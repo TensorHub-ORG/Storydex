@@ -3,10 +3,20 @@ const fs = require("fs");
 const path = require("path");
 const { spawn } = require("child_process");
 
+function readDesktopPackageMetadata() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+const DESKTOP_PACKAGE = readDesktopPackageMetadata();
+const DESKTOP_APP_ID = String(DESKTOP_PACKAGE.build?.appId || "cn.tensorhub.storydex").trim();
+const DESKTOP_PRODUCT_NAME = String(DESKTOP_PACKAGE.build?.productName || DESKTOP_PACKAGE.productName || "Storydex").trim();
 const FRONTEND_DEV_URL = process.env.STORYDEX_DESKTOP_URL || "http://127.0.0.1:5173";
 const BACKEND_HOST = process.env.STORYDEX_BACKEND_HOST || "127.0.0.1";
 const BACKEND_PORT = Number(process.env.STORYDEX_BACKEND_PORT || 18081);
-const STORYKEEPER_BASE_URL = (process.env.STORYKEEPER_BASE_URL || "https://storykeeper.septemc.cn").trim();
 const BACKEND_HEALTH_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}/api/v1/sys/health`;
 const DESKTOP_TITLEBAR_HEIGHT = 42;
 const DEFAULT_TITLEBAR_THEME = {
@@ -38,7 +48,7 @@ const PYTHON_PREFLIGHT_CODE = [
 function initializeAppMetadata() {
   try {
     if (app && typeof app.setAppUserModelId === 'function') {
-      app.setAppUserModelId("com.storydex.desktop");
+      app.setAppUserModelId(DESKTOP_APP_ID);
     }
   } catch (e) {
     console.warn('[Storydex Desktop] Could not set app user model id:', e.message);
@@ -659,7 +669,7 @@ function buildBackendEnvironment(candidate, runtimeEnvironment) {
     STORYDEX_HELP_GUIDE_ROOT: helpGuideRoot,
     STORYDEX_MINGIT_ROOT: mingitRoot,
     STORYDEX_GIT_EXECUTABLE: gitExecutable,
-    STORYKEEPER_BASE_URL: STORYKEEPER_BASE_URL
+    PYTHONUTF8: "1"
   };
 
   delete nextEnv.PYTHONHOME;
@@ -1042,7 +1052,7 @@ async function openPreviewWindow(relativePath) {
 
   const windowIcon = resolveDesktopIconPath();
   previewWindow = new BrowserWindow({
-    title: `${fileNameFromRelativePath(normalizedRelativePath)} · Storydex`,
+    title: `${fileNameFromRelativePath(normalizedRelativePath)} · ${DESKTOP_PRODUCT_NAME}`,
     icon: windowIcon,
     width: 1180,
     height: 860,
@@ -1074,7 +1084,7 @@ async function openPreviewWindow(relativePath) {
 async function createMainWindow() {
   const windowIcon = resolveDesktopIconPath();
   mainWindow = new BrowserWindow({
-    title: "Storydex",
+    title: DESKTOP_PRODUCT_NAME,
     icon: windowIcon,
     width: 1680,
     height: 980,

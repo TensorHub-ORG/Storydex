@@ -11,7 +11,10 @@
     "build:frontend": "npm --prefix ../frontend run build",
     "sync:assets": "node scripts/sync-app-assets.cjs",
     "patch:win-exe": "node scripts/patch-win-executable.cjs",
-    "build:desktop": "npm run build:frontend && npm run sync:assets && set ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/&& electron-builder --dir --win --config.win.signAndEditExecutable=false && npm run patch:win-exe",
+    "check:embedded-python": "node scripts/validate-embedded-python.cjs",
+    "check:encoding": "node ../../scripts/validate_text_encoding.cjs",
+    "check:release": "node scripts/validate-release-config.cjs",
+    "build:desktop": "npm run build:frontend && npm run sync:assets && npm run check:embedded-python && set ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/&& electron-builder --dir --win --config.win.signAndEditExecutable=false && npm run patch:win-exe",
     "package:win": "npm run build:desktop && set ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/&& electron-builder --win nsis --prepackaged release\\win-unpacked --config.win.signAndEditExecutable=false"
   },
   "devDependencies": {

@@ -1,5 +1,6 @@
 @echo off
 setlocal EnableExtensions
+chcp 65001 >nul
 
 set "ROOT=%~dp0.."
 set "BOOTSTRAP_SCRIPT=%ROOT%\scripts\bootstrap_python39.ps1"
@@ -21,6 +22,8 @@ if not exist "%PYTHON_EXE%" (
 
 echo [Storydex] Launching backend dev window (uvicorn)...
 set "PYTHONNOUSERSITE=1"
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
 start "Storydex Backend Dev" /D "%ROOT%\apps\backend" cmd /k ""%PYTHON_EXE%" -m uvicorn main:app --host 127.0.0.1 --port 18081"
 
 echo [Storydex] Waiting for backend health check...

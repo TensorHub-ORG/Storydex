@@ -1,5 +1,6 @@
 @echo off
 setlocal EnableExtensions
+chcp 65001 >nul
 
 set "ROOT=%~dp0.."
 set "BOOTSTRAP_SCRIPT=%ROOT%\scripts\bootstrap_python39.ps1"
@@ -31,6 +32,8 @@ call :ensure_node_deps "%FRONTEND_DIR%" "frontend" || goto :error
 call :ensure_node_deps "%DESKTOP_DIR%" "desktop" || goto :error
 
 set "PYTHONNOUSERSITE=1"
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
 set "PYTHONHOME="
 set "STORYDEX_PYTHON=%PYTHON_EXE%"
 set "STORYDEX_EMBED_PYTHON=%ROOT%\.python39"

@@ -13,10 +13,22 @@ jobs:
   release-windows:
     name: Build and publish Windows release
     runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+      NPM_CONFIG_UNICODE: "true"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Use UTF-8 console
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+          $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+          chcp 65001
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -35,38 +47,114 @@ jobs:
       - name: Install Node dependencies
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+          $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
           npm ci --prefix apps/frontend
           npm ci --prefix apps/desktop
+
+      - name: Resolve release metadata
+        id: metadata
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+          $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
+          $package = Get-Content -Raw -LiteralPath "apps/desktop/package.json" | ConvertFrom-Json
+          $version = [string]$package.version
+          if (-not $version) {
+            throw "apps/desktop/package.json does not define a version."
+          }
+
+          $metadataVersion = [string]$package.build.extraMetadata.version
+          if ($metadataVersion -and $metadataVersion -ne $version) {
+            throw "build.extraMetadata.version ($metadataVersion) does not match package version ($version)."
+          }
+
+          $tag = "v$version"
+          if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne $tag) {
+            throw "Release tag '$env:GITHUB_REF_NAME' does not match apps/desktop/package.json version '$tag'."
+          }
+
+          $outputs = @{
+            version = $version
+            tag = $tag
+            setup_name = "StorydexSetup-x64-$version.exe"
+            blockmap_name = "StorydexSetup-x64-$version.exe.blockmap"
+            unpacked_zip_name = "Storydex-win-unpacked.zip"
+            release_name = "Storydex $tag"
+          }
+
+          foreach ($entry in $outputs.GetEnumerator()) {
+            "$($entry.Key)=$($entry.Value)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          }
+
+      - name: Validate release configuration
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          npm --prefix apps/desktop run check:encoding
+          npm --prefix apps/desktop run check:release
 
       - name: Prepare embedded Python
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+          $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap_python39.ps1 -InstallRequirements
 
       - name: Build Windows package
         shell: cmd
-        run: npm --prefix apps/desktop run package:win
+        run: |
+          chcp 65001
+          npm --prefix apps/desktop run package:win
 
       - name: Prepare release assets
+        id: release
         shell: pwsh
+        env:
+          STORYDEX_VERSION: ${{ steps.metadata.outputs.version }}
+          STORYDEX_SETUP_NAME: ${{ steps.metadata.outputs.setup_name }}
+          STORYDEX_BLOCKMAP_NAME: ${{ steps.metadata.outputs.blockmap_name }}
+          STORYDEX_UNPACKED_ZIP_NAME: ${{ steps.metadata.outputs.unpacked_zip_name }}
         run: |
           $ErrorActionPreference = "Stop"
+          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+          $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
           $releaseDir = Join-Path (Resolve-Path ".").Path "release-assets"
           New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
 
           $unpackedSource = Join-Path (Resolve-Path ".").Path "apps\desktop\release\win-unpacked"
           $unpackedTarget = Join-Path $releaseDir "Storydex-win-unpacked"
+          if (Test-Path $unpackedTarget) {
+            Remove-Item -LiteralPath $unpackedTarget -Recurse -Force
+          }
           Copy-Item -LiteralPath $unpackedSource -Destination $unpackedTarget -Recurse -Force
 
-          Copy-Item -LiteralPath "apps\desktop\release\StorydexSetup-x64-0.1.0.exe" -Destination (Join-Path $releaseDir "StorydexSetup-x64-0.1.0.exe") -Force
-          Copy-Item -LiteralPath "apps\desktop\release\StorydexSetup-x64-0.1.0.exe.blockmap" -Destination (Join-Path $releaseDir "StorydexSetup-x64-0.1.0.exe.blockmap") -Force
+          $desktopReleaseDir = Join-Path (Resolve-Path ".").Path "apps\desktop\release"
+          $setupSource = Join-Path $desktopReleaseDir $env:STORYDEX_SETUP_NAME
+          $blockmapSource = Join-Path $desktopReleaseDir $env:STORYDEX_BLOCKMAP_NAME
+          if (-not (Test-Path $setupSource)) {
+            Get-ChildItem -LiteralPath $desktopReleaseDir | Format-Table -AutoSize | Out-String | Write-Host
+            throw "Expected installer was not produced: $setupSource"
+          }
+          if (-not (Test-Path $blockmapSource)) {
+            Get-ChildItem -LiteralPath $desktopReleaseDir | Format-Table -AutoSize | Out-String | Write-Host
+            throw "Expected blockmap was not produced: $blockmapSource"
+          }
 
-          Compress-Archive -LiteralPath $unpackedTarget -DestinationPath (Join-Path $releaseDir "Storydex-win-unpacked.zip") -CompressionLevel Optimal
+          Copy-Item -LiteralPath $setupSource -Destination (Join-Path $releaseDir $env:STORYDEX_SETUP_NAME) -Force
+          Copy-Item -LiteralPath $blockmapSource -Destination (Join-Path $releaseDir $env:STORYDEX_BLOCKMAP_NAME) -Force
+
+          Compress-Archive -LiteralPath $unpackedTarget -DestinationPath (Join-Path $releaseDir $env:STORYDEX_UNPACKED_ZIP_NAME) -CompressionLevel Optimal -Force
 
           $names = @(
-            "StorydexSetup-x64-0.1.0.exe",
-            "Storydex-win-unpacked.zip",
-            "StorydexSetup-x64-0.1.0.exe.blockmap"
+            $env:STORYDEX_SETUP_NAME,
+            $env:STORYDEX_UNPACKED_ZIP_NAME,
+            $env:STORYDEX_BLOCKMAP_NAME
           )
           $hashLines = foreach ($name in $names) {
             $file = Join-Path $releaseDir $name
@@ -75,15 +163,42 @@ jobs:
           }
           Set-Content -LiteralPath (Join-Path $releaseDir "SHA256SUMS.txt") -Value $hashLines -Encoding ASCII
 
+          $notesTarget = Join-Path $releaseDir "RELEASE_NOTES.md"
+          $versionedNotes = Join-Path (Resolve-Path ".").Path "apps\desktop\build\release-notes-v$($env:STORYDEX_VERSION).md"
+          if (Test-Path $versionedNotes) {
+            Copy-Item -LiteralPath $versionedNotes -Destination $notesTarget -Force
+          } else {
+            @(
+              "# Storydex v$($env:STORYDEX_VERSION) Windows Release",
+              "",
+              "- Installer: ``$($env:STORYDEX_SETUP_NAME)``",
+              "- Portable unpacked bundle: ``$($env:STORYDEX_UNPACKED_ZIP_NAME)``",
+              "- Checksums: ``SHA256SUMS.txt``"
+            ) | Set-Content -LiteralPath $notesTarget -Encoding utf8
+          }
+
+          $outputs = @{
+            notes_path = "release-assets/RELEASE_NOTES.md"
+            setup_path = "release-assets/$($env:STORYDEX_SETUP_NAME)"
+            zip_path = "release-assets/$($env:STORYDEX_UNPACKED_ZIP_NAME)"
+            blockmap_path = "release-assets/$($env:STORYDEX_BLOCKMAP_NAME)"
+            sums_path = "release-assets/SHA256SUMS.txt"
+          }
+
+          foreach ($entry in $outputs.GetEnumerator()) {
+            "$($entry.Key)=$($entry.Value)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          }
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: Storydex v0.1.0
-          body_path: apps/desktop/build/release-notes-v0.1.0.md
+          tag_name: ${{ steps.metadata.outputs.tag }}
+          name: ${{ steps.metadata.outputs.release_name }}
+          body_path: ${{ steps.release.outputs.notes_path }}
           draft: false
           prerelease: false
           files: |
-            release-assets/StorydexSetup-x64-0.1.0.exe
-            release-assets/Storydex-win-unpacked.zip
-            release-assets/StorydexSetup-x64-0.1.0.exe.blockmap
-            release-assets/SHA256SUMS.txt
+            ${{ steps.release.outputs.setup_path }}
+            ${{ steps.release.outputs.zip_path }}
+            ${{ steps.release.outputs.blockmap_path }}
+            ${{ steps.release.outputs.sums_path }}

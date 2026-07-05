@@ -118,13 +118,115 @@ function shouldCopyPythonEnv(sourcePath) {
   return true;
 }
 
+function readPyvenvHome(sourceRoot) {
+  const configPath = path.join(sourceRoot, "pyvenv.cfg");
+  if (!fs.existsSync(configPath)) {
+    return "";
+  }
+
+  const content = fs.readFileSync(configPath, "utf8");
+  for (const line of content.split(/\r?\n/)) {
+    const match = line.match(/^\s*home\s*=\s*(.+?)\s*$/i);
+    if (match?.[1]) {
+      return match[1].trim();
+    }
+  }
+  return "";
+}
+
+function normalizePathForMatch(pathValue) {
+  return String(path.resolve(pathValue)).replace(/\\/g, "/").toLowerCase();
+}
+
+function isInsidePath(candidatePath, rootPath) {
+  const candidate = normalizePathForMatch(candidatePath);
+  const root = normalizePathForMatch(rootPath).replace(/\/+$/, "");
+  return candidate === root || candidate.startsWith(`${root}/`);
+}
+
+function shouldCopyPythonRuntime(sourcePath) {
+  if (!shouldCopyPythonEnv(sourcePath)) return false;
+  const normalized = String(sourcePath).replace(/\\/g, "/").toLowerCase();
+  if (normalized.endsWith("/pyvenv.cfg")) return false;
+  if (normalized.includes("/lib/site-packages/")) return false;
+  return true;
+}
+
+function resolveSitePackagesDirectory(rootPath) {
+  const windowsPath = path.join(rootPath, "Lib", "site-packages");
+  if (fs.existsSync(windowsPath)) {
+    return windowsPath;
+  }
+
+  const libRoot = path.join(rootPath, "lib");
+  if (!fs.existsSync(libRoot)) {
+    return "";
+  }
+
+  for (const entry of fs.readdirSync(libRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !/^python\d+\.\d+$/i.test(entry.name)) {
+      continue;
+    }
+    const candidate = path.join(libRoot, entry.name, "site-packages");
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return "";
+}
+
+function hasRootPythonExecutable(rootPath) {
+  const candidates =
+    process.platform === "win32"
+      ? [path.join(rootPath, "python.exe")]
+      : [path.join(rootPath, "bin", "python"), path.join(rootPath, "python")];
+  return candidates.some((candidate) => fs.existsSync(candidate));
+}
+
+function copyPortablePythonFromVenv(sourceRoot, targetRoot) {
+  const baseRoot = readPyvenvHome(sourceRoot);
+  if (!baseRoot) {
+    throw new Error(`[Storydex Desktop] ${sourceRoot} is a venv, but pyvenv.cfg does not define home.`);
+  }
+  if (!fs.existsSync(baseRoot) || !hasRootPythonExecutable(baseRoot)) {
+    throw new Error(
+      [
+        `[Storydex Desktop] Cannot package non-relocatable Python venv: ${sourceRoot}`,
+        `pyvenv.cfg points to missing base runtime: ${baseRoot}`,
+        "Build a fresh runtime on this machine or set STORYDEX_EMBED_PYTHON to a full Python runtime directory."
+      ].join("\n")
+    );
+  }
+  if (isInsidePath(baseRoot, sourceRoot)) {
+    throw new Error(`[Storydex Desktop] Refusing to copy venv base runtime from inside the venv itself: ${baseRoot}`);
+  }
+
+  resetDirectory(targetRoot);
+  copyDirectoryContents(baseRoot, targetRoot, shouldCopyPythonRuntime);
+
+  const sourceSitePackages = resolveSitePackagesDirectory(sourceRoot);
+  const targetSitePackages = resolveSitePackagesDirectory(targetRoot);
+  if (!sourceSitePackages || !targetSitePackages) {
+    throw new Error(
+      `[Storydex Desktop] Failed to resolve site-packages while packaging embedded Python. source=${sourceSitePackages || "(missing)"} target=${targetSitePackages || "(missing)"}`
+    );
+  }
+  copyDirectoryContents(sourceSitePackages, targetSitePackages, shouldCopyPythonEnv);
+
+  if (fs.existsSync(path.join(targetRoot, "pyvenv.cfg"))) {
+    throw new Error("[Storydex Desktop] Embedded Python target still contains pyvenv.cfg after portable runtime sync.");
+  }
+}
+
 function copyEmbeddedPythonEnv() {
   ensureSource(embeddedPythonSource, "embedded python env");
+  if (fs.existsSync(path.join(embeddedPythonSource, "pyvenv.cfg"))) {
+    copyPortablePythonFromVenv(embeddedPythonSource, embeddedPythonTarget);
+    return;
+  }
+
   resetDirectory(embeddedPythonTarget);
-  fs.cpSync(embeddedPythonSource, embeddedPythonTarget, {
-    recursive: true,
-    filter: shouldCopyPythonEnv
-  });
+  copyDirectoryContents(embeddedPythonSource, embeddedPythonTarget, shouldCopyPythonRuntime);
 }
 
 function copyDesktopIcon() {
