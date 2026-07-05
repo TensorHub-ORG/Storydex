@@ -212,6 +212,21 @@ def _normalize_story_generation_options(value: Dict[str, Any] | None) -> Dict[st
     }
 
 
+def _apply_turn_contract_story_generation_defaults(
+    story_generation: Dict[str, Any],
+    turn_contract: Dict[str, Any],
+) -> Dict[str, Any]:
+    turn_plan = turn_contract.get("turnPlan") if isinstance(turn_contract.get("turnPlan"), dict) else {}
+    selected_template = str(turn_plan.get("selectedChapterTemplate") or "").strip()
+    if not selected_template:
+        return story_generation
+
+    next_story_generation = dict(story_generation)
+    next_story_generation["chapterTemplateId"] = selected_template
+    next_story_generation["chapterTemplate"] = selected_template
+    return next_story_generation
+
+
 def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
     try:
         parsed = int(value)
@@ -1831,6 +1846,7 @@ async def agent_chat(
             active_file=payload.active_file,
             story_generation=story_generation,
         )
+        story_generation = _apply_turn_contract_story_generation_defaults(story_generation, turn_contract)
         task_plan = await _create_agent_task_plan(
             prompt=payload.prompt,
             trace_id=trace_id,
@@ -1959,6 +1975,7 @@ async def agent_chat_stream(
             active_file=payload.active_file,
             story_generation=story_generation,
         )
+        story_generation = _apply_turn_contract_story_generation_defaults(story_generation, turn_contract)
     except Exception:
         agent_git_autocommit_service.finish_turn(
             git_snapshot,

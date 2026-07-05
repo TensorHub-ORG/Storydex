@@ -397,24 +397,6 @@ class TraceHistoryService:
         except OSError:
             pass
 
-    def _date_dir(self, date_str: str = "") -> Path:
-        if not date_str:
-            date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        date_dir = self._primary_traces_root() / date_str
-        date_dir.mkdir(parents=True, exist_ok=True)
-        readme = date_dir / "README.md"
-        if not readme.exists():
-            readme.write_text("# Trace 日期分组\n\n存放本日期的 Agent 执行审计记录。\n", encoding="utf-8")
-        return date_dir
-
-    @staticmethod
-    def _safe_date(created_at: str) -> str:
-        try:
-            parsed = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-        except ValueError:
-            parsed = datetime.now(timezone.utc)
-        return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d")
-
     @staticmethod
     def _normalize_session_id(session_id: str) -> str:
         return str(session_id or "default").strip() or "default"

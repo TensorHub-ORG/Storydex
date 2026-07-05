@@ -36,6 +36,25 @@ function resetDirectory(pathValue) {
   fs.mkdirSync(pathValue, { recursive: true });
 }
 
+function copyDirectoryContents(sourceDir, targetDir, filter = () => true) {
+  for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
+    const sourcePath = path.join(sourceDir, entry.name);
+    if (!filter(sourcePath)) {
+      continue;
+    }
+    const targetPath = path.join(targetDir, entry.name);
+    if (entry.isDirectory()) {
+      fs.mkdirSync(targetPath, { recursive: true });
+      copyDirectoryContents(sourcePath, targetPath, filter);
+      continue;
+    }
+    if (entry.isFile()) {
+      fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+      fs.copyFileSync(sourcePath, targetPath);
+    }
+  }
+}
+
 function copyFrontendDist() {
   ensureSource(frontendDistSource, "frontend dist");
   resetDirectory(frontendDistTarget);
@@ -66,7 +85,7 @@ function copyBackendSource() {
 function copyHelpGuide() {
   ensureSource(helpGuideSource, "help guide");
   resetDirectory(helpGuideTarget);
-  fs.cpSync(helpGuideSource, helpGuideTarget, { recursive: true });
+  copyDirectoryContents(helpGuideSource, helpGuideTarget);
 }
 
 function shouldCopyMinGit(sourcePath) {

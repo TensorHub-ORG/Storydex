@@ -67,7 +67,7 @@ const workspaceRef = ref<HTMLElement | null>(null);
 
 const ACTIVITY_BAR_WIDTH = 48;
 const SPLITTER_WIDTH = 8;
-const AGENT_SPLITTER_WIDTH = 0;
+const AGENT_SPLITTER_WIDTH = 8;
 const MIN_EDITOR_WIDTH = 480;
 const MIN_SIDEBAR_WIDTH = 220;
 const MIN_AGENT_WIDTH = 320;
@@ -221,13 +221,23 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 .workspace-splitter-agent {
-  width: 8px;
-  margin-left: -4px;
-  margin-right: -4px;
+  width: 100%;
+  margin: 0;
   background: transparent;
 }
 
 .workspace-splitter-agent::before {
-  display: none;
+  pointer-events: none;
+  inset: 0 auto;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background: var(--border-subtle);
+}
+
+.workspace-splitter-agent:hover::before,
+:global(body.is-resizing-panels) .workspace-splitter-agent::before {
+  width: 2px;
+  background: var(--accent);
 }
 </style>

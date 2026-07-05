@@ -76,6 +76,10 @@ quota_apps/quota_gateway_backend/runtime.err.log
 apps/desktop/node_modules/
 apps/desktop/release/
 apps/desktop/app/
+apps/desktop/vendor/*
+!apps/desktop/vendor/
+!apps/desktop/vendor/mingit/
+!apps/desktop/vendor/mingit/**
 
 # ----- Logs / Temp -----
 *.log
