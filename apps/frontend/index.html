@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Storydex Writer Workbench</title>
+
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Noto+Serif+SC:wght@400;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=block"
+    />
+
+    <script>
+      (function () {
+        var themeKey = "storydex.ui.theme";
+        var cachedTheme = null;
+
+        try {
+          cachedTheme = window.localStorage.getItem(themeKey);
+        } catch (error) {
+          cachedTheme = null;
+        }
+
+        if (cachedTheme === "snow" || cachedTheme === "book" || cachedTheme === "dark") {
+          document.documentElement.setAttribute("data-theme", cachedTheme);
+        } else {
+          document.documentElement.removeAttribute("data-theme");
+          cachedTheme = "default";
+        }
+
+        document.documentElement.style.colorScheme = cachedTheme === "dark" ? "dark" : "light";
+      })();
+
+      document.documentElement.style.setProperty("--icon-opacity", "0");
+      if (document.fonts && document.fonts.ready) {
+        document.fonts.ready.then(() => {
+          document.documentElement.style.setProperty("--icon-opacity", "1");
+        });
+      } else {
+        window.addEventListener("load", () => {
+          document.documentElement.style.setProperty("--icon-opacity", "1");
+        });
+      }
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

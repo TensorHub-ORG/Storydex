@@ -1,0 +1,22 @@
+{
+  "appId": "com.storydex.desktop",
+  "productName": "Storydex",
+  "executableName": "Storydex",
+  "asar": false,
+  "directories": {
+    "output": "../../release/release_202604162233"
+  },
+  "files": [
+    "electron/**/*",
+    "app/**/*",
+    "package.json"
+  ],
+  "extraMetadata": {
+    "version": "1.0.0"
+  },
+  "win": {
+    "icon": "../../assets/Storydex_icon/storydex_icon_01.ico",
+    "signAndEditExecutable": false,
+    "artifactName": "StorydexSetup-x64-${version}.${ext}"
+  }
+}

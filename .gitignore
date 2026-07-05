@@ -1,0 +1,116 @@
+# ----- Environment -----
+.env
+.env.*
+!.env.sample
+!.env.example
+!apps/backend/.env.example
+!apps/frontend/.env.example
+
+# ----- Secrets / Credentials -----
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.der
+*.kdbx
+*secret*
+*secrets*
+*credential*
+*credentials*
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+
+# ----- Python -----
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.python39/
+.vscode/
+.coomi/
+.claude/
+.codex/
+.claude/settings.local.json
+.storydex/config/llm-profiles.local.json
+reference_code/
+test_workspace/
+sample/
+tool_develop_logs/
+quota_apps/
+
+# ----- Node / Frontend -----
+node_modules/
+apps/frontend/node_modules/
+apps/frontend/dist/
+apps/frontend/.vite/
+apps/frontend/.playwright-cli/
+apps/frontend/.tmp/
+*.tsbuildinfo
+.nyc_output/
+coverage/
+apps/frontend/coverage/
+
+# ----- Quota Apps Runtime / Cache -----
+quota_apps/node_modules/
+quota_apps/__pycache__/
+quota_apps/**/node_modules/
+quota_apps/**/__pycache__/
+quota_apps/**/.pytest_cache/
+quota_apps/**/.vite/
+quota_apps/.deploy/
+quota_apps/quota_gateway_frontend/dist/
+quota_apps/quota_gateway_backend/runtime.log
+quota_apps/quota_gateway_backend/runtime.err.log
+
+# ----- Desktop Build / Packaging -----
+apps/desktop/node_modules/
+apps/desktop/release/
+apps/desktop/app/
+
+# ----- Logs / Temp -----
+*.log
+*.err
+*.out
+*.tmp
+*.temp
+output/
+.cache/
+.temp/
+.tmp/
+.playwright-cli/
+playwright-report/
+test-results/
+blob-report/
+htmlcov/
+.coverage
+
+# ----- OS / Editor -----
+.DS_Store
+Thumbs.db
+.trae/
+
+# ----- Project Runtime State -----
+.storydex-project-state.json
+.storydex/
+*.sqlite
+*.sqlite3
+*.db
+
+# ----- Internal / Non-public Workbench Assets -----
+experiments/
+playwright/
+docs/archive/
+docs/superpowers/
+
+# ----- Release -----
+release/

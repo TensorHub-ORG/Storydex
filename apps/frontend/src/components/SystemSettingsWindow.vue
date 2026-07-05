@@ -1,0 +1,1133 @@
+<template>
+  <section v-if="visible" class="system-settings-overlay" @click.self="emit('close')">
+    <div class="system-settings-window" role="dialog" aria-modal="true" aria-label="系统设置">
+      <div class="system-settings-body">
+        <aside class="system-settings-sidebar">
+          <div class="system-settings-sidebar-title">系统设置</div>
+          <label class="system-settings-search" for="system-settings-search-input">
+            <span class="material-symbols-rounded" aria-hidden="true">search</span>
+            <input
+              id="system-settings-search-input"
+              v-model.trim="searchKeyword"
+              type="text"
+              placeholder="搜索设置（主题、章节、布局）"
+            />
+          </label>
+
+          <div class="system-settings-nav" role="tablist" aria-label="设置分类">
+            <button
+              v-for="section in matchedSections"
+              :key="section.id"
+              class="system-settings-nav-item"
+              :class="{ active: activeSection === section.id }"
+              type="button"
+              role="tab"
+              :aria-selected="activeSection === section.id"
+              @click="selectSection(section.id)"
+            >
+              <span class="material-symbols-rounded" aria-hidden="true">{{ section.icon }}</span>
+              <span>{{ section.label }}</span>
+            </button>
+          </div>
+
+          <div v-if="normalizedSearch" class="system-settings-search-meta">
+            {{ matchedSections.length ? `找到 ${matchedSections.length} 个匹配分类` : "没有匹配分类" }}
+          </div>
+        </aside>
+
+        <main class="system-settings-content">
+          <div class="system-settings-content-scroll">
+          <div v-if="loading" class="system-settings-empty">正在加载系统设置...</div>
+
+          <div v-else-if="!visibleSections.length" class="system-settings-empty">
+            没有找到与“{{ searchKeyword }}”匹配的设置项。
+          </div>
+
+          <template v-else>
+            <article v-for="section in visibleSections" :key="section.id" class="system-settings-card">
+              <header class="system-settings-card-header">
+                <div class="system-settings-card-title-wrap">
+                  <span class="material-symbols-rounded" aria-hidden="true">{{ section.icon }}</span>
+                  <h2 class="system-settings-card-title">{{ section.label }}</h2>
+                </div>
+                <div class="system-settings-card-actions">
+                  <button
+                    class="system-settings-icon-action"
+                    type="button"
+                    title="重新加载"
+                    :disabled="isSectionReloading(section.id)"
+                    @click="reloadSection(section.id)"
+                  >
+                    <span class="material-symbols-rounded" aria-hidden="true">refresh</span>
+                  </button>
+                  <button
+                    class="system-settings-icon-action"
+                    type="button"
+                    title="保存"
+                    :disabled="isSectionSaving(section.id)"
+                    @click="saveSection(section.id)"
+                  >
+                    <span class="material-symbols-rounded" aria-hidden="true">save</span>
+                  </button>
+                  <button class="system-settings-icon-action" type="button" title="关闭" @click="emit('close')">
+                    <span class="material-symbols-rounded" aria-hidden="true">close</span>
+                  </button>
+                </div>
+              </header>
+
+              <div v-if="section.id === 'appearance'" class="system-settings-card-body">
+                <section class="system-settings-block">
+                  <div class="system-settings-block-title">界面主题</div>
+                  <div class="theme-grid">
+                    <button
+                      v-for="item in themeOptions"
+                      :key="item.code"
+                      class="theme-option"
+                      :class="{ active: uiStore.theme === item.code }"
+                      type="button"
+                      @click="handleThemeSelect(item.code)"
+                    >
+                      <span class="theme-option-preview" :style="{ background: item.preview }"></span>
+                      <span class="theme-option-copy">
+                        <span class="theme-option-label">{{ item.label }}</span>
+                        <span class="theme-option-description">{{ item.description }}</span>
+                      </span>
+                    </button>
+                  </div>
+                </section>
+
+
+                <section class="system-settings-block">
+                  <div class="system-settings-block-title">字体大小</div>
+
+                  <label class="system-settings-field">
+                    <span>文件显示字体大小</span>
+                    <div class="system-settings-range-row">
+                      <input
+                        v-model.number="fileFontSizeModel"
+                        class="system-settings-range"
+                        type="range"
+                        min="12"
+                        max="24"
+                        step="1"
+                      />
+                      <span class="system-settings-range-value">{{ fileFontSizeModel }} px</span>
+                    </div>
+                  </label>
+
+                  <label class="system-settings-field">
+                    <span>玩家模式字体大小</span>
+                    <div class="system-settings-range-row">
+                      <input
+                        v-model.number="playerFontSizeModel"
+                        class="system-settings-range"
+                        type="range"
+                        min="12"
+                        max="28"
+                        step="1"
+                      />
+                      <span class="system-settings-range-value">{{ playerFontSizeModel }} px</span>
+                    </div>
+                  </label>
+
+                  <div class="system-settings-inline-note">修改后自动保存</div>
+                </section>
+              </div>
+
+              <div v-else-if="section.id === 'layout'" class="system-settings-card-body">
+                <section class="system-settings-block">
+                  <div class="system-settings-block-title">工作台宽度</div>
+
+                  <label class="system-settings-field">
+                    <span>资源栏宽度</span>
+                    <div class="system-settings-range-row">
+                      <input
+                        v-model.number="sidebarWidthModel"
+                        class="system-settings-range"
+                        type="range"
+                        min="220"
+                        max="520"
+                        step="1"
+                      />
+                      <span class="system-settings-range-value">{{ sidebarWidthModel }} px</span>
+                    </div>
+                  </label>
+
+                  <label class="system-settings-field">
+                    <span>Agent 栏宽度</span>
+                    <div class="system-settings-range-row">
+                      <input
+                        v-model.number="agentWidthModel"
+                        class="system-settings-range"
+                        type="range"
+                        min="320"
+                        max="760"
+                        step="1"
+                      />
+                      <span class="system-settings-range-value">{{ agentWidthModel }} px</span>
+                    </div>
+                  </label>
+
+
+                  <div class="system-settings-inline-note">修改后自动保存</div>
+                </section>
+              </div>
+
+              <div v-else class="system-settings-card-body">
+                <section class="system-settings-block">
+                  <div class="system-settings-project-meta-bar">
+                    <span>来源：{{ sourceLabel }}</span>
+                    <span>更新：{{ updatedAtLabel }}</span>
+                    <span class="system-settings-project-path">路径：{{ settingsPathLabel }}</span>
+                  </div>
+                </section>
+
+                <section v-if="!projectSettingsAvailable" class="system-settings-block">
+                  <div class="system-settings-empty-inline">
+                    请先打开项目
+                  </div>
+                </section>
+
+                <section v-else class="system-settings-block">
+                  <label class="system-settings-field">
+                    <span>剧情片段扩展名</span>
+                    <select v-model="segmentExtension" class="system-settings-input" :disabled="saving">
+                      <option value=".md">Markdown .md</option>
+                      <option value=".txt">Text .txt</option>
+                    </select>
+                  </label>
+
+                  <label class="system-settings-field">
+                    <span>每章剧情片段上限</span>
+                    <input
+                      v-model.number="maxSegmentsPerChapter"
+                      class="system-settings-input"
+                      type="number"
+                      min="1"
+                      max="99"
+                      step="1"
+                      inputmode="numeric"
+                      :disabled="saving"
+                    />
+                  </label>
+
+                  <label class="system-settings-switch-card">
+                    <span class="system-settings-switch-copy">
+                      <span class="system-settings-switch-title">自动命名章节目录</span>
+                      <span class="system-settings-switch-description">
+                        兼容历史项目
+                      </span>
+                    </span>
+                    <span class="system-settings-switch">
+                      <input v-model="autoNameChapterDirectories" type="checkbox" :disabled="saving" />
+                      <span class="system-settings-switch-track" aria-hidden="true"></span>
+                    </span>
+                  </label>
+
+                  <label class="system-settings-switch-card">
+                    <span class="system-settings-switch-copy">
+                      <span class="system-settings-switch-title">Agent 结束后询问提交</span>
+                      <span class="system-settings-switch-description">
+                        检测到小说项目有未提交修改时弹出提交确认
+                      </span>
+                    </span>
+                    <span class="system-settings-switch">
+                      <input v-model="agentCommitPromptEnabled" type="checkbox" :disabled="saving" />
+                      <span class="system-settings-switch-track" aria-hidden="true"></span>
+                    </span>
+                  </label>
+
+                  <div v-if="errorMessage" class="system-settings-feedback is-error">{{ errorMessage }}</div>
+                  <div v-else-if="successMessage" class="system-settings-feedback is-success">{{ successMessage }}</div>
+                </section>
+              </div>
+            </article>
+          </template>
+          </div>
+        </main>
+      </div>
+    </div>
+  </section>
+</template>
+
+<script setup lang="ts">
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { themeOptions } from "@/constants/themes";
+import type { ThemeCode } from "@/constants/themes";
+import { useUiStore } from "@/stores/ui";
+import { useWorkspaceStore } from "@/stores/workspace";
+import type { StorySegmentExtension } from "@/types/workspace";
+
+type SettingsSectionId = "appearance" | "layout" | "project";
+
+interface SettingsSection {
+  id: SettingsSectionId;
+  label: string;
+  icon: string;
+  description: string;
+  keywords: string;
+}
+
+const sections: SettingsSection[] = [
+  {
+    id: "appearance",
+    label: "界面与主题",
+    icon: "palette",
+    description: "",
+    keywords: "主题 外观 颜色 模式 storydex 字体 字号 文件 玩家"
+  },
+  {
+    id: "layout",
+    label: "工作台布局",
+    icon: "view_sidebar",
+    description: "",
+    keywords: "布局 宽度 侧栏 agent 栏"
+  },
+  {
+    id: "project",
+    label: "项目设置",
+    icon: "auto_stories",
+    description: "",
+    keywords: "剧情 片段 章节 自动命名 扩展名 提交 commit git agent"
+  }
+];
+
+const extraSections: SettingsSection[] = [];
+
+const props = defineProps<{
+  visible: boolean;
+}>();
+
+const emit = defineEmits<{
+  close: [];
+}>();
+
+const uiStore = useUiStore();
+const workspaceStore = useWorkspaceStore();
+
+const loading = ref(false);
+const saving = ref(false);
+const errorMessage = ref("");
+const successMessage = ref("");
+const searchKeyword = ref("");
+const activeSection = ref<SettingsSectionId>("appearance");
+
+const segmentExtension = ref<StorySegmentExtension>(".md");
+const maxSegmentsPerChapter = ref(3);
+const autoNameChapterDirectories = ref(false);
+const agentCommitPromptEnabled = ref(true);
+
+const sidebarWidthModel = computed({
+  get: () => uiStore.sidebarWidth,
+  set: (value: number) => uiStore.setSidebarWidth(Number(value))
+});
+
+const agentWidthModel = computed({
+  get: () => uiStore.agentWidth,
+  set: (value: number) => uiStore.setAgentWidth(Number(value))
+});
+
+const fileFontSizeModel = computed({
+  get: () => uiStore.fileFontSize,
+  set: (value: number) => uiStore.setFileFontSize(Number(value))
+});
+
+const playerFontSizeModel = computed({
+  get: () => uiStore.playerFontSize,
+  set: (value: number) => uiStore.setPlayerFontSize(Number(value))
+});
+
+
+const normalizedSearch = computed(() => searchKeyword.value.trim().toLowerCase());
+const allSections = computed(() => [...sections, ...extraSections]);
+
+const matchedSections = computed(() => {
+  if (!normalizedSearch.value) {
+    return allSections.value;
+  }
+  return allSections.value.filter((section) => sectionMatches(section, normalizedSearch.value));
+});
+
+const visibleSections = computed(() => {
+  if (!normalizedSearch.value) {
+    return allSections.value.filter((section) => section.id === activeSection.value);
+  }
+  return matchedSections.value;
+});
+
+const projectSettingsAvailable = computed(
+  () => !workspaceStore.launchScreenVisible && Boolean(workspaceStore.currentProject)
+);
+
+const sourceLabel = computed(() => {
+  if (workspaceStore.storySettings.source === "api") {
+    return "API 优先";
+  }
+  if (workspaceStore.storySettings.source === "project_file") {
+    return "项目文件回退";
+  }
+  return "默认设置";
+});
+
+const settingsPathLabel = computed(() => {
+  return workspaceStore.storySettingsPath || ".storydex/config/project-settings.json";
+});
+
+const updatedAtLabel = computed(() => {
+  const value = String(workspaceStore.storySettings.updatedAt || "").trim();
+  if (!value) {
+    return "尚未记录";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleString("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+});
+
+const storySettingsDirty = computed(() => {
+  return (
+    segmentExtension.value !== workspaceStore.storySegmentExtension
+    || normalizeMaxSegments(maxSegmentsPerChapter.value) !== workspaceStore.storyMaxSegmentsPerChapter
+    || Boolean(autoNameChapterDirectories.value) !== workspaceStore.autoNameChapterDirectories
+    || Boolean(agentCommitPromptEnabled.value) !== workspaceStore.storySettings.agentCommitPromptEnabled
+  );
+});
+
+watch(
+  matchedSections,
+  (nextSections) => {
+    if (!nextSections.length) {
+      return;
+    }
+    if (!nextSections.some((section) => section.id === activeSection.value)) {
+      activeSection.value = nextSections[0].id;
+    }
+  },
+  { immediate: true }
+);
+
+watch(
+  () => props.visible,
+  async (visible) => {
+    if (!visible) {
+      searchKeyword.value = "";
+      errorMessage.value = "";
+      successMessage.value = "";
+      return;
+    }
+
+    await initializeWindow();
+  },
+  { immediate: true }
+);
+
+onMounted(() => {
+  document.addEventListener("keydown", handleDocumentKeydown);
+});
+
+onBeforeUnmount(() => {
+  document.removeEventListener("keydown", handleDocumentKeydown);
+});
+
+function selectSection(sectionId: SettingsSectionId): void {
+  activeSection.value = sectionId;
+}
+
+function handleThemeSelect(theme: ThemeCode): void {
+  uiStore.setTheme(theme);
+}
+
+async function initializeWindow(): Promise<void> {
+  loading.value = true;
+  errorMessage.value = "";
+  successMessage.value = "";
+
+  try {
+    if (projectSettingsAvailable.value) {
+      await workspaceStore.refreshStorySettings();
+    }
+    syncStorySettingsFromStore();
+  } catch (error: unknown) {
+    errorMessage.value = error instanceof Error ? error.message : "加载系统设置失败。";
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function reloadProjectSettings(): Promise<void> {
+  await initializeWindow();
+}
+
+async function reloadSection(sectionId: SettingsSectionId): Promise<void> {
+  if (sectionId === "project") {
+    await reloadProjectSettings();
+    return;
+  }
+
+  await initializeWindow();
+}
+
+function isSectionReloading(sectionId: SettingsSectionId): boolean {
+  if (sectionId === "project") {
+    return loading.value || saving.value;
+  }
+  return loading.value;
+}
+
+async function saveSection(sectionId: SettingsSectionId): Promise<void> {
+  if (sectionId === "project") {
+    await handleSaveProjectSettings();
+    return;
+  }
+
+  errorMessage.value = "";
+  successMessage.value = "";
+  try {
+    await uiStore.flushPersistedState();
+    successMessage.value = "系统设置已保存。";
+  } catch (error: unknown) {
+    errorMessage.value = error instanceof Error ? error.message : "保存系统设置失败。";
+  }
+}
+
+function isSectionSaving(sectionId: SettingsSectionId): boolean {
+  if (sectionId === "project") {
+    return saving.value || !storySettingsDirty.value || !projectSettingsAvailable.value;
+  }
+  return loading.value;
+}
+
+async function handleSaveProjectSettings(): Promise<void> {
+  if (!projectSettingsAvailable.value) {
+    errorMessage.value = "请先打开一个项目。";
+    return;
+  }
+
+  saving.value = true;
+  errorMessage.value = "";
+  successMessage.value = "";
+
+  try {
+    await workspaceStore.updateStorySettings({
+      segmentExtension: segmentExtension.value,
+      maxSegmentsPerChapter: normalizeMaxSegments(maxSegmentsPerChapter.value),
+      autoNameChapterDirectories: Boolean(autoNameChapterDirectories.value),
+      agentCommitPromptEnabled: Boolean(agentCommitPromptEnabled.value)
+    });
+    successMessage.value = "项目设置已保存。";
+  } catch (error: unknown) {
+    errorMessage.value = error instanceof Error ? error.message : "保存项目设置失败。";
+  } finally {
+    saving.value = false;
+  }
+}
+
+function syncStorySettingsFromStore(): void {
+  segmentExtension.value = workspaceStore.storySegmentExtension;
+  maxSegmentsPerChapter.value = workspaceStore.storyMaxSegmentsPerChapter;
+  autoNameChapterDirectories.value = workspaceStore.autoNameChapterDirectories;
+  agentCommitPromptEnabled.value = workspaceStore.storySettings.agentCommitPromptEnabled;
+}
+
+function normalizeMaxSegments(value: number): number {
+  const parsed = Number.isFinite(value) ? Math.trunc(value) : 3;
+  return Math.max(1, Math.min(99, parsed || 3));
+}
+
+function handleDocumentKeydown(event: KeyboardEvent): void {
+  if (!props.visible || event.key !== "Escape") {
+    return;
+  }
+  emit("close");
+}
+
+function sectionMatches(section: SettingsSection, query: string): boolean {
+  const searchSource = `${section.label} ${section.description} ${section.keywords}`.toLowerCase();
+  return searchSource.includes(query);
+}
+</script>
+
+<style scoped>
+.system-settings-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 160;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 14px;
+  background: color-mix(in srgb, var(--bg-app) 82%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+.system-settings-window {
+  width: min(1240px, calc(100vw - 28px));
+  height: min(820px, calc(100vh - 28px));
+  border-radius: 16px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-card);
+  box-shadow: var(--shadow-md);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.system-settings-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 228px minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.system-settings-sidebar {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border-right: 1px solid var(--border-ghost);
+  background: var(--bg-sidebar);
+}
+
+.system-settings-sidebar-title {
+  padding: 2px 2px 4px;
+  color: var(--text-main);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.system-settings-card-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.system-settings-icon-action {
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-soft);
+  display: inline-grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+}
+
+.system-settings-icon-action:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.system-settings-icon-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.system-settings-icon-action .material-symbols-rounded {
+  font-size: 19px;
+}
+
+.system-settings-search {
+  min-height: 34px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--bg-card) 92%, transparent);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  color: var(--text-muted);
+}
+
+.system-settings-search input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-main);
+  outline: none;
+  font-size: 13px;
+}
+
+.system-settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.system-settings-nav-item {
+  min-height: 34px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-soft);
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.system-settings-nav-item:hover {
+  background: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.system-settings-nav-item.active {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent-strong);
+}
+
+.system-settings-search-meta {
+  margin-top: auto;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.system-settings-content {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.system-settings-content-scroll {
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 14px 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overscroll-behavior: contain;
+}
+
+.system-settings-empty {
+  min-height: 220px;
+  border: 1px dashed var(--border-subtle);
+  border-radius: 16px;
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--bg-card) 88%, transparent);
+  font-size: 13px;
+  text-align: center;
+  line-height: 1.7;
+  padding: 0 18px;
+}
+
+.system-settings-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.system-settings-card-header {
+  min-height: 38px;
+  padding: 0 0 10px;
+  border-bottom: 1px solid var(--border-ghost);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.system-settings-card-title-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.system-settings-card-title-wrap .material-symbols-rounded {
+  color: var(--accent);
+}
+
+.system-settings-card-heading {
+  min-width: 0;
+}
+
+.system-settings-card-title {
+  color: var(--text-main);
+  font-size: 18px;
+  font-weight: 700;
+  margin: 0;
+}
+
+.system-settings-card-description {
+  margin-top: 4px;
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+.system-settings-card-body {
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.system-settings-block {
+  padding: 0 0 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border-ghost) 78%, transparent);
+}
+
+.system-settings-block:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.system-settings-block-title {
+  color: var(--text-main);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.theme-option {
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--bg-input);
+  padding: 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.theme-option:hover {
+  background: var(--bg-hover);
+}
+
+.theme-option.active {
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.theme-option-preview {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--border-subtle) 90%, white 10%);
+  flex-shrink: 0;
+}
+
+.theme-option-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.theme-option-label {
+  color: var(--text-main);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.theme-option-description {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.mode-switch-row {
+  display: inline-flex;
+  gap: 8px;
+}
+
+.mode-switch-btn {
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-soft);
+  cursor: pointer;
+}
+
+.mode-switch-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.mode-switch-btn.active {
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent-strong);
+}
+
+.system-settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--text-main);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.system-settings-range-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.system-settings-range {
+  flex: 1;
+  min-width: 0;
+}
+
+.system-settings-range-value {
+  min-width: 74px;
+  color: var(--text-soft);
+  font-size: 12px;
+  text-align: right;
+}
+
+.system-settings-inline-note {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.system-settings-input {
+  width: 100%;
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-card) 90%, transparent);
+  color: var(--text-main);
+  outline: none;
+}
+
+.system-settings-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.system-settings-project-meta-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-ghost);
+  border-radius: 8px;
+  background: var(--bg-input);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.system-settings-project-path {
+  min-width: 180px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.system-settings-empty-inline {
+  min-height: 48px;
+  border: 1px dashed var(--border-subtle);
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+  text-align: center;
+  line-height: 1.7;
+  padding: 0 12px;
+}
+
+.system-settings-switch-card {
+  min-height: 52px;
+  padding: 4px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+}
+
+.system-settings-switch-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.system-settings-switch-title {
+  color: var(--text-main);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.system-settings-switch-description {
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.system-settings-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.system-settings-switch input {
+  position: absolute;
+  opacity: 0;
+  inset: 0;
+  cursor: pointer;
+}
+
+.system-settings-switch-track {
+  width: 48px;
+  height: 28px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-soft) 22%, transparent);
+  position: relative;
+  transition: background-color 0.18s ease;
+}
+
+.system-settings-switch-track::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 4px 10px color-mix(in srgb, black 16%, transparent);
+  transition: transform 0.18s ease;
+}
+
+.system-settings-switch input:checked + .system-settings-switch-track {
+  background: color-mix(in srgb, var(--accent) 66%, white 10%);
+}
+
+.system-settings-switch input:checked + .system-settings-switch-track::after {
+  transform: translateX(20px);
+}
+
+.system-settings-primary-btn,
+.system-settings-secondary-btn {
+  min-height: 36px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  cursor: pointer;
+}
+
+.system-settings-primary-btn {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 26%, var(--border-subtle));
+  color: var(--accent-strong);
+}
+
+.system-settings-secondary-btn {
+  background: transparent;
+  color: var(--text-soft);
+}
+
+.system-settings-primary-btn:hover:not(:disabled),
+.system-settings-secondary-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.system-settings-primary-btn:disabled,
+.system-settings-secondary-btn:disabled,
+.system-settings-input:disabled,
+.system-settings-switch input:disabled + .system-settings-switch-track {
+  opacity: 0.56;
+  cursor: not-allowed;
+}
+
+.system-settings-feedback {
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.system-settings-feedback.is-error {
+  color: var(--danger);
+}
+
+.system-settings-feedback.is-success {
+  color: var(--success);
+}
+
+@media (max-width: 980px) {
+  .system-settings-window {
+    width: calc(100vw - 20px);
+    height: calc(100vh - 20px);
+  }
+
+  .system-settings-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .system-settings-sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--border-ghost);
+  }
+
+  .system-settings-nav {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .theme-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 700px) {
+  .system-settings-overlay {
+    padding: 8px;
+  }
+
+  .system-settings-sidebar,
+  .system-settings-content-scroll {
+    padding: 12px;
+  }
+
+  .system-settings-nav {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .system-settings-range-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .system-settings-range-value {
+    text-align: left;
+    min-width: 0;
+  }
+}
+</style>

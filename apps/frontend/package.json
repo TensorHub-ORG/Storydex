@@ -1,0 +1,47 @@
+{
+  "name": "storydex-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit --skipLibCheck && vite build",
+    "preview": "vite preview",
+    "test:agent-continuation": "node scripts/verify-agent-continuation-manual.cjs",
+    "test:markdown-renderer": "node scripts/verify-markdown-renderer.mjs",
+    "test:pending-write-normalization": "node scripts/verify-pending-write-normalization.mjs",
+    "test:resolved-pending-write": "node scripts/verify-resolved-pending-write.mjs",
+    "test:agent-run-display-state": "node scripts/verify-agent-run-display-state.mjs",
+    "test:agent-run-scoped-pending-state": "node scripts/verify-agent-run-scoped-pending-state.mjs",
+    "test:agent-panel-pending-approval-strip": "node scripts/verify-agent-panel-pending-approval-strip.mjs",
+    "test:agent-natural-e2e-contract": "node scripts/verify-agent-natural-e2e-contract.mjs",
+    "test:agent-session-switch-contract": "node scripts/verify-agent-session-switch-contract.mjs",
+    "test:agent-pending-write-session-contract": "node scripts/verify-agent-pending-write-session-contract.mjs",
+    "test:agent-conversation-output": "node scripts/verify-agent-conversation-output.mjs",
+    "test:workbench-agent-collapse": "node scripts/verify-workbench-agent-collapse.mjs",
+    "test:agent-composer-input-state": "node scripts/verify-agent-composer-input-state.mjs",
+    "test:agent-logical-assets": "node scripts/verify-agent-logical-assets.mjs",
+    "test:agent-usage-ledger": "node scripts/verify-agent-usage-ledger.mjs",
+    "test:turn-phase-checklist": "node scripts/verify-turn-phase-checklist.mjs",
+    "test:storydex-relationship-direction": "node scripts/verify-storydex-relationship-direction.mjs",
+    "test:storydex-ui-appearance": "node scripts/verify-storydex-ui-appearance.mjs",
+    "test:story-wiki-graph-query": "node scripts/verify-story-wiki-graph-query.mjs",
+    "type-check": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "@fontsource/material-symbols-rounded": "^5.2.41",
+    "axios": "^1.7.9",
+    "markdown-it": "^14.1.1",
+    "pinia": "^2.2.6",
+    "vue": "^3.5.0",
+    "vue-router": "^4.4.5"
+  },
+  "devDependencies": {
+    "@types/markdown-it": "^14.1.2",
+    "@types/node": "^22.10.1",
+    "@vitejs/plugin-vue": "^5.1.4",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "vue-tsc": "^2.1.8"
+  }
+}
