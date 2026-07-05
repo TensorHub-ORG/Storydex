@@ -235,8 +235,7 @@ function clamp(value: number, min: number, max: number): number {
   background: var(--border-subtle);
 }
 
-.workspace-splitter-agent:hover::before,
-:global(body.is-resizing-panels) .workspace-splitter-agent::before {
+.workspace-splitter-agent:hover::before {
   width: 2px;
   background: var(--accent);
 }
