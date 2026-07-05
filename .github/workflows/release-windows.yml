@@ -1,0 +1,89 @@
+name: Release Windows
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release-windows:
+    name: Build and publish Windows release
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: |
+            apps/frontend/package-lock.json
+            apps/desktop/package-lock.json
+
+      - name: Setup Python 3.9
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Install Node dependencies
+        shell: pwsh
+        run: |
+          npm ci --prefix apps/frontend
+          npm ci --prefix apps/desktop
+
+      - name: Prepare embedded Python
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap_python39.ps1 -InstallRequirements
+
+      - name: Build Windows package
+        shell: cmd
+        run: npm --prefix apps/desktop run package:win
+
+      - name: Prepare release assets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $releaseDir = Join-Path (Resolve-Path ".").Path "release-assets"
+          New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
+
+          $unpackedSource = Join-Path (Resolve-Path ".").Path "apps\desktop\release\win-unpacked"
+          $unpackedTarget = Join-Path $releaseDir "Storydex-win-unpacked"
+          Copy-Item -LiteralPath $unpackedSource -Destination $unpackedTarget -Recurse -Force
+
+          Copy-Item -LiteralPath "apps\desktop\release\StorydexSetup-x64-0.1.0.exe" -Destination (Join-Path $releaseDir "StorydexSetup-x64-0.1.0.exe") -Force
+          Copy-Item -LiteralPath "apps\desktop\release\StorydexSetup-x64-0.1.0.exe.blockmap" -Destination (Join-Path $releaseDir "StorydexSetup-x64-0.1.0.exe.blockmap") -Force
+
+          Compress-Archive -LiteralPath $unpackedTarget -DestinationPath (Join-Path $releaseDir "Storydex-win-unpacked.zip") -CompressionLevel Optimal
+
+          $names = @(
+            "StorydexSetup-x64-0.1.0.exe",
+            "Storydex-win-unpacked.zip",
+            "StorydexSetup-x64-0.1.0.exe.blockmap"
+          )
+          $hashLines = foreach ($name in $names) {
+            $file = Join-Path $releaseDir $name
+            $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $file
+            "$($hash.Hash)  $name"
+          }
+          Set-Content -LiteralPath (Join-Path $releaseDir "SHA256SUMS.txt") -Value $hashLines -Encoding ASCII
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Storydex v0.1.0
+          body_path: apps/desktop/build/release-notes-v0.1.0.md
+          draft: false
+          prerelease: false
+          files: |
+            release-assets/StorydexSetup-x64-0.1.0.exe
+            release-assets/Storydex-win-unpacked.zip
+            release-assets/StorydexSetup-x64-0.1.0.exe.blockmap
+            release-assets/SHA256SUMS.txt

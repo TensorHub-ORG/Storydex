@@ -2,7 +2,7 @@
   "name": "storydex-desktop",
   "private": true,
   "version": "0.1.0",
-  "description": "Storydex desktop development shell based on Electron",
+  "description": "Storydex desktop app",
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "concurrently -k -n FRONTEND,ELECTRON -c cyan,green \"npm:dev:frontend\" \"npm:dev:electron\"",
@@ -22,14 +22,14 @@
     "wait-on": "^8.0.1"
   },
   "build": {
-    "appId": "com.storydex.desktop.dev",
+    "appId": "cn.tensorhub.storydex",
     "productName": "Storydex",
     "asar": false,
     "directories": {
       "output": "release"
     },
     "extraMetadata": {
-      "version": "1.0.0"
+      "version": "0.1.0"
     },
     "files": [
       "electron/**/*",
@@ -43,11 +43,17 @@
       "target": [
         "nsis"
       ],
-      "artifactName": "StorydexSetup-x64-1.0.0.${ext}"
+      "artifactName": "StorydexSetup-x64-${version}.${ext}"
     },
     "nsis": {
+      "license": "build/installer-license.zh-CN.txt",
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "allowElevation": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Storydex"
     }
   }
 }

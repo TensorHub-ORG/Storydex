@@ -63,10 +63,15 @@ function copyFrontendDist() {
 
 function shouldCopyBackend(sourcePath) {
   const normalized = String(sourcePath).replace(/\\/g, "/");
+  const fileName = path.basename(normalized);
   if (normalized.includes("/__pycache__/")) return false;
   if (normalized.includes("/.pytest_cache/")) return false;
   if (normalized.includes("/.mypy_cache/")) return false;
   if (normalized.includes("/tests/")) return false;
+  if (normalized.includes("/test_support/")) return false;
+  if (normalized.includes("/-p/")) return false;
+  if (fileName === ".env" || fileName.startsWith(".env.")) return false;
+  if (/\.(log|err|out|tmp|temp|pyc)$/i.test(fileName)) return false;
   if (/\/\.codex-[^/]+\.log$/i.test(normalized)) return false;
   if (/\/\.uvicorn-[^/]+\.log$/i.test(normalized)) return false;
   if (normalized.endsWith("/.DS_Store")) return false;
