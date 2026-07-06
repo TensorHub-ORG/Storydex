@@ -117,7 +117,7 @@
                 :disabled="loading || saving"
                 spellcheck="false"
                 placeholder="https://api.example.com/v1"
-                @input="syncProviderFields"
+                @input="handleProviderConnectionInput"
               />
             </label>
 
@@ -128,30 +128,49 @@
                 :disabled="loading || saving"
                 spellcheck="false"
                 placeholder="sk-..."
-                @input="syncProviderFields"
+                @input="handleProviderConnectionInput"
               />
             </label>
 
+            <div class="coomi-model-fetch-row">
+              <button
+                class="coomi-config-action"
+                type="button"
+                :disabled="modelFetchDisabled"
+                @click="fetchModels"
+              >
+                <span class="material-symbols-rounded">cloud_download</span>
+                <span>{{ fetchingModels ? "获取中" : "获取模型" }}</span>
+              </button>
+              <span v-if="modelFetchMessage" class="coomi-model-fetch-message">{{ modelFetchMessage }}</span>
+            </div>
+
             <label class="coomi-config-field full">
               <span>标准模型</span>
-              <input
+              <select
                 v-model="form.model"
                 :disabled="loading || saving"
-                spellcheck="false"
-                placeholder="标准模型名称"
-                @input="syncProviderFields"
-              />
+                @change="syncProviderFields"
+              >
+                <option value="">选择标准模型</option>
+                <option v-for="model in standardModelOptions" :key="model" :value="model">
+                  {{ model }}
+                </option>
+              </select>
             </label>
 
             <label class="coomi-config-field full">
               <span>快速模型</span>
-              <input
+              <select
                 v-model="form.fastModel"
                 :disabled="loading || saving"
-                spellcheck="false"
-                placeholder="快速模型名称"
-                @input="syncProviderFields"
-              />
+                @change="syncProviderFields"
+              >
+                <option value="">跟随标准模型</option>
+                <option v-for="model in fastModelOptions" :key="model" :value="model">
+                  {{ model }}
+                </option>
+              </select>
             </label>
           </div>
         </section>
@@ -190,7 +209,7 @@
 
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
-import { fetchAgentCoomiConfig, updateAgentCoomiConfig } from "@/api/agent";
+import { fetchAgentCoomiConfig, fetchAgentCoomiModels, updateAgentCoomiConfig } from "@/api/agent";
 import { useAgentStore } from "@/stores/agent";
 
 type ProviderType = "generic" | "openai" | "anthropic";
@@ -223,9 +242,12 @@ const emit = defineEmits<{
 const agentStore = useAgentStore();
 const loading = ref(false);
 const saving = ref(false);
+const fetchingModels = ref(false);
 const configPath = ref("C:/Users/Septem/.storydex/.coomi/config/providers.json");
 const updatedAt = ref("");
 const errorMessage = ref("");
+const modelFetchMessage = ref("");
+const modelOptions = ref<string[]>([]);
 const configData = ref<Record<string, unknown>>(emptyConfig());
 const selectedProviderId = ref("");
 const formProviderId = ref("");
@@ -250,6 +272,13 @@ const providerOptions = computed<ProviderOption[]>(() => {
 });
 
 const hasProviders = computed(() => providerOptions.value.length > 0);
+
+const modelFetchDisabled = computed(
+  () => loading.value || saving.value || fetchingModels.value || !form.baseUrl.trim() || !form.apiKey.trim()
+);
+
+const standardModelOptions = computed(() => optionsWithCurrentModel(form.model));
+const fastModelOptions = computed(() => optionsWithCurrentModel(form.fastModel));
 
 const updatedLabel = computed(() => {
   if (saving.value) return "正在保存";
@@ -396,6 +425,68 @@ function syncProviderFields(): void {
   dirty.value = true;
 }
 
+function handleProviderConnectionInput(): void {
+  resetModelOptions();
+  syncProviderFields();
+}
+
+async function fetchModels(): Promise<void> {
+  const baseUrl = form.baseUrl.trim();
+  const apiKey = form.apiKey.trim();
+  errorMessage.value = "";
+  modelFetchMessage.value = "";
+  if (!baseUrl || !apiKey) {
+    modelFetchMessage.value = "请先填写接口地址和 API 密钥。";
+    return;
+  }
+
+  fetchingModels.value = true;
+  try {
+    const result = await fetchAgentCoomiModels({ baseUrl, apiKey });
+    modelOptions.value = normalizeModelOptions(result.data.models);
+    if (!modelOptions.value.length) {
+      modelFetchMessage.value = "未获取到模型列表，可继续保留当前模型。";
+      return;
+    }
+    if (!form.model.trim()) {
+      form.model = modelOptions.value[0];
+      syncProviderFields();
+    }
+    modelFetchMessage.value = `已获取 ${modelOptions.value.length} 个模型。`;
+  } catch (error: unknown) {
+    modelFetchMessage.value = error instanceof Error ? error.message : "获取模型失败。";
+  } finally {
+    fetchingModels.value = false;
+  }
+}
+
+function optionsWithCurrentModel(currentModel: string): string[] {
+  const current = currentModel.trim();
+  if (!current || modelOptions.value.includes(current)) {
+    return modelOptions.value;
+  }
+  return [current, ...modelOptions.value];
+}
+
+function normalizeModelOptions(values: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values || []) {
+    const model = String(value || "").trim();
+    if (!model || seen.has(model)) {
+      continue;
+    }
+    seen.add(model);
+    result.push(model);
+  }
+  return result;
+}
+
+function resetModelOptions(): void {
+  modelOptions.value = [];
+  modelFetchMessage.value = "";
+}
+
 function markDirty(): void {
   dirty.value = true;
 }
@@ -479,6 +570,7 @@ function selectInitialProvider(): void {
 
 function loadForm(providerId: string): void {
   const provider = asRecord(getProviders()[providerId]) || {};
+  resetModelOptions();
   formProviderId.value = providerId;
   Object.assign(form, {
     id: providerId,
@@ -733,6 +825,24 @@ function formatDate(value: string): string {
   row-gap: 12px;
 }
 
+.coomi-model-fetch-row {
+  grid-column: 1 / -1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.coomi-model-fetch-message {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .coomi-config-field {
   display: grid;
   gap: 6px;
@@ -868,6 +978,11 @@ function formatDate(value: string): string {
 
 @media (max-width: 620px) {
   .coomi-provider-picker-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .coomi-model-fetch-row {
     align-items: stretch;
     flex-direction: column;
   }

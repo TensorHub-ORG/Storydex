@@ -46,7 +46,8 @@ class AgentGitAutoCommitService:
             )
 
         try:
-            self.git_service.initialize_repository(root)
+            summary = self.git_service.initialize_repository(root)
+            initial_commit = self._commit_initial_snapshot_if_needed(root, summary)
             baseline = self.git_service.read_summary(root)
             baseline_status = self._status_map(baseline.get("changedFiles"))
             return AgentGitSnapshot(
@@ -54,7 +55,7 @@ class AgentGitAutoCommitService:
                 available=True,
                 baseline_status=baseline_status,
                 baseline_fingerprints=self._fingerprints_for_paths(root, baseline_status),
-                initial_commit=None,
+                initial_commit=initial_commit,
             )
         except GitServiceError as exc:
             return AgentGitSnapshot(
@@ -268,15 +269,14 @@ class AgentGitAutoCommitService:
                 message=str(exc),
             )
 
-    @staticmethod
-    def _commit_initial_snapshot_if_needed(workspace_root: Path, summary: Dict[str, Any]) -> Dict[str, Any] | None:
+    def _commit_initial_snapshot_if_needed(self, workspace_root: Path, summary: Dict[str, Any]) -> Dict[str, Any] | None:
         recent_commits = summary.get("recentCommits")
         changed_files = summary.get("changedFiles")
         if isinstance(recent_commits, list) and recent_commits:
             return None
         if not isinstance(changed_files, list) or not changed_files:
             return None
-        result = get_git_service().commit_all(
+        result = self.git_service.commit_all(
             workspace_root,
             message="workspace: initial local snapshot",
         )

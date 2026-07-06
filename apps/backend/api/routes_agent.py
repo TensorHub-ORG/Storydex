@@ -133,6 +133,20 @@ class AgentCoomiConfigUpdateRequest(BaseModel):
     content: str
 
 
+class AgentCoomiModelListRequest(BaseModel):
+    base_url: str = Field(default="", alias="baseUrl")
+    api_key: str = Field(default="", alias="apiKey")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AgentCoomiModelListData(BaseModel):
+    endpoint: str = ""
+    models: List[str] = Field(default_factory=list)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class AgentPermissionModeRequest(BaseModel):
     permission_mode: str = Field(alias="permissionMode")
 
@@ -1250,6 +1264,31 @@ def agent_update_coomi_config(payload: AgentCoomiConfigUpdateRequest, request: R
     )
 
 
+@router.post("/agent/coomi/models", response_model=ApiEnvelope)
+def agent_list_coomi_models(payload: AgentCoomiModelListRequest, request: Request) -> ApiEnvelope:
+    del request
+    started = time.perf_counter()
+    trace_id = str(uuid4())
+    try:
+        result = get_storydex_coomi_agent_service().list_models(
+            base_url=payload.base_url,
+            api_key=payload.api_key,
+        )
+    except ValueError as exc:
+        raise StorydexError(
+            "Unable to fetch Coomi model list.",
+            code="coomi_models_unavailable",
+            status_code=400,
+            details={"message": str(exc)},
+        ) from exc
+    data = AgentCoomiModelListData(**result)
+    return success_response(
+        data=data.model_dump(by_alias=True),
+        trace=ApiTrace(traceId=trace_id, durationMs=int((time.perf_counter() - started) * 1000), toolCalls=0),
+        audit=[{"action": "fetch_coomi_models", "endpoint": data.endpoint, "modelCount": len(data.models)}],
+    )
+
+
 @router.post("/agent/coomi/permission", response_model=ApiEnvelope)
 def agent_set_coomi_permission(payload: AgentPermissionModeRequest, request: Request) -> ApiEnvelope:
     del request
@@ -1352,13 +1391,10 @@ async def agent_run_commit_decision(
                     prompt=original_prompt,
                 )
             except Exception as exc:
-                raise StorydexError(
-                    "Failed to generate commit message.",
-                    code="commit_message_generation_failed",
-                    status_code=502,
-                    details={"message": str(exc)},
-                ) from exc
-            generated_message = True
+                del exc
+                commit_message = agent_git_autocommit_service._commit_message_for_prompt(original_prompt)
+            else:
+                generated_message = True
         result_payload = agent_git_autocommit_service.commit_current_changes(
             workspace_root,
             message=commit_message,

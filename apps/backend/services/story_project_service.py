@@ -34,6 +34,10 @@ _PREFIX_NUMBER_RE = re.compile(r"^(?P<prefix>.*?)(?P<number>\d{2,4})$")
 _SCRIPT_CONTEXT_SUFFIXES = {".md", ".txt", ".json", ".yaml", ".yml"}
 _RUNTIME_PRESET_TEXT_SUFFIXES = {".md", ".txt"}
 _RUNTIME_PRESET_JSON_SUFFIX = ".safe.json"
+# SillyTavern 预设编译后动辄上万字，运行时给它专用的大预算（Storydex 自有
+# 预设仍走 720/2400 的紧凑预算）。
+_ST_RUNTIME_PRESET_MAX_CHARS_PER_FILE = 24_000
+_ST_RUNTIME_PRESET_TOTAL_CHARS = 26_000
 _CHARACTER_CONSTRAINT_JSON_READ_LIMIT = 80_000
 _TEMPLATE_CONTEXT_READ_CHARS = 12_000
 _PRESET_LIBRARY_DIRS = {"library", "imported", "blocked"}
@@ -359,7 +363,7 @@ class StoryProjectService:
                         "mainPresetLimit": 1,
                         "rawJsonRuntime": False,
                         "presetSchemaVersion": 1,
-                        "description": "Only files under presets/active or compiled safe presets may affect generation.",
+                        "description": "Only files under presets/active or compiled presets may affect generation.",
                     },
                     "directories": {
                         "active": ".storydex/presets/active",
@@ -4588,6 +4592,8 @@ class StoryProjectService:
         *,
         max_files: int = 5,
         max_chars_per_file: int = 720,
+        runtime_context: Optional[Dict[str, Any]] = None,
+        st_max_chars_per_file: Optional[int] = None,
     ) -> List[Tuple[str, str]]:
         root = Path(workspace_root).resolve()
         preset_root = self.storydex_root(root) / "presets"
@@ -4599,18 +4605,61 @@ class StoryProjectService:
         entries: List[Tuple[str, str]] = []
         for path in files:
             preview = self._read_text_preview(path, max_chars=max_chars_per_file)
-            if not preview:
-                continue
-            # T-C: 主 markdown 旁有同 stem 的 .preset.json 时，把结构化字段压缩附加。
             if path.suffix.lower() == ".md":
                 sidecar = find_sidecar_path(path)
                 if sidecar.exists():
                     doc, _warnings = _load_preset_sidecar_impl(sidecar)
+                    compiled = self._compile_preset_sidecar_text(
+                        doc,
+                        runtime_context=runtime_context,
+                        max_chars=max_chars_per_file,
+                        st_max_chars=st_max_chars_per_file,
+                    )
+                    if compiled:
+                        entries.append((path.relative_to(root).as_posix(), compiled))
+                        continue
                     summary = summarize_preset_sidecar(doc, max_chars=max_chars_per_file)
                     if summary:
                         preview = preview + "\n\n---\n\n[Structured Preset Sidecar]\n" + summary
+            if not preview:
+                continue
             entries.append((path.relative_to(root).as_posix(), preview))
         return entries
+
+    def _compile_preset_sidecar_text(
+        self,
+        doc: PresetDocument,
+        *,
+        runtime_context: Optional[Dict[str, Any]],
+        max_chars: int,
+        st_max_chars: Optional[int] = None,
+    ) -> str:
+        try:
+            from services.preset_compiler import compile_preset
+
+            result = compile_preset(doc, runtime_context=runtime_context)
+            compiled = result.compiled_text
+            # ST 绝对注入（injection_position == 1）没有独立的消息层可挂，
+            # 按 depth 从大到小追加到文本尾部：depth 越小离生成越近。
+            if result.injections:
+                injection_texts = [
+                    injection.text.strip()
+                    for injection in sorted(result.injections, key=lambda item: -item.depth)
+                    if injection.text.strip()
+                ]
+                if injection_texts:
+                    compiled = "\n\n".join(part for part in [compiled, *injection_texts] if part)
+        except Exception:
+            return ""
+        effective_max = max_chars
+        if st_max_chars is not None and self._is_silly_tavern_document(doc):
+            effective_max = max(max_chars, int(st_max_chars))
+        return self._truncate_text(compiled, max_chars=effective_max)
+
+    @staticmethod
+    def _is_silly_tavern_document(doc: PresetDocument) -> bool:
+        # 外部导入的预设（SillyTavern 或通用格式）都允许使用运行时大预算。
+        return str(getattr(doc.meta, "source_format", "") or "").strip().lower() in {"sillytavern", "generic"}
 
     def _runtime_preset_files(self, workspace_root: Path, *, max_files: int) -> List[Path]:
         root = Path(workspace_root).resolve()
@@ -4665,21 +4714,21 @@ class StoryProjectService:
             "Runtime model:",
             "1. System prompts keep only Storydex hard runtime constraints.",
             "2. Project presets provide creative style, dialogue, POV, format, continuity, and anti-cliche rules.",
-            "3. Only active or compiled safe presets may affect generation.",
-            "4. Raw community JSON, scripts, regex bindings, and blocked modules are import/library material only.",
+            "3. Active presets and compiled preset sidecars may affect generation.",
+            "4. Imported SillyTavern presets are preserved; active sidecar modules are compiled at runtime.",
             "",
             "Activation policy:",
             "1. `.storydex/presets/active/` is the runtime directory.",
             "2. The active directory is treated as a single main preset; if multiple files exist, only the first sorted file is loaded.",
             "3. `.storydex/presets/library/`, `imported/`, and `blocked/` are never injected directly.",
-            "4. Community JSON must be sanitized and compiled before activation; raw `.json` files are ignored.",
+            "4. Raw preset export JSON and regex/display scripts stay as source metadata unless a dedicated compatibility layer applies them.",
         ]
         if not entries:
             lines.extend(
                 [
                     "",
                     "No active project preset is enabled.",
-                    "Put one reviewed `.md`, `.txt`, or `.safe.json` file under `.storydex/presets/active/` to affect story generation.",
+                    "Put one reviewed `.md`, `.txt`, or compiled preset sidecar under `.storydex/presets/active/` to affect story generation.",
                 ]
             )
             return "\n".join(lines).rstrip() + "\n"
@@ -4696,23 +4745,32 @@ class StoryProjectService:
         max_files: int = 5,
         max_chars_per_file: int = 720,
         total_chars: int = 2400,
+        runtime_context: Optional[Dict[str, Any]] = None,
     ) -> str:
         entries = self._collect_preset_entries(
             workspace_root,
             max_files=max_files,
             max_chars_per_file=max_chars_per_file,
+            runtime_context=runtime_context,
+            st_max_chars_per_file=_ST_RUNTIME_PRESET_MAX_CHARS_PER_FILE,
         )
         if not entries:
             return ""
 
         lines: List[str] = [
             "[Active Project Preset]",
-            "Only the following reviewed active/compiled-safe preset rules may affect this generation.",
-            "Raw community JSON, scripts, regex bindings, and blocked modules are not runtime rules.",
+            "The rules below are the authoritative creative directives for this generation.",
+            "Follow them strictly for style, POV, formatting, pacing, and content decisions; they take precedence over generic style defaults.",
+            "Raw preset export JSON and regex/display scripts remain source metadata unless a compatibility layer applies them.",
         ]
         for relative_path, content in entries:
             lines.extend(["", f"### {relative_path}", content])
-        return self._truncate_text("\n".join(lines).strip(), max_chars=total_chars)
+        # SillyTavern 编译文本远超 Storydex 自有预设的预算；出现超长条目时
+        # 放开总预算，保持社区预设全量注入。
+        effective_total = int(total_chars or 2400)
+        if any(len(content) > max_chars_per_file for _, content in entries):
+            effective_total = max(effective_total, _ST_RUNTIME_PRESET_TOTAL_CHARS)
+        return self._truncate_text("\n".join(lines).strip(), max_chars=effective_total)
 
     def _build_character_hard_constraints_context(
         self,

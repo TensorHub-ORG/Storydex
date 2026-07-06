@@ -55,9 +55,9 @@
               :disabled="importing"
               @click="openImportPicker"
             >
-              <span class="material-symbols-rounded">cleaning_services</span>
+              <span class="material-symbols-rounded">upload_file</span>
               <span>导入</span>
-              <b>{{ importing ? "处理中" : "净化" }}</b>
+              <b v-if="importing">处理中</b>
             </button>
           </div>
           <p v-if="importSummary" class="preset-import-summary">{{ importSummary }}</p>
@@ -83,6 +83,7 @@
               type="button"
               :class="{ active: workspaceStore.activeFileBindingOrPath === item.relativePath }"
               :title="item.relativePath"
+              @contextmenu.prevent.stop="openPresetContextMenu($event, item)"
               @click="openPreset(item.relativePath)"
             >
               <span class="preset-row-icon material-symbols-rounded">{{ iconFor(item) }}</span>
@@ -132,6 +133,7 @@
               type="button"
               :class="{ active: workspaceStore.activeFileBindingOrPath === item.relativePath }"
               :title="item.relativePath"
+              @contextmenu.prevent.stop="openPresetContextMenu($event, item)"
               @click="openPreset(item.relativePath)"
             >
               <span class="preset-row-icon material-symbols-rounded">{{ iconFor(item) }}</span>
@@ -187,11 +189,52 @@
         </div>
       </div>
     </Teleport>
+
+    <Teleport to="body">
+      <div
+        v-if="contextMenu.visible"
+        ref="contextMenuRef"
+        class="preset-context-menu"
+        :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
+        @click.stop
+      >
+        <button class="preset-context-menu-item" type="button" @click="handleOpenContextPreset">打开</button>
+        <button
+          v-if="contextMenu.item?.extension === '.md'"
+          class="preset-context-menu-item"
+          type="button"
+          @click="handleEditContextPreset"
+        >
+          编辑参数
+        </button>
+        <button
+          v-if="contextMenu.item && isEnabledPreset(contextMenu.item)"
+          class="preset-context-menu-item"
+          type="button"
+          @click="handleContextDeactivate"
+        >
+          停用
+        </button>
+        <button
+          v-else-if="contextMenu.item?.extension === '.md'"
+          class="preset-context-menu-item"
+          type="button"
+          @click="handleContextActivate"
+        >
+          启用
+        </button>
+        <div class="preset-context-menu-separator"></div>
+        <button class="preset-context-menu-item" type="button" @click="handleCopyPresetRelativePath">
+          复制相对路径
+        </button>
+        <button class="preset-context-menu-item is-danger" type="button" @click="handleDeletePreset">删除</button>
+      </div>
+    </Teleport>
   </aside>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import PresetEditor from "@/components/PresetEditor.vue";
 import PresetImportPreview from "@/components/PresetImportPreview.vue";
 import {
@@ -213,6 +256,13 @@ interface PresetItem {
   isActiveMain: boolean;
 }
 
+interface PresetContextMenuState {
+  visible: boolean;
+  x: number;
+  y: number;
+  item: PresetItem | null;
+}
+
 const workspaceStore = useWorkspaceStore();
 const presetStore = usePresetStore();
 const importInputRef = ref<HTMLInputElement | null>(null);
@@ -225,10 +275,29 @@ const previewLoading = ref(false);
 const previewItems = ref<SillyTavernPresetImportItem[]>([]);
 const previewErrorMessage = ref("");
 const pendingImportPayload = ref<SillyTavernPresetImportFilePayload[]>([]);
+const contextMenuRef = ref<HTMLDivElement | null>(null);
+const contextMenu = ref<PresetContextMenuState>({
+  visible: false,
+  x: 0,
+  y: 0,
+  item: null
+});
 
 const projectLabel = computed(() => workspaceStore.projectLabel || "未打开项目");
 const enabledItems = computed(() => collectPresetItems(".storydex/presets/active"));
 const disabledItems = computed(() => collectPresetItems(".storydex/presets/library"));
+
+onMounted(() => {
+  window.addEventListener("click", closePresetContextMenu);
+  window.addEventListener("blur", closePresetContextMenu);
+  window.addEventListener("keydown", handlePresetContextKeydown);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("click", closePresetContextMenu);
+  window.removeEventListener("blur", closePresetContextMenu);
+  window.removeEventListener("keydown", handlePresetContextKeydown);
+});
 
 async function handleActivate(relativePath: string): Promise<void> {
   await presetStore.activate(relativePath);
@@ -236,6 +305,111 @@ async function handleActivate(relativePath: string): Promise<void> {
 
 async function handleDeactivate(relativePath: string): Promise<void> {
   await presetStore.deactivate(relativePath);
+}
+
+async function openPresetContextMenu(event: MouseEvent, item: PresetItem): Promise<void> {
+  contextMenu.value = {
+    visible: true,
+    x: event.clientX,
+    y: event.clientY,
+    item
+  };
+  await nextTick();
+  repositionPresetContextMenu(event.clientX, event.clientY);
+}
+
+function closePresetContextMenu(): void {
+  contextMenu.value.visible = false;
+  contextMenu.value.item = null;
+}
+
+function handlePresetContextKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape") {
+    closePresetContextMenu();
+  }
+}
+
+function repositionPresetContextMenu(anchorX: number, anchorY: number): void {
+  const menuElement = contextMenuRef.value;
+  if (!menuElement || !contextMenu.value.visible) {
+    return;
+  }
+  const margin = 12;
+  const menuWidth = menuElement.offsetWidth;
+  const menuHeight = menuElement.offsetHeight;
+  const maxX = Math.max(margin, window.innerWidth - menuWidth - margin);
+  const maxY = Math.max(margin, window.innerHeight - menuHeight - margin);
+  contextMenu.value = {
+    ...contextMenu.value,
+    x: Math.min(Math.max(anchorX, margin), maxX),
+    y: Math.min(Math.max(anchorY, margin), maxY)
+  };
+}
+
+function handleOpenContextPreset(): void {
+  const item = contextMenu.value.item;
+  closePresetContextMenu();
+  if (item) {
+    openPreset(item.relativePath);
+  }
+}
+
+async function handleEditContextPreset(): Promise<void> {
+  const item = contextMenu.value.item;
+  closePresetContextMenu();
+  if (item?.extension === ".md") {
+    await openEditor(item.relativePath);
+  }
+}
+
+async function handleContextActivate(): Promise<void> {
+  const item = contextMenu.value.item;
+  closePresetContextMenu();
+  if (item?.extension === ".md") {
+    await handleActivate(item.relativePath);
+  }
+}
+
+async function handleContextDeactivate(): Promise<void> {
+  const item = contextMenu.value.item;
+  closePresetContextMenu();
+  if (item) {
+    await handleDeactivate(item.relativePath);
+  }
+}
+
+async function handleCopyPresetRelativePath(): Promise<void> {
+  const relativePath = contextMenu.value.item?.relativePath || "";
+  closePresetContextMenu();
+  if (!relativePath || !navigator.clipboard?.writeText) {
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(relativePath);
+  } catch {
+    // Clipboard permissions are browser-controlled; failing to copy should not affect file operations.
+  }
+}
+
+async function handleDeletePreset(): Promise<void> {
+  const item = contextMenu.value.item;
+  closePresetContextMenu();
+  if (!item?.relativePath) {
+    return;
+  }
+  const confirmed = window.confirm(`确定要删除“${item.name}”吗？`);
+  if (!confirmed) {
+    return;
+  }
+  try {
+    await workspaceStore.deletePath(item.relativePath);
+    if (item.hasSidecar) {
+      await workspaceStore.deletePath(sidecarPathFor(item.relativePath));
+    }
+    await Promise.all([workspaceStore.refreshTree(), presetStore.refreshList()]);
+  } catch {
+    // handled by stores
+  }
 }
 
 async function openEditor(relativePath: string): Promise<void> {
@@ -304,7 +478,7 @@ async function confirmImport(): Promise<void> {
     const firstImported = data.items.find((item) => item.relativePath);
     const moduleCount = data.items.reduce((sum, item) => sum + (item.moduleCount || 0), 0);
     const warningCount = data.items.reduce((sum, item) => sum + (item.importWarnings?.length || 0), 0);
-    importSummary.value = `已导入 ${data.items.length} 个预设，${moduleCount} 个模块，${warningCount} 条宏警告。`;
+    importSummary.value = `已导入 ${data.items.length} 个预设，${moduleCount} 个模块，${warningCount} 条宏提示。`;
     if (firstImported) {
       await openEditor(firstImported.relativePath);
     }
@@ -325,6 +499,7 @@ function cancelImport(): void {
 }
 
 function openPreset(relativePath: string): void {
+  closePresetContextMenu();
   void workspaceStore.openFile(relativePath, { forceReload: true });
 }
 
@@ -369,8 +544,15 @@ function hasSidecarFor(relativePath: string): boolean {
   if (!relativePath.toLowerCase().endsWith(".md")) {
     return false;
   }
-  const sidecarPath = relativePath.replace(/\.md$/iu, ".preset.json");
-  return Boolean(findNode(workspaceStore.tree, sidecarPath));
+  return Boolean(findNode(workspaceStore.tree, sidecarPathFor(relativePath)));
+}
+
+function sidecarPathFor(relativePath: string): string {
+  return normalizePath(relativePath).replace(/\.md$/iu, ".preset.json");
+}
+
+function isEnabledPreset(item: PresetItem): boolean {
+  return normalizePath(item.relativePath).startsWith(".storydex/presets/active/");
 }
 
 function findNode(nodes: WorkspaceTreeNode[], targetPath: string): WorkspaceTreeNode | null {
@@ -762,6 +944,49 @@ async function fileToBase64(file: File): Promise<string> {
   color: var(--accent-strong);
 }
 
+.preset-context-menu {
+  position: fixed;
+  z-index: 10000;
+  min-width: 168px;
+  padding: 5px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-panel, var(--bg-sidebar));
+  box-shadow: 0 12px 30px rgb(0 0 0 / 0.24);
+}
+
+.preset-context-menu-item {
+  width: 100%;
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-main);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.preset-context-menu-item:hover,
+.preset-context-menu-item:focus-visible {
+  background: var(--bg-hover);
+  outline: none;
+}
+
+.preset-context-menu-item.is-danger {
+  color: var(--danger);
+}
+
+.preset-context-menu-separator {
+  height: 1px;
+  margin: 5px 4px;
+  background: var(--border-ghost);
+}
+
 .preset-editor-overlay {
   position: fixed;
   inset: 0;
@@ -782,6 +1007,13 @@ async function fileToBase64(file: File): Promise<string> {
   overflow: hidden;
   display: flex;
   flex-direction: column;
+}
+
+/* 导入预览是双栏布局，需要更宽的窗口 */
+.preset-import-preview-modal {
+  width: min(960px, 96vw);
+  height: min(86vh, 720px);
+  border-radius: 6px;
 }
 
 .preset-editor-close {

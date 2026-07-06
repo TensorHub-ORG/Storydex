@@ -289,7 +289,7 @@
           <span class="preset-import-meta-value">{{ importSourceFormat }}</span>
         </p>
         <details v-if="importWarnings.length" class="preset-import-meta-subdetails">
-          <summary>导入警告 ({{ importWarnings.length }})</summary>
+          <summary>导入提示 ({{ importWarnings.length }})</summary>
           <ul class="preset-import-meta-warning-list">
             <li v-for="(warning, index) in importWarnings.slice(0, 30)" :key="index" class="preset-import-meta-warning-item">
               ⚠ {{ warning }}
@@ -327,17 +327,35 @@
     <details v-if="presetModules.length" class="preset-editor-section" open>
       <summary>模块开关</summary>
       <div class="preset-module-toggle-list">
-        <article v-for="(module, index) in presetModules" :key="module.id || index" class="preset-module-toggle-row">
-          <label class="preset-module-toggle-main">
-            <input
-              type="checkbox"
-              :checked="module.enabledByDefault !== false"
-              @change="onModuleEnabledChange(index, ($event.target as HTMLInputElement).checked)"
+        <details
+          v-for="(module, index) in presetModules"
+          :key="module.id || index"
+          class="preset-module-toggle-row"
+        >
+          <summary class="preset-module-toggle-summary">
+            <span class="preset-module-toggle-chevron material-symbols-rounded">chevron_right</span>
+            <span class="preset-module-toggle-main">
+              <input
+                type="checkbox"
+                :checked="module.enabledByDefault !== false"
+                @click.stop
+                @change.stop="onModuleEnabledChange(index, ($event.target as HTMLInputElement).checked)"
+              />
+              <span>{{ module.title || module.id || `module_${index + 1}` }}</span>
+            </span>
+            <small>{{ moduleMetaLabel(module) }}</small>
+          </summary>
+          <label class="preset-module-content">
+            <span>内容</span>
+            <textarea
+              class="preset-editor-textarea preset-module-content-textarea"
+              rows="8"
+              :value="module.content || ''"
+              placeholder="此模块暂无内容。"
+              @input="onModuleContentChange(index, ($event.target as HTMLTextAreaElement).value)"
             />
-            <span>{{ module.title || module.id || `module_${index + 1}` }}</span>
           </label>
-          <small>{{ slotLabel(module.slot || "advanced") }} · {{ module.id || `module_${index + 1}` }}</small>
-        </article>
+        </details>
       </div>
     </details>
 
@@ -406,7 +424,7 @@
           </header>
           <p class="preset-module-summary">{{ summarizeText(section.text) }}</p>
           <footer class="preset-module-card-footer">
-            <span>{{ section.virtual ? "v1 虚拟模块" : "v2 模块" }}</span>
+            <span>{{ textLengthLabel(section.text) }}</span>
             <button class="preset-editor-ghost-btn" type="button" @click="toggleTurnDisabled(section.sourceModuleId)">
               本轮禁用
             </button>
@@ -611,6 +629,17 @@ function slotLabel(slot: string): string {
   return labels[slot] || slot;
 }
 
+function moduleMetaLabel(module: PresetModulePayload): string {
+  const parts: string[] = [slotLabel(module.slot || "advanced")];
+  if (typeof module.priority === "number") {
+    parts.push(`priority ${module.priority}`);
+  }
+  if (module.scope) {
+    parts.push(scopeLabel(module.scope));
+  }
+  return parts.join(" · ");
+}
+
 function scopeLabel(scope: string): string {
   return scope === "turn" ? "本轮" : "全局";
 }
@@ -618,6 +647,11 @@ function scopeLabel(scope: string): string {
 function summarizeText(text: string): string {
   const normalized = String(text || "").replace(/\s+/g, " ").trim();
   return normalized.length > 120 ? `${normalized.slice(0, 120)}…` : normalized;
+}
+
+function textLengthLabel(text: string): string {
+  const length = String(text || "").trim().length;
+  return length > 0 ? `${length} 字` : "无内容";
 }
 
 function riskTextForModule(moduleId: string): string {
@@ -727,6 +761,16 @@ function onModuleEnabledChange(index: number, enabled: boolean): void {
     return;
   }
   modules[index] = { ...existing, enabledByDefault: enabled };
+  presetStore.markDirty({ ...document.value, modules });
+}
+
+function onModuleContentChange(index: number, content: string): void {
+  const modules = [...presetModules.value];
+  const existing = modules[index];
+  if (!existing) {
+    return;
+  }
+  modules[index] = { ...existing, content };
   presetStore.markDirty({ ...document.value, modules });
 }
 
@@ -953,13 +997,38 @@ function onRawJsonChange(text: string): void {
 
 .preset-module-toggle-row {
   min-width: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 3px;
   padding: 7px 8px;
   border: 1px solid var(--border-ghost);
   border-radius: 6px;
   background: var(--bg-elevated, #fff);
+}
+
+.preset-module-toggle-row[open] {
+  border-color: var(--border-subtle);
+}
+
+.preset-module-toggle-summary {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.preset-module-toggle-summary::-webkit-details-marker {
+  display: none;
+}
+
+.preset-module-toggle-chevron {
+  color: var(--text-faint);
+  font-size: 16px;
+  transition: transform 0.12s ease;
+}
+
+.preset-module-toggle-row[open] .preset-module-toggle-chevron {
+  transform: rotate(90deg);
 }
 
 .preset-module-toggle-main {
@@ -983,6 +1052,22 @@ function onRawJsonChange(text: string): void {
 .preset-module-toggle-row small {
   color: var(--text-muted);
   font-size: 11px;
+}
+
+.preset-module-content {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-ghost);
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.preset-module-content-textarea {
+  min-height: 112px;
+  max-height: 280px;
 }
 
 .preset-editor-workbench-hero,

@@ -43,21 +43,31 @@ class StorydexContextAssemblerService:
         max_total_chars = 7600
 
         preset_paths = self._runtime_preset_paths(root)
+        preset_runtime_context = self._build_preset_runtime_context(
+            generation_context,
+            prompt=prompt,
+            active_entities=active_entities,
+        )
         preset_block = self.story_project_service._build_preset_context(  # noqa: SLF001 - existing Storydex context builder
             root,
             max_files=5,
             max_chars_per_file=720,
             total_chars=2200,
+            runtime_context=preset_runtime_context,
         )
+        # SillyTavern 编译预设可远超默认 2200 字预算；按实际长度放开该块，
+        # 并把全局预算按溢出扩容，保证其他上下文块的预算不被挤占。
+        preset_block_budget = max(2200, len(preset_block))
+        max_total_chars += max(0, preset_block_budget - 2200)
         sources.append(self._source("runtime_presets", preset_paths, policy="active_or_compiled_safe_only"))
         self._append_block(
             blocks,
             block_id="runtime_presets",
-            title="Active or compiled-safe project presets",
+            title="Active or compiled project presets",
             kind="preset",
             content=preset_block,
             source_paths=preset_paths or self._extract_context_paths(preset_block),
-            max_chars=2200,
+            max_chars=preset_block_budget,
             max_total_chars=max_total_chars,
             notes=notes,
         )
@@ -258,6 +268,36 @@ class StorydexContextAssemblerService:
             except ValueError:
                 continue
         return paths
+
+    @staticmethod
+    def _build_preset_runtime_context(
+        generation_context: Dict[str, Any],
+        *,
+        prompt: str,
+        active_entities: Sequence[str],
+    ) -> Dict[str, Any]:
+        settings = generation_context.get("projectSettings") if isinstance(generation_context.get("projectSettings"), dict) else {}
+        persona_name = str(settings.get("personaName") or settings.get("userName") or "user").strip()
+        active_names = [str(item).strip() for item in active_entities if str(item).strip()]
+        context: Dict[str, Any] = {
+            "prompt": str(prompt or ""),
+            "lastUserMessage": str(prompt or ""),
+            "user": persona_name,
+            "personaName": persona_name,
+            # Storydex 目前只有常规生成一种触发类型；ST 的 injection_trigger
+            # 按这个值判定是否生效。
+            "generationType": "normal",
+        }
+        if active_names:
+            context.update(
+                {
+                    "char": active_names[0],
+                    "character": active_names[0],
+                    "characterName": active_names[0],
+                    "activeEntities": active_names,
+                }
+            )
+        return context
 
     def _recent_segments(
         self,

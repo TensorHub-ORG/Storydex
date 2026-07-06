@@ -163,6 +163,7 @@
                         'is-neighbor': node.neighbor,
                         'is-synthetic': node.synthetic,
                         'is-selectable': isWikiNodeSelectable(node),
+                        'needs-review': node.needsReview,
                       },
                     ]"
                     :transform="`translate(${node.x} ${node.y})`"
@@ -189,6 +190,9 @@
                   </g>
                 </g>
               </svg>
+              <div v-if="wikiHiddenIsolatedNodeCount > 0" class="ssp-wiki-graph-note">
+                另有 {{ wikiHiddenIsolatedNodeCount }} 个孤立条目，可通过搜索查看
+              </div>
               <div v-if="wikiGraphLegend.length" class="ssp-wiki-graph-legend">
                 <span v-for="item in wikiGraphLegend" :key="item.key" class="ssp-wiki-legend-item">
                   <i :class="`tone-${item.key}`"></i>{{ item.label }}
@@ -562,7 +566,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { apiClient, unwrapEnvelope } from "@/api/client";
+import { apiClient, describeTransportError, unwrapEnvelope } from "@/api/client";
 import { useStoryStore } from "@/stores/story";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type { ApiEnvelope } from "@/types/api";
@@ -715,6 +719,7 @@ interface StoryWikiNodePayload {
   neighbor?: boolean;
   count?: number;
   needsReviewCount?: number;
+  needsReview?: boolean;
 }
 
 interface StoryWikiEdgePayload {
@@ -808,6 +813,7 @@ interface WikiGraphNode {
   tone: string;
   count: number;
   needsReviewCount: number;
+  needsReview: boolean;
   x: number;
   y: number;
   radius: number;
@@ -928,6 +934,7 @@ const WIKI_TONE_LABELS: Record<string, string> = {
   hub: "导航",
   misc: "其他",
 };
+const WIKI_ISOLATED_NODE_VISIBLE_LIMIT = 8;
 
 const panelLoading = computed(() => (
   props.relationshipOnly ? wikiLoading.value || wikiRebuilding.value || wikiAgentRunning.value : loading.value
@@ -1143,6 +1150,36 @@ const wikiGraphDegrees = computed<Map<string, number>>(() => {
   return degrees;
 });
 
+const wikiIsolatedRawGraphNodes = computed<StoryWikiNodePayload[]>(() => {
+  const rawNodes = wikiGraphQueryData.value?.graph?.nodes ?? [];
+  const degrees = wikiGraphDegrees.value;
+  return rawNodes.filter((node) => !node.synthetic && (degrees.get(node.id) ?? 0) === 0);
+});
+
+const wikiShouldLimitIsolatedNodes = computed(() => (
+  wikiGraphQueryData.value?.mode === "category"
+  && wikiIsolatedRawGraphNodes.value.length > WIKI_ISOLATED_NODE_VISIBLE_LIMIT
+));
+
+const wikiHiddenIsolatedNodeCount = computed(() => (
+  wikiShouldLimitIsolatedNodes.value
+    ? wikiIsolatedRawGraphNodes.value.length - WIKI_ISOLATED_NODE_VISIBLE_LIMIT
+    : 0
+));
+
+const wikiVisibleRawGraphNodes = computed<StoryWikiNodePayload[]>(() => {
+  const rawNodes = wikiGraphQueryData.value?.graph?.nodes ?? [];
+  if (!wikiShouldLimitIsolatedNodes.value) {
+    return rawNodes;
+  }
+  const hiddenIds = new Set(
+    wikiIsolatedRawGraphNodes.value
+      .slice(WIKI_ISOLATED_NODE_VISIBLE_LIMIT)
+      .map((node) => node.id),
+  );
+  return rawNodes.filter((node) => !hiddenIds.has(node.id));
+});
+
 function wikiNodeRadius(node: StoryWikiNodePayload, degree: number): number {
   if (node.synthetic) {
     return node.role === "projectHub" ? 20 : 15;
@@ -1157,7 +1194,7 @@ function wikiNodeLabel(value: string): string {
 }
 
 function recomputeWikiLayout(): void {
-  const rawNodes = wikiGraphQueryData.value?.graph?.nodes ?? [];
+  const rawNodes = wikiVisibleRawGraphNodes.value;
   if (!rawNodes.length) {
     wikiLayoutPositions.value = {};
     return;
@@ -1187,7 +1224,7 @@ function recomputeWikiLayout(): void {
 }
 
 const wikiGraphNodes = computed<WikiGraphNode[]>(() => {
-  const rawNodes = wikiGraphQueryData.value?.graph?.nodes ?? [];
+  const rawNodes = wikiVisibleRawGraphNodes.value;
   const layout = wikiLayoutPositions.value;
   const overrides = wikiNodeOverrides.value;
   const degrees = wikiGraphDegrees.value;
@@ -1219,6 +1256,7 @@ const wikiGraphNodes = computed<WikiGraphNode[]>(() => {
       tone: WIKI_NODE_TONES[type] ?? (node.synthetic ? "hub" : "misc"),
       count: typeof node.count === "number" ? node.count : 0,
       needsReviewCount: typeof node.needsReviewCount === "number" ? node.needsReviewCount : 0,
+      needsReview: Boolean(node.needsReview),
       x: position.x,
       y: position.y,
       radius: wikiNodeRadius(node, degree),
@@ -1730,11 +1768,12 @@ async function loadWikiGraph(params: WikiGraphQueryParams = currentWikiGraphQuer
     if (requestSeq !== wikiGraphLoadSeq) {
       return;
     }
+    wikiErrorMessage.value = "";
     wikiGraphQueryData.value = data.data ?? null;
     ensureWikiGraphSelection();
   } catch (error: unknown) {
     if (requestSeq === wikiGraphLoadSeq) {
-      wikiErrorMessage.value = (error as Error)?.message || "知识图谱查询失败。";
+      wikiErrorMessage.value = describeTransportError(error, "知识图谱查询失败。");
       wikiGraphQueryData.value = null;
     }
   } finally {
@@ -1754,7 +1793,7 @@ async function loadWiki(): Promise<void> {
     ensureWikiSelection();
     await loadWikiGraph({ category: selectedWikiCategory.value });
   } catch (error: unknown) {
-    wikiErrorMessage.value = (error as Error)?.message || "无法读取知识图谱。";
+    wikiErrorMessage.value = describeTransportError(error, "无法读取知识图谱。");
   } finally {
     wikiLoading.value = false;
   }
@@ -1770,7 +1809,7 @@ async function rebuildWiki(): Promise<void> {
     ensureWikiSelection();
     await loadWikiGraph(currentWikiGraphQueryParams());
   } catch (error: unknown) {
-    wikiErrorMessage.value = (error as Error)?.message || "知识图谱重新生成失败。";
+    wikiErrorMessage.value = describeTransportError(error, "知识图谱重新生成失败。");
   } finally {
     wikiRebuilding.value = false;
   }
@@ -1806,7 +1845,7 @@ async function runWikiAgentWorkflow(workflow: "generate" | "update" | "review"):
     }
   } catch (error: unknown) {
     wikiAgentTone.value = "error";
-    wikiAgentStatus.value = (error as Error)?.message || "Agent WIKI 流程失败。";
+    wikiAgentStatus.value = describeTransportError(error, "Agent WIKI 流程失败。");
     wikiErrorMessage.value = wikiAgentStatus.value;
   } finally {
     wikiAgentRunning.value = false;
@@ -2765,6 +2804,11 @@ defineExpose({ loadSnapshot, undoLastRollback });
   stroke-width: 1.5;
   transition: fill 140ms ease;
 }
+.ssp-wiki-node.needs-review .ssp-wiki-node-dot {
+  stroke: color-mix(in srgb, var(--warn, #d9a441) 82%, var(--wiki-node-color, var(--text-muted)));
+  stroke-width: 2;
+  stroke-dasharray: 4 3;
+}
 .ssp-wiki-node-halo {
   fill: transparent;
   stroke: transparent;
@@ -2809,6 +2853,23 @@ defineExpose({ loadSnapshot, undoLastRollback });
   fill: color-mix(in srgb, var(--wiki-node-color, var(--text-muted)) 32%, var(--bg-editor));
   stroke: var(--wiki-node-color, var(--text-muted));
   stroke-dasharray: 3 3;
+}
+.ssp-wiki-graph-note {
+  position: absolute;
+  left: 50%;
+  bottom: 48px;
+  transform: translateX(-50%);
+  max-width: min(520px, calc(100% - 32px));
+  padding: 6px 12px;
+  border: 1px solid var(--border-ghost);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-card) 88%, transparent);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: center;
+  backdrop-filter: blur(8px);
+  pointer-events: none;
 }
 .ssp-wiki-graph-legend {
   position: absolute;

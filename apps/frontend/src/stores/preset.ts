@@ -218,6 +218,10 @@ export const usePresetStore = defineStore("preset", {
       this.errorMessage = "";
       try {
         await savePresetDocument(this.currentName, this.document);
+        const workspaceStore = useWorkspaceStore();
+        if (workspaceStore.activeFileBindingOrPath === this.currentName && !workspaceStore.isDirty) {
+          await workspaceStore.openFile(this.currentName, { forceReload: true });
+        }
         this.dirty = false;
       } catch (error) {
         this.errorMessage = error instanceof PresetApiError ? error.message : describeTransportError(error, "预设保存失败。");

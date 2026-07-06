@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import re
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, Iterator
+from typing import Any, AsyncIterator, Callable, Dict, Iterator
+from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 
@@ -17,6 +19,7 @@ STORYDEX_COOMI_CONFIG = STORYDEX_COOMI_HOME / ".coomi" / "config" / "providers.j
 DEFAULT_CONTEXT_WINDOW = 256_000
 COMPACT_THRESHOLD_RATIO = 0.9
 WARNING_THRESHOLD_RATIO = 0.6
+_COOMI_ENDPOINT_COMPAT_INSTALLED = False
 
 
 class StorydexCoomiUnavailable(RuntimeError):
@@ -58,8 +61,8 @@ class StorydexCoomiAgentService:
                 from coomi.services import get_llm_provider
 
                 provider = get_llm_provider()
-                response = await asyncio.to_thread(
-                    provider.chat,
+                response = await _call_provider_chat(
+                    provider,
                     _task_planner_messages(
                         prompt=prompt,
                         workspace_root=workspace,
@@ -92,8 +95,8 @@ class StorydexCoomiAgentService:
                 from coomi.services import get_llm_provider
 
                 provider = get_llm_provider()
-                response = await asyncio.to_thread(
-                    provider.chat,
+                response = await _call_provider_chat(
+                    provider,
                     _commit_message_messages(
                         changed_files=changed_files,
                         diff_summary=diff_summary,
@@ -611,6 +614,40 @@ class StorydexCoomiAgentService:
         self._permissions.clear()
         return self.read_config()
 
+    def list_models(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        timeout: float = 20.0,
+        http_get: Callable[..., Any] | None = None,
+    ) -> Dict[str, Any]:
+        endpoint = _coomi_models_endpoint(base_url)
+        normalized_key = str(api_key or "").strip()
+        if not normalized_key:
+            raise ValueError("Coomi API key is required to fetch models.")
+
+        headers = {
+            "Authorization": f"Bearer {normalized_key}",
+            "Accept": "application/json",
+        }
+        try:
+            response = (
+                http_get(endpoint, headers=headers, timeout=timeout)
+                if http_get is not None
+                else _httpx_get(endpoint, headers=headers, timeout=timeout)
+            )
+        except Exception as exc:
+            raise ValueError(f"Model list request failed ({exc.__class__.__name__}).") from exc
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        if status_code < 200 or status_code >= 300:
+            raise ValueError(f"Model list request failed ({status_code}).")
+        try:
+            payload = response.json()
+        except Exception as exc:
+            raise ValueError("Model list response is not valid JSON.") from exc
+        return {"endpoint": endpoint, "models": _extract_model_ids(payload)}
+
     def clear_session(self, session_id: str) -> None:
         normalized = str(session_id or "default").strip() or "default"
         self._sessions.pop(normalized, None)
@@ -635,6 +672,128 @@ class StorydexCoomiAgentService:
         current = _normalize_permission_mode(self._permission_mode)
         next_mode = order[(order.index(current) + 1) % len(order)]
         return self.set_permission_mode(next_mode)
+
+
+def _httpx_get(url: str, *, headers: Dict[str, str], timeout: float) -> Any:
+    import httpx
+
+    return httpx.get(url, headers=headers, timeout=timeout)
+
+
+async def _call_provider_chat(provider: Any, messages: list[Dict[str, Any]], options: Any) -> Any:
+    chat = getattr(provider, "chat")
+    if inspect.iscoroutinefunction(chat):
+        return await chat(messages, options)
+
+    response = await asyncio.to_thread(chat, messages, options)
+    if inspect.isawaitable(response):
+        return await response
+    return response
+
+
+def _coomi_api_base_url(base_url: str) -> str:
+    raw = str(base_url or "").strip()
+    if not raw:
+        return ""
+    parsed = urlsplit(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return raw
+
+    path = (parsed.path or "").rstrip("/")
+    lowered = path.lower()
+    for suffix in ("/chat/completions", "/completions", "/responses", "/models"):
+        if lowered.endswith(suffix):
+            path = path[:-len(suffix)]
+            break
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+
+def _install_coomi_endpoint_compat() -> None:
+    global _COOMI_ENDPOINT_COMPAT_INSTALLED
+    if _COOMI_ENDPOINT_COMPAT_INSTALLED:
+        return
+    try:
+        from coomi.services.llm.config import ProviderConfig
+    except Exception:
+        return
+
+    if getattr(ProviderConfig, "_storydex_endpoint_compat_installed", False):
+        _COOMI_ENDPOINT_COMPAT_INSTALLED = True
+        return
+
+    original_from_dict = ProviderConfig.from_dict
+
+    @classmethod
+    def from_dict_with_endpoint_compat(cls: Any, provider_id: str, data: dict) -> Any:
+        if isinstance(data, dict):
+            next_data = dict(data)
+            base_url = next_data.get("base_url")
+            if isinstance(base_url, str):
+                next_data["base_url"] = _coomi_api_base_url(base_url)
+            data = next_data
+        return original_from_dict(provider_id, data)
+
+    ProviderConfig.from_dict = from_dict_with_endpoint_compat
+    setattr(ProviderConfig, "_storydex_endpoint_compat_installed", True)
+    _COOMI_ENDPOINT_COMPAT_INSTALLED = True
+
+
+def _coomi_models_endpoint(base_url: str) -> str:
+    raw = str(base_url or "").strip()
+    if not raw:
+        raise ValueError("Coomi base URL is required to fetch models.")
+    parsed = urlsplit(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("Coomi base URL must be a complete http(s) URL.")
+
+    path = (parsed.path or "").rstrip("/")
+    lowered = path.lower()
+    replacements = (
+        "/chat/completions",
+        "/completions",
+        "/responses",
+    )
+    for suffix in replacements:
+        if lowered.endswith(suffix):
+            path = f"{path[:-len(suffix)]}/models"
+            break
+    else:
+        if not lowered.endswith("/models"):
+            path = f"{path}/models" if path else "/models"
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+
+def _extract_model_ids(payload: Any) -> list[str]:
+    candidates: Any = payload
+    if isinstance(payload, dict):
+        for key in ("data", "models", "items"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                candidates = value
+                break
+        else:
+            candidates = [payload.get("model")] if payload.get("model") else []
+    if not isinstance(candidates, list):
+        return []
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        model_id = ""
+        if isinstance(item, str):
+            model_id = item
+        elif isinstance(item, dict):
+            for key in ("id", "name", "model"):
+                value = item.get(key)
+                if isinstance(value, str) and value.strip():
+                    model_id = value
+                    break
+        model_id = model_id.strip()
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        result.append(model_id)
+    return result
 
 
 def _commit_message_messages(
@@ -1235,7 +1394,8 @@ def _render_turn_contract(value: Dict[str, Any] | None) -> str:
 
     lines.append(
         "- context: inject active or compiled-safe presets only; use recent active characters and relevant facts, "
-        "not a full memory dump."
+        "not a full memory dump. The active preset block below contains binding creative rules for this turn; "
+        "follow it faithfully when writing story content."
     )
     skill_summary = _skill_registry_summary(skill_registry)
     if skill_summary:
@@ -1548,6 +1708,7 @@ def _storydex_coomi_home() -> Iterator[None]:
     previous_userprofile = os.environ.get("USERPROFILE")
     os.environ["HOME"] = str(STORYDEX_COOMI_HOME)
     os.environ["USERPROFILE"] = str(STORYDEX_COOMI_HOME)
+    _install_coomi_endpoint_compat()
     try:
         yield
     finally:

@@ -4,6 +4,8 @@ import type {
   AgentChatResponse,
   AgentCommitDecisionRequest,
   AgentCoomiConfigResponse,
+  AgentCoomiModelListRequest,
+  AgentCoomiModelListResponse,
   AgentCoomiConfigUpdateRequest,
   AgentCoomiStatusResponse,
   AgentHistoryResponse,
@@ -230,6 +232,23 @@ export async function updateAgentCoomiConfig(
 
   try {
     return unwrapEnvelope(response.data, "Coomi config update failed.");
+  } catch (error: unknown) {
+    if (error instanceof ApiResponseError) {
+      throw new AgentApiError(error.message, error.code, error.details, error.trace, error.audit);
+    }
+    throw error;
+  }
+}
+
+export async function fetchAgentCoomiModels(
+  payload: AgentCoomiModelListRequest
+): Promise<ApiResult<AgentCoomiModelListResponse>> {
+  const response = await apiClient.post<ApiEnvelope<AgentCoomiModelListResponse>>("/agent/coomi/models", payload, {
+    timeout: 30000
+  });
+
+  try {
+    return unwrapEnvelope(response.data, "Coomi model list request failed.");
   } catch (error: unknown) {
     if (error instanceof ApiResponseError) {
       throw new AgentApiError(error.message, error.code, error.details, error.trace, error.audit);

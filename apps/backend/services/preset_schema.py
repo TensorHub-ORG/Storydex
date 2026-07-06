@@ -228,7 +228,7 @@ class PresetMeta(BaseModel):
     source_format: Optional[str] = None  # "sillytavern" | "storydex" | "generic"
     display_regexes: List[Dict[str, Any]] = Field(default_factory=list)  # markdownOnly 正则元数据
     chat_squash_meta: Dict[str, Any] = Field(default_factory=dict)  # SPreset ChatSquash 元数据
-    import_warnings: List[str] = Field(default_factory=list)  # 宏清理等格式适配警告
+    import_warnings: List[str] = Field(default_factory=list)  # 宏兼容等格式适配提示
 
 
 # -- 顶层 Document ---------------------------------------------------------
@@ -299,6 +299,58 @@ def write_preset_sidecar(md_path: Path, doc: PresetDocument) -> None:
     payload = doc.model_dump(mode="json")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(sidecar)
+    _sync_markdown_module_section(md_path, doc)
+
+
+def _sync_markdown_module_section(md_path: Path, doc: PresetDocument) -> None:
+    try:
+        text = md_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        logger.warning("preset markdown read failed during module sync: %s", exc)
+        return
+
+    next_text = _replace_markdown_module_section(text, doc)
+    if next_text is None or next_text == text:
+        return
+
+    tmp = md_path.with_suffix(md_path.suffix + ".tmp")
+    try:
+        tmp.write_text(next_text, encoding="utf-8")
+        tmp.replace(md_path)
+    except OSError as exc:
+        logger.warning("preset markdown write failed during module sync: %s", exc)
+
+
+def _replace_markdown_module_section(text: str, doc: PresetDocument) -> Optional[str]:
+    lines = text.splitlines()
+    start = next((index for index, line in enumerate(lines) if line.strip() == "## Modules"), None)
+    if start is None:
+        return None
+
+    try:
+        from services.preset_compiler import modules_from_document
+
+        modules = modules_from_document(doc)
+    except Exception as exc:
+        logger.warning("preset module summary build failed during markdown sync: %s", exc)
+        return None
+
+    rendered = ["## Modules"]
+    for module in modules:
+        state = "on" if module.enabled_by_default else "off"
+        rendered.append(f"- [{state}] {module.title or module.id} ({module.slot or 'advanced'})")
+
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if lines[index].startswith("## "):
+            end = index
+            break
+
+    next_lines = [*lines[:start], *rendered, *lines[end:]]
+    suffix = "\n" if text.endswith("\n") else ""
+    return "\n".join(next_lines) + suffix
 
 
 def summarize_preset_sidecar(doc: PresetDocument, max_chars: int = 900) -> str:

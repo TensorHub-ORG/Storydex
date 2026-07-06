@@ -1659,9 +1659,14 @@ function formatTokenCount(value: number): string {
 .coomi-fold-meta,
 .coomi-tool-chunk-head span:last-child,
 .coomi-tool-row-head span:last-child {
+  flex: 0 0 auto;
+  min-width: 2.5em;
   margin-left: auto;
   color: var(--text-muted);
   font-size: 11px;
+  line-height: 1.2;
+  text-align: right;
+  white-space: nowrap;
 }
 
 .coomi-tool-group {

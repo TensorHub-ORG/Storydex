@@ -267,17 +267,30 @@ export const useAgentStore = defineStore("agent", {
           },
           prompt.sessionId
         );
-        const packet = {
-          ...result.data,
-          type: result.data.type || result.data._type || "GitCommitResult",
-          _type: result.data._type || result.data.type || "GitCommitResult",
-          traceId: prompt.traceId,
-          sessionId: prompt.sessionId
-        } as AgentStreamPacket;
-        this.applyStreamPacket(prompt.traceId, packet);
+        this.applyStreamPacket(prompt.traceId, buildCommitDecisionPacket(prompt, result.data));
         this.pendingCommitPrompt = null;
         await useGitStore().refreshSummary({ silent: true });
       } catch (error: unknown) {
+        if (mode === "auto" && shouldRetryCommitWithFallbackMessage(error)) {
+          try {
+            const result = await submitAgentRunCommitDecision(
+              prompt.traceId,
+              {
+                mode: "manual",
+                message: fallbackCommitMessage(prompt),
+                sessionId: prompt.sessionId
+              },
+              prompt.sessionId
+            );
+            this.applyStreamPacket(prompt.traceId, buildCommitDecisionPacket(prompt, result.data));
+            this.pendingCommitPrompt = null;
+            await useGitStore().refreshSummary({ silent: true });
+            return;
+          } catch (retryError: unknown) {
+            this.lastError = describeTransportError(retryError, "提交小说项目修改失败。");
+            return;
+          }
+        }
         this.lastError = describeTransportError(error, "提交小说项目修改失败。");
       } finally {
         this.isCommittingGit = false;
@@ -1551,6 +1564,41 @@ function normalizeCommitPrompt(
     added: Math.max(0, Math.round(Number(packet.added ?? 0) || 0)),
     removed: Math.max(0, Math.round(Number(packet.removed ?? 0) || 0))
   };
+}
+
+function buildCommitDecisionPacket(prompt: AgentPendingCommitPrompt, data: AgentStreamPacket): AgentStreamPacket {
+  return {
+    ...data,
+    type: data.type || data._type || "GitCommitResult",
+    _type: data._type || data.type || "GitCommitResult",
+    traceId: prompt.traceId,
+    sessionId: prompt.sessionId
+  };
+}
+
+function fallbackCommitMessage(prompt: AgentPendingCommitPrompt): string {
+  const count = Math.max(0, Math.round(Number(prompt.changedFileCount || prompt.changedFiles.length || 0)));
+  return count > 0 ? `agent: update project files (${count} files)` : "agent: update project files";
+}
+
+function shouldRetryCommitWithFallbackMessage(error: unknown): boolean {
+  if (error instanceof AgentApiError && error.code === "commit_message_generation_failed") {
+    return true;
+  }
+
+  const root = asRecord(error);
+  const response = asRecord(root.response);
+  const responseData = asRecord(response.data);
+  const envelopeError = asRecord(responseData.error);
+  const details = asRecord(envelopeError.details);
+  const status = Number(response.status || 0);
+  const code = String(envelopeError.code || "");
+  const message = `${String(envelopeError.message || "")} ${String(details.message || "")} ${String(root.message || "")}`;
+  return code === "commit_message_generation_failed" || (status === 502 && /commit message/i.test(message));
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
 }
 
 function mergeChangeLedgerPaths(

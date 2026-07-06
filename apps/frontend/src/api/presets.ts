@@ -42,6 +42,19 @@ export interface PresetCompiledSection {
   scope: string;
   text: string;
   virtual?: boolean;
+  sourceOrder?: number | null;
+  sourceRole?: string;
+  injectionPosition?: number | null;
+  injectionDepth?: number | null;
+  injectionOrder?: number | null;
+}
+
+export interface PresetCompiledInjection {
+  depth: number;
+  order: number;
+  role: "system" | "user" | "assistant" | string;
+  text: string;
+  sourceModuleIds: string[];
 }
 
 export interface PresetRisk {
@@ -56,6 +69,7 @@ export interface PresetCompileResult {
   relativePath: string;
   compiledText: string;
   sections: PresetCompiledSection[];
+  injections: PresetCompiledInjection[];
   risks: PresetRisk[];
   warnings: string[];
 }

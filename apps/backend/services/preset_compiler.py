@@ -32,6 +32,17 @@ class PresetModule(BaseModel):
     content: str = ""
     tags: List[str] = Field(default_factory=list)
     virtual: bool = False
+    source_format: str = Field(default="", alias="sourceFormat")
+    source_identifier: str = Field(default="", alias="sourceIdentifier")
+    source_name: str = Field(default="", alias="sourceName")
+    source_order: Optional[int] = Field(default=None, alias="sourceOrder")
+    source_role: str = Field(default="", alias="sourceRole")
+    source_system_prompt: Optional[bool] = Field(default=None, alias="sourceSystemPrompt")
+    forbid_overrides: Optional[bool] = Field(default=None, alias="forbidOverrides")
+    injection_position: Optional[int] = Field(default=None, alias="injectionPosition")
+    injection_depth: Optional[int] = Field(default=None, alias="injectionDepth")
+    injection_order: Optional[int] = Field(default=None, alias="injectionOrder")
+    injection_trigger: List[str] = Field(default_factory=list, alias="injectionTrigger")
 
 
 class PresetRuntimeOverrides(BaseModel):
@@ -56,6 +67,21 @@ class PresetCompiledSection(BaseModel):
     purpose: List[str] = Field(default_factory=list)
     text: str
     virtual: bool = False
+    source_order: Optional[int] = Field(default=None, alias="sourceOrder")
+    source_role: str = Field(default="", alias="sourceRole")
+    injection_position: Optional[int] = Field(default=None, alias="injectionPosition")
+    injection_depth: Optional[int] = Field(default=None, alias="injectionDepth")
+    injection_order: Optional[int] = Field(default=None, alias="injectionOrder")
+
+
+class PresetCompiledInjection(BaseModel):
+    model_config = _EXTRA_ALLOW
+
+    depth: int
+    order: int
+    role: str
+    text: str
+    source_module_ids: List[str] = Field(default_factory=list, alias="sourceModuleIds")
 
 
 class PresetRisk(BaseModel):
@@ -73,6 +99,7 @@ class PresetCompileResult(BaseModel):
 
     compiled_text: str = Field(alias="compiledText")
     sections: List[PresetCompiledSection] = Field(default_factory=list)
+    injections: List[PresetCompiledInjection] = Field(default_factory=list)
     risks: List[PresetRisk] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
 
@@ -87,25 +114,42 @@ _SLOT_ORDER: Dict[str, int] = {
     "advanced": 60,
 }
 
+# 外部导入的预设（SillyTavern 或通用格式）：按导入顺序编译、不加 Storydex
+# 段头、运行时展开 ST 宏。Storydex 原生预设仍走槽位排序 + 段头渲染。
+_IMPORTED_SOURCE_FORMATS = {"sillytavern", "generic"}
+
 
 def compile_preset(
     doc: PresetDocument,
     *,
     overrides: Optional[PresetRuntimeOverrides | Dict[str, Any]] = None,
+    runtime_context: Optional[Dict[str, Any]] = None,
 ) -> PresetCompileResult:
     runtime_overrides = _coerce_overrides(overrides)
     modules = _modules_from_document(doc)
     warnings = _validate_modules(modules)
+    source_format = _document_source_format(doc)
+    imported_format = source_format in _IMPORTED_SOURCE_FORMATS
+    macro_runtime = None
+    if imported_format:
+        from services.silly_tavern_macro_runtime import create_silly_tavern_macro_runtime
+
+        macro_runtime = create_silly_tavern_macro_runtime(runtime_context)
+    generation_type = _runtime_generation_type(runtime_context)
 
     disabled: Set[str] = set(runtime_overrides.disabled_module_ids)
     enabled_extra: Set[str] = set(runtime_overrides.enabled_module_ids)
 
     sections: List[PresetCompiledSection] = []
-    for module in sorted(modules, key=_module_sort_key):
+    for module in sorted(modules, key=lambda item: _module_sort_key(item, source_format=source_format)):
         enabled = (module.enabled_by_default or module.id in enabled_extra) and module.id not in disabled
         if not enabled:
             continue
+        if imported_format and not _silly_tavern_trigger_allows(module, generation_type):
+            continue
         text = module.content.strip()
+        if macro_runtime is not None:
+            text = macro_runtime.expand(text).strip()
         if not text:
             continue
         sections.append(
@@ -121,6 +165,11 @@ def compile_preset(
                 purpose=module.purpose,
                 text=text,
                 virtual=module.virtual,
+                sourceOrder=module.source_order,
+                sourceRole=module.source_role,
+                injectionPosition=module.injection_position,
+                injectionDepth=module.injection_depth,
+                injectionOrder=module.injection_order,
             )
         )
 
@@ -143,10 +192,17 @@ def compile_preset(
                 )
             )
 
-    sections.sort(key=lambda item: (_SLOT_ORDER.get(item.slot, 999), -item.priority, item.source_module_id))
-    compiled_text = _render_sections(sections)
+    sections.sort(key=lambda item: _section_sort_key(item, source_format=source_format))
+    compiled_text = _render_sections(sections, source_format=source_format)
+    injections = _silly_tavern_absolute_injections(sections) if imported_format else []
     risks = check_preset_risks(modules, sections)
-    return PresetCompileResult(compiledText=compiled_text, sections=sections, risks=risks, warnings=warnings)
+    return PresetCompileResult(
+        compiledText=compiled_text,
+        sections=sections,
+        injections=injections,
+        risks=risks,
+        warnings=warnings,
+    )
 
 
 def check_preset_risks(
@@ -210,6 +266,70 @@ def _modules_from_document(doc: PresetDocument) -> List[PresetModule]:
         if modules:
             return modules
     return _virtual_modules_from_v1(doc)
+
+
+def _document_source_format(doc: PresetDocument) -> str:
+    source = str(getattr(doc.meta, "source_format", "") or "").strip().lower()
+    if source:
+        return source
+    runtime_defaults = getattr(doc, "__pydantic_extra__", {}) or {}
+    if isinstance(runtime_defaults, dict):
+        raw_runtime = runtime_defaults.get("runtimeDefaults") or runtime_defaults.get("runtime_defaults")
+        if isinstance(raw_runtime, dict):
+            return str(raw_runtime.get("sourceFormat") or raw_runtime.get("source_format") or "").strip().lower()
+    return ""
+
+
+def _runtime_generation_type(runtime_context: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(runtime_context, dict):
+        return "normal"
+    value = runtime_context.get("generationType") or runtime_context.get("lastGenerationType") or "normal"
+    return str(value or "normal").strip().lower() or "normal"
+
+
+def _silly_tavern_trigger_allows(module: PresetModule, generation_type: str) -> bool:
+    triggers = [str(item).strip().lower() for item in module.injection_trigger if str(item).strip()]
+    if not triggers:
+        return True
+    return generation_type in triggers
+
+
+_ST_ROLE_ALIASES = {"model": "assistant", "bot": "assistant", "ai": "assistant", "human": "user"}
+
+
+def _silly_tavern_absolute_injections(sections: Sequence[PresetCompiledSection]) -> List[PresetCompiledInjection]:
+    grouped: Dict[tuple[int, int, str], Dict[str, Any]] = {}
+    for section in sections:
+        if section.injection_position != 1:
+            continue
+        role = str(section.source_role or "system").strip().lower()
+        role = _ST_ROLE_ALIASES.get(role, role)
+        if role not in {"system", "user", "assistant"}:
+            role = "system"
+        depth = int(section.injection_depth if section.injection_depth is not None else 4)
+        order = int(section.injection_order if section.injection_order is not None else 100)
+        key = (depth, order, role)
+        entry = grouped.setdefault(key, {"texts": [], "source_ids": []})
+        entry["texts"].append(section.text.strip())
+        entry["source_ids"].append(section.source_module_id)
+
+    role_rank = {"system": 0, "user": 1, "assistant": 2}
+    injections: List[PresetCompiledInjection] = []
+    for depth, order, role in sorted(grouped, key=lambda item: (item[0], -item[1], role_rank[item[2]])):
+        entry = grouped[(depth, order, role)]
+        text = "\n".join(item for item in entry["texts"] if item).strip()
+        if not text:
+            continue
+        injections.append(
+            PresetCompiledInjection(
+                depth=depth,
+                order=order,
+                role=role,
+                text=text,
+                sourceModuleIds=entry["source_ids"],
+            )
+        )
+    return injections
 
 
 def _virtual_modules_from_v1(doc: PresetDocument) -> List[PresetModule]:
@@ -390,11 +510,30 @@ def _validate_modules(modules: Sequence[PresetModule]) -> List[str]:
     return warnings
 
 
-def _module_sort_key(module: PresetModule) -> tuple[int, int, str]:
+def _module_sort_key(module: PresetModule, *, source_format: str = "") -> tuple[int, int, str]:
+    if source_format in _IMPORTED_SOURCE_FORMATS or module.source_format in _IMPORTED_SOURCE_FORMATS:
+        order = module.source_order if module.source_order is not None else 1_000_000
+        return (0, int(order), module.id)
     return (_SLOT_ORDER.get(module.slot, 999), -module.priority, module.id)
 
 
-def _render_sections(sections: Sequence[PresetCompiledSection]) -> str:
+def _section_sort_key(section: PresetCompiledSection, *, source_format: str = "") -> tuple[int, int, str]:
+    if source_format in _IMPORTED_SOURCE_FORMATS:
+        order = section.source_order if section.source_order is not None else 1_000_000
+        return (0, int(order), section.source_module_id)
+    return (_SLOT_ORDER.get(section.slot, 999), -section.priority, section.source_module_id)
+
+
+def _render_sections(sections: Sequence[PresetCompiledSection], *, source_format: str = "") -> str:
+    if source_format in _IMPORTED_SOURCE_FORMATS:
+        # 绝对注入（injection_position == 1）走 injections 结构化输出，
+        # 不再混入相对顺序文本，避免同一段内容出现两份。
+        return "\n\n".join(
+            section.text.strip()
+            for section in sections
+            if section.text.strip() and section.injection_position != 1
+        ).strip()
+
     chunks: List[str] = []
     for section in sections:
         chunks.append(

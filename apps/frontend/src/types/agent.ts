@@ -83,6 +83,16 @@ export interface AgentCoomiConfigUpdateRequest {
   content: string;
 }
 
+export interface AgentCoomiModelListRequest {
+  baseUrl: string;
+  apiKey: string;
+}
+
+export interface AgentCoomiModelListResponse {
+  endpoint: string;
+  models: string[];
+}
+
 export type AgentStreamPacketType =
   | "hello"
   | "final"
