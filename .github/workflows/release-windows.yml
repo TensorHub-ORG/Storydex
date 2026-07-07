@@ -137,6 +137,7 @@ jobs:
           $desktopReleaseDir = Join-Path (Resolve-Path ".").Path "apps\desktop\release"
           $setupSource = Join-Path $desktopReleaseDir $env:STORYDEX_SETUP_NAME
           $blockmapSource = Join-Path $desktopReleaseDir $env:STORYDEX_BLOCKMAP_NAME
+          $latestSource = Join-Path $desktopReleaseDir "latest.yml"
           if (-not (Test-Path $setupSource)) {
             Get-ChildItem -LiteralPath $desktopReleaseDir | Format-Table -AutoSize | Out-String | Write-Host
             throw "Expected installer was not produced: $setupSource"
@@ -145,16 +146,22 @@ jobs:
             Get-ChildItem -LiteralPath $desktopReleaseDir | Format-Table -AutoSize | Out-String | Write-Host
             throw "Expected blockmap was not produced: $blockmapSource"
           }
+          if (-not (Test-Path $latestSource)) {
+            Get-ChildItem -LiteralPath $desktopReleaseDir | Format-Table -AutoSize | Out-String | Write-Host
+            throw "Expected auto-update metadata was not produced: $latestSource"
+          }
 
           Copy-Item -LiteralPath $setupSource -Destination (Join-Path $releaseDir $env:STORYDEX_SETUP_NAME) -Force
           Copy-Item -LiteralPath $blockmapSource -Destination (Join-Path $releaseDir $env:STORYDEX_BLOCKMAP_NAME) -Force
+          Copy-Item -LiteralPath $latestSource -Destination (Join-Path $releaseDir "latest.yml") -Force
 
           Compress-Archive -LiteralPath $unpackedTarget -DestinationPath (Join-Path $releaseDir $env:STORYDEX_UNPACKED_ZIP_NAME) -CompressionLevel Optimal -Force
 
           $names = @(
             $env:STORYDEX_SETUP_NAME,
             $env:STORYDEX_UNPACKED_ZIP_NAME,
-            $env:STORYDEX_BLOCKMAP_NAME
+            $env:STORYDEX_BLOCKMAP_NAME,
+            "latest.yml"
           )
           $hashLines = foreach ($name in $names) {
             $file = Join-Path $releaseDir $name
@@ -182,6 +189,7 @@ jobs:
             setup_path = "release-assets/$($env:STORYDEX_SETUP_NAME)"
             zip_path = "release-assets/$($env:STORYDEX_UNPACKED_ZIP_NAME)"
             blockmap_path = "release-assets/$($env:STORYDEX_BLOCKMAP_NAME)"
+            latest_path = "release-assets/latest.yml"
             sums_path = "release-assets/SHA256SUMS.txt"
           }
 
@@ -201,4 +209,5 @@ jobs:
             ${{ steps.release.outputs.setup_path }}
             ${{ steps.release.outputs.zip_path }}
             ${{ steps.release.outputs.blockmap_path }}
+            ${{ steps.release.outputs.latest_path }}
             ${{ steps.release.outputs.sums_path }}
