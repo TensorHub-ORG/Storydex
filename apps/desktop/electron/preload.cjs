@@ -98,5 +98,16 @@ contextBridge.exposeInMainWorld("storydexDesktop", {
   revealPath: async (absolutePath) => ipcRenderer.invoke("storydex:reveal-path", absolutePath),
   openWithDialog: async (absolutePath) => ipcRenderer.invoke("storydex:open-with-dialog", absolutePath),
   setTitleBarTheme: async (theme) => ipcRenderer.invoke("storydex:set-titlebar-theme", theme),
-  openPreviewWindow: async (relativePath) => ipcRenderer.invoke("storydex:open-preview-window", relativePath)
+  openPreviewWindow: async (relativePath) => ipcRenderer.invoke("storydex:open-preview-window", relativePath),
+  updater: {
+    getState: async () => ipcRenderer.invoke("storydex:updater-get-state"),
+    check: async () => ipcRenderer.invoke("storydex:updater-check"),
+    download: async () => ipcRenderer.invoke("storydex:updater-download"),
+    install: async () => ipcRenderer.invoke("storydex:updater-install"),
+    onState: (listener) => {
+      const wrapped = (_event, state) => listener(state);
+      ipcRenderer.on("storydex:updater-state", wrapped);
+      return () => ipcRenderer.removeListener("storydex:updater-state", wrapped);
+    }
+  }
 });

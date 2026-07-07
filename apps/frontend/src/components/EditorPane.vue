@@ -141,8 +141,18 @@
               </div>
             </div>
             <div v-else class="doc-preview-shell agent-clean-preview-content">
-              <div v-if="renderedCharacterJsonMarkdown" class="doc-markdown" v-html="renderedCharacterJsonMarkdown"></div>
-              <div v-else-if="workspaceStore.isMarkdownFile" class="doc-markdown" v-html="renderedMarkdown"></div>
+              <div
+                v-if="renderedCharacterJsonMarkdown"
+                class="doc-markdown"
+                @click="handleMarkdownLinkClick"
+                v-html="renderedCharacterJsonMarkdown"
+              ></div>
+              <div
+                v-else-if="workspaceStore.isMarkdownFile"
+                class="doc-markdown"
+                @click="handleMarkdownLinkClick"
+                v-html="renderedMarkdown"
+              ></div>
               <pre v-else class="doc-preview">{{ workspaceStore.editorContent }}</pre>
             </div>
           </div>
@@ -151,8 +161,18 @@
             <div v-if="workspaceStore.isPreviewUnsupported" class="doc-unavailable">
               {{ workspaceStore.previewUnsupportedMessage }}
             </div>
-            <div v-else-if="renderedCharacterJsonMarkdown" class="doc-markdown" v-html="renderedCharacterJsonMarkdown"></div>
-            <div v-else-if="workspaceStore.isMarkdownFile" class="doc-markdown" v-html="renderedMarkdown"></div>
+            <div
+              v-else-if="renderedCharacterJsonMarkdown"
+              class="doc-markdown"
+              @click="handleMarkdownLinkClick"
+              v-html="renderedCharacterJsonMarkdown"
+            ></div>
+            <div
+              v-else-if="workspaceStore.isMarkdownFile"
+              class="doc-markdown"
+              @click="handleMarkdownLinkClick"
+              v-html="renderedMarkdown"
+            ></div>
             <pre v-else class="doc-preview">{{ workspaceStore.editorContent }}</pre>
           </div>
 
@@ -217,6 +237,11 @@ import WelcomeStartPage from "@/components/WelcomeStartPage.vue";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type { WorkspaceEditorTab } from "@/types/workspace";
 import { createMarkdownRenderer } from "@/utils/markdown";
+import {
+  findMarkdownLinkAnchor,
+  isExternalMarkdownHref,
+  resolveMarkdownWorkspaceHref
+} from "@/utils/workspaceLinks";
 
 const workspaceStore = useWorkspaceStore();
 const markdown = createMarkdownRenderer();
@@ -308,6 +333,23 @@ function handleModeChange(mode: "preview" | "edit"): void {
 
 function handleAgentPreviewModeChange(mode: "preview" | "diff"): void {
   agentPreviewMode.value = mode;
+}
+
+function handleMarkdownLinkClick(event: MouseEvent): void {
+  const anchor = findMarkdownLinkAnchor(event.target);
+  const href = anchor?.getAttribute("href") || "";
+  const relativePath = resolveMarkdownWorkspaceHref(href, workspaceStore.activeFileBindingOrPath);
+  if (relativePath) {
+    event.preventDefault();
+    event.stopPropagation();
+    void workspaceStore.openFile(relativePath);
+    return;
+  }
+
+  if (isExternalMarkdownHref(href)) {
+    event.preventDefault();
+    window.open(anchor?.href || href, "_blank", "noopener,noreferrer");
+  }
 }
 
 function handleGitReviewRefresh(): void {

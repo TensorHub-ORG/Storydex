@@ -97,6 +97,7 @@
                   <div
                     v-else-if="entry.item.type === 'assistant'"
                     class="coomi-assistant-text coomi-markdown"
+                    @click="handleMarkdownLinkClick"
                     v-html="renderMarkdown(entry.item.content)"
                   ></div>
                   <div v-else-if="entry.item.type === 'reasoning'" class="coomi-reasoning-text">{{ entry.item.content }}</div>
@@ -160,14 +161,24 @@
 
     <footer ref="composerRef" class="coomi-composer">
       <div v-if="agentStore.lastError" class="coomi-error">{{ agentStore.lastError }}</div>
-      <button
-        v-if="executionFloatVisible && executionFloatCollapsed"
-        class="coomi-execution-handle"
-        type="button"
-        title="展开文件变更摘要"
-        aria-label="展开文件变更摘要"
-        @click="expandExecutionFloat"
-      ></button>
+      <div v-if="collapsedHandlesVisible" class="coomi-collapsed-handles">
+        <button
+          v-if="executionFloatVisible && executionFloatCollapsed"
+          class="coomi-collapsed-handle"
+          type="button"
+          title="展开文件变更摘要"
+          aria-label="展开文件变更摘要"
+          @click="expandExecutionFloat"
+        ></button>
+        <button
+          v-if="promptDockActive && promptDockCollapsed"
+          class="coomi-collapsed-handle"
+          type="button"
+          :title="promptDockHandleTitle"
+          :aria-label="promptDockHandleTitle"
+          @click="expandPromptDock"
+        ></button>
+      </div>
       <div class="coomi-composer-status">
         <span class="coomi-status-pill" :title="modelLabel">模型：{{ modelLabel }}</span>
         <div class="coomi-status-control">
@@ -290,28 +301,65 @@
           aria-label="上下文窗口用量"
         ></span>
       </div>
-      <div v-if="agentStore.pendingApproval" class="coomi-command-menu coomi-approval-menu">
+      <div v-if="activeApproval && !promptDockCollapsed" class="coomi-command-menu coomi-approval-menu">
         <div class="coomi-approval-head">
-          <span>{{ agentStore.pendingApproval.header }}</span>
-          <small>{{ compactText(agentStore.pendingApproval.question, 220) }}</small>
+          <div class="coomi-approval-head-main">
+            <span>{{ activeApproval.header }}</span>
+            <small>{{ compactText(activeApproval.question, 220) }}</small>
+          </div>
+          <div class="coomi-approval-head-tools">
+            <div v-if="approvalQueue.length > 1" class="coomi-approval-nav">
+              <button
+                class="coomi-approval-nav-btn"
+                type="button"
+                title="上一个问题"
+                aria-label="上一个问题"
+                :disabled="approvalCursor <= 0"
+                @mousedown.prevent="goToApproval(approvalCursor - 1)"
+              >
+                <span class="material-symbols-rounded">chevron_left</span>
+              </button>
+              <span class="coomi-approval-nav-count">{{ approvalCursor + 1 }}/{{ approvalQueue.length }}</span>
+              <button
+                class="coomi-approval-nav-btn"
+                type="button"
+                title="下一个问题"
+                aria-label="下一个问题"
+                :disabled="approvalCursor >= approvalQueue.length - 1"
+                @mousedown.prevent="goToApproval(approvalCursor + 1)"
+              >
+                <span class="material-symbols-rounded">chevron_right</span>
+              </button>
+            </div>
+            <button
+              class="coomi-approval-collapse"
+              type="button"
+              title="暂时收起"
+              aria-label="暂时收起问题面板"
+              @click="collapsePromptDock"
+            >
+              <span class="material-symbols-rounded">keyboard_arrow_down</span>
+            </button>
+          </div>
         </div>
         <button
-          v-for="option in agentStore.pendingApproval.options"
+          v-for="option in activeApproval.options"
           :key="option.value"
           type="button"
           class="coomi-command-option coomi-approval-option"
-          :class="{ active: selectedApprovalValue === option.value }"
+          :class="{ active: activeApprovalDraft?.value === option.value }"
           @mousedown.prevent="selectApprovalOption(option.value)"
         >
           <span>{{ approvalOptionLabel(option.label, option.value) }}</span>
           <small>{{ option.description || approvalOptionDescription(option.value) }}</small>
         </button>
         <textarea
-          v-if="agentStore.pendingApproval.allowText"
-          v-model="approvalText"
+          v-if="activeApproval.allowText"
           class="coomi-approval-input"
           placeholder="输入补充回复"
           rows="2"
+          :value="activeApprovalDraft?.text || ''"
+          @input="updateApprovalDraftText(($event.target as HTMLTextAreaElement).value)"
           @keydown.stop
         ></textarea>
         <div class="coomi-approval-actions">
@@ -322,17 +370,38 @@
             class="coomi-approval-action primary"
             type="button"
             :disabled="!canConfirmApproval"
+            :title="approvalConfirmTitle"
             @mousedown.prevent="handleApprovalConfirm"
           >
-            确认
+            {{ approvalConfirmLabel }}
           </button>
         </div>
       </div>
-      <div v-else-if="agentStore.pendingCommitPrompt" class="coomi-command-menu coomi-approval-menu coomi-commit-menu">
+      <div
+        v-else-if="agentStore.pendingCommitPrompt && !promptDockCollapsed"
+        class="coomi-command-menu coomi-approval-menu coomi-commit-menu"
+      >
         <div class="coomi-approval-head">
-          <span>本轮有未提交修改</span>
-          <small>{{ commitPromptSummary }}</small>
+          <div class="coomi-approval-head-main">
+            <span>本轮有未提交修改</span>
+            <small>{{ commitPromptSummary }}</small>
+          </div>
+          <button
+            class="coomi-approval-collapse"
+            type="button"
+            title="暂时收起"
+            aria-label="暂时收起提交面板"
+            @click="collapsePromptDock"
+          >
+            <span class="material-symbols-rounded">keyboard_arrow_down</span>
+          </button>
         </div>
+        <ul v-if="commitPromptFiles.length" class="coomi-commit-file-list">
+          <li v-for="file in commitPromptFiles" :key="file" class="coomi-commit-file" :title="file">
+            <span class="material-symbols-rounded">edit_note</span>
+            <span>{{ file }}</span>
+          </li>
+        </ul>
         <button
           type="button"
           class="coomi-command-option coomi-approval-option"
@@ -430,8 +499,14 @@ import AgentExecutionFloatBar from "@/components/AgentExecutionFloatBar.vue";
 import CoomiConfigPanel from "@/components/CoomiConfigPanel.vue";
 import { useAgentStore } from "@/stores/agent";
 import { useWorkspaceStore } from "@/stores/workspace";
+import {
+  findMarkdownLinkAnchor,
+  isExternalMarkdownHref,
+  resolveMarkdownWorkspaceHref
+} from "@/utils/workspaceLinks";
 import type {
   AgentExecutionRun,
+  AgentPendingApproval,
   CoomiWaterfallItem,
   CoomiWaterfallItemStatus,
   CoomiWaterfallItemType
@@ -462,6 +537,7 @@ type PendingWriteLike = {
 };
 type PermissionChoice = "plan_mode" | "ask_approval" | "approve_for_me" | "full_access";
 type ReasoningChoice = "auto" | "low" | "medium" | "high";
+type ApprovalDraft = { value: string; text: string };
 
 const TOOL_CHUNK_SIZE = 5;
 const agentStore = useAgentStore();
@@ -480,11 +556,12 @@ const foldState = ref<Record<string, boolean>>({});
 const toolChunkState = ref<Record<string, boolean>>({});
 const toolRowState = ref<Record<string, boolean>>({});
 const selectedReasoningMode = ref<ReasoningChoice>("auto");
-const selectedApprovalValue = ref("");
-const approvalText = ref("");
+const approvalCursor = ref(0);
+const approvalDrafts = ref<Record<string, ApprovalDraft>>({});
 const commitPromptMode = ref<"auto" | "manual" | "skip" | "">("");
 const commitMessage = ref("");
 const executionFloatCollapsed = ref(false);
+const promptDockCollapsed = ref(false);
 const executionFloatSignature = computed(() => {
   if (workspaceStore.launchScreenVisible) {
     return "";
@@ -682,16 +759,21 @@ const filteredCommands = computed(() => {
   return slashCommands.filter((command) => command.value.trim().toLowerCase().startsWith(query));
 });
 const commandMenuVisible = computed(() => commandMenuOpen.value && filteredCommands.value.length > 0 && !agentStore.isRunning);
-const canConfirmApproval = computed(() => {
-  const approval = agentStore.pendingApproval;
-  if (!approval) {
-    return false;
-  }
-  if (approval.kind === "question" && approval.allowText && selectedApprovalValue.value === "answer") {
-    return Boolean(approvalText.value.trim());
-  }
-  return Boolean(selectedApprovalValue.value || approvalText.value.trim());
-});
+const approvalQueue = computed(() => agentStore.pendingApprovals);
+const activeApproval = computed(
+  () => approvalQueue.value[approvalCursor.value] || approvalQueue.value[approvalQueue.value.length - 1] || null
+);
+const activeApprovalDraft = computed(() =>
+  activeApproval.value ? approvalDrafts.value[activeApproval.value.approvalId] || null : null
+);
+const allApprovalsComplete = computed(() =>
+  approvalQueue.value.every((approval) => isApprovalDraftComplete(approval, approvalDrafts.value[approval.approvalId]))
+);
+const canConfirmApproval = computed(() => approvalQueue.value.length > 0 && allApprovalsComplete.value);
+const approvalConfirmLabel = computed(() => (approvalQueue.value.length > 1 ? "提交全部答案" : "确认"));
+const approvalConfirmTitle = computed(() =>
+  approvalQueue.value.length > 1 && !canConfirmApproval.value ? "还有未回答的问题，可用左右箭头切换查看" : ""
+);
 const commitPromptSummary = computed(() => {
   const prompt = agentStore.pendingCommitPrompt;
   if (!prompt) {
@@ -699,6 +781,16 @@ const commitPromptSummary = computed(() => {
   }
   return `${prompt.changedFileCount} 个文件已修改 +${prompt.added} -${prompt.removed}`;
 });
+const commitPromptFiles = computed(() => agentStore.pendingCommitPrompt?.changedFiles || []);
+const promptDockActive = computed(() => Boolean(agentStore.pendingApproval || agentStore.pendingCommitPrompt));
+const promptDockHandleTitle = computed(() =>
+  agentStore.pendingApproval ? "展开待回答的问题" : "展开未提交修改面板"
+);
+const collapsedHandlesVisible = computed(
+  () =>
+    (executionFloatVisible.value && executionFloatCollapsed.value) ||
+    (promptDockActive.value && promptDockCollapsed.value)
+);
 
 onMounted(async () => {
   window.addEventListener("pointerdown", handleDocumentPointerDown);
@@ -736,21 +828,48 @@ watch(
 );
 
 watch(
-  () => agentStore.pendingApproval,
-  (approval) => {
-    approvalText.value = "";
-    selectedApprovalValue.value =
-      approval?.options.find((option) => option.isRecommended)?.value ||
-      approval?.options[0]?.value ||
-      "";
+  () => agentStore.pendingApprovals,
+  (queue, previous) => {
+    const validIds = new Set(queue.map((item) => item.approvalId));
+    const drafts: Record<string, ApprovalDraft> = {};
+    for (const [id, draft] of Object.entries(approvalDrafts.value)) {
+      if (validIds.has(id)) {
+        drafts[id] = draft;
+      }
+    }
+    for (const approval of queue) {
+      if (!drafts[approval.approvalId]) {
+        drafts[approval.approvalId] = {
+          value:
+            approval.options.find((option) => option.isRecommended)?.value ||
+            approval.options[0]?.value ||
+            "",
+          text: ""
+        };
+      }
+    }
+    approvalDrafts.value = drafts;
+    if (!queue.length) {
+      approvalCursor.value = 0;
+      return;
+    }
+    if (!previous?.length) {
+      approvalCursor.value = 0;
+    } else if (approvalCursor.value > queue.length - 1) {
+      approvalCursor.value = queue.length - 1;
+    }
+    promptDockCollapsed.value = false;
   }
 );
 
 watch(
   () => agentStore.pendingCommitPrompt,
-  () => {
+  (prompt) => {
     commitPromptMode.value = "";
     commitMessage.value = "";
+    if (prompt) {
+      promptDockCollapsed.value = false;
+    }
   }
 );
 
@@ -1025,29 +1144,77 @@ function resizeComposer(): void {
   input.style.height = `${Math.min(180, Math.max(34, input.scrollHeight))}px`;
 }
 
-function selectApprovalOption(value: string): void {
-  selectedApprovalValue.value = value;
+function isApprovalDraftComplete(approval: AgentPendingApproval, draft: ApprovalDraft | undefined): boolean {
+  if (!draft) {
+    return false;
+  }
+  if (approval.kind === "question" && approval.allowText && draft.value === "answer") {
+    return Boolean(draft.text.trim());
+  }
+  return Boolean(draft.value || draft.text.trim());
 }
 
-async function handleApprovalConfirm(): Promise<void> {
-  const approval = agentStore.pendingApproval;
+function goToApproval(index: number): void {
+  if (index < 0 || index > approvalQueue.value.length - 1) {
+    return;
+  }
+  approvalCursor.value = index;
+}
+
+function selectApprovalOption(value: string): void {
+  const approval = activeApproval.value;
   if (!approval) {
     return;
   }
-  const selectedOption = approval.options.find((option) => option.value === selectedApprovalValue.value);
-  const selectedValue = selectedApprovalValue.value || selectedOption?.value || "answer";
-  const response = {
-    option: selectedValue,
-    label: selectedOption?.label || selectedValue,
-    other_text: approvalText.value.trim() || null
+  const draft = approvalDrafts.value[approval.approvalId] || { value: "", text: "" };
+  approvalDrafts.value = {
+    ...approvalDrafts.value,
+    [approval.approvalId]: { ...draft, value }
   };
-  const decision: "allow" | "deny" | "answer" =
-    selectedValue === "allow" ? "allow" : selectedValue === "deny" ? "deny" : "answer";
-  await agentStore.resolvePendingApproval(decision, response);
+  // 选完自动进入下一题；可随时用头部箭头返回修改之前的选择。
+  const needsText = approval.kind === "question" && approval.allowText && value === "answer";
+  if (!needsText && approvalCursor.value < approvalQueue.value.length - 1) {
+    approvalCursor.value += 1;
+  }
+}
+
+function updateApprovalDraftText(text: string): void {
+  const approval = activeApproval.value;
+  if (!approval) {
+    return;
+  }
+  const draft = approvalDrafts.value[approval.approvalId] || { value: "", text: "" };
+  approvalDrafts.value = {
+    ...approvalDrafts.value,
+    [approval.approvalId]: { ...draft, text }
+  };
+}
+
+async function handleApprovalConfirm(): Promise<void> {
+  const queue = [...approvalQueue.value];
+  if (!queue.length || !canConfirmApproval.value) {
+    return;
+  }
+  for (const approval of queue) {
+    const draft = approvalDrafts.value[approval.approvalId] || { value: "", text: "" };
+    const selectedOption = approval.options.find((option) => option.value === draft.value);
+    const selectedValue = draft.value || selectedOption?.value || "answer";
+    const response = {
+      option: selectedValue,
+      label: selectedOption?.label || selectedValue,
+      other_text: draft.text.trim() || null
+    };
+    const decision: "allow" | "deny" | "answer" =
+      selectedValue === "allow" ? "allow" : selectedValue === "deny" ? "deny" : "answer";
+    await agentStore.resolvePendingApproval(decision, response, approval.approvalId);
+  }
 }
 
 async function handleApprovalCancel(): Promise<void> {
-  await agentStore.resolvePendingApproval("cancel", { "__cancelled__": true });
+  const queue = [...approvalQueue.value];
+  for (const approval of queue) {
+    await agentStore.resolvePendingApproval("cancel", { "__cancelled__": true }, approval.approvalId);
+  }
 }
 
 function collapseExecutionFloat(): void {
@@ -1056,6 +1223,14 @@ function collapseExecutionFloat(): void {
 
 function expandExecutionFloat(): void {
   executionFloatCollapsed.value = false;
+}
+
+function collapsePromptDock(): void {
+  promptDockCollapsed.value = true;
+}
+
+function expandPromptDock(): void {
+  promptDockCollapsed.value = false;
 }
 
 async function handleCommitPromptAuto(): Promise<void> {
@@ -1304,6 +1479,23 @@ function compactJson(value: unknown): string {
 
 function renderMarkdown(value: string): string {
   return markdown.render(value || "");
+}
+
+function handleMarkdownLinkClick(event: MouseEvent): void {
+  const anchor = findMarkdownLinkAnchor(event.target);
+  const href = anchor?.getAttribute("href") || "";
+  const relativePath = resolveMarkdownWorkspaceHref(href, workspaceStore.activeFileBindingOrPath);
+  if (relativePath) {
+    event.preventDefault();
+    event.stopPropagation();
+    void workspaceStore.openFile(relativePath);
+    return;
+  }
+
+  if (isExternalMarkdownHref(href)) {
+    event.preventDefault();
+    window.open(anchor?.href || href, "_blank", "noopener,noreferrer");
+  }
 }
 
 function compactText(value: unknown, limit = 1800): string {
@@ -2221,22 +2413,134 @@ function formatTokenCount(value: number): string {
 
 .coomi-approval-head {
   display: grid;
-  gap: 4px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
   padding: 4px 2px 7px;
   border-bottom: 1px solid var(--border-ghost);
 }
 
-.coomi-approval-head span {
+.coomi-approval-head-main {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.coomi-approval-head-main span {
   color: var(--text-main);
   font-size: 12px;
   font-weight: 700;
 }
 
-.coomi-approval-head small {
+.coomi-approval-head-main small {
   white-space: pre-wrap;
   color: var(--text-muted);
   font-size: 11px;
   line-height: 1.45;
+}
+
+.coomi-approval-head-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.coomi-approval-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.coomi-approval-nav-btn {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.coomi-approval-nav-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.coomi-approval-nav-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.coomi-approval-nav-btn .material-symbols-rounded {
+  font-size: 17px;
+}
+
+.coomi-approval-nav-count {
+  min-width: 2.4em;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.coomi-approval-collapse {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.coomi-approval-collapse:hover {
+  background: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.coomi-approval-collapse .material-symbols-rounded {
+  font-size: 18px;
+}
+
+.coomi-commit-file-list {
+  margin: 0;
+  padding: 6px 2px;
+  border-bottom: 1px solid var(--border-ghost);
+  list-style: none;
+  max-height: 132px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.coomi-commit-file {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  min-height: 22px;
+  color: var(--text-soft);
+  font-size: 11px;
+}
+
+.coomi-commit-file .material-symbols-rounded {
+  color: var(--text-muted);
+  font-size: 15px;
+}
+
+.coomi-commit-file span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
 .coomi-command-option {
@@ -2353,22 +2657,32 @@ function formatTokenCount(value: number): string {
   overflow: visible;
 }
 
-.coomi-execution-handle {
+.coomi-collapsed-handles {
   position: absolute;
-  left: 50%;
+  left: 12px;
+  right: 12px;
   top: -10px;
   z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  pointer-events: none;
+}
+
+.coomi-collapsed-handle {
+  position: relative;
   width: 72px;
   height: 14px;
   padding: 0;
   border: 0;
   border-radius: 999px;
   background: transparent;
-  transform: translateX(-50%);
   cursor: pointer;
+  pointer-events: auto;
 }
 
-.coomi-execution-handle::before {
+.coomi-collapsed-handle::before {
   content: "";
   position: absolute;
   left: 16px;
@@ -2384,14 +2698,14 @@ function formatTokenCount(value: number): string {
     transform 0.16s ease;
 }
 
-.coomi-execution-handle:hover::before,
-.coomi-execution-handle:focus-visible::before {
+.coomi-collapsed-handle:hover::before,
+.coomi-collapsed-handle:focus-visible::before {
   background: var(--accent-strong);
   opacity: 1;
   transform: scaleX(1.12);
 }
 
-.coomi-execution-handle:focus-visible {
+.coomi-collapsed-handle:focus-visible {
   outline: 1px solid color-mix(in srgb, var(--accent-strong) 38%, transparent);
   outline-offset: 3px;
 }

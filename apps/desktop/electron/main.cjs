@@ -606,6 +606,141 @@ async function openWithDialog(_event, absolutePath) {
   return true;
 }
 
+// ---- 差分更新（electron-updater + NSIS blockmap）----
+// NSIS 安装包发布时会生成 *.exe.blockmap；electron-updater 更新时对比新旧 blockmap，
+// 只下载有变化的数据块，实现增量（差分）更新。
+let updaterModule = null;
+let updaterState = {
+  supported: false,
+  status: "idle",
+  currentVersion: "",
+  availableVersion: "",
+  releaseNotes: "",
+  progress: null,
+  error: "",
+  feedUrl: ""
+};
+
+function resolveAutoUpdater() {
+  if (updaterModule) {
+    return updaterModule.autoUpdater;
+  }
+  try {
+    updaterModule = require("electron-updater");
+    return updaterModule.autoUpdater;
+  } catch (error) {
+    console.warn("[Storydex Desktop] electron-updater unavailable:", error.message || String(error));
+    return null;
+  }
+}
+
+function setUpdaterState(patch) {
+  updaterState = { ...updaterState, ...patch };
+  for (const windowRef of BrowserWindow.getAllWindows()) {
+    if (!windowRef.isDestroyed()) {
+      windowRef.webContents.send("storydex:updater-state", { ...updaterState });
+    }
+  }
+}
+
+function initializeAutoUpdater() {
+  updaterState.currentVersion = app.getVersion();
+  if (!app.isPackaged) {
+    setUpdaterState({ supported: false, status: "unsupported", error: "开发模式不支持自动更新，请使用打包后的桌面版。" });
+    return;
+  }
+  const autoUpdater = resolveAutoUpdater();
+  if (!autoUpdater) {
+    setUpdaterState({ supported: false, status: "unsupported", error: "缺少 electron-updater 依赖，无法自动更新。" });
+    return;
+  }
+
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.disableDifferentialDownload = false;
+
+  const configuredFeed = String(process.env.STORYDEX_UPDATE_URL || "").trim();
+  if (configuredFeed) {
+    autoUpdater.setFeedURL({ provider: "generic", url: configuredFeed });
+  }
+
+  autoUpdater.on("checking-for-update", () => {
+    setUpdaterState({ status: "checking", error: "" });
+  });
+  autoUpdater.on("update-available", (info) => {
+    setUpdaterState({
+      status: "available",
+      availableVersion: String(info?.version || ""),
+      releaseNotes: typeof info?.releaseNotes === "string" ? info.releaseNotes : "",
+      error: ""
+    });
+  });
+  autoUpdater.on("update-not-available", () => {
+    setUpdaterState({ status: "not-available", availableVersion: "", progress: null, error: "" });
+  });
+  autoUpdater.on("download-progress", (progress) => {
+    setUpdaterState({
+      status: "downloading",
+      progress: {
+        percent: Number(progress?.percent || 0),
+        transferred: Number(progress?.transferred || 0),
+        total: Number(progress?.total || 0),
+        bytesPerSecond: Number(progress?.bytesPerSecond || 0)
+      },
+      error: ""
+    });
+  });
+  autoUpdater.on("update-downloaded", (info) => {
+    setUpdaterState({
+      status: "downloaded",
+      availableVersion: String(info?.version || updaterState.availableVersion),
+      progress: null,
+      error: ""
+    });
+  });
+  autoUpdater.on("error", (error) => {
+    setUpdaterState({ status: "error", error: error?.message || String(error) });
+  });
+
+  setUpdaterState({ supported: true, status: "idle", feedUrl: configuredFeed, error: "" });
+}
+
+async function checkForDesktopUpdates() {
+  const autoUpdater = updaterState.supported ? resolveAutoUpdater() : null;
+  if (autoUpdater) {
+    try {
+      await autoUpdater.checkForUpdates();
+    } catch (error) {
+      setUpdaterState({ status: "error", error: error?.message || String(error) });
+    }
+  }
+  return { ...updaterState };
+}
+
+async function downloadDesktopUpdate() {
+  const autoUpdater = updaterState.supported ? resolveAutoUpdater() : null;
+  if (autoUpdater) {
+    try {
+      setUpdaterState({ status: "downloading", error: "" });
+      await autoUpdater.downloadUpdate();
+    } catch (error) {
+      setUpdaterState({ status: "error", error: error?.message || String(error) });
+    }
+  }
+  return { ...updaterState };
+}
+
+function installDesktopUpdate() {
+  const autoUpdater = updaterState.supported ? resolveAutoUpdater() : null;
+  if (!autoUpdater || updaterState.status !== "downloaded") {
+    return false;
+  }
+  quitting = true;
+  stopBackendKernel();
+  autoUpdater.quitAndInstall(true, true);
+  return true;
+}
+
 function registerDesktopIpc() {
   ipcMain.handle("storydex:pick-directory", pickDirectory);
   ipcMain.handle("storydex:reveal-path", revealPath);
@@ -614,6 +749,10 @@ function registerDesktopIpc() {
   ipcMain.handle("storydex:set-titlebar-theme", setTitlebarTheme);
   ipcMain.handle("storydex:get-pending-open-target", () => getPendingOpenTarget());
   ipcMain.handle("storydex:ack-open-target", (_event, targetId) => acknowledgeOpenTarget(targetId));
+  ipcMain.handle("storydex:updater-get-state", () => ({ ...updaterState }));
+  ipcMain.handle("storydex:updater-check", () => checkForDesktopUpdates());
+  ipcMain.handle("storydex:updater-download", () => downloadDesktopUpdate());
+  ipcMain.handle("storydex:updater-install", () => installDesktopUpdate());
 }
 
 function normalizeTitlebarColor(value, fallback) {
@@ -1009,10 +1148,45 @@ async function loadRenderer(windowRef, routePath = "/", query = {}) {
   });
 }
 
+function openExternalUrl(url) {
+  const value = String(url || "").trim();
+  if (/^https?:\/\//i.test(value)) {
+    shell.openExternal(value);
+  }
+}
+
 function attachWindowOpenHandler(windowRef) {
-  windowRef.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+  const { webContents } = windowRef;
+
+  webContents.setWindowOpenHandler(({ url }) => {
+    openExternalUrl(url);
     return { action: "deny" };
+  });
+
+  // SPA 使用客户端路由（pushState / hash），正常情况下不会触发整页导航。
+  // 因此任何 will-navigate 都视为“点击了链接想离开应用”，一律阻止：
+  //   - 真正的外部 http/https 链接 → 交给系统浏览器打开；
+  //   - 相对链接（如 001.md）被解析到应用自身来源或 file://，直接留在原界面，
+  //     避免整页跳走导致白屏、跳到奇怪地址且无法返回。
+  webContents.on("will-navigate", (event, targetUrl) => {
+    event.preventDefault();
+
+    const value = String(targetUrl || "").trim();
+    if (!/^https?:\/\//i.test(value)) {
+      return;
+    }
+
+    let sameOrigin = false;
+    try {
+      sameOrigin = new URL(value).origin === new URL(webContents.getURL()).origin;
+    } catch {
+      sameOrigin = false;
+    }
+    if (sameOrigin) {
+      return;
+    }
+
+    shell.openExternal(value);
   });
 }
 
@@ -1124,6 +1298,7 @@ app.on("window-all-closed", () => {
 app.whenReady().then(async () => {
   initializeAppMetadata();
   registerDesktopIpc();
+  initializeAutoUpdater();
   const backendReady = await startBackendKernel();
   if (!backendReady) {
     app.quit();

@@ -173,6 +173,72 @@
                 </section>
               </div>
 
+              <div v-else-if="section.id === 'about'" class="system-settings-card-body">
+                <section class="system-settings-block">
+                  <div class="system-settings-block-title">软件更新</div>
+
+                  <div v-if="!updaterBridgeAvailable" class="system-settings-empty-inline">
+                    当前在浏览器中运行，软件更新仅在桌面版可用。
+                  </div>
+
+                  <template v-else>
+                    <div class="system-settings-update-meta">
+                      <span>当前版本</span>
+                      <strong>v{{ updaterState.currentVersion || "未知" }}</strong>
+                    </div>
+                    <div
+                      v-if="updaterState.availableVersion && updaterState.status !== 'not-available'"
+                      class="system-settings-update-meta"
+                    >
+                      <span>可用新版本</span>
+                      <strong>v{{ updaterState.availableVersion }}</strong>
+                    </div>
+
+                    <div v-if="updaterState.status === 'downloading' && updaterState.progress" class="system-settings-update-progress">
+                      <div class="system-settings-update-progress-bar">
+                        <span :style="{ width: `${Math.min(100, Math.max(0, updaterState.progress.percent))}%` }"></span>
+                      </div>
+                      <small>
+                        {{ updaterState.progress.percent.toFixed(1) }}% ·
+                        {{ formatUpdateBytes(updaterState.progress.transferred) }} / {{ formatUpdateBytes(updaterState.progress.total) }}
+                        · 差分下载，仅传输有变化的部分
+                      </small>
+                    </div>
+
+                    <div class="system-settings-update-actions">
+                      <button
+                        class="system-settings-update-btn"
+                        type="button"
+                        :disabled="!updaterState.supported || updaterBusy"
+                        @click="checkDesktopUpdate"
+                      >
+                        {{ updaterState.status === "checking" ? "检查中…" : "检查更新" }}
+                      </button>
+                      <button
+                        v-if="updaterState.status === 'available'"
+                        class="system-settings-update-btn primary"
+                        type="button"
+                        :disabled="updaterBusy"
+                        @click="downloadDesktopUpdate"
+                      >
+                        下载更新（增量）
+                      </button>
+                      <button
+                        v-if="updaterState.status === 'downloaded'"
+                        class="system-settings-update-btn primary"
+                        type="button"
+                        @click="installDesktopUpdate"
+                      >
+                        重启并安装
+                      </button>
+                    </div>
+
+                    <div class="system-settings-inline-note">{{ updaterStatusText }}</div>
+                    <div v-if="updaterState.error" class="system-settings-feedback is-error">{{ updaterState.error }}</div>
+                  </template>
+                </section>
+              </div>
+
               <div v-else class="system-settings-card-body">
                 <section class="system-settings-block">
                   <div class="system-settings-project-meta-bar">
@@ -258,7 +324,7 @@ import { useUiStore } from "@/stores/ui";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type { StorySegmentExtension } from "@/types/workspace";
 
-type SettingsSectionId = "appearance" | "layout" | "project";
+type SettingsSectionId = "appearance" | "layout" | "project" | "about";
 
 interface SettingsSection {
   id: SettingsSectionId;
@@ -289,6 +355,13 @@ const sections: SettingsSection[] = [
     icon: "auto_stories",
     description: "",
     keywords: "剧情 片段 章节 自动命名 扩展名 提交 commit git agent"
+  },
+  {
+    id: "about",
+    label: "更新与关于",
+    icon: "system_update_alt",
+    description: "",
+    keywords: "更新 升级 版本 差分 增量 检查更新 安装 about update version"
   }
 ];
 
@@ -316,6 +389,40 @@ const segmentExtension = ref<StorySegmentExtension>(".md");
 const maxSegmentsPerChapter = ref(3);
 const autoNameChapterDirectories = ref(false);
 const agentCommitPromptEnabled = ref(true);
+
+const updaterState = ref<StorydexDesktopUpdaterState>({
+  supported: false,
+  status: "idle",
+  currentVersion: "",
+  availableVersion: "",
+  releaseNotes: "",
+  progress: null,
+  error: "",
+  feedUrl: ""
+});
+const updaterBridgeAvailable = computed(() => Boolean(window.storydexDesktop?.updater));
+const updaterBusy = computed(() => updaterState.value.status === "checking" || updaterState.value.status === "downloading");
+const updaterStatusText = computed(() => {
+  switch (updaterState.value.status) {
+    case "checking":
+      return "正在检查更新…";
+    case "available":
+      return `发现新版本 v${updaterState.value.availableVersion}，可增量下载。`;
+    case "not-available":
+      return "当前已是最新版本。";
+    case "downloading":
+      return "正在下载更新…";
+    case "downloaded":
+      return "更新已下载完成，重启后自动安装。";
+    case "error":
+      return "更新失败，可稍后重试。";
+    case "unsupported":
+      return updaterState.value.error || "当前环境不支持自动更新。";
+    default:
+      return "点击“检查更新”获取最新版本，下载时使用差分更新以节省流量。";
+  }
+});
+let detachUpdaterListener: (() => void) | null = null;
 
 const sidebarWidthModel = computed({
   get: () => uiStore.sidebarWidth,
@@ -430,11 +537,66 @@ watch(
 
 onMounted(() => {
   document.addEventListener("keydown", handleDocumentKeydown);
+  void initializeUpdaterBridge();
 });
 
 onBeforeUnmount(() => {
   document.removeEventListener("keydown", handleDocumentKeydown);
+  detachUpdaterListener?.();
+  detachUpdaterListener = null;
 });
+
+async function initializeUpdaterBridge(): Promise<void> {
+  const bridge = window.storydexDesktop?.updater;
+  if (!bridge) {
+    return;
+  }
+  detachUpdaterListener = bridge.onState((state) => {
+    updaterState.value = { ...updaterState.value, ...state };
+  });
+  try {
+    updaterState.value = { ...updaterState.value, ...(await bridge.getState()) };
+  } catch {
+    // 桌面桥不可用时保持默认状态
+  }
+}
+
+async function checkDesktopUpdate(): Promise<void> {
+  const bridge = window.storydexDesktop?.updater;
+  if (!bridge) {
+    return;
+  }
+  updaterState.value = { ...updaterState.value, ...(await bridge.check()) };
+}
+
+async function downloadDesktopUpdate(): Promise<void> {
+  const bridge = window.storydexDesktop?.updater;
+  if (!bridge) {
+    return;
+  }
+  updaterState.value = { ...updaterState.value, ...(await bridge.download()) };
+}
+
+async function installDesktopUpdate(): Promise<void> {
+  const bridge = window.storydexDesktop?.updater;
+  if (!bridge) {
+    return;
+  }
+  await bridge.install();
+}
+
+function formatUpdateBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) {
+    return "0 MB";
+  }
+  if (value >= 1024 * 1024 * 1024) {
+    return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  }
+  if (value >= 1024 * 1024) {
+    return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  return `${Math.max(1, Math.round(value / 1024))} KB`;
+}
 
 function selectSection(sectionId: SettingsSectionId): void {
   activeSection.value = sectionId;
@@ -657,6 +819,83 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
   color: var(--text-main);
   outline: none;
   font-size: 13px;
+}
+
+.system-settings-update-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.system-settings-update-meta strong {
+  color: var(--text-main);
+  font-variant-numeric: tabular-nums;
+}
+
+.system-settings-update-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.system-settings-update-progress small {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.system-settings-update-progress-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-main) 8%, transparent);
+  overflow: hidden;
+}
+
+.system-settings-update-progress-bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent-strong);
+  transition: width 0.25s ease;
+}
+
+.system-settings-update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.system-settings-update-btn {
+  min-height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-main);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+}
+
+.system-settings-update-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.system-settings-update-btn.primary {
+  border-color: transparent;
+  background: var(--accent-strong);
+  color: var(--text-on-accent, #fff);
+}
+
+.system-settings-update-btn.primary:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+
+.system-settings-update-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .system-settings-nav {

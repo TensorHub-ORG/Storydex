@@ -1544,6 +1544,9 @@ class _StorydexApprovalContext:
 
     async def _handle_ask_questions(self, questions: list[Dict[str, Any]]) -> Dict[Any, Any]:
         answers: Dict[Any, Any] = {}
+        total = len(questions)
+        pending: list[tuple[int, str, asyncio.Future[Dict[str, Any]]]] = []
+        # 先把全部问题一次性发给前端：前端可以在最终提交前来回切换、修改每题答案。
         for index, question in enumerate(questions):
             approval_id = f"{self.trace_id}-{uuid4().hex}"
             future: asyncio.Future[Dict[str, Any]] = asyncio.get_running_loop().create_future()
@@ -1565,16 +1568,25 @@ class _StorydexApprovalContext:
                     "options": _approval_options(question.get("options"), is_permission=is_permission),
                     "allowText": not is_permission,
                     "multiSelect": bool(question.get("multiSelect")),
+                    "questionIndex": index + 1,
+                    "questionTotal": total,
                 },
             ))
+            pending.append((index, approval_id, future))
+        cancelled = False
+        for index, approval_id, future in pending:
             try:
                 answer = await future
             finally:
                 self.service._approval_waiters.pop(approval_id, None)
                 self.pending_ids.discard(approval_id)
             if answer.get("__cancelled__"):
-                return {"__cancelled__": True}
+                cancelled = True
+                break
             answers[index] = answer
+        if cancelled:
+            self.cancel_pending()
+            return {"__cancelled__": True}
         return answers
 
     def cancel_pending(self) -> None:

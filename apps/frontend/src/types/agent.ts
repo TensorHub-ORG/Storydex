@@ -195,6 +195,8 @@ export interface AgentStreamPacket {
   order?: number;
   title?: string;
   tasks?: AgentTaskItem[];
+  questionIndex?: number;
+  questionTotal?: number;
   updatedAt?: string;
   session_id?: string;
   sessionId?: string;
@@ -252,6 +254,8 @@ export interface AgentPendingApproval {
   options: AgentApprovalOption[];
   allowText?: boolean;
   multiSelect?: boolean;
+  questionIndex?: number;
+  questionTotal?: number;
 }
 
 export interface AgentPendingCommitPrompt {

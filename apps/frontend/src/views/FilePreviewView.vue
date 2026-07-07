@@ -85,6 +85,7 @@
         <div
           v-else-if="activeTab.extension === '.md'"
           class="preview-window-markdown doc-markdown"
+          @click="handleMarkdownLinkClick"
           v-html="renderedMarkdown"
         ></div>
 
@@ -103,6 +104,11 @@ import { isThemeCode } from "@/constants/themes";
 import { useTheme } from "@/composables/useTheme";
 import { readCachedThemeCode, writeCachedThemeCode } from "@/utils/appearance";
 import { createMarkdownRenderer } from "@/utils/markdown";
+import {
+  findMarkdownLinkAnchor,
+  isExternalMarkdownHref,
+  resolveMarkdownWorkspaceHref
+} from "@/utils/workspaceLinks";
 
 type PreviewEditorMode = "preview" | "edit";
 
@@ -249,6 +255,23 @@ function handleWindowKeydown(event: KeyboardEvent): void {
   }
   event.preventDefault();
   void flushActiveTabAutoSave();
+}
+
+function handleMarkdownLinkClick(event: MouseEvent): void {
+  const anchor = findMarkdownLinkAnchor(event.target);
+  const href = anchor?.getAttribute("href") || "";
+  const relativePath = resolveMarkdownWorkspaceHref(href, activeTab.value?.relativePath || "");
+  if (relativePath) {
+    event.preventDefault();
+    event.stopPropagation();
+    void openOrActivateTab(relativePath);
+    return;
+  }
+
+  if (isExternalMarkdownHref(href)) {
+    event.preventDefault();
+    window.open(anchor?.href || href, "_blank", "noopener,noreferrer");
+  }
 }
 
 async function openOrActivateTab(relativePath: string): Promise<void> {

@@ -34,26 +34,50 @@
       <summary>采样参数（default）</summary>
       <div class="preset-editor-grid">
         <label class="preset-editor-field">
-          <span>temperature ({{ formatNumber(document.sampling.default.temperature) }})</span>
-          <input
-            type="range"
-            min="0"
-            max="2"
-            step="0.05"
-            :value="document.sampling.default.temperature ?? 1"
-            @input="onSamplingChange('temperature', Number(($event.target as HTMLInputElement).value))"
-          />
+          <span>temperature</span>
+          <div class="preset-editor-slider-row">
+            <input
+              type="range"
+              min="0"
+              max="2"
+              step="0.05"
+              :value="document.sampling.default.temperature ?? 1"
+              @input="onSamplingChange('temperature', Number(($event.target as HTMLInputElement).value))"
+            />
+            <input
+              type="number"
+              class="preset-editor-slider-number"
+              min="0"
+              max="2"
+              step="0.05"
+              :value="document.sampling.default.temperature ?? 1"
+              @input="onSamplingNumberInput('temperature', $event, 0, 2)"
+              @change="onSamplingNumberCommit('temperature', $event, 1)"
+            />
+          </div>
         </label>
         <label class="preset-editor-field">
-          <span>top_p ({{ formatNumber(document.sampling.default.topP) }})</span>
-          <input
-            type="range"
-            min="0"
-            max="1"
-            step="0.01"
-            :value="document.sampling.default.topP ?? 0.98"
-            @input="onSamplingChange('topP', Number(($event.target as HTMLInputElement).value))"
-          />
+          <span>top_p</span>
+          <div class="preset-editor-slider-row">
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              :value="document.sampling.default.topP ?? 0.98"
+              @input="onSamplingChange('topP', Number(($event.target as HTMLInputElement).value))"
+            />
+            <input
+              type="number"
+              class="preset-editor-slider-number"
+              min="0"
+              max="1"
+              step="0.01"
+              :value="document.sampling.default.topP ?? 0.98"
+              @input="onSamplingNumberInput('topP', $event, 0, 1)"
+              @change="onSamplingNumberCommit('topP', $event, 0.98)"
+            />
+          </div>
         </label>
         <label class="preset-editor-field">
           <span>top_k ({{ document.sampling.default.topK ?? '—' }}, 仅 Anthropic)</span>
@@ -67,26 +91,50 @@
           />
         </label>
         <label class="preset-editor-field">
-          <span>frequency_penalty ({{ formatNumber(document.sampling.default.frequencyPenalty) }}, OpenAI 兼容)</span>
-          <input
-            type="range"
-            min="-2"
-            max="2"
-            step="0.05"
-            :value="document.sampling.default.frequencyPenalty ?? 0"
-            @input="onSamplingChange('frequencyPenalty', Number(($event.target as HTMLInputElement).value))"
-          />
+          <span>frequency_penalty (OpenAI 兼容)</span>
+          <div class="preset-editor-slider-row">
+            <input
+              type="range"
+              min="-2"
+              max="2"
+              step="0.05"
+              :value="document.sampling.default.frequencyPenalty ?? 0"
+              @input="onSamplingChange('frequencyPenalty', Number(($event.target as HTMLInputElement).value))"
+            />
+            <input
+              type="number"
+              class="preset-editor-slider-number"
+              min="-2"
+              max="2"
+              step="0.05"
+              :value="document.sampling.default.frequencyPenalty ?? 0"
+              @input="onSamplingNumberInput('frequencyPenalty', $event, -2, 2)"
+              @change="onSamplingNumberCommit('frequencyPenalty', $event, 0)"
+            />
+          </div>
         </label>
         <label class="preset-editor-field">
-          <span>presence_penalty ({{ formatNumber(document.sampling.default.presencePenalty) }}, OpenAI 兼容)</span>
-          <input
-            type="range"
-            min="-2"
-            max="2"
-            step="0.05"
-            :value="document.sampling.default.presencePenalty ?? 0"
-            @input="onSamplingChange('presencePenalty', Number(($event.target as HTMLInputElement).value))"
-          />
+          <span>presence_penalty (OpenAI 兼容)</span>
+          <div class="preset-editor-slider-row">
+            <input
+              type="range"
+              min="-2"
+              max="2"
+              step="0.05"
+              :value="document.sampling.default.presencePenalty ?? 0"
+              @input="onSamplingChange('presencePenalty', Number(($event.target as HTMLInputElement).value))"
+            />
+            <input
+              type="number"
+              class="preset-editor-slider-number"
+              min="-2"
+              max="2"
+              step="0.05"
+              :value="document.sampling.default.presencePenalty ?? 0"
+              @input="onSamplingNumberInput('presencePenalty', $event, -2, 2)"
+              @change="onSamplingNumberCommit('presencePenalty', $event, 0)"
+            />
+          </div>
         </label>
         <label class="preset-editor-field">
           <span>seed (留空=随机)</span>
@@ -530,6 +578,27 @@ function onSamplingChange<K extends keyof SamplingParams>(key: K, value: Samplin
   presetStore.markDirty(next);
 }
 
+type SamplingSliderKey = "temperature" | "topP" | "frequencyPenalty" | "presencePenalty";
+
+function onSamplingNumberInput(key: SamplingSliderKey, event: Event, min: number, max: number): void {
+  const target = event.target as HTMLInputElement;
+  const trimmed = target.value.trim();
+  if (!trimmed) {
+    return;
+  }
+  const num = Number(trimmed);
+  if (!Number.isFinite(num)) {
+    return;
+  }
+  onSamplingChange(key, Math.min(max, Math.max(min, num)));
+}
+
+function onSamplingNumberCommit(key: SamplingSliderKey, event: Event, fallback: number): void {
+  const target = event.target as HTMLInputElement;
+  const current = document.value.sampling.default[key];
+  target.value = String(current ?? fallback);
+}
+
 function onStagesChange(text: string): void {
   const stages = text.split(/\n+/).map((line) => line.trim()).filter(Boolean);
   const next = { ...document.value, thinking: { ...document.value.thinking, stages } };
@@ -564,10 +633,6 @@ function onKvChange(field: "termReplaceMap" | "nameAliasMap", text: string): voi
 
 function kvToText(map: Record<string, string>): string {
   return Object.entries(map).map(([k, v]) => `${k}→${v}`).join("\n");
-}
-
-function formatNumber(value: number | null | undefined): string {
-  return value == null ? "—" : value.toFixed(2);
 }
 
 function parseOptionalInt(text: string): number | null {
@@ -961,6 +1026,23 @@ function onRawJsonChange(text: string): void {
 
 .preset-editor-field input[type="range"] {
   accent-color: var(--accent, #2563eb);
+}
+
+.preset-editor-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.preset-editor-slider-row input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.preset-editor-field .preset-editor-slider-number {
+  flex: 0 0 auto;
+  width: 64px;
+  padding: 4px 6px;
 }
 
 .preset-editor-field-inline {

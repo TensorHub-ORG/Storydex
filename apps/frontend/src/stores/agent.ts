@@ -62,7 +62,7 @@ interface AgentState {
   warningThreshold: number | null;
   compressionStatus: string;
   compressionSummary: string;
-  pendingApproval: AgentPendingApproval | null;
+  pendingApprovals: AgentPendingApproval[];
   pendingCommitPrompt: AgentPendingCommitPrompt | null;
   isCommittingGit: boolean;
   storyFragmentCount: number;
@@ -104,7 +104,7 @@ export const useAgentStore = defineStore("agent", {
     warningThreshold: null,
     compressionStatus: "idle",
     compressionSummary: "",
-    pendingApproval: null,
+    pendingApprovals: [],
     pendingCommitPrompt: null,
     isCommittingGit: false,
     storyFragmentCount: 1,
@@ -131,6 +131,10 @@ export const useAgentStore = defineStore("agent", {
 
     permissionModeLabel(state): string {
       return state.coomiStatus?.permissionLabel || state.coomiStatus?.permissionMode || "完全访问";
+    },
+
+    pendingApproval(state): AgentPendingApproval | null {
+      return state.pendingApprovals[0] ?? null;
     },
 
     activeTraceRun(state): AgentExecutionRun | null {
@@ -180,7 +184,7 @@ export const useAgentStore = defineStore("agent", {
       this.lastError = "";
       this.lastErrorCode = null;
       this.lastSuccess = "";
-      this.pendingApproval = null;
+      this.pendingApprovals = [];
       this.pendingCommitPrompt = null;
       this.isCommittingGit = false;
       if (options?.clearSessionId) {
@@ -231,13 +235,16 @@ export const useAgentStore = defineStore("agent", {
 
     async resolvePendingApproval(
       decision: "allow" | "deny" | "cancel" | "answer",
-      response?: Record<string, unknown>
+      response?: Record<string, unknown>,
+      approvalId?: string
     ): Promise<void> {
-      const approval = this.pendingApproval;
+      const approval = approvalId
+        ? this.pendingApprovals.find((item) => item.approvalId === approvalId)
+        : this.pendingApprovals[0];
       if (!approval) {
         return;
       }
-      this.pendingApproval = null;
+      this.pendingApprovals = this.pendingApprovals.filter((item) => item.approvalId !== approval.approvalId);
       try {
         await resolveAgentCoomiApproval(approval.approvalId, decision, response);
       } catch (error: unknown) {
@@ -532,7 +539,7 @@ export const useAgentStore = defineStore("agent", {
       this.lastError = "";
       this.lastErrorCode = null;
       this.lastSuccess = "";
-      this.pendingApproval = null;
+      this.pendingApprovals = [];
       this.pendingCommitPrompt = null;
       this.isRunning = true;
       this.promptInput = "";
@@ -668,7 +675,13 @@ export const useAgentStore = defineStore("agent", {
           }
         ];
       } else if (eventName === "PermissionRequest") {
-        this.pendingApproval = normalizePendingApproval(visiblePacket);
+        const approval = normalizePendingApproval(visiblePacket);
+        if (approval) {
+          this.pendingApprovals = [
+            ...this.pendingApprovals.filter((item) => item.approvalId !== approval.approvalId),
+            approval
+          ];
+        }
       } else if (eventName === "TaskPlanCreated" || eventName === "TaskPlanUpdated") {
         nextRun.tasks = normalizeTaskPlan(visiblePacket.tasks, traceId, nextRun.tasks);
       } else if (
@@ -727,17 +740,17 @@ export const useAgentStore = defineStore("agent", {
       } else if (eventName === "AgentCompleted") {
         nextRun.status = "completed";
         nextRun.tasks = finalizeTaskStatuses(nextRun.tasks, "completed");
-        this.pendingApproval = null;
+        this.pendingApprovals = [];
       } else if (eventName === "AgentCancelled") {
         nextRun.status = "cancelled";
         nextRun.tasks = finalizeTaskStatuses(nextRun.tasks, "cancelled");
-        this.pendingApproval = null;
+        this.pendingApprovals = [];
       } else if (eventName === "AgentError") {
         nextRun.status = "failed";
         nextRun.tasks = finalizeTaskStatuses(nextRun.tasks, "failed");
         nextRun.errorMessage = String(visiblePacket.message || "Coomi execution failed.");
         nextRun.errorCode = String(visiblePacket.error_type || "coomi_error");
-        this.pendingApproval = null;
+        this.pendingApprovals = [];
       }
 
       this.lastEvents = nextRun.events;
@@ -1953,6 +1966,9 @@ function normalizePendingApproval(packet: AgentStreamPacket): AgentPendingApprov
       isRecommended: asBoolean(record?.isRecommended) ?? asBoolean(record?.is_recommended) ?? false
     });
   }
+  const packetRecord = packet as unknown as Record<string, unknown>;
+  const questionIndex = firstNumber(packetRecord, ["questionIndex", "question_index"]);
+  const questionTotal = firstNumber(packetRecord, ["questionTotal", "question_total"]);
   return {
     approvalId,
     kind,
@@ -1967,7 +1983,9 @@ function normalizePendingApproval(packet: AgentStreamPacket): AgentPendingApprov
           { label: "拒绝", value: "deny", description: "将拒绝结果返回给 Coomi。" }
         ],
     allowText: asBoolean((packet as unknown as Record<string, unknown>).allowText) ?? false,
-    multiSelect: asBoolean((packet as unknown as Record<string, unknown>).multiSelect) ?? false
+    multiSelect: asBoolean((packet as unknown as Record<string, unknown>).multiSelect) ?? false,
+    questionIndex: questionIndex ?? undefined,
+    questionTotal: questionTotal ?? undefined
   };
 }
 
