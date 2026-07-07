@@ -224,7 +224,7 @@ class PresetMeta(BaseModel):
     description: str = ""
     compatible_providers: List[str] = Field(default_factory=list)
     updated_at: str = ""
-    # 导入元数据（SillyTavern 适配）
+    # 导入元数据（外部预设适配）
     source_format: Optional[str] = None  # "sillytavern" | "storydex" | "generic"
     display_regexes: List[Dict[str, Any]] = Field(default_factory=list)  # markdownOnly 正则元数据
     chat_squash_meta: Dict[str, Any] = Field(default_factory=dict)  # SPreset ChatSquash 元数据

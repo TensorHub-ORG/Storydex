@@ -55,7 +55,7 @@ class StorydexContextAssemblerService:
             total_chars=2200,
             runtime_context=preset_runtime_context,
         )
-        # SillyTavern 编译预设可远超默认 2200 字预算；按实际长度放开该块，
+        # 外部导入预设可远超默认 2200 字预算；按实际长度放开该块，
         # 并把全局预算按溢出扩容，保证其他上下文块的预算不被挤占。
         preset_block_budget = max(2200, len(preset_block))
         max_total_chars += max(0, preset_block_budget - 2200)

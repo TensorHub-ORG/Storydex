@@ -762,7 +762,7 @@ const authorRef = computed<AuthorReferenceEditorValue>(() => {
   };
 });
 
-// 导入元数据（SillyTavern 适配）
+// 导入元数据（外部预设适配）
 const importSourceFormat = computed(() => document.value.meta?.sourceFormat || "");
 const importWarnings = computed<string[]>(() => document.value.meta?.importWarnings || []);
 const displayRegexes = computed<Array<Record<string, unknown>>>(() => document.value.meta?.displayRegexes || []);

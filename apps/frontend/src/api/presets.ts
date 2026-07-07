@@ -244,7 +244,7 @@ export async function importSillyTavernPresets(
     "/presets/import/sillytavern",
     payload
   );
-  return unwrap(response.data, "SillyTavern preset import failed.");
+  return unwrap(response.data, "External preset import failed.");
 }
 
 export async function previewSillyTavernImport(
@@ -254,7 +254,7 @@ export async function previewSillyTavernImport(
     "/presets/import/preview",
     payload
   );
-  return unwrap(response.data, "SillyTavern preset preview failed.");
+  return unwrap(response.data, "External preset preview failed.");
 }
 
 export async function fetchActivePreset(): Promise<ApiResult<ActivePresetResponse>> {

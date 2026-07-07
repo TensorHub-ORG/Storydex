@@ -114,8 +114,8 @@ _SLOT_ORDER: Dict[str, int] = {
     "advanced": 60,
 }
 
-# 外部导入的预设（SillyTavern 或通用格式）：按导入顺序编译、不加 Storydex
-# 段头、运行时展开 ST 宏。Storydex 原生预设仍走槽位排序 + 段头渲染。
+# 外部导入的预设：按导入顺序编译、不加 Storydex
+# 段头、运行时展开外部宏。Storydex 原生预设仍走槽位排序 + 段头渲染。
 _IMPORTED_SOURCE_FORMATS = {"sillytavern", "generic"}
 
 

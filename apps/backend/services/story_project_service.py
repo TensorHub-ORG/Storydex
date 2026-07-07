@@ -34,7 +34,7 @@ _PREFIX_NUMBER_RE = re.compile(r"^(?P<prefix>.*?)(?P<number>\d{2,4})$")
 _SCRIPT_CONTEXT_SUFFIXES = {".md", ".txt", ".json", ".yaml", ".yml"}
 _RUNTIME_PRESET_TEXT_SUFFIXES = {".md", ".txt"}
 _RUNTIME_PRESET_JSON_SUFFIX = ".safe.json"
-# SillyTavern 预设编译后动辄上万字，运行时给它专用的大预算（Storydex 自有
+# 外部导入预设编译后动辄上万字，运行时给它专用的大预算（Storydex 自有
 # 预设仍走 720/2400 的紧凑预算）。
 _ST_RUNTIME_PRESET_MAX_CHARS_PER_FILE = 24_000
 _ST_RUNTIME_PRESET_TOTAL_CHARS = 26_000
@@ -4658,7 +4658,7 @@ class StoryProjectService:
 
     @staticmethod
     def _is_silly_tavern_document(doc: PresetDocument) -> bool:
-        # 外部导入的预设（SillyTavern 或通用格式）都允许使用运行时大预算。
+        # 外部导入的预设都允许使用运行时大预算。
         return str(getattr(doc.meta, "source_format", "") or "").strip().lower() in {"sillytavern", "generic"}
 
     def _runtime_preset_files(self, workspace_root: Path, *, max_files: int) -> List[Path]:
@@ -4715,7 +4715,7 @@ class StoryProjectService:
             "1. System prompts keep only Storydex hard runtime constraints.",
             "2. Project presets provide creative style, dialogue, POV, format, continuity, and anti-cliche rules.",
             "3. Active presets and compiled preset sidecars may affect generation.",
-            "4. Imported SillyTavern presets are preserved; active sidecar modules are compiled at runtime.",
+            "4. Imported external presets are preserved; active sidecar modules are compiled at runtime.",
             "",
             "Activation policy:",
             "1. `.storydex/presets/active/` is the runtime directory.",
@@ -4765,7 +4765,7 @@ class StoryProjectService:
         ]
         for relative_path, content in entries:
             lines.extend(["", f"### {relative_path}", content])
-        # SillyTavern 编译文本远超 Storydex 自有预设的预算；出现超长条目时
+        # 外部导入预设编译文本远超 Storydex 自有预设的预算；出现超长条目时
         # 放开总预算，保持社区预设全量注入。
         effective_total = int(total_chars or 2400)
         if any(len(content) > max_chars_per_file for _, content in entries):

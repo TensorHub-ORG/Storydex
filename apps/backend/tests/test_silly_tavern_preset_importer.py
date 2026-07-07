@@ -47,7 +47,7 @@ def test_import_reports_preserved_silly_tavern_macros_without_removal_language()
 
     warnings = "\n".join(result.import_warnings)
 
-    assert "保留 SillyTavern 宏" in warnings
+    assert "保留外部预设宏" in warnings
     assert "移除" not in warnings
 
 

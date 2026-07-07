@@ -16,14 +16,14 @@ _TITLE_FIELDS = ("name", "title", "label", "identifier", "id")
 _FILENAME_FORBIDDEN = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _ID_CLEANUP = re.compile(r"[^0-9A-Za-z_]+")
 
-# 保留的 SillyTavern 宏（Storydex 上下文装配器可解析）
+# 保留的外部预设宏（Storydex 上下文装配器可解析）
 _PRESERVED_MACROS = re.compile(r"\{\{\s*(user|char)\s*\}\}", re.IGNORECASE)
-# SillyTavern 专有宏保留原文导入，运行时兼容层后续再展开。
+# 外部预设专有宏保留原文导入，运行时兼容层后续再展开。
 _OTHER_MACRO_PATTERN = re.compile(r"\{\{[^}]*\}\}")
 _MACRO_NAME_PATTERN = re.compile(r"^\{\{\s*(//|[!/#]?[A-Za-z][A-Za-z0-9_]*)")
 
-# SillyTavern 聊天补全导出的 prompt_order 里，100001 是所有角色共用的默认档，
-# 100000 是内置 fallback；优先取 100001 才与 SillyTavern 实际生效的开关一致。
+# 外部聊天补全预设导出的 prompt_order 里，100001 是所有角色共用的默认档，
+# 100000 是内置 fallback；优先取 100001 才与原始预设实际生效的开关一致。
 _ST_DUMMY_CHARACTER_IDS = (100001, 100000)
 
 # ST 导出的 role 存在 Gemini/Claude 风格别名，归一化成 OpenAI 三角色。
@@ -143,7 +143,7 @@ def convert_silly_tavern_preset(content: bytes, *, filename: str) -> SillyTavern
         modules.append(regex_mod)
 
     for candidate in candidates:
-        # marker 跳过（结构解析，非内容过滤）：marker 是 SillyTavern 的占位符
+        # marker 跳过（结构解析，非内容过滤）：marker 是外部预设的占位符
         if candidate.marker:
             continue
         # 空内容跳过
@@ -202,7 +202,7 @@ def convert_silly_tavern_preset(content: bytes, *, filename: str) -> SillyTavern
         )
         import_warnings.append("未识别出结构化模块，已将文件原文导入为单个模块。")
 
-    format_label = "SillyTavern" if source_format == "sillytavern" else "imported"
+    format_label = "external" if source_format == "sillytavern" else "imported"
     # 构造 meta（含导入元数据）
     meta_dict: Dict[str, Any] = {
         "name": title,
@@ -523,7 +523,7 @@ def _selected_prompt_order(raw_order: Any) -> List[Dict[str, Any]]:
         if isinstance(order, list):
             by_character[entry.get("character_id")] = order
     selected: List[Any] = []
-    # SillyTavern 聊天补全预设默认读取 dummy character 档（100001）。
+    # 外部聊天补全预设默认读取 dummy character 档（100001）。
     for character_id in _ST_DUMMY_CHARACTER_IDS:
         if by_character.get(character_id):
             selected = by_character[character_id]
@@ -614,9 +614,9 @@ def _normalize_prompt_text(text: str) -> str:
 
 
 def _collect_silly_tavern_macro_names(content: str) -> Counter[str]:
-    """按宏名统计模块内容中的 SillyTavern 宏（{{user}}/{{char}} 除外）。
+    """按宏名统计模块内容中的外部预设宏（{{user}}/{{char}} 除外）。
 
-    Storydex 导入阶段不执行 SillyTavern 宏，也不删除宏。这样外部预设可以
+    Storydex 导入阶段不执行外部预设宏，也不删除宏。这样外部预设可以
     保真进入项目，后续运行时兼容层再决定如何展开变量、随机、时间等语义。
     """
     counter: Counter[str] = Counter()
@@ -638,7 +638,7 @@ def _summarize_macro_hints(counter: Counter[str], *, max_lines: int = 40) -> Lis
         return []
     hints: List[str] = []
     for name, count in counter.most_common(max_lines):
-        hints.append(f"保留 SillyTavern 宏 {{{{{name}}}}} ×{count}（导入阶段不执行，运行时兼容层会尽量展开）")
+        hints.append(f"保留外部预设宏 {{{{{name}}}}} ×{count}（导入阶段不执行，运行时兼容层会尽量展开）")
     remaining = len(counter) - max_lines
     if remaining > 0:
         hints.append(f"另有 {remaining} 种宏同样保留原文，详见模块内容。")
@@ -761,7 +761,7 @@ def _render_markdown(
     title: str,
     filename: str,
     modules: List[Dict[str, Any]],
-    format_label: str = "SillyTavern",
+    format_label: str = "external",
 ) -> str:
     lines = [
         f"# {title}",
