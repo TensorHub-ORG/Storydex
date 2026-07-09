@@ -45,7 +45,7 @@
     "publish": [
       {
         "provider": "generic",
-        "url": "https://updates.tensorhub.cn/storydex/windows/"
+        "url": "https://updates.septemc.com/storydex/windows/"
       }
     ],
     "win": {
