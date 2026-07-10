@@ -143,7 +143,7 @@ def test_portable_branch_matrix_for_async_paths_names_and_summaries(service: Tra
     assert rooted_calls[0]["trace_id"] == "rooted"
 
     base = service.project_service.storydex_root / ".agent" / "sessions"
-    monkeypatch.setattr(service, "_session_id_needs_safe_directory", lambda _value: False)
+    monkeypatch.setattr(TraceHistoryService, "_session_id_needs_safe_directory", staticmethod(lambda _value: False))
     escaped = service._resolve_session_root(base, "../forced-escape")
     assert escaped.name.startswith("_session_")
 
@@ -160,3 +160,54 @@ def test_portable_branch_matrix_for_async_paths_names_and_summaries(service: Tra
         ],
     )
     assert summary["firstPrompt"] == "first nonblank"
+
+
+def test_legacy_migration_branch_matrix_for_directories_older_records_and_cleanup_errors(
+    service: TraceHistoryService, monkeypatch
+):
+    legacy_root = service.project_service.storydex_root / "traces"
+    (legacy_root / "directory.json").mkdir(parents=True)
+    source = legacy_root / "older.json"
+    payload = record("older", "old", "2026-01-01T00:00:00Z", updatedAt="2026-01-01T00:00:00Z")
+    source.write_text(json.dumps(payload), encoding="utf-8")
+    target = service._build_trace_path_at_storydex_root(
+        storydex_root=service.project_service.storydex_root,
+        trace_id="older",
+        created_at=payload["createdAt"],
+        session_id="default",
+    )
+    target.write_text(
+        json.dumps(record("older", "new", "2026-01-02T00:00:00Z", updatedAt="2026-01-02T00:00:00Z")),
+        encoding="utf-8",
+    )
+
+    original_unlink = Path.unlink
+    monkeypatch.setattr(
+        Path,
+        "unlink",
+        lambda path, *args, **kwargs: (_ for _ in ()).throw(OSError("locked"))
+        if path == source
+        else original_unlink(path, *args, **kwargs),
+    )
+    monkeypatch.setattr("services.trace_history_service.shutil.rmtree", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("busy")))
+    service._migrate_trace_root_locked(legacy_root, service.project_service.storydex_root)
+    assert json.loads(target.read_text(encoding="utf-8"))["prompt"] == "new"
+
+
+def test_clear_records_skips_metadata_and_tolerates_locked_files(service: TraceHistoryService, monkeypatch):
+    primary = service.get_session_root("locked")
+    legacy = service.project_service.storydex_root / "sessions" / "locked"
+    legacy.mkdir(parents=True)
+    locked_files = {primary / "trace.json", legacy / "trace.json"}
+    for root in (primary, legacy):
+        (root / "log.json").write_text("{}", encoding="utf-8")
+        (root / "trace.json").write_text("{}", encoding="utf-8")
+    original_unlink = Path.unlink
+    monkeypatch.setattr(
+        Path,
+        "unlink",
+        lambda path, *args, **kwargs: (_ for _ in ()).throw(OSError("locked"))
+        if path in locked_files
+        else original_unlink(path, *args, **kwargs),
+    )
+    assert service.clear_records("locked") == 0
