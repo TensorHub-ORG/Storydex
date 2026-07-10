@@ -12,6 +12,7 @@ import type {
   AgentSessionsResponse,
   AgentStreamPacket
 } from "@/types/agent";
+import { parseSseFrameData, splitSseFrames } from "@/api/sseParser.mjs";
 import type { ApiEnvelope, ApiResult, ApiTrace } from "@/types/api";
 import type { WorkspaceGitDiffResponse } from "@/types/workspace";
 
@@ -415,47 +416,9 @@ async function buildStreamResponseError(response: Response): Promise<AgentApiErr
   return new AgentApiError(text || `Coomi request failed (${response.status}).`);
 }
 
-function splitSseFrames(buffer: string): { frames: string[]; rest: string } {
-  const normalized = buffer.replace(/\r\n/g, "\n");
-  const parts = normalized.split("\n\n");
-  return {
-    frames: parts.slice(0, -1),
-    rest: parts[parts.length - 1] || ""
-  };
-}
-
 function parseSseFrame(frame: string): AgentStreamPacket | null {
-  const lines = frame.split("\n");
-  let eventName = "message";
-  const dataLines: string[] = [];
-
-  for (const rawLine of lines) {
-    const line = rawLine.trimEnd();
-    if (!line || line.startsWith(":")) {
-      continue;
-    }
-    if (line.startsWith("event:")) {
-      eventName = line.slice("event:".length).trim();
-      continue;
-    }
-    if (line.startsWith("data:")) {
-      dataLines.push(line.slice("data:".length).trimStart());
-    }
-  }
-
-  if (dataLines.length === 0) {
-    return null;
-  }
-
-  try {
-    const parsed = JSON.parse(dataLines.join("\n")) as Record<string, unknown>;
-    return {
-      type: (typeof parsed.type === "string" ? parsed.type : eventName) as AgentStreamPacket["type"],
-      ...parsed
-    } as AgentStreamPacket;
-  } catch {
-    return null;
-  }
+  const parsed = parseSseFrameData(frame);
+  return parsed as AgentStreamPacket | null;
 }
 
 function isAbortError(error: unknown): boolean {

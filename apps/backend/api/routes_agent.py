@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any, AsyncIterator, Dict, List, Optional
@@ -36,6 +37,8 @@ git_service = get_git_service()
 story_project_service = get_story_project_service()
 
 _AGENT_GENERATION_LOCK = Lock()
+_PHASE_HEARTBEAT_SECONDS = 0.6
+_COMMIT_MESSAGE_TIMEOUT_SECONDS = 2.0
 
 
 class _CancellationToken:
@@ -290,6 +293,33 @@ def _encode_sse(event_name: str, payload: Dict[str, Any]) -> str:
     return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+def _turn_phase_packet(
+    *,
+    trace_id: str,
+    session_id: str,
+    phase: str,
+    label: str,
+    status: str,
+    phase_started: float,
+    detail: str = "",
+    heartbeat: bool = False,
+) -> Dict[str, Any]:
+    elapsed_ms = max(0, int((time.perf_counter() - phase_started) * 1000))
+    return {
+        "_type": "TurnPhase",
+        "_version": 1,
+        "traceId": trace_id,
+        "sessionId": session_id,
+        "phase": phase,
+        "label": label,
+        "detail": detail or label,
+        "status": status,
+        "startedAt": (datetime.now(timezone.utc) - timedelta(milliseconds=elapsed_ms)).isoformat(),
+        "elapsedMs": elapsed_ms,
+        "heartbeat": heartbeat,
+    }
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -305,7 +335,7 @@ def _phase_for_event(event_name: str) -> str:
         return "planning"
     if event_name == "TurnContract":
         return "orchestration"
-    if event_name in {"UsageUpdate", "CompressionEvent", "TurnPhase"}:
+    if event_name in {"RunAccepted", "UsageUpdate", "CompressionEvent", "TurnPhase"}:
         return "runtime"
     if event_name.startswith("Agent"):
         return "agent"
@@ -329,6 +359,8 @@ def _status_for_event(event_name: str, payload: Dict[str, Any]) -> str:
         return str(payload.get("status") or ("success" if payload.get("created") else "info"))
     if event_name == "TurnContract":
         return "warning" if str(payload.get("status") or "") == "needs_user_input" else "info"
+    if event_name == "RunAccepted":
+        return "running"
     if event_name in {"AgentCompleted", "ToolDone"}:
         return "success"
     if event_name == "AgentCancelled":
@@ -351,7 +383,7 @@ def _detail_for_event(event_name: str, payload: Dict[str, Any]) -> str:
         return str(payload.get("message") or payload.get("reason") or event_name)
     if event_name == "AgentError":
         return str(payload.get("message") or "Coomi Agent error")
-    if event_name == "TurnPhase":
+    if event_name in {"RunAccepted", "TurnPhase"}:
         return str(payload.get("detail") or payload.get("label") or event_name)
     if event_name == "TurnContract":
         turn_plan = payload.get("turnPlan") if isinstance(payload.get("turnPlan"), dict) else {}
@@ -1029,14 +1061,61 @@ async def _stream_coomi_sse(
 
     try:
         try:
-            task_plan = await _create_agent_task_plan(
-                prompt=prompt,
-                trace_id=trace_id,
-                session_id=session_id,
-                workspace_root=workspace_root,
-                active_file=active_file,
-                story_generation=story_generation,
-                turn_contract=turn_contract,
+            planning_started = time.perf_counter()
+            yield _encode_sse(
+                "TurnPhase",
+                _turn_phase_packet(
+                    trace_id=trace_id,
+                    session_id=session_id,
+                    phase="task_planning",
+                    label="正在规划执行步骤",
+                    status="running",
+                    phase_started=planning_started,
+                ),
+            )
+            planning_task = asyncio.create_task(
+                _create_agent_task_plan(
+                    prompt=prompt,
+                    trace_id=trace_id,
+                    session_id=session_id,
+                    workspace_root=workspace_root,
+                    active_file=active_file,
+                    story_generation=story_generation,
+                    turn_contract=turn_contract,
+                )
+            )
+            while not planning_task.done():
+                done, _ = await asyncio.wait({planning_task}, timeout=_PHASE_HEARTBEAT_SECONDS)
+                if done:
+                    break
+                if await request.is_disconnected():
+                    cancellation_token.cancel()
+                    planning_task.cancel()
+                    return
+                yield _encode_sse(
+                    "TurnPhase",
+                    _turn_phase_packet(
+                        trace_id=trace_id,
+                        session_id=session_id,
+                        phase="task_planning",
+                        label="正在规划执行步骤",
+                        status="running",
+                        phase_started=planning_started,
+                        heartbeat=True,
+                    ),
+                )
+            task_plan = await planning_task
+            yield _encode_sse(
+                "TurnPhase",
+                _turn_phase_packet(
+                    trace_id=trace_id,
+                    session_id=session_id,
+                    phase="task_planning",
+                    label="执行步骤规划完成",
+                    status="success",
+                    phase_started=planning_started,
+                    detail=f"已生成 {len(task_plan)} 个执行步骤",
+                ),
             )
             tracker = _TaskRunTracker(task_plan, trace_id=trace_id, session_id=session_id)
             plan_payload = tracker.plan_created_payload()
@@ -1069,7 +1148,19 @@ async def _stream_coomi_sse(
                 for task_event_name, task_payload in tracker.start_next():
                     events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
                     yield _encode_sse(task_event_name, task_payload)
-                async for event_name, payload in get_storydex_coomi_agent_service().stream_events(
+                model_started = time.perf_counter()
+                yield _encode_sse(
+                    "TurnPhase",
+                    _turn_phase_packet(
+                        trace_id=trace_id,
+                        session_id=session_id,
+                        phase="model_execution",
+                        label="正在启动模型执行",
+                        status="running",
+                        phase_started=model_started,
+                    ),
+                )
+                runtime_events = get_storydex_coomi_agent_service().stream_events(
                     prompt=prompt,
                     trace_id=trace_id,
                     session_id=session_id,
@@ -1078,10 +1169,50 @@ async def _stream_coomi_sse(
                     story_generation=story_generation,
                     turn_contract=turn_contract,
                     cancellation_token=cancellation_token,
-                ):
+                ).__aiter__()
+                model_output_started = False
+                while True:
+                    next_event = asyncio.create_task(runtime_events.__anext__())
+                    while not next_event.done():
+                        done, _ = await asyncio.wait({next_event}, timeout=_PHASE_HEARTBEAT_SECONDS)
+                        if done:
+                            break
+                        if await request.is_disconnected():
+                            cancellation_token.cancel()
+                            next_event.cancel()
+                            return
+                        yield _encode_sse(
+                            "TurnPhase",
+                            _turn_phase_packet(
+                                trace_id=trace_id,
+                                session_id=session_id,
+                                phase="model_execution",
+                                label="正在等待模型输出",
+                                status="running",
+                                phase_started=model_started,
+                                heartbeat=True,
+                            ),
+                        )
+                    try:
+                        event_name, payload = await next_event
+                    except StopAsyncIteration:
+                        break
                     if await request.is_disconnected():
                         cancellation_token.cancel()
                         break
+                    if not model_output_started and event_name not in {"AgentStarted", "UsageUpdate"}:
+                        model_output_started = True
+                        yield _encode_sse(
+                            "TurnPhase",
+                            _turn_phase_packet(
+                                trace_id=trace_id,
+                                session_id=session_id,
+                                phase="model_execution",
+                                label="模型已开始输出",
+                                status="success",
+                                phase_started=model_started,
+                            ),
+                        )
                     packet = dict(payload)
                     if event_name == "TextChunk":
                         packet["content"] = _strip_visible_tool_text(str(packet.get("content") or ""))
@@ -1200,7 +1331,13 @@ def agent_delete_session_by_body(payload: AgentSessionDeleteRequest, request: Re
 def _delete_agent_session(session_id: str) -> ApiEnvelope:
     started = time.perf_counter()
     trace_id = str(uuid4())
-    get_storydex_coomi_agent_service().clear_session(session_id)
+    workspace_root = project_service.workspace_root
+    get_storydex_coomi_agent_service().clear_session(
+        session_id,
+        workspace_root=workspace_root,
+        delete_history=True,
+    )
+    storydex_intent_service.clear_session(session_id=session_id, workspace_root=workspace_root)
     result = trace_history_service.delete_session(session_id)
     return success_response(
         data={**result, "runtime": "coomi"},
@@ -1355,13 +1492,30 @@ async def agent_run_commit_decision(
             details={"mode": payload.mode},
         )
 
-    current_payload = agent_git_autocommit_service.current_changes_payload(
-        workspace_root,
-        event_type="GitCommitResult",
-        status="info",
-        reason="user_skipped" if mode == "skip" else "pending_commit",
-        message="已暂不提交本地修改。" if mode == "skip" else "检测到未提交修改。",
+    existing_ledger = _record_change_ledger(
+        record or {},
+        trace_id=trace_id,
+        session_id=resolved_session_id,
     )
+    if mode == "skip":
+        current_payload = agent_git_autocommit_service.acknowledge_skip(
+            workspace_root,
+            changed_files=(
+                existing_ledger.get("changedFiles")
+                if isinstance(existing_ledger.get("changedFiles"), list)
+                else []
+            ),
+            added=int(existing_ledger.get("added") or 0),
+            removed=int(existing_ledger.get("removed") or 0),
+        )
+    else:
+        current_payload = agent_git_autocommit_service.current_changes_payload(
+            workspace_root,
+            event_type="GitCommitResult",
+            status="info",
+            reason="pending_commit",
+            message="检测到未提交修改。",
+        )
     current_changed_files = [
         str(path).replace("\\", "/").strip()
         for path in (
@@ -1386,11 +1540,14 @@ async def agent_run_commit_decision(
         else:
             original_prompt = str((record or {}).get("prompt") or "")
             try:
-                commit_message = await get_storydex_coomi_agent_service().generate_commit_message(
-                    workspace_root=workspace_root,
-                    changed_files=current_changed_files,
-                    diff_summary=_build_commit_message_diff_summary(workspace_root, current_changed_files),
-                    prompt=original_prompt,
+                commit_message = await asyncio.wait_for(
+                    get_storydex_coomi_agent_service().generate_commit_message(
+                        workspace_root=workspace_root,
+                        changed_files=current_changed_files,
+                        diff_summary=_build_commit_message_diff_summary(workspace_root, current_changed_files),
+                        prompt=original_prompt,
+                    ),
+                    timeout=_COMMIT_MESSAGE_TIMEOUT_SECONDS,
                 )
             except Exception as exc:
                 del exc
@@ -1402,6 +1559,7 @@ async def agent_run_commit_decision(
             message=commit_message,
         )
         result_payload["generatedMessage"] = generated_message
+        result_payload["commitMessageStrategy"] = "llm" if generated_message else "deterministic_fallback"
 
     result_payload["traceId"] = trace_id
     result_payload["sessionId"] = resolved_session_id
@@ -1622,6 +1780,8 @@ def _normalize_changed_file_candidates(value: Any, *, workspace_root: Path) -> L
                     except (OSError, ValueError):
                         continue
                 else:
+                    if any(part == ".." for part in text.split("/")):
+                        continue
                     normalized = text.lstrip("./").strip("/")
             except OSError:
                 continue
@@ -1848,7 +2008,13 @@ def agent_clear_conversation(
     session_id_query: Optional[str] = Query(default=None, alias="sessionId"),
 ) -> ApiEnvelope:
     session_id = str(session_id_query or "").strip() or _resolve_agent_session_id(request)
-    get_storydex_coomi_agent_service().clear_session(session_id)
+    workspace_root = project_service.workspace_root
+    get_storydex_coomi_agent_service().clear_session(
+        session_id,
+        workspace_root=workspace_root,
+        delete_history=True,
+    )
+    storydex_intent_service.clear_session(session_id=session_id, workspace_root=workspace_root)
     cleared_history_count = trace_history_service.clear_records(session_id)
     trace_history_service.mark_session_cleared(session_id)
     return success_response(
@@ -1999,6 +2165,223 @@ async def agent_chat(
         _release_agent_generation_slot()
 
 
+async def _stream_agent_chat_request_sse(
+    *,
+    payload: AgentChatRequest,
+    request: Request,
+    trace_id: str,
+    session_id: str,
+    cancellation_token: _CancellationToken,
+) -> AsyncIterator[str]:
+    request_started = time.perf_counter()
+    accepted = {
+        "_type": "RunAccepted",
+        "_version": 1,
+        "traceId": trace_id,
+        "sessionId": session_id,
+        "phase": "accepted",
+        "label": "请求已接收",
+        "detail": "正在准备 Storydex 执行环境",
+        "status": "running",
+        "startedAt": datetime.now(timezone.utc).isoformat(),
+        "elapsedMs": 0,
+    }
+    yield _encode_sse("RunAccepted", accepted)
+
+    workspace_root: Path | None = None
+    git_snapshot: AgentGitSnapshot | None = None
+    delegated = False
+    git_task: asyncio.Task[AgentGitSnapshot] | None = None
+    intent_task: asyncio.Task[Dict[str, Any]] | None = None
+    try:
+        workspace_root = _resolve_agent_workspace_root(payload)
+        story_generation = _normalize_story_generation_options(payload.story_generation)
+        git_task = asyncio.create_task(asyncio.to_thread(agent_git_autocommit_service.begin_turn, workspace_root))
+
+        intent_started = time.perf_counter()
+        yield _encode_sse(
+            "TurnPhase",
+            _turn_phase_packet(
+                trace_id=trace_id,
+                session_id=session_id,
+                phase="intent_classification",
+                label="正在识别执行意图",
+                status="running",
+                phase_started=intent_started,
+            ),
+        )
+        intent_task = asyncio.create_task(
+            storydex_intent_service.classify_intent(
+                prompt=payload.prompt,
+                active_file=payload.active_file,
+                workspace_root=workspace_root,
+                session_id=session_id,
+            )
+        )
+        while not intent_task.done():
+            done, _ = await asyncio.wait({intent_task}, timeout=_PHASE_HEARTBEAT_SECONDS)
+            if done:
+                break
+            if await request.is_disconnected():
+                cancellation_token.cancel()
+                intent_task.cancel()
+                return
+            yield _encode_sse(
+                "TurnPhase",
+                _turn_phase_packet(
+                    trace_id=trace_id,
+                    session_id=session_id,
+                    phase="intent_classification",
+                    label="正在识别执行意图",
+                    status="running",
+                    phase_started=intent_started,
+                    heartbeat=True,
+                ),
+            )
+        intent_frame = await intent_task
+        yield _encode_sse(
+            "TurnPhase",
+            _turn_phase_packet(
+                trace_id=trace_id,
+                session_id=session_id,
+                phase="intent_classification",
+                label="执行意图识别完成",
+                status="success",
+                phase_started=intent_started,
+                detail=(
+                    f"{str(intent_frame.get('primary') or 'general')}"
+                    f" · {str(intent_frame.get('method') or 'unknown')}"
+                ),
+            ),
+        )
+
+        context_started = time.perf_counter()
+        yield _encode_sse(
+            "TurnPhase",
+            _turn_phase_packet(
+                trace_id=trace_id,
+                session_id=session_id,
+                phase="context_assembly",
+                label="正在组装项目上下文",
+                status="running",
+                phase_started=context_started,
+            ),
+        )
+        contract_task = asyncio.create_task(
+            asyncio.to_thread(
+                storydex_orchestration_service.build_turn_contract,
+                workspace_root,
+                prompt=payload.prompt,
+                active_file=payload.active_file,
+                story_generation=story_generation,
+                intent_frame=intent_frame,
+            )
+        )
+        while not contract_task.done():
+            done, _ = await asyncio.wait({contract_task}, timeout=_PHASE_HEARTBEAT_SECONDS)
+            if done:
+                break
+            if await request.is_disconnected():
+                cancellation_token.cancel()
+                contract_task.cancel()
+                return
+            yield _encode_sse(
+                "TurnPhase",
+                _turn_phase_packet(
+                    trace_id=trace_id,
+                    session_id=session_id,
+                    phase="context_assembly",
+                    label="正在组装项目上下文",
+                    status="running",
+                    phase_started=context_started,
+                    heartbeat=True,
+                ),
+            )
+        turn_contract = await contract_task
+        story_generation = _apply_turn_contract_story_generation_defaults(story_generation, turn_contract)
+        context_assembly = turn_contract.get("contextAssembly") if isinstance(turn_contract, dict) else {}
+        budget = context_assembly.get("budget") if isinstance(context_assembly, dict) else {}
+        yield _encode_sse(
+            "TurnPhase",
+            _turn_phase_packet(
+                trace_id=trace_id,
+                session_id=session_id,
+                phase="context_assembly",
+                label="项目上下文组装完成",
+                status="success",
+                phase_started=context_started,
+                detail=f"已准备 {int((budget or {}).get('blockCount') or 0)} 个上下文块",
+            ),
+        )
+
+        snapshot_started = time.perf_counter()
+        while git_task is not None and not git_task.done():
+            done, _ = await asyncio.wait({git_task}, timeout=_PHASE_HEARTBEAT_SECONDS)
+            if done:
+                break
+            if await request.is_disconnected():
+                cancellation_token.cancel()
+                git_task.cancel()
+                return
+            yield _encode_sse(
+                "TurnPhase",
+                _turn_phase_packet(
+                    trace_id=trace_id,
+                    session_id=session_id,
+                    phase="workspace_snapshot",
+                    label="正在读取项目版本状态",
+                    status="running",
+                    phase_started=snapshot_started,
+                    heartbeat=True,
+                ),
+            )
+        if git_task is None:
+            raise RuntimeError("Git snapshot task was not initialized.")
+        git_snapshot = await git_task
+
+        delegated = True
+        async for chunk in _stream_coomi_sse(
+            prompt=payload.prompt,
+            trace_id=trace_id,
+            session_id=session_id,
+            active_file=payload.active_file,
+            workspace_root=workspace_root,
+            story_generation=story_generation,
+            turn_contract=turn_contract,
+            git_snapshot=git_snapshot,
+            request=request,
+            cancellation_token=cancellation_token,
+        ):
+            yield chunk
+    except Exception as exc:
+        packet = {
+            "_type": "AgentError",
+            "_version": 1,
+            "traceId": trace_id,
+            "sessionId": session_id,
+            "error_type": type(exc).__name__,
+            "message": str(exc),
+            "duration_ms": int((time.perf_counter() - request_started) * 1000),
+        }
+        yield _encode_sse("AgentError", packet)
+        yield _encode_sse("done", {"type": "done"})
+    finally:
+        if not delegated:
+            for task in (intent_task, git_task):
+                if task is not None and not task.done():
+                    task.cancel()
+            if git_snapshot is not None and workspace_root is not None:
+                try:
+                    agent_git_autocommit_service.finish_turn(
+                        git_snapshot,
+                        prompt=payload.prompt,
+                        commit_prompt_enabled=_agent_commit_prompt_enabled(workspace_root),
+                    )
+                except Exception:
+                    pass
+            _release_agent_generation_slot()
+
+
 @router.post("/agent/chat/stream")
 async def agent_chat_stream(
     payload: AgentChatRequest,
@@ -2010,44 +2393,12 @@ async def agent_chat_stream(
     if not _try_acquire_agent_generation_slot():
         raise _agent_busy_error(trace_id=trace_id, session_id=session_id)
     cancellation_token = _CancellationToken()
-    workspace_root = _resolve_agent_workspace_root(payload)
-    git_snapshot = agent_git_autocommit_service.begin_turn(workspace_root)
-    try:
-        story_generation = _normalize_story_generation_options(payload.story_generation)
-        intent_frame = await storydex_intent_service.classify_intent(
-            prompt=payload.prompt,
-            active_file=payload.active_file,
-            workspace_root=workspace_root,
-            session_id=session_id,
-        )
-        turn_contract = storydex_orchestration_service.build_turn_contract(
-            workspace_root,
-            prompt=payload.prompt,
-            active_file=payload.active_file,
-            story_generation=story_generation,
-            intent_frame=intent_frame,
-        )
-        story_generation = _apply_turn_contract_story_generation_defaults(story_generation, turn_contract)
-    except Exception:
-        agent_git_autocommit_service.finish_turn(
-            git_snapshot,
-            prompt=payload.prompt,
-            commit_prompt_enabled=_agent_commit_prompt_enabled(workspace_root),
-        )
-        _release_agent_generation_slot()
-        raise
-
     return StreamingResponse(
-        _stream_coomi_sse(
-            prompt=payload.prompt,
+        _stream_agent_chat_request_sse(
+            payload=payload,
+            request=request,
             trace_id=trace_id,
             session_id=session_id,
-            active_file=payload.active_file,
-            workspace_root=workspace_root,
-            story_generation=story_generation,
-            turn_contract=turn_contract,
-            git_snapshot=git_snapshot,
-            request=request,
             cancellation_token=cancellation_token,
         ),
         media_type="text/event-stream",

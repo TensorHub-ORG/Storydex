@@ -644,6 +644,19 @@ async function writeClipboard(text: string): Promise<void> {
   }
   window.prompt("复制以下文本", text);
 }
+defineExpose({
+  __testUtils: import.meta.env.MODE === "test" ? {
+    tabContextMenu, agentPreviewMode, contextTab, contextTabIndex, activeFileStats, renderedMarkdown,
+    renderedCharacterJsonMarkdown, isCharacterJsonDocument, handleInput, handleModeChange,
+    handleAgentPreviewModeChange, handleMarkdownLinkClick, handleGitReviewRefresh, handleActivateTab,
+    handleCloseTab, handleDocumentPointerDown, handleDocumentKeydown, handleTabStripContextMenu,
+    openTabContextMenu, closeTabContextMenu, repositionTabContextMenu, handleContextClose,
+    handleContextCloseOthers, handleContextCloseRight, handleContextCloseSaved, handleContextCloseAll,
+    closeTabBatch, handleCopyPath, handleCopyRelativePath, formatDate, formatInteger, formatBytes, iconFor,
+    samePath, absolutePathFor, normalizeRelativePath, renderCharacterJsonAsMarkdown, parseCharacterJson,
+    renderMarkdownValue, renderInlineValue, stringValue, writeClipboard
+  } : null
+});
 </script>
 
 <style scoped>

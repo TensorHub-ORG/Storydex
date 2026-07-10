@@ -102,6 +102,9 @@
                   ></div>
                   <div v-else-if="entry.item.type === 'reasoning'" class="coomi-reasoning-text">{{ entry.item.content }}</div>
                   <div v-else-if="entry.item.type === 'error'" class="coomi-error-text">{{ entry.item.content }}</div>
+                  <div v-else-if="entry.item.type === 'phase'" class="coomi-phase-text" aria-live="polite">
+                    {{ entry.item.content }}
+                  </div>
                 </div>
               </section>
 
@@ -406,7 +409,7 @@
           type="button"
           class="coomi-command-option coomi-approval-option"
           :disabled="agentStore.isCommittingGit"
-          @mousedown.prevent="handleCommitPromptAuto"
+          @click="handleCommitPromptAuto"
         >
           <span>确认提交，并自动生成提交信息</span>
           <small>调用一次 LLM 生成提交信息后提交</small>
@@ -416,7 +419,7 @@
           class="coomi-command-option coomi-approval-option"
           :class="{ active: commitPromptMode === 'manual' }"
           :disabled="agentStore.isCommittingGit"
-          @mousedown.prevent="selectCommitPromptManual"
+          @click="selectCommitPromptManual"
         >
           <span>确认提交</span>
           <small>手动输入提交信息后直接提交</small>
@@ -434,7 +437,7 @@
             class="coomi-approval-action primary"
             type="button"
             :disabled="agentStore.isCommittingGit || !commitMessage.trim()"
-            @mousedown.prevent="handleCommitPromptManual"
+            @click="handleCommitPromptManual"
           >
             提交
           </button>
@@ -443,11 +446,20 @@
           type="button"
           class="coomi-command-option coomi-approval-option"
           :disabled="agentStore.isCommittingGit"
-          @mousedown.prevent="handleCommitPromptSkip"
+          @click="handleCommitPromptSkip"
         >
           <span>暂不进行提交</span>
           <small>保留当前未提交修改</small>
         </button>
+      </div>
+      <div
+        v-else-if="agentStore.isCommittingGit || agentStore.commitActionLabel"
+        class="coomi-commit-progress"
+        :class="{ completed: !agentStore.isCommittingGit }"
+        aria-live="polite"
+      >
+        <span class="coomi-commit-progress-dot"></span>
+        <span>{{ agentStore.commitActionLabel || "正在处理本地版本" }}</span>
       </div>
       <div v-else-if="commandMenuVisible" class="coomi-command-menu">
         <button
@@ -1235,7 +1247,11 @@ function expandPromptDock(): void {
 
 async function handleCommitPromptAuto(): Promise<void> {
   commitPromptMode.value = "auto";
+  promptDockCollapsed.value = true;
   await agentStore.resolvePendingCommitPrompt("auto");
+  if (agentStore.lastError && agentStore.pendingCommitPrompt) {
+    promptDockCollapsed.value = false;
+  }
 }
 
 function selectCommitPromptManual(): void {
@@ -1244,12 +1260,20 @@ function selectCommitPromptManual(): void {
 
 async function handleCommitPromptManual(): Promise<void> {
   commitPromptMode.value = "manual";
+  promptDockCollapsed.value = true;
   await agentStore.resolvePendingCommitPrompt("manual", commitMessage.value);
+  if (agentStore.lastError && agentStore.pendingCommitPrompt) {
+    promptDockCollapsed.value = false;
+  }
 }
 
 async function handleCommitPromptSkip(): Promise<void> {
   commitPromptMode.value = "skip";
+  promptDockCollapsed.value = true;
   await agentStore.resolvePendingCommitPrompt("skip");
+  if (agentStore.lastError && agentStore.pendingCommitPrompt) {
+    promptDockCollapsed.value = false;
+  }
 }
 
 function approvalOptionLabel(label: string, value: string): string {
@@ -1294,7 +1318,7 @@ function displayEntries(run: AgentExecutionRun): DisplayEntry[] {
   };
 
   for (const item of run.items) {
-    if (item.type === "usage" || item.type === "compression" || item.type === "system" || item.type === "phase") {
+    if (item.type === "usage" || item.type === "compression" || item.type === "system") {
       continue;
     }
     if (item.type === "tool") {
@@ -1530,6 +1554,129 @@ function formatTokenCount(value: number): string {
   }
   return String(Math.round(value));
 }
+
+defineExpose({
+  __testUtils: import.meta.env.MODE === "test" ? {
+    conversationRuns,
+    sessionSummaries,
+    modelLabel,
+    permissionControlLabel,
+    activePermissionTone,
+    selectedReasoningOption,
+    reasoningLabel,
+    storyOptionsLabel,
+    selectedChapterTemplate,
+    selectedChapterTemplateDescription,
+    storyChapterTemplateErrorMessage,
+    contextRatio,
+    contextLevel,
+    contextRingStyle,
+    contextTooltip,
+    filteredCommands,
+    commandMenuVisible,
+    approvalQueue,
+    activeApproval,
+    activeApprovalDraft,
+    allApprovalsComplete,
+    canConfirmApproval,
+    approvalConfirmLabel,
+    approvalConfirmTitle,
+    commitPromptSummary,
+    commitPromptFiles,
+    promptDockActive,
+    promptDockHandleTitle,
+    collapsedHandlesVisible,
+    commandMenuOpen,
+    permissionMenuOpen,
+    reasoningMenuOpen,
+    storyOptionsOpen,
+    selectedReasoningMode,
+    selectedCommandIndex,
+    approvalCursor,
+    approvalDrafts,
+    commitPromptMode,
+    commitMessage,
+    executionFloatCollapsed,
+    promptDockCollapsed,
+    buildPendingTargetPathOperationItems,
+    buildLiveOperationItemsForPending,
+    attachPendingWriteContext,
+    shouldApplyWholePendingWrite,
+    handleApproveOperation,
+    handleRejectOperation,
+    handleSubmitOrStop,
+    handleComposerKeydown,
+    handleCyclePermission,
+    togglePermissionMenu,
+    toggleReasoningMenu,
+    toggleStoryOptions,
+    handleDocumentPointerDown,
+    updateStoryFragmentCount,
+    updateStoryFragmentWordCount,
+    updateStoryChapterTemplate,
+    syncStoryGenerationOptionsFromProjectSettings,
+    persistStoryGenerationOptions,
+    isPermissionOptionActive,
+    permissionToneClass,
+    selectPermissionOption,
+    selectReasoningOption,
+    runCoomiCommand,
+    handleNewSession,
+    handleSessionSelect,
+    handleSessionDelete,
+    handleConfigSaved,
+    insertCommand,
+    selectCommand,
+    handleComposerInput,
+    resizeComposer,
+    isApprovalDraftComplete,
+    goToApproval,
+    selectApprovalOption,
+    updateApprovalDraftText,
+    handleApprovalConfirm,
+    handleApprovalCancel,
+    collapseExecutionFloat,
+    expandExecutionFloat,
+    collapsePromptDock,
+    expandPromptDock,
+    handleCommitPromptAuto,
+    selectCommitPromptManual,
+    handleCommitPromptManual,
+    handleCommitPromptSkip,
+    approvalOptionLabel,
+    approvalOptionDescription,
+    scrollToBottom,
+    displayEntries,
+    toolGroupStatus,
+    isFoldOpen,
+    toggleFold,
+    toolGroupDefaultOpen,
+    isToolGroupOpen,
+    toolChunks,
+    toolChunkDefaultOpen,
+    isToolChunkOpen,
+    toggleToolChunk,
+    reasoningTitle,
+    isActiveReasoning,
+    toolGroupTitle,
+    toolChunkTitle,
+    toolSummary,
+    toolStatusLabel,
+    compactToolDetail,
+    toolRowId,
+    isToolRowOpen,
+    toggleToolRow,
+    formatItemType,
+    formatStatus,
+    formatDate,
+    compactJson,
+    renderMarkdown,
+    handleMarkdownLinkClick,
+    compactText,
+    firstStringFromRecord,
+    formatTokenCount
+  } : null
+});
 </script>
 
 <style scoped>
@@ -1731,6 +1878,10 @@ function formatTokenCount(value: number): string {
   border-left-color: var(--info);
 }
 
+.coomi-event.type-phase {
+  border-left-color: var(--info);
+}
+
 .coomi-event.status-error {
   border-left-color: var(--danger);
 }
@@ -1781,6 +1932,13 @@ function formatTokenCount(value: number): string {
 
 .coomi-error-text {
   color: var(--danger);
+}
+
+.coomi-phase-text {
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
 }
 
 .coomi-tool-meta {
@@ -2404,6 +2562,39 @@ function formatTokenCount(value: number): string {
   background-color: var(--bg-input);
   backdrop-filter: none;
   box-shadow: var(--shadow-popover);
+}
+
+.coomi-commit-progress {
+  position: absolute;
+  left: 12px;
+  right: 58px;
+  bottom: calc(100% + 6px);
+  z-index: 6;
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text-soft);
+  box-shadow: var(--shadow-popover);
+  font-size: 12px;
+}
+
+.coomi-commit-progress-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: coomi-running-pulse 1.2s ease-in-out infinite;
+}
+
+.coomi-commit-progress.completed .coomi-commit-progress-dot {
+  background: var(--success);
+  animation: none;
 }
 
 .coomi-approval-menu {

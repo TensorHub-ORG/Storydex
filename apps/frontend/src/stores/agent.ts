@@ -65,6 +65,7 @@ interface AgentState {
   pendingApprovals: AgentPendingApproval[];
   pendingCommitPrompt: AgentPendingCommitPrompt | null;
   isCommittingGit: boolean;
+  commitActionLabel: string;
   storyFragmentCount: number;
   storyFragmentWordCount: number;
   storyChapterTemplateId: string;
@@ -76,6 +77,8 @@ interface AgentState {
 const MAX_EXECUTION_HISTORY = 40;
 const DEFAULT_CHAPTER_TEMPLATE_ID = "default_chapter_directory";
 let activeStreamAbortController: AbortController | null = null;
+let commitProgressTimer: number | null = null;
+let commitActionClearTimer: number | null = null;
 
 export const useAgentStore = defineStore("agent", {
   state: (): AgentState => ({
@@ -107,6 +110,7 @@ export const useAgentStore = defineStore("agent", {
     pendingApprovals: [],
     pendingCommitPrompt: null,
     isCommittingGit: false,
+    commitActionLabel: "",
     storyFragmentCount: 1,
     storyFragmentWordCount: 2000,
     storyChapterTemplateId: DEFAULT_CHAPTER_TEMPLATE_ID,
@@ -187,6 +191,15 @@ export const useAgentStore = defineStore("agent", {
       this.pendingApprovals = [];
       this.pendingCommitPrompt = null;
       this.isCommittingGit = false;
+      this.commitActionLabel = "";
+      if (commitProgressTimer !== null) {
+        window.clearTimeout(commitProgressTimer);
+        commitProgressTimer = null;
+      }
+      if (commitActionClearTimer !== null) {
+        window.clearTimeout(commitActionClearTimer);
+        commitActionClearTimer = null;
+      }
       if (options?.clearSessionId) {
         this.currentSessionId = "";
       }
@@ -263,6 +276,23 @@ export const useAgentStore = defineStore("agent", {
         return;
       }
       this.isCommittingGit = true;
+      this.commitActionLabel =
+        mode === "auto" ? "正在生成提交说明" : mode === "manual" ? "正在创建本地版本" : "正在保留未提交修改";
+      if (commitProgressTimer !== null) {
+        window.clearTimeout(commitProgressTimer);
+        commitProgressTimer = null;
+      }
+      if (commitActionClearTimer !== null) {
+        window.clearTimeout(commitActionClearTimer);
+        commitActionClearTimer = null;
+      }
+      if (mode === "auto") {
+        commitProgressTimer = window.setTimeout(() => {
+          if (this.isCommittingGit) {
+            this.commitActionLabel = "正在创建本地版本";
+          }
+        }, 2100);
+      }
       this.lastError = "";
       try {
         const result = await submitAgentRunCommitDecision(
@@ -276,7 +306,8 @@ export const useAgentStore = defineStore("agent", {
         );
         this.applyStreamPacket(prompt.traceId, buildCommitDecisionPacket(prompt, result.data));
         this.pendingCommitPrompt = null;
-        await useGitStore().refreshSummary({ silent: true });
+        this.commitActionLabel = mode === "skip" ? "已保留未提交修改" : "本地版本已创建";
+        void useGitStore().refreshSummary({ silent: true });
       } catch (error: unknown) {
         if (mode === "auto" && shouldRetryCommitWithFallbackMessage(error)) {
           try {
@@ -291,7 +322,8 @@ export const useAgentStore = defineStore("agent", {
             );
             this.applyStreamPacket(prompt.traceId, buildCommitDecisionPacket(prompt, result.data));
             this.pendingCommitPrompt = null;
-            await useGitStore().refreshSummary({ silent: true });
+            this.commitActionLabel = "本地版本已创建";
+            void useGitStore().refreshSummary({ silent: true });
             return;
           } catch (retryError: unknown) {
             this.lastError = describeTransportError(retryError, "提交小说项目修改失败。");
@@ -300,7 +332,17 @@ export const useAgentStore = defineStore("agent", {
         }
         this.lastError = describeTransportError(error, "提交小说项目修改失败。");
       } finally {
+        if (commitProgressTimer !== null) {
+          window.clearTimeout(commitProgressTimer);
+          commitProgressTimer = null;
+        }
         this.isCommittingGit = false;
+        commitActionClearTimer = window.setTimeout(() => {
+          if (!this.isCommittingGit) {
+            this.commitActionLabel = "";
+          }
+          commitActionClearTimer = null;
+        }, 1200);
       }
     },
 
@@ -807,6 +849,20 @@ function streamPacketToWaterfallItem(
 ): CoomiWaterfallItem | null {
   const eventName = String(packet._type || packet.type || "");
   const raw = packet as unknown as Record<string, unknown>;
+  if (eventName === "RunAccepted" || eventName === "TurnPhase") {
+    const elapsedMs = Math.max(0, Number(packet.elapsedMs || 0));
+    const label = String(packet.label || packet.detail || (eventName === "RunAccepted" ? "请求已接收" : "正在准备"));
+    const detail = String(packet.detail || "").trim();
+    const elapsedLabel = elapsedMs > 0 ? ` · ${(elapsedMs / 1000).toFixed(1)}s` : "";
+    return createWaterfallItem({
+      id: `${traceId}-active-phase`,
+      type: "phase",
+      status: statusForPacket(eventName, packet),
+      title: label,
+      content: `${detail && detail !== label ? `${label} · ${detail}` : label}${elapsedLabel}`,
+      raw
+    });
+  }
   if (eventName === "TextChunk") {
     const content = stripDsmlToolText(packet.content);
     if (!content) {
@@ -869,7 +925,6 @@ function streamPacketToWaterfallItem(
       eventName === "TaskFailed" ||
       eventName === "TaskSkipped" ||
       eventName === "TaskPlanUpdated" ||
-      eventName === "TurnPhase" ||
     eventName === "StageOutput" ||
     eventName === "AgentStarted" ||
     eventName === "AgentCompleted" ||
@@ -968,7 +1023,7 @@ function phaseForEvent(eventName: string): string {
   if (eventName === "GitAutoCommit" || eventName === "GitCommitPrompt" || eventName === "GitCommitResult") return "version_control";
   if (eventName.startsWith("Task")) return "planning";
   if (eventName === "TurnContract") return "orchestration";
-  if (eventName === "UsageUpdate" || eventName === "CompressionEvent" || eventName === "TurnPhase") return "runtime";
+  if (eventName === "RunAccepted" || eventName === "UsageUpdate" || eventName === "CompressionEvent" || eventName === "TurnPhase") return "runtime";
   if (eventName.startsWith("Agent")) return "agent";
   return "runtime";
 }
@@ -1006,7 +1061,7 @@ function detailForPacket(eventName: string, packet: AgentStreamPacket): string {
   if (eventName === "AgentError") return String(packet.message || "Coomi error");
   if (eventName === "GitAutoCommit" || eventName === "GitCommitPrompt" || eventName === "GitCommitResult") return summarizeGitAutoCommitPacket(packet);
   if (eventName === "TurnContract") return summarizeTurnContractPacket(packet);
-  if (eventName === "TurnPhase") return String(packet.detail || packet.label || eventName);
+  if (eventName === "RunAccepted" || eventName === "TurnPhase") return String(packet.detail || packet.label || eventName);
   if (eventName === "AgentCompleted") return `tokens ${Number(packet.total_tokens || 0)}`;
   return eventName;
 }
@@ -2164,3 +2219,77 @@ function clampInteger(value: unknown, minimum: number, maximum: number, fallback
   }
   return Math.max(minimum, Math.min(maximum, parsed));
 }
+
+// Deterministic normalization helpers are exposed only to Vitest. Keeping these
+// assertions close to the store lets security-sensitive path/session behavior be
+// tested directly without changing the production component API.
+export const __agentStoreTestUtils = import.meta.env.MODE === "test" ? {
+  streamPacketToTraceEvent,
+  streamPacketToWaterfallItem,
+  segmentItemId,
+  createWaterfallItem,
+  mergeWaterfallItem,
+  phaseForEvent,
+  statusForPacket,
+  detailForPacket,
+  summarizeGitAutoCommitPacket,
+  summarizeTurnContractPacket,
+  summarizePresetCompileFailures,
+  summarizeContextAssembly,
+  stripDsmlToolText,
+  stripTextualToolBlocks,
+  looksLikeToolXmlFragment,
+  normalizeHistoryRuns,
+  normalizeHistoryRun,
+  buildHistoryWaterfallItems,
+  normalizeCoomiStatus,
+  normalizeSessionSummaries,
+  normalizeStoryChapterTemplates,
+  normalizeStoryChapterTemplateError,
+  isStoryChapterTemplateNotFoundError,
+  createEmptyChangeLedger,
+  finalizeTaskStatuses,
+  normalizeTaskPlan,
+  upsertTaskEvent,
+  deriveTasksFromEvents,
+  sanitizeTaskList,
+  isGenericTaskTitle,
+  normalizeTaskStatus,
+  statusForTaskEvent,
+  normalizeChangeLedger,
+  normalizeCommitPrompt,
+  buildCommitDecisionPacket,
+  fallbackCommitMessage,
+  shouldRetryCommitWithFallbackMessage,
+  asRecord,
+  mergeChangeLedgerPaths,
+  isWriteLikeToolPacket,
+  extractChangedPathsFromToolPacket,
+  findToolArgumentsForPacket,
+  collectPathCandidates,
+  isPathLikeKey,
+  looksLikePathText,
+  extractPathsFromPreview,
+  normalizeChangedPath,
+  uniqueStrings,
+  escapeRegExp,
+  normalizeHistoryChangeLedger,
+  normalizeTraceEvents,
+  normalizeTrace,
+  normalizeAudit,
+  normalizeRunStatus,
+  normalizeAgentError,
+  normalizePendingApproval,
+  stringify,
+  summarizeUsagePacket,
+  summarizeCompressionPacket,
+  extractCompressionMeta,
+  firstString,
+  firstNumber,
+  formatTokenCount,
+  toRecord,
+  asString,
+  asBoolean,
+  asNumber,
+  clampInteger
+} : null;

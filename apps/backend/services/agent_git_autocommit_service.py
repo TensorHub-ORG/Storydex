@@ -269,6 +269,28 @@ class AgentGitAutoCommitService:
                 message=str(exc),
             )
 
+    def acknowledge_skip(
+        self,
+        workspace_root: Path,
+        *,
+        changed_files: Iterable[str] | None = None,
+        added: int = 0,
+        removed: int = 0,
+    ) -> Dict[str, Any]:
+        """Acknowledge a no-write decision without rescanning the repository."""
+        return self._payload(
+            event_type="GitCommitResult",
+            workspace_root=workspace_root,
+            created=False,
+            status="info",
+            reason="user_skipped",
+            message="已暂不提交本地修改。",
+            changed_files=changed_files,
+            added=added,
+            removed=removed,
+            diff_source="working_tree",
+        )
+
     def _commit_initial_snapshot_if_needed(self, workspace_root: Path, summary: Dict[str, Any]) -> Dict[str, Any] | None:
         recent_commits = summary.get("recentCommits")
         changed_files = summary.get("changedFiles")

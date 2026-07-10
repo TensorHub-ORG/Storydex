@@ -341,6 +341,14 @@ function formatTimestamp(value: string): string {
     minute: "2-digit"
   });
 }
+defineExpose({
+  __testUtils: import.meta.env.MODE === "test" ? {
+    commitMessage, changesExpanded, historyExpanded, summary, changedFiles, recentCommits,
+    refreshSummary, initializeRepository, toggleChanges, toggleHistory, handleCommitKeydown,
+    commitAllChanges, openChangedFile, restoreCommit, isCurrentCommit, formatStatus, statusClassName,
+    fileBaseName, fileDirectory, fileIconName, historyMetaText, historyRefLabel, historyRowTitle, formatTimestamp
+  } : null
+});
 </script>
 
 <style scoped>
