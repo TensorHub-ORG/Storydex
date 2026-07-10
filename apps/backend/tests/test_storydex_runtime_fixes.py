@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -463,7 +464,8 @@ def test_workspace_bound_bash_tool_runs_in_workspace(tmp_path):
     from services.storydex_coomi_runtime_tools import StorydexBashTool
 
     tool = StorydexBashTool(workspace_root=tmp_path)
-    result = tool.run({"command": "cd"})
+    command = "cd" if os.name == "nt" else "pwd"
+    result = tool.run({"command": command})
     assert result.success
     assert str(tmp_path.resolve()).lower() in result.output.strip().lower()
 

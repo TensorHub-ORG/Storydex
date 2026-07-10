@@ -114,9 +114,9 @@ jobs:
         working-directory: apps/frontend
       - run: npm run test:coverage
         working-directory: apps/frontend
-      - run: npm run test:regressions
-        working-directory: apps/frontend
       - run: npm run build
+        working-directory: apps/frontend
+      - run: npm run test:regressions
         working-directory: apps/frontend
       - name: Upload frontend reports
         if: always()

@@ -124,7 +124,8 @@ def test_secure_storage_roundtrip_validation_tampering_and_helpers(monkeypatch, 
     with pytest.raises(secure_storage_service.SecureStorageError):
         service.encrypt_json({}, user_id="")
     encrypted = service.encrypt_json({"token": "secret", "n": 1}, user_id="u")
-    assert encrypted["scheme"] == "dpapi-v1"
+    expected_scheme = "dpapi-v1" if __import__("os").name == "nt" else "local-secret-v1"
+    assert encrypted["scheme"] == expected_scheme
     assert service.decrypt_json(encrypted, user_id="u") == {"token": "secret", "n": 1}
     with pytest.raises(secure_storage_service.SecureStorageError):
         service.decrypt_json(encrypted, user_id="")

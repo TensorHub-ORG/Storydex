@@ -66,7 +66,7 @@ def test_stream_sends_acceptance_and_heartbeats_before_slow_intent_finishes(monk
             session_id="session-1",
             cancellation_token=routes_agent._CancellationToken(),
         )
-        first = await anext(stream)
+        first = await stream.__anext__()
         first_elapsed = time.perf_counter() - started
         first_completed_state = intent_service.completed
         remaining = [chunk async for chunk in stream]
@@ -118,7 +118,7 @@ def test_task_planning_phase_is_emitted_before_planner_completes(monkeypatch, tm
             request=_ConnectedRequest(),
             cancellation_token=routes_agent._CancellationToken(),
         )
-        first = await anext(stream)
+        first = await stream.__anext__()
         completed_at_first = planner_completed
         await stream.aclose()
         return first, completed_at_first
