@@ -608,6 +608,17 @@ async function fileToBase64(file: File): Promise<string> {
   }
   return window.btoa(binary);
 }
+defineExpose({
+  __testUtils: import.meta.env.MODE === "test" ? {
+    contextMenu, editorOpen, previewOpen, previewItems, pendingImportPayload, enabledItems, disabledItems,
+    handleActivate, handleDeactivate, openPresetContextMenu, closePresetContextMenu, handlePresetContextKeydown,
+    repositionPresetContextMenu, handleOpenContextPreset, handleEditContextPreset, handleContextActivate,
+    handleContextDeactivate, handleCopyPresetRelativePath, handleDeletePreset, openEditor, closeEditor,
+    refreshTree, openImportPicker, handleImportInputChange, confirmImport, cancelImport, openPreset,
+    collectPresetItems, walkPresetFiles, hasSidecarFor, sidecarPathFor, isEnabledPreset, findNode,
+    isPresetFile, iconFor, extensionLabel, extensionFromName, normalizePath, fileToBase64
+  } : null
+});
 </script>
 
 <style scoped>

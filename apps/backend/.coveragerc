@@ -1,0 +1,24 @@
+[run]
+branch = True
+source =
+    api
+    core
+    services
+parallel = True
+
+[report]
+show_missing = True
+skip_covered = False
+precision = 2
+fail_under = 80
+exclude_lines =
+    pragma: no cover
+    if TYPE_CHECKING:
+    if __name__ == ["']__main__["']:
+
+[json]
+output = test-results/coverage.json
+
+[xml]
+output = test-results/coverage.xml
+

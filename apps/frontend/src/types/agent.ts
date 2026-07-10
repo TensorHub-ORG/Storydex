@@ -98,6 +98,7 @@ export type AgentStreamPacketType =
   | "final"
   | "error"
   | "done"
+  | "RunAccepted"
   | "TextChunk"
   | "TextReset"
   | "ReasoningChunk"
@@ -149,6 +150,9 @@ export interface AgentStreamPacket {
   current?: number;
   total?: number;
   detail?: string;
+  startedAt?: string;
+  elapsedMs?: number;
+  heartbeat?: boolean;
   tool_name?: string;
   tool_call_id?: string;
   arguments?: Record<string, unknown>;

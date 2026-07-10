@@ -1251,6 +1251,25 @@ async function writeClipboard(text: string): Promise<void> {
   }
   window.prompt("复制以下文本", text);
 }
+defineExpose({
+  __testUtils: import.meta.env.MODE === "test" ? {
+    expandedPaths, contextMenu, clipboardState, pendingCreate, pendingRename, pendingRenameValue, dragTargetPath, rows,
+    nodePath, normalizeNodePath, isChapterDirectory, diagnosticCount, directDiagnosticCount, hasDiagnostics,
+    hasDirectDiagnostics, diagnosticHint, shouldShowRowActions, showDiagnosticDot, chapterCompletionLabel,
+    isStorySegmentNode, storyDiagnosticCount, storyDiagnosticHint, shouldShowStoryRowActions, chapterStateTitle,
+    isRenamingNode, handleRefresh, handleAutoRefresh, handleWindowPointerDown, handleSave, handleRowClick,
+    handleChapterCompletionToggle, openNodeContextMenu, handleRootContextMenu, openContextMenuAt, closeContextMenu,
+    isDirectoryDropTarget, handleRootDragEnter, handleRootDragOver, handleRootDragLeave, handleRootDrop,
+    handleNodeDragEnter, handleNodeDragOver, handleNodeDragLeave, handleNodeDrop, repositionContextMenu,
+    toggleDirectory, isExpanded, iconFor, getNodeKey, flattenTree, shouldRenderCreateRowAfter, startRootCreate,
+    startCreate, cancelPendingCreate, cancelPendingRename, startRename, submitPendingRename, submitPendingCreate,
+    handleOpenToSide, handleOpenWith, handleReveal, handleRevealRoot, handleAddToChat, handleCut, handleCopy,
+    handlePaste, handleRename, handleDelete, handleRenameNode, handleDeleteNode, handleCopyPath,
+    handleCopyRelativePath, hasExternalFiles, importDroppedFiles, fileToBase64, getDirectoryPath, getParentPath,
+    joinRelativePath, sanitizeLeafName, normalizePath, absolutePathFor, buildPastedRelativePath, splitCopyName,
+    treeContainsPath, writeClipboard
+  } : null
+});
 </script>
 
 <style scoped>

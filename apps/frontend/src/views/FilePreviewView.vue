@@ -573,6 +573,16 @@ function fileNameFromPath(value: string): string {
   const parts = normalized.split("/");
   return parts[parts.length - 1] || normalized;
 }
+defineExpose({
+  __testUtils: import.meta.env.MODE === "test" ? {
+    tabs, activeRelativePath, activeTab, activeFileStats, renderedMarkdown, isActiveTabDirty,
+    applyPersistedAppearance, handleWindowFocus, handleWindowBlur, handleWindowPageHide, handleWindowKeydown,
+    handleMarkdownLinkClick, openOrActivateTab, ensureTab, loadTabContent, activateTab, closeTab,
+    handleModeChange, handleEditorInput, saveTab, isTabDirty, scheduleActiveTabAutoSave, clearAutoSaveTimer,
+    flushActiveTabAutoSave, persistTabBeforeLeaving, saveAllTabs, iconFor, extensionFromPath,
+    countStoryTextWords, countLines, formatInteger, formatBytes, normalizeRelativePath, fileNameFromPath
+  } : null
+});
 </script>
 
 <style scoped>

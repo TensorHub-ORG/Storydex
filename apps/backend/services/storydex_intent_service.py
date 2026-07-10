@@ -39,9 +39,11 @@ INTENT_LABELS: tuple[str, ...] = (
 )
 _CONFIDENCE_LEVELS = {"high", "medium", "low"}
 _INTENT_SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
-DEFAULT_LLM_TIMEOUT_SECONDS = 8.0
+DEFAULT_LLM_TIMEOUT_SECONDS = 2.0
 _MAX_PROMPT_CHARS = 2000
 _MAX_SESSION_MEMORY = 256
+_FOLLOW_UP_RE = re.compile(r"^(执行|继续|确认|好的?|可以|是的|就这么做|开始|继续执行)[。.!！\s]*$")
+_VARIABLE_ACTION_RE = re.compile(r"(变量|状态).*(整理|更新|同步|归档)|(整理|更新|同步|归档).*(变量|状态)")
 
 # 内置意图目录：描述、资产落点（与 TurnContract assetTargets 对齐）、少样本示例。
 _BUILTIN_INTENT_CATALOG: Dict[str, Dict[str, Any]] = {
@@ -148,7 +150,7 @@ def build_intent_catalog(
 
 def heuristic_intent_frame(*, prompt: str, active_file: str) -> Dict[str, Any]:
     """关键词启发式分类，作为 LLM 不可用时的兜底路径。"""
-    text = f"{prompt}\n{active_file}"
+    text = str(prompt or "")
     signals: List[str] = []
     primary = "general"
     if _STORY_INTENT_RE.search(text):
@@ -314,23 +316,47 @@ class StorydexIntentService:
     ) -> Dict[str, Any]:
         normalized_prompt = str(prompt or "").strip()
         catalog = self._catalog(workspace_root)
-        previous_turn = self._session_turns.get(session_id) if session_id else None
+        session_key = self._session_key(workspace_root=workspace_root, session_id=session_id)
+        previous_turn = self._session_turns.get(session_key) if session_key else None
+        is_follow_up = bool(_FOLLOW_UP_RE.match(normalized_prompt))
+        if session_id and (is_follow_up or previous_turn is None):
+            persisted_turn = self._load_persisted_turn(
+                session_id=session_id,
+                workspace_root=workspace_root,
+            )
+            if persisted_turn:
+                previous_turn = {**persisted_turn, **(previous_turn or {})}
         # 确定性短路：slash 命令与空输入不需要语义分类。
         if not normalized_prompt or normalized_prompt.startswith("/"):
             frame = heuristic_intent_frame(prompt=normalized_prompt, active_file=active_file)
             frame["method"] = "deterministic"
+        elif is_follow_up and previous_turn:
+            frame = self._follow_up_frame(previous_turn)
         else:
-            frame = await self._llm_intent_frame(
-                prompt=normalized_prompt,
-                active_file=active_file,
-                catalog=catalog,
-                previous_turn=previous_turn,
-            )
-            if frame is None:
-                frame = heuristic_intent_frame(prompt=normalized_prompt, active_file=active_file)
-                frame["method"] = "heuristic_fallback"
+            heuristic = heuristic_intent_frame(prompt=normalized_prompt, active_file=active_file)
+            explicit_signals = [
+                signal for signal in heuristic.get("signals", []) if signal != "active_chapter_file"
+            ]
+            if explicit_signals:
+                frame = heuristic
+                frame["method"] = "heuristic_fast"
+            else:
+                frame = await self._llm_intent_frame(
+                    prompt=normalized_prompt,
+                    active_file=active_file,
+                    catalog=catalog,
+                    previous_turn=previous_turn,
+                )
+                if frame is None:
+                    frame = heuristic
+                    frame["method"] = "heuristic_fallback"
         _enrich_frame(frame, catalog)
-        self._remember(session_id=session_id, prompt=normalized_prompt, primary=str(frame.get("primary") or ""))
+        self._remember(
+            session_key=session_key,
+            prompt=normalized_prompt,
+            primary=str(frame.get("primary") or ""),
+            previous_turn=previous_turn,
+        )
         return frame
 
     def _catalog(self, workspace_root: Path | None) -> Dict[str, Dict[str, Any]]:
@@ -342,13 +368,111 @@ class StorydexIntentService:
         except Exception:
             return build_intent_catalog()
 
-    def _remember(self, *, session_id: str, prompt: str, primary: str) -> None:
-        if not session_id or not prompt or not primary:
+    def clear_session(self, *, session_id: str, workspace_root: Path | None = None) -> None:
+        key = self._session_key(workspace_root=workspace_root, session_id=session_id)
+        if key:
+            self._session_turns.pop(key, None)
+        if workspace_root is None:
+            suffix = f"::{str(session_id or 'default').strip() or 'default'}"
+            for candidate in [item for item in self._session_turns if item.endswith(suffix)]:
+                self._session_turns.pop(candidate, None)
+
+    @staticmethod
+    def _session_key(*, workspace_root: Path | None, session_id: str) -> str:
+        normalized_session = str(session_id or "").strip()
+        if not normalized_session:
+            return ""
+        workspace = str(Path(workspace_root).resolve()) if workspace_root is not None else "default"
+        return f"{workspace}::{normalized_session}"
+
+    def _remember(
+        self,
+        *,
+        session_key: str,
+        prompt: str,
+        primary: str,
+        previous_turn: Dict[str, str] | None = None,
+    ) -> None:
+        if not session_key or not prompt or not primary:
             return
-        self._session_turns[session_id] = {"prompt": prompt[:200], "intent": primary}
-        self._session_turns.move_to_end(session_id)
+        remembered = {
+            "prompt": prompt[:200],
+            "intent": primary,
+        }
+        if previous_turn:
+            assistant_reply = str(previous_turn.get("assistantReply") or "").strip()
+            pending_action = str(previous_turn.get("pendingAction") or "").strip()
+            if assistant_reply:
+                remembered["assistantReply"] = assistant_reply[:1200]
+            if pending_action:
+                remembered["pendingAction"] = pending_action[:500]
+        self._session_turns[session_key] = remembered
+        self._session_turns.move_to_end(session_key)
         while len(self._session_turns) > _MAX_SESSION_MEMORY:
             self._session_turns.popitem(last=False)
+
+    @staticmethod
+    def _follow_up_frame(previous_turn: Dict[str, str]) -> Dict[str, Any]:
+        assistant_reply = str(previous_turn.get("assistantReply") or "")
+        pending_action = str(previous_turn.get("pendingAction") or "")
+        primary = str(previous_turn.get("intent") or "general")
+        if _VARIABLE_ACTION_RE.search(f"{pending_action}\n{assistant_reply}"):
+            primary = "general"
+        return {
+            "primary": primary,
+            "confidence": "high",
+            "signals": ["persistent_previous_turn", "elliptical_follow_up"],
+            "method": "deterministic_context",
+            "reason": "Resolved from the previous assistant proposal in this session.",
+        }
+
+    @staticmethod
+    def _load_persisted_turn(*, session_id: str, workspace_root: Path | None) -> Dict[str, str] | None:
+        try:
+            from services.trace_history_service import get_trace_history_service
+
+            records = get_trace_history_service().list_records(session_id=session_id, limit=5)
+        except Exception:
+            return None
+        expected_workspace = str(Path(workspace_root).resolve()) if workspace_root is not None else ""
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            record_workspace = str(record.get("workspaceRoot") or "").strip()
+            if expected_workspace and record_workspace:
+                try:
+                    if str(Path(record_workspace).resolve()) != expected_workspace:
+                        continue
+                except Exception:
+                    continue
+            prompt = str(record.get("prompt") or "").strip()
+            reply = str(record.get("reply") or "").strip()
+            intent = ""
+            audit = record.get("audit") if isinstance(record.get("audit"), list) else []
+            for item in reversed(audit):
+                if isinstance(item, dict) and item.get("action") == "storydex_turn_contract":
+                    intent = str(item.get("intent") or "").strip()
+                    break
+            if not intent:
+                events = record.get("events") if isinstance(record.get("events"), list) else []
+                for event in reversed(events):
+                    if not isinstance(event, dict) or event.get("event") != "TurnContract":
+                        continue
+                    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+                    intent_frame = data.get("intentFrame") if isinstance(data.get("intentFrame"), dict) else {}
+                    intent = str(intent_frame.get("primary") or "").strip()
+                    if intent:
+                        break
+            if not prompt and not reply:
+                continue
+            pending_action = reply[-800:] if reply and ("?" in reply or "？" in reply or "是否" in reply) else ""
+            return {
+                "prompt": prompt[:200],
+                "intent": intent or "general",
+                "assistantReply": reply[-1200:],
+                "pendingAction": pending_action,
+            }
+        return None
 
     async def _llm_intent_frame(
         self,

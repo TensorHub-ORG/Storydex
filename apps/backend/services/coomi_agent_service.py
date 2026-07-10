@@ -3,11 +3,14 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 import os
 import re
 import threading
 import time
 from contextlib import contextmanager
+from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, Iterator
 from urllib.parse import urlsplit, urlunsplit
@@ -26,10 +29,115 @@ WARNING_THRESHOLD_RATIO = 0.6
 _COOMI_ENDPOINT_COMPAT_INSTALLED = False
 _COOMI_HOME_REDIRECTS_INSTALLED = False
 _COOMI_REDIRECT_INSTALL_LOCK = threading.Lock()
+_LOGGER = logging.getLogger(__name__)
 
 
 class StorydexCoomiUnavailable(RuntimeError):
     pass
+
+
+def _coomi_binding_path(workspace_root: Path, storydex_session_id: str) -> Path:
+    workspace = Path(workspace_root).resolve()
+    normalized_session = str(storydex_session_id or "default").strip() or "default"
+    digest = sha256(normalized_session.encode("utf-8")).hexdigest()[:24]
+    return workspace / ".storydex" / ".agent" / "runtime" / "coomi-sessions" / f"{digest}.json"
+
+
+def _read_coomi_session_binding(*, workspace_root: Path, storydex_session_id: str) -> Dict[str, Any]:
+    path = _coomi_binding_path(workspace_root, storydex_session_id)
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        _LOGGER.warning("Unable to read Coomi session binding %s: %s", path, exc)
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    expected_workspace = str(Path(workspace_root).resolve())
+    if str(payload.get("workspaceRoot") or "") != expected_workspace:
+        _LOGGER.warning("Ignored cross-workspace Coomi session binding: %s", path)
+        return {}
+    if str(payload.get("storydexSessionId") or "") != (str(storydex_session_id or "default").strip() or "default"):
+        return {}
+    return payload
+
+
+def _write_coomi_session_binding(
+    *,
+    workspace_root: Path,
+    storydex_session_id: str,
+    session: Any,
+) -> Path:
+    path = _coomi_binding_path(workspace_root, storydex_session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "workspaceRoot": str(Path(workspace_root).resolve()),
+        "storydexSessionId": str(storydex_session_id or "default").strip() or "default",
+        "coomiSessionId": str(getattr(session, "id", "") or ""),
+        "historyPath": str(getattr(session, "history_path", "") or ""),
+        "updatedAt": datetime.now(timezone.utc).isoformat(),
+    }
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
+    return path
+
+
+def _restore_bound_coomi_session(*, manager: Any, workspace_root: Path, storydex_session_id: str) -> Any | None:
+    binding = _read_coomi_session_binding(
+        workspace_root=workspace_root,
+        storydex_session_id=storydex_session_id,
+    )
+    if not binding:
+        return None
+    history_path = Path(str(binding.get("historyPath") or ""))
+    if not history_path.exists() or not history_path.is_file():
+        _LOGGER.warning("Coomi session history is missing for Storydex session %s", storydex_session_id)
+        return None
+    try:
+        from coomi.services.session_history import load_session_from_jsonl
+
+        session = load_session_from_jsonl(history_path)
+        expected_id = str(binding.get("coomiSessionId") or "")
+        if expected_id and str(getattr(session, "id", "") or "") != expected_id:
+            raise ValueError("Coomi session id does not match the Storydex binding")
+        manager.register_session(session)
+        return session
+    except Exception as exc:
+        _LOGGER.warning("Unable to restore Coomi session %s: %s", storydex_session_id, exc)
+        return None
+
+
+def _delete_coomi_session_binding(
+    *,
+    workspace_root: Path,
+    storydex_session_id: str,
+    delete_history: bool,
+) -> None:
+    path = _coomi_binding_path(workspace_root, storydex_session_id)
+    binding = _read_coomi_session_binding(
+        workspace_root=workspace_root,
+        storydex_session_id=storydex_session_id,
+    )
+    if delete_history:
+        raw_history_path = str(binding.get("historyPath") or "").strip()
+        if raw_history_path:
+            try:
+                history_path = Path(raw_history_path).resolve()
+                sessions_root = STORYDEX_COOMI_SESSIONS.resolve()
+                history_path.relative_to(sessions_root)
+                if history_path.is_file():
+                    history_path.unlink()
+            except (OSError, ValueError):
+                _LOGGER.warning("Refused or failed to delete Coomi history path: %s", raw_history_path)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        _LOGGER.warning("Unable to delete Coomi session binding %s: %s", path, exc)
 
 
 class StorydexCoomiAgentService:
@@ -48,6 +156,12 @@ class StorydexCoomiAgentService:
             lock = asyncio.Lock()
             self._lock = lock
         return lock
+
+    @staticmethod
+    def _runtime_key(*, session_id: str, workspace_root: Path) -> str:
+        workspace = str(Path(workspace_root).resolve())
+        normalized_session = str(session_id or "default").strip() or "default"
+        return f"{workspace}::{normalized_session}"
 
     async def create_task_plan(
         self,
@@ -291,8 +405,9 @@ class StorydexCoomiAgentService:
         app_context: Any = None,
     ) -> tuple[Any, Any]:
         async with self._runtime_lock():
-            session = self._sessions.get(session_id)
-            agent = self._agents.get(session_id)
+            runtime_key = self._runtime_key(session_id=session_id, workspace_root=workspace_root)
+            session = self._sessions.get(runtime_key)
+            agent = self._agents.get(runtime_key)
             if session is not None and agent is not None:
                 session.system_prompt = await _build_coomi_system_prompt(
                     workspace_root=workspace_root,
@@ -318,7 +433,7 @@ class StorydexCoomiAgentService:
 
             provider = get_llm_provider()
             registry = _create_storydex_tool_registry(workspace_root)
-            permissions = self._permissions.get(session_id)
+            permissions = self._permissions.get(runtime_key)
             if permissions is None:
                 permissions = self._create_permission_system(
                     PermissionLevel,
@@ -326,7 +441,7 @@ class StorydexCoomiAgentService:
                     PermissionSystem,
                     workspace_root,
                 )
-                self._permissions[session_id] = permissions
+                self._permissions[runtime_key] = permissions
             else:
                 _sync_storydex_permission_context(permissions, workspace_root=workspace_root, mode=self._permission_mode)
 
@@ -337,10 +452,24 @@ class StorydexCoomiAgentService:
                 turn_contract=turn_contract,
             )
             manager = SessionManager(history_dir=STORYDEX_COOMI_SESSIONS, persist_history=True)
-            session = manager.create_session(
-                system_prompt=system_prompt,
-                cwd=workspace_root.as_posix(),
-                model=getattr(provider, "model", "coomi"),
+            session = _restore_bound_coomi_session(
+                manager=manager,
+                workspace_root=workspace_root,
+                storydex_session_id=session_id,
+            )
+            if session is None:
+                session = manager.create_session(
+                    system_prompt=system_prompt,
+                    cwd=workspace_root.as_posix(),
+                    model=getattr(provider, "model", "coomi"),
+                )
+            else:
+                session.system_prompt = system_prompt
+                setattr(session, "current_model", getattr(provider, "model", "coomi"))
+            _write_coomi_session_binding(
+                workspace_root=workspace_root,
+                storydex_session_id=session_id,
+                session=session,
             )
             agent = AgentLoop(
                 provider,
@@ -356,8 +485,8 @@ class StorydexCoomiAgentService:
                 workspace_root=workspace_root,
                 app_context=app_context,
             )
-            self._sessions[session_id] = session
-            self._agents[session_id] = agent
+            self._sessions[runtime_key] = session
+            self._agents[runtime_key] = agent
             return agent, session
 
     async def _stream_plan_command(
@@ -656,11 +785,30 @@ class StorydexCoomiAgentService:
             raise ValueError("Model list response is not valid JSON.") from exc
         return {"endpoint": endpoint, "models": _extract_model_ids(payload)}
 
-    def clear_session(self, session_id: str) -> None:
+    def clear_session(
+        self,
+        session_id: str,
+        *,
+        workspace_root: Path | None = None,
+        delete_history: bool = False,
+    ) -> None:
         normalized = str(session_id or "default").strip() or "default"
-        self._sessions.pop(normalized, None)
-        self._agents.pop(normalized, None)
-        self._permissions.pop(normalized, None)
+        if workspace_root is not None:
+            runtime_key = self._runtime_key(session_id=normalized, workspace_root=workspace_root)
+            self._sessions.pop(runtime_key, None)
+            self._agents.pop(runtime_key, None)
+            self._permissions.pop(runtime_key, None)
+            if delete_history:
+                _delete_coomi_session_binding(
+                    workspace_root=workspace_root,
+                    storydex_session_id=normalized,
+                    delete_history=True,
+                )
+            return
+        suffix = f"::{normalized}"
+        for cache in (self._sessions, self._agents, self._permissions):
+            for key in [item for item in cache if item.endswith(suffix)]:
+                cache.pop(key, None)
 
     def set_permission_mode(self, mode: str) -> Dict[str, Any]:
         normalized = _normalize_permission_mode(mode)

@@ -5,14 +5,29 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and verify release assets without publishing
+        required: true
+        default: true
+        type: boolean
+
+concurrency:
+  group: storydex-windows-release
+  cancel-in-progress: false
 
 permissions:
   contents: write
 
 jobs:
+  quality-gate:
+    uses: ./.github/workflows/quality-gate.yml
+
   release-windows:
     name: Build and publish Windows release
+    needs: quality-gate
     runs-on: windows-latest
+    environment: ${{ github.event_name == 'push' && 'production' || 'release-dry-run' }}
     env:
       PYTHONUTF8: "1"
       PYTHONIOENCODING: "utf-8"
@@ -198,7 +213,18 @@ jobs:
             "$($entry.Key)=$($entry.Value)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           }
 
+      - name: Generate build manifest and dependency inventory
+        shell: pwsh
+        run: |
+          node scripts/generate_release_metadata.cjs --release-dir=release-assets --version=${{ steps.metadata.outputs.version }} --test-summary="Reusable quality gate passed"
+          $lines = Get-ChildItem -LiteralPath release-assets -File | Where-Object Name -ne "SHA256SUMS.txt" | Sort-Object Name | ForEach-Object {
+            $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName
+            "$($hash.Hash)  $($_.Name)"
+          }
+          Set-Content -LiteralPath release-assets/SHA256SUMS.txt -Value $lines -Encoding ASCII
+
       - name: Publish GitHub Release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.metadata.outputs.tag }}
@@ -212,8 +238,11 @@ jobs:
             ${{ steps.release.outputs.blockmap_path }}
             ${{ steps.release.outputs.latest_path }}
             ${{ steps.release.outputs.sums_path }}
+            release-assets/BUILD_MANIFEST.json
+            release-assets/DEPENDENCIES.json
 
       - name: Publish update feed to VPS
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         env:
           DEPLOY_HOST: ${{ secrets.STORYDEX_DEPLOY_HOST }}
@@ -267,8 +296,7 @@ jobs:
 
           $files = @(
             @{ local = "release-assets/$($env:SETUP_NAME)";     remote = $env:SETUP_NAME },
-            @{ local = "release-assets/$($env:BLOCKMAP_NAME)";  remote = $env:BLOCKMAP_NAME },
-            @{ local = "release-assets/latest.yml";             remote = "latest.yml" }
+            @{ local = "release-assets/$($env:BLOCKMAP_NAME)";  remote = $env:BLOCKMAP_NAME }
           )
 
           foreach ($f in $files) {
@@ -282,12 +310,33 @@ jobs:
           & ssh @sshArgs
           if ($LASTEXITCODE -ne 0) { throw "Failed to ensure remote directory: $remoteDir" }
 
-          # Upload latest.yml LAST so it never points to a not-yet-uploaded installer.
-          foreach ($f in @($files[0], $files[1], $files[2])) {
+          foreach ($f in $files) {
             $scpArgs = @("-i", $keyPath, "-P", $port) + $hostKeyOpts + @($f.local, "$target`:$remoteDir/$($f.remote)")
             Write-Host "Uploading $($f.local) -> $remoteDir/$($f.remote)"
             & scp @scpArgs
             if ($LASTEXITCODE -ne 0) { throw "Upload failed for $($f.local)" }
+          }
+
+          # latest.yml is uploaded under a temporary name and atomically renamed last.
+          $latestTemporary = "latest.yml.$($env:GITHUB_RUN_ID).tmp"
+          $latestScpArgs = @("-i", $keyPath, "-P", $port) + $hostKeyOpts + @("release-assets/latest.yml", "$target`:$remoteDir/$latestTemporary")
+          & scp @latestScpArgs
+          if ($LASTEXITCODE -ne 0) { throw "Upload failed for latest.yml" }
+          $replaceArgs = @("-i", $keyPath, "-p", $port) + $hostKeyOpts + @($target, "mv -f '$remoteDir/$latestTemporary' '$remoteDir/latest.yml'")
+          & ssh @replaceArgs
+          if ($LASTEXITCODE -ne 0) { throw "Atomic latest.yml replacement failed" }
+
+          $publicBase = "https://updates.septemc.com/storydex/windows"
+          $publishedLatest = (Invoke-WebRequest -UseBasicParsing -Uri "$publicBase/latest.yml").Content
+          if ($publishedLatest -notmatch "(?m)^version:\s*$([regex]::Escape('${{ steps.metadata.outputs.version }}'))\s*$") {
+            throw "Published latest.yml version mismatch"
+          }
+          if ($publishedLatest -notmatch "(?m)^path:\s*$([regex]::Escape($env:SETUP_NAME))\s*$") {
+            throw "Published latest.yml installer path mismatch"
+          }
+          foreach ($name in @($env:SETUP_NAME, $env:BLOCKMAP_NAME)) {
+            $response = Invoke-WebRequest -UseBasicParsing -Method Head -Uri "$publicBase/$name"
+            if ($response.StatusCode -lt 200 -or $response.StatusCode -ge 400) { throw "Published asset unavailable: $name" }
           }
 
           Remove-Item -LiteralPath $keyPath -Force -ErrorAction SilentlyContinue

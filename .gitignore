@@ -118,3 +118,9 @@ docs/superpowers/
 
 # ----- Release -----
 release/
+releases/
+
+# ----- Other -----
+.codex_tmp/
+videos/
+docs/宣发文档/

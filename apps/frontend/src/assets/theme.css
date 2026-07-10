@@ -251,11 +251,12 @@ body.is-resizing-panels {
 }
 
 :root:not(.icon-font-ready) .material-symbols-rounded {
-  font-size: 0;
+  visibility: hidden;
 }
 
 :root:not(.icon-font-ready) .material-symbols-rounded::before {
-  content: "•";
+  content: "…";
+  visibility: visible;
   font-size: 12px;
   line-height: 1;
   color: var(--text-faint);
@@ -263,6 +264,23 @@ body.is-resizing-panels {
 
 :root.icon-font-ready .material-symbols-rounded::before {
   content: "";
+}
+
+:root.icon-font-failed .material-symbols-rounded {
+  width: auto;
+  min-width: 1em;
+  height: auto;
+  overflow: visible;
+  visibility: visible;
+  font-family: var(--font-ui);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+  text-transform: lowercase;
+}
+
+:root.icon-font-failed .material-symbols-rounded::before {
+  content: none;
 }
 
 code,

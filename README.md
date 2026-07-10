@@ -21,7 +21,7 @@
 </table>
 
 <p align="center">
-  <img alt="release" src="https://img.shields.io/badge/release-v0.3.2-2563eb?style=flat-square" />
+  <img alt="release" src="https://img.shields.io/badge/release-v0.3.3-2563eb?style=flat-square" />
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0%20%2B%20Commons%20Clause-0f766e?style=flat-square" />
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-f97316?style=flat-square" />
   <img alt="desktop" src="https://img.shields.io/badge/desktop-Electron%2034-47848f?style=flat-square&logo=electron&logoColor=white" />
@@ -98,3 +98,46 @@ Storydex/
 ## 作者与版权
 
 Copyright 2026 Septemc and Flowby.
+
+## v0.3.3
+
+v0.3.3 修复了离线 Material Symbols 图标在冷启动或字体加载失败时显示为空白的问题，并为字体加载增加确定性重试、超时状态和可见文本降级。Coomi 现在会在请求进入后立即发送 `RunAccepted`，随后持续发送带耗时的 `TurnPhase` 和 heartbeat，因此意图识别、上下文装配或模型等待期间不会长期停留在没有过程反馈的“执行中”。
+
+会话恢复改为 Storydex 项目、Storydex sessionId 与 Coomi JSONL 历史的隔离映射。重新启动应用后，原会话可继续读取上一轮用户、助手、工具与待执行动作；“执行”等省略指令会承接上一轮确认语义，不会仅因活动文件位于 `chapters/` 而误触发新剧情生成。
+
+本地 Git 确认面板会在点击自动提交、手动提交或跳过后立即收起并显示操作状态。跳过不再重新扫描完整仓库，提交说明生成有 2 秒超时和本地确定性回退。该功能只在小说项目中创建本地 Git 版本，**不会自动配置远程仓库，也不会自动 push**。
+
+## 开发与测试
+
+安装测试依赖后，可使用统一 PowerShell 入口：
+
+```powershell
+pip install -r apps/backend/requirements-test.txt
+npm ci --prefix apps/frontend
+npm ci --prefix apps/desktop
+.\scripts\run_full_test_suite.ps1 -Mode Fast
+.\scripts\run_full_test_suite.ps1 -Mode Full
+.\scripts\run_full_test_suite.ps1 -Mode Release
+```
+
+- `Fast`：编码、冲突标记、版本、Python 编译、后端 pytest/覆盖率、前端类型/Vitest/回归/构建、桌面单元与发布配置检查。
+- `Full`：在 Fast 基础上构建 `win-unpacked`，验证前端字体、后端、嵌入式 Python、MinGit 与更新配置，并运行隔离用户目录的 Electron E2E。
+- `Release`：在 Full 基础上生成并验证 NSIS installer、blockmap、`latest.yml` 和校验文件；任何阶段失败都会返回非零退出码。
+
+测试代码分别位于 `apps/backend/tests`、`apps/frontend/tests` 和 `apps/desktop/tests`。后端覆盖 unit、API contract、integration、security、SSE 性能、会话恢复和并发失败恢复；前端覆盖 SSE parser、Pinia store、AgentPanel 与字体状态机；桌面覆盖 Node 契约、打包资源、Electron 冷启动和更新元数据。所有自动化测试使用临时 HOME、临时项目和 fake/mock provider，不访问真实付费 LLM 或用户配置。
+
+`.github/workflows/ci.yml` 在 PR、main push 和手动触发时调用可复用的 `quality-gate.yml`。质量门禁覆盖 Python 3.9（Windows/Ubuntu）、Python 3.13 Windows 兼容性、Node 20、Windows 打包与 Electron E2E，并上传 JUnit、覆盖率和失败诊断产物。发布工作流必须先通过同一质量门禁。
+
+## Windows 安装、便携包与应用内更新
+
+v0.3.3 发布资产包括 NSIS 安装包、`Storydex-win-unpacked.zip` 便携包、blockmap、`latest.yml`、SHA256 校验、发布说明和构建 manifest。应用内更新使用 `electron-updater` 的 generic feed；安装版可使用 blockmap 进行差分下载，便携包适合解压后直接启动和人工验证。
+
+## Desktop Update Feed
+
+Windows desktop releases use the generic electron-updater feed at:
+
+```text
+https://updates.septemc.com/storydex/windows/
+```
+
+For differential-update testing, publish both `0.3.2` and `0.3.3` installer assets to the update directory, then leave `latest.yml` pointing to `0.3.3`. Install the `0.3.2` package first, then check for updates inside Storydex to verify the `0.3.2 -> 0.3.3` update path.

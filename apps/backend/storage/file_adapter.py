@@ -33,7 +33,15 @@ class FileAdapter:
         self.workspace_root = workspace_root.resolve()
 
     def resolve_path(self, relative_path: str) -> Path:
-        candidate = (self.workspace_root / relative_path).resolve()
+        raw_path = str(relative_path or "").strip().replace("\\", "/")
+        if raw_path.startswith("/") or raw_path.startswith("//"):
+            raise InvalidWorkspacePathError(f"Path is outside workspace: {relative_path}")
+        if len(raw_path) >= 2 and raw_path[0].isalpha() and raw_path[1] == ":":
+            raise InvalidWorkspacePathError(f"Path is outside workspace: {relative_path}")
+        parts = [part for part in raw_path.split("/") if part not in {"", "."}]
+        if any(part == ".." for part in parts):
+            raise InvalidWorkspacePathError(f"Path is outside workspace: {relative_path}")
+        candidate = self.workspace_root.joinpath(*parts).resolve()
         if self.workspace_root not in candidate.parents and candidate != self.workspace_root:
             raise InvalidWorkspacePathError(f"Path is outside workspace: {relative_path}")
         return candidate

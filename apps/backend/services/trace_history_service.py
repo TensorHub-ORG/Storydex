@@ -334,8 +334,12 @@ class TraceHistoryService:
         normalized = str(session_id or "").strip()
         if normalized in {".", ".."}:
             return True
-        path = Path(normalized)
-        return path.is_absolute() or any(part == ".." for part in path.parts)
+        portable = normalized.replace("\\", "/")
+        if portable.startswith("/") or portable.startswith("//"):
+            return True
+        if len(portable) >= 2 and portable[0].isalpha() and portable[1] == ":":
+            return True
+        return any(part == ".." for part in portable.split("/"))
 
     @staticmethod
     def _safe_session_directory_name(session_id: str) -> str:
