@@ -153,4 +153,10 @@ function hasEventData(value: unknown): boolean {
 function stringifyData(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
+defineExpose({
+  __testUtils: import.meta.env.MODE === "test" ? {
+    activeRun, executionHistory, shortTrace, formatDate, formatStatus, statusClass, eventToneClass,
+    hasEventData, stringifyData
+  } : null
+});
 </script>

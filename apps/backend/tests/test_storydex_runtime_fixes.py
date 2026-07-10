@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,8 +19,12 @@ import pytest
 import services.coomi_agent_service as coomi_agent_service
 from services.coomi_agent_service import (
     DEFAULT_CONTEXT_WINDOW,
+    _coomi_binding_path,
+    _delete_coomi_session_binding,
+    _restore_bound_coomi_session,
     _resolve_context_window,
     _storydex_check_permission,
+    _write_coomi_session_binding,
     _write_paths_escape_workspace,
 )
 from services.retrieval_service import get_retrieval_service, reset_retrieval_cache
@@ -118,6 +123,100 @@ def test_write_tool_inside_workspace_stays_allowed(tmp_path):
 def test_default_permission_mode_is_full_access():
     service = coomi_agent_service.StorydexCoomiAgentService()
     assert service._permission_mode == "full_access"
+
+
+def test_coomi_session_binding_restores_jsonl_messages(monkeypatch, tmp_path):
+    pytest.importorskip("coomi")
+    from coomi.engine.session import SessionManager
+    from coomi.services.session_history import append_message
+    from coomi.types import Message
+
+    history_root = tmp_path / "coomi-history"
+    monkeypatch.setattr(coomi_agent_service, "STORYDEX_COOMI_SESSIONS", history_root)
+    workspace = tmp_path / "story"
+    workspace.mkdir()
+    manager = SessionManager(history_dir=history_root, persist_history=True)
+    session = manager.create_session(system_prompt="system", cwd=str(workspace), model="fake")
+    user_message = Message(role="user", content="是否需要执行变量整理")
+    assistant_message = Message(role="assistant", content="需要，请确认后执行。")
+    session.messages.extend([user_message, assistant_message])
+    append_message(session, user_message)
+    append_message(session, assistant_message)
+    _write_coomi_session_binding(
+        workspace_root=workspace,
+        storydex_session_id="storydex-session",
+        session=session,
+    )
+
+    restored_manager = SessionManager(history_dir=history_root, persist_history=True)
+    restored = _restore_bound_coomi_session(
+        manager=restored_manager,
+        workspace_root=workspace,
+        storydex_session_id="storydex-session",
+    )
+
+    assert restored is not None
+    assert [message.content for message in restored.messages] == ["是否需要执行变量整理", "需要，请确认后执行。"]
+    assert restored_manager.get_session(restored.id) is restored
+
+
+def test_coomi_session_binding_is_project_isolated(tmp_path):
+    first = tmp_path / "one"
+    second = tmp_path / "two"
+    first.mkdir()
+    second.mkdir()
+    assert _coomi_binding_path(first, "same-session") != _coomi_binding_path(second, "same-session")
+
+
+def test_corrupt_coomi_binding_safely_falls_back(monkeypatch, tmp_path):
+    pytest.importorskip("coomi")
+    from coomi.engine.session import SessionManager
+
+    history_root = tmp_path / "coomi-history"
+    monkeypatch.setattr(coomi_agent_service, "STORYDEX_COOMI_SESSIONS", history_root)
+    workspace = tmp_path / "story"
+    workspace.mkdir()
+    binding_path = _coomi_binding_path(workspace, "broken-session")
+    binding_path.parent.mkdir(parents=True, exist_ok=True)
+    binding_path.write_text("{broken", encoding="utf-8")
+
+    restored = _restore_bound_coomi_session(
+        manager=SessionManager(history_dir=history_root, persist_history=True),
+        workspace_root=workspace,
+        storydex_session_id="broken-session",
+    )
+
+    assert restored is None
+
+
+def test_delete_coomi_binding_removes_bound_history(monkeypatch, tmp_path):
+    pytest.importorskip("coomi")
+    from coomi.engine.session import SessionManager
+
+    history_root = tmp_path / "coomi-history"
+    monkeypatch.setattr(coomi_agent_service, "STORYDEX_COOMI_SESSIONS", history_root)
+    workspace = tmp_path / "story"
+    workspace.mkdir()
+    session = SessionManager(history_dir=history_root, persist_history=True).create_session(
+        system_prompt="system",
+        cwd=str(workspace),
+        model="fake",
+    )
+    binding_path = _write_coomi_session_binding(
+        workspace_root=workspace,
+        storydex_session_id="delete-session",
+        session=session,
+    )
+    history_path = Path(session.history_path)
+
+    _delete_coomi_session_binding(
+        workspace_root=workspace,
+        storydex_session_id="delete-session",
+        delete_history=True,
+    )
+
+    assert not binding_path.exists()
+    assert not history_path.exists()
 
 
 # ─────────────────── 3. 预设编译失败浮出 ───────────────────
@@ -365,7 +464,8 @@ def test_workspace_bound_bash_tool_runs_in_workspace(tmp_path):
     from services.storydex_coomi_runtime_tools import StorydexBashTool
 
     tool = StorydexBashTool(workspace_root=tmp_path)
-    result = tool.run({"command": "cd"})
+    command = "cd" if os.name == "nt" else "pwd"
+    result = tool.run({"command": command})
     assert result.success
     assert str(tmp_path.resolve()).lower() in result.output.strip().lower()
 

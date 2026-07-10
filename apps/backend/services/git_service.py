@@ -354,15 +354,15 @@ class GitService:
         root = Path(workspace_root).resolve()
         normalized_paths = self._normalize_paths(paths)
         self.initialize_repository(root)
-        if ".gitignore" not in normalized_paths and self._paths_have_changes(root, [".gitignore"]):
-            normalized_paths.append(".gitignore")
-        is_first_commit = not self._has_head_commit(root)
         if not normalized_paths:
             return {
                 "created": False,
                 "commit": None,
                 "summary": self.read_summary(root),
             }
+        if ".gitignore" not in normalized_paths and self._paths_have_changes(root, [".gitignore"]):
+            normalized_paths.append(".gitignore")
+        is_first_commit = not self._has_head_commit(root)
 
         if not self._paths_have_changes(root, normalized_paths):
             return {
@@ -410,7 +410,12 @@ class GitService:
 
     def _ensure_branch_name(self, workspace_root: Path) -> None:
         branch = self._read_current_branch(workspace_root)
-        if branch:
+        if branch == self.DEFAULT_BRANCH:
+            return
+        # A freshly initialized repository inherits the user's global
+        # init.defaultBranch. Storydex repositories must remain deterministic,
+        # while existing repositories with commits keep their chosen branch.
+        if branch and self._has_head_commit(workspace_root):
             return
         self._run_git(workspace_root, ["symbolic-ref", "HEAD", f"refs/heads/{self.DEFAULT_BRANCH}"], check=False)
 

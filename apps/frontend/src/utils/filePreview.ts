@@ -22,5 +22,5 @@ export async function openFilePreviewWindow(relativePath: string): Promise<boole
 }
 
 function normalizeRelativePath(value: string): string {
-  return String(value || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").trim();
+  return String(value || "").trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").trim();
 }

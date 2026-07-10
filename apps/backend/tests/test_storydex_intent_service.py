@@ -18,9 +18,12 @@ from contextlib import contextmanager
 
 from services.storydex_intent_service import (
     StorydexIntentService,
+    _extract_json_object,
+    _intent_messages,
     _parse_intent_frame,
     build_intent_catalog,
     heuristic_intent_frame,
+    is_valid_intent_frame,
 )
 from services.story_project_service import get_story_project_service
 from services.storydex_orchestration_service import get_storydex_orchestration_service
@@ -87,16 +90,21 @@ def test_parse_intent_frame_rejects_unknown_label_and_bad_json():
 # ─────────────────── 2. 兜底路径 ───────────────────
 
 
-def test_classify_intent_falls_back_when_provider_raises(monkeypatch):
+def test_classify_intent_uses_fast_heuristic_for_clear_signal(monkeypatch):
+    calls = 0
+
     class BrokenProvider:
         async def chat(self, messages, options):
+            nonlocal calls
+            calls += 1
             raise RuntimeError("provider offline")
 
     _install_fake_provider(monkeypatch, BrokenProvider())
     service = StorydexIntentService()
     frame = asyncio.run(service.classify_intent(prompt="帮我整理知识图谱", active_file=""))
     assert frame["primary"] == "wiki_work"
-    assert frame["method"] == "heuristic_fallback"
+    assert frame["method"] == "heuristic_fast"
+    assert calls == 0
 
 
 def test_classify_intent_falls_back_on_timeout(monkeypatch):
@@ -107,7 +115,7 @@ def test_classify_intent_falls_back_on_timeout(monkeypatch):
 
     _install_fake_provider(monkeypatch, SlowProvider())
     service = StorydexIntentService(llm_timeout_seconds=0.01)
-    frame = asyncio.run(service.classify_intent(prompt="续写一段剧情", active_file=""))
+    frame = asyncio.run(service.classify_intent(prompt="帮我处理一下这个", active_file="chapters/001.md"))
     assert frame["primary"] == "story_generation"
     assert frame["method"] == "heuristic_fallback"
 
@@ -119,8 +127,8 @@ def test_classify_intent_falls_back_on_invalid_llm_output(monkeypatch):
 
     _install_fake_provider(monkeypatch, NoisyProvider())
     service = StorydexIntentService()
-    frame = asyncio.run(service.classify_intent(prompt="设计一个反派角色", active_file=""))
-    assert frame["primary"] == "character_work"
+    frame = asyncio.run(service.classify_intent(prompt="帮我处理一下这个", active_file=""))
+    assert frame["primary"] == "general"
     assert frame["method"] == "heuristic_fallback"
 
 
@@ -244,19 +252,231 @@ def test_classify_intent_accepts_custom_registry_intent(monkeypatch, tmp_path):
 
 
 def test_classify_intent_passes_previous_turn_context(monkeypatch):
-    seen_requests = []
+    calls = 0
 
     class FakeProvider:
         async def chat(self, messages, options):
-            seen_requests.append(json.loads(messages[1]["content"]))
-            if len(seen_requests) == 1:
-                return _FakeResponse('{"primary": "character_work", "confidence": "high"}')
-            return _FakeResponse('{"primary": "character_work", "confidence": "medium", "reason": "延续上一轮"}')
+            nonlocal calls
+            calls += 1
+            return _FakeResponse('{"primary": "general", "confidence": "medium"}')
 
     _install_fake_provider(monkeypatch, FakeProvider())
     service = StorydexIntentService()
     asyncio.run(service.classify_intent(prompt="设计一个新角色", session_id="s1"))
     frame = asyncio.run(service.classify_intent(prompt="继续", session_id="s1"))
-    assert seen_requests[0]["previousTurn"] is None
-    assert seen_requests[1]["previousTurn"] == {"prompt": "设计一个新角色", "intent": "character_work"}
     assert frame["primary"] == "character_work"
+    assert frame["method"] == "deterministic_context"
+    assert calls == 0
+
+
+def test_persisted_assistant_action_survives_service_restart(monkeypatch, tmp_path):
+    class PersistedTraceHistory:
+        def list_records(self, *, session_id, limit):
+            assert session_id == "restored-session"
+            return [
+                {
+                    "prompt": "这是一个什么故事",
+                    "reply": "变量更新已经完成，是否需要我继续执行变量整理？",
+                    "workspaceRoot": str(tmp_path),
+                    "audit": [
+                        {
+                            "action": "storydex_turn_contract",
+                            "intent": "story_generation",
+                        }
+                    ],
+                }
+            ]
+
+    import services.trace_history_service as trace_history_module
+
+    monkeypatch.setattr(trace_history_module, "get_trace_history_service", lambda: PersistedTraceHistory())
+
+    restarted_service = StorydexIntentService()
+    frame = asyncio.run(
+        restarted_service.classify_intent(
+            prompt="执行",
+            active_file="chapters/第三章/001.md",
+            workspace_root=tmp_path,
+            session_id="restored-session",
+        )
+    )
+
+    assert frame["primary"] == "general"
+    assert frame["method"] == "deterministic_context"
+    assert "persistent_previous_turn" in frame["signals"]
+
+
+def test_in_memory_previous_turn_is_isolated_by_workspace(tmp_path):
+    service = StorydexIntentService()
+    first_workspace = tmp_path / "one"
+    second_workspace = tmp_path / "two"
+    first_workspace.mkdir()
+    second_workspace.mkdir()
+
+    asyncio.run(
+        service.classify_intent(
+            prompt="设计一个新角色",
+            workspace_root=first_workspace,
+            session_id="same-id",
+        )
+    )
+    frame = asyncio.run(
+        service.classify_intent(
+            prompt="继续",
+            workspace_root=second_workspace,
+            session_id="same-id",
+        )
+    )
+
+    assert frame["primary"] != "character_work"
+
+
+def test_catalog_tolerates_registry_failures_and_invalid_entries(tmp_path):
+    class BrokenProjects:
+        def read_agent_skill_registry(self, root):
+            raise OSError("registry unavailable")
+
+    fallback = build_intent_catalog(workspace_root=tmp_path, story_project_service=BrokenProjects())
+    assert set(fallback) >= {"general", "story_generation"}
+
+    class InvalidProjects:
+        def read_agent_skill_registry(self, root):
+            return {
+                "skills": [
+                    None,
+                    "bad",
+                    {},
+                    {"name": "bad slug", "intent": "INVALID-LABEL"},
+                    {"id": "minimal", "intent": "custom_work", "assetTargets": "not-a-list"},
+                    {"name": "minimal", "intent": "custom_work", "assetTargets": ["", "assets/", "assets/"]},
+                ]
+            }
+
+    catalog = build_intent_catalog(workspace_root=tmp_path, story_project_service=InvalidProjects())
+    assert catalog["custom_work"]["skills"] == ["minimal"]
+    assert catalog["custom_work"]["assetTargets"] == ["assets/"]
+
+
+def test_heuristics_validation_json_and_message_helpers_cover_edge_cases():
+    assert heuristic_intent_frame(prompt="设计角色关系", active_file="")["primary"] == "character_work"
+    assert heuristic_intent_frame(prompt="整理项目目录", active_file="")["primary"] == "project_organization"
+    assert heuristic_intent_frame(prompt="普通问题", active_file="chapters/001.md")["primary"] == "story_generation"
+    assert heuristic_intent_frame(prompt="普通问题", active_file="notes/chapter.md")["primary"] == "general"
+
+    assert is_valid_intent_frame(None) is False
+    assert is_valid_intent_frame({"primary": "BAD", "method": "llm"}) is False
+    assert is_valid_intent_frame({"primary": "general", "method": ""}) is False
+    assert is_valid_intent_frame({"primary": "general", "method": "llm"}) is True
+
+    assert _extract_json_object('prefix {"primary":"general"} suffix') == {"primary": "general"}
+    assert _extract_json_object("prefix {broken} suffix") is None
+    assert _extract_json_object("no braces") is None
+    frame = _parse_intent_frame(
+        '{"primary":"general","secondary":"wiki_work","confidence":"low","reason":"ok"}',
+        valid_labels=set(build_intent_catalog()),
+    )
+    assert frame["secondary"] == "wiki_work"
+    same = _parse_intent_frame(
+        '{"primary":"general","secondary":"general"}',
+        valid_labels=set(build_intent_catalog()),
+    )
+    assert "secondary" not in same
+
+    messages = _intent_messages(
+        prompt="x" * 3000,
+        active_file="chapters/1.md",
+        catalog={"general": {"description": "chat", "assetTargets": [], "skills": [], "examples": []}},
+        previous_turn={"intent": "general"},
+    )
+    request = json.loads(messages[1]["content"])
+    assert len(request["prompt"]) == 2000
+    assert request["activeFileIsChapter"] is True
+
+
+def test_service_catalog_fallback_clear_session_and_memory_bound(monkeypatch, tmp_path):
+    import services.storydex_intent_service as intent_module
+
+    service = StorydexIntentService(story_project_service=object())
+    monkeypatch.setattr(intent_module, "build_intent_catalog", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("bad")) if kwargs else {"general": {"assetTargets": [], "skills": []}})
+    assert set(service._catalog(tmp_path)) == {"general"}
+
+    service = StorydexIntentService()
+    one = tmp_path / "one"
+    two = tmp_path / "two"
+    service._remember(session_key=f"{one.resolve()}::same", prompt="one", primary="general")
+    service._remember(session_key=f"{two.resolve()}::same", prompt="two", primary="general")
+    service.clear_session(session_id="same", workspace_root=one)
+    assert f"{one.resolve()}::same" not in service._session_turns
+    assert f"{two.resolve()}::same" in service._session_turns
+    service.clear_session(session_id="same")
+    assert not service._session_turns
+    service.clear_session(session_id="")
+
+    monkeypatch.setattr(intent_module, "_MAX_SESSION_MEMORY", 2)
+    service._remember(session_key="a", prompt="a", primary="general")
+    service._remember(session_key="b", prompt="b", primary="general")
+    service._remember(session_key="c", prompt="c", primary="general")
+    assert list(service._session_turns) == ["b", "c"]
+    service._remember(session_key="", prompt="x", primary="general")
+
+
+def test_persisted_turn_handles_errors_workspace_filter_and_event_intent(monkeypatch, tmp_path):
+    import services.trace_history_service as trace_history_module
+
+    class BrokenHistory:
+        def list_records(self, **kwargs):
+            raise OSError("broken")
+
+    monkeypatch.setattr(trace_history_module, "get_trace_history_service", lambda: BrokenHistory())
+    assert StorydexIntentService._load_persisted_turn(session_id="s", workspace_root=tmp_path) is None
+
+    other = tmp_path / "other"
+    other.mkdir()
+
+    class EventHistory:
+        def list_records(self, **kwargs):
+            return [
+                "bad",
+                {"workspaceRoot": str(other), "prompt": "wrong workspace", "reply": "ignored"},
+                {"workspaceRoot": "\x00", "prompt": "bad path", "reply": "ignored"},
+                {"workspaceRoot": str(tmp_path), "prompt": "", "reply": "", "audit": [None]},
+                {
+                    "workspaceRoot": str(tmp_path),
+                    "prompt": "continue",
+                    "reply": "done",
+                    "audit": [None, {"action": "other"}],
+                    "events": [
+                        None,
+                        {"event": "Other"},
+                        {"event": "TurnContract", "data": "bad"},
+                        {"event": "TurnContract", "data": {"intentFrame": "bad"}},
+                        {"event": "TurnContract", "data": {"intentFrame": {"primary": "wiki_work"}}},
+                    ],
+                },
+            ]
+
+    monkeypatch.setattr(trace_history_module, "get_trace_history_service", lambda: EventHistory())
+    restored = StorydexIntentService._load_persisted_turn(session_id="s", workspace_root=tmp_path)
+    assert restored["intent"] == "wiki_work"
+    assert restored["pendingAction"] == ""
+
+
+def test_provider_without_content_falls_back_and_follow_up_keeps_pending_fields(monkeypatch):
+    class ContentlessProvider:
+        async def chat(self, messages, options):
+            return object()
+
+    _install_fake_provider(monkeypatch, ContentlessProvider())
+    service = StorydexIntentService()
+    frame = asyncio.run(service.classify_intent(prompt="请帮我处理一下"))
+    assert frame["method"] == "heuristic_fallback"
+
+    service._remember(
+        session_key="default::s",
+        prompt="previous",
+        primary="character_work",
+        previous_turn={"assistantReply": "please continue", "pendingAction": "update character"},
+    )
+    remembered = service._session_turns["default::s"]
+    assert remembered["assistantReply"] == "please continue"
+    assert remembered["pendingAction"] == "update character"

@@ -29,6 +29,7 @@ const excludedSegments = new Set([
   "dist",
   "node_modules",
   "release",
+  "releases",
   "vendor"
 ]);
 

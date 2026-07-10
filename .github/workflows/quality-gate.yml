@@ -1,0 +1,266 @@
+name: Reusable Quality Gate
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+  STORYDEX_DISABLE_NETWORK: "1"
+  STORYDEX_TESTING: "1"
+
+jobs:
+  source-policy:
+    name: source-policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - name: Encoding, conflicts, and version consistency
+        shell: pwsh
+        run: |
+          node scripts/validate_text_encoding.cjs
+          $conflicts = & git grep -n -E '^(<<<<<<< .+|=======|>>>>>>> .+)$' -- . `
+            ':(exclude)apps/desktop/app/**' `
+            ':(exclude)apps/desktop/vendor/**' `
+            ':(exclude)apps/desktop/release/**' `
+            ':(exclude)releases/**'
+          $searchCode = $LASTEXITCODE
+          if ($searchCode -gt 1) { throw "Conflict-marker scan failed with exit code $searchCode" }
+          if ($conflicts) { $conflicts | Write-Host; throw "Conflict markers found" }
+          $global:LASTEXITCODE = 0
+          node scripts/validate_version_consistency.cjs
+          git diff --check
+
+  backend-tests:
+    name: backend-tests (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.9"
+          - os: windows-latest
+            python: "3.9"
+          - os: windows-latest
+            python: "3.13"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            apps/backend/requirements-test.txt
+      - name: Install backend test dependencies
+        run: python -m pip install -r apps/backend/requirements-test.txt
+      - name: Run backend tests with coverage
+        working-directory: apps/backend
+        run: >-
+          python -m pytest -q
+          --cov=api --cov=core --cov=services --cov-branch
+          --cov-report=term-missing
+          --cov-report=json:test-results/coverage.json
+          --cov-report=xml:test-results/coverage.xml
+          --junitxml=test-results/pytest.xml
+      - name: Enforce detailed coverage gates
+        working-directory: apps/backend
+        run: python tests/assert_coverage.py test-results/coverage.json
+      - name: Upload backend reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-${{ matrix.os }}-py${{ matrix.python }}
+          path: apps/backend/test-results
+          if-no-files-found: warn
+
+  backend-compatibility:
+    name: backend-compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - run: python -m pip install -r apps/backend/requirements-test.txt
+      - name: Compile and import all backend modules
+        working-directory: apps/backend
+        run: |
+          python -m compileall -q api core services
+          python -c "import main; assert main.app.title"
+
+  frontend-tests:
+    name: frontend-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/frontend/package-lock.json
+      - run: npm ci
+        working-directory: apps/frontend
+      - run: npm run type-check
+        working-directory: apps/frontend
+      - run: npm run test:coverage
+        working-directory: apps/frontend
+      - run: npm run build
+        working-directory: apps/frontend
+      - run: npm run test:regressions
+        working-directory: apps/frontend
+      - name: Upload frontend reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-test-results
+          path: apps/frontend/test-results
+          if-no-files-found: warn
+
+  desktop-unit-tests:
+    name: desktop-unit-tests
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - run: npm ci
+        working-directory: apps/desktop
+      - run: npm run test:unit
+        working-directory: apps/desktop
+      - run: npm run check:release
+        working-directory: apps/desktop
+
+  integration-tests:
+    name: integration-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+          cache: pip
+          cache-dependency-path: apps/backend/requirements-test.txt
+      - run: python -m pip install -r apps/backend/requirements-test.txt
+      - name: Session, SSE, Git, and runtime integration regressions
+        working-directory: apps/backend
+        run: >-
+          python -m pytest -q
+          tests/test_agent_stream_responsiveness.py
+          tests/test_agent_git_autocommit_service.py
+          tests/test_storydex_intent_service.py
+          tests/test_storydex_runtime_fixes.py
+          --junitxml=test-results/integration.xml
+      - name: Upload integration report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results
+          path: apps/backend/test-results
+          if-no-files-found: warn
+
+  desktop-package-smoke:
+    name: desktop-package-smoke
+    runs-on: windows-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: |
+            apps/frontend/package-lock.json
+            apps/desktop/package-lock.json
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.9" }
+      - run: npm ci
+        working-directory: apps/frontend
+      - run: npm ci
+        working-directory: apps/desktop
+      - name: Prepare embedded Python
+        shell: pwsh
+        run: ./scripts/bootstrap_python39.ps1 -InstallRequirements
+      - name: Build unpacked desktop
+        shell: cmd
+        run: npm --prefix apps/desktop run build:desktop
+      - run: npm run check:packaged
+        working-directory: apps/desktop
+      - uses: actions/upload-artifact@v4
+        with:
+          name: storydex-win-unpacked
+          path: apps/desktop/release/win-unpacked
+          retention-days: 3
+
+  electron-e2e:
+    name: electron-e2e
+    needs: desktop-package-smoke
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - run: npm ci
+        working-directory: apps/desktop
+      - uses: actions/download-artifact@v4
+        with:
+          name: storydex-win-unpacked
+          path: apps/desktop/release/win-unpacked
+      - name: Run packaged Electron E2E
+        working-directory: apps/desktop
+        run: npm run test:e2e
+      - name: Upload Electron diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: electron-e2e-diagnostics
+          path: |
+            apps/desktop/test-results
+            apps/desktop/playwright-report
+          if-no-files-found: warn
+
+  quality-gate-summary:
+    name: quality-gate-summary
+    if: always()
+    needs:
+      - source-policy
+      - backend-tests
+      - backend-compatibility
+      - frontend-tests
+      - desktop-unit-tests
+      - integration-tests
+      - desktop-package-smoke
+      - electron-e2e
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every quality job
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          results = json.loads(os.environ["RESULTS"])
+          failed = {name: item["result"] for name, item in results.items() if item["result"] != "success"}
+          if failed:
+              print("Quality gate failed:", failed)
+              sys.exit(1)
+          print("All Storydex quality gates passed.")
+          PY
