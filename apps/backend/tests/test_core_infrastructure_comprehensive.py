@@ -150,6 +150,24 @@ def test_secure_storage_roundtrip_validation_tampering_and_helpers(monkeypatch, 
     assert secure_storage_service._bytes_from_blob(secure_storage_service._DATA_BLOB()) == b""
 
 
+def test_secure_storage_cross_platform_dpapi_and_decode_branches(monkeypatch, tmp_path):
+    service = secure_storage_service.SecureStorageService(root=tmp_path)
+    monkeypatch.setattr(secure_storage_service.os, "name", "nt")
+    monkeypatch.setattr(secure_storage_service, "_dpapi_protect", lambda raw, *, entropy: b"protected:" + raw)
+    monkeypatch.setattr(secure_storage_service, "_dpapi_unprotect", lambda raw, *, entropy: raw.removeprefix(b"protected:"))
+    encrypted = service.encrypt_json({"token": "secret"}, user_id="u")
+    assert encrypted["scheme"] == "dpapi-v1"
+    assert service.decrypt_json(encrypted, user_id="u") == {"token": "secret"}
+
+    monkeypatch.setattr(secure_storage_service.os, "name", "posix")
+    non_object = service.encrypt_json([], user_id="u")
+    with pytest.raises(secure_storage_service.SecureStorageError, match="payload_invalid"):
+        service.decrypt_json(non_object, user_id="u")
+    monkeypatch.setattr(secure_storage_service.base64, "b64decode", lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad")))
+    with pytest.raises(secure_storage_service.SecureStorageError, match="ciphertext_invalid"):
+        service.decrypt_json({"scheme": "local-secret-v1", "ciphertext": "bad"}, user_id="u")
+
+
 def test_job_queue_lifecycle_dedup_filters_retries_wait_and_singleton(tmp_path):
     queue = job_queue.JobQueue(tmp_path / "jobs.db")
     first = queue.enqueue(kind="ok", payload={"x": 1}, dedup_key="same", project_id="p")

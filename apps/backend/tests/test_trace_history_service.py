@@ -130,3 +130,33 @@ def test_private_helpers_handle_invalid_timestamps_and_paths(service: TraceHisto
     assert service._record_belongs_to_session({"sessionId": "s"}, "s") is True
     summary = service._build_session_summary("empty", [])
     assert summary["traceCount"] == 0 and summary["firstPrompt"] == ""
+
+
+def test_portable_branch_matrix_for_async_paths_names_and_summaries(service: TraceHistoryService, monkeypatch):
+    sync_calls = []
+    rooted_calls = []
+    monkeypatch.setattr(service, "_upsert_record_sync", lambda **kwargs: sync_calls.append(kwargs))
+    monkeypatch.setattr(service, "_upsert_record_sync_at_storydex_root", lambda **kwargs: rooted_calls.append(kwargs))
+    service._async_trace_handler({"trace_id": "plain", "record": {"traceId": "plain"}})
+    service._async_trace_handler({"trace_id": "rooted", "storydex_root": str(service.project_service.storydex_root)})
+    assert sync_calls[0]["trace_id"] == "plain"
+    assert rooted_calls[0]["trace_id"] == "rooted"
+
+    base = service.project_service.storydex_root / ".agent" / "sessions"
+    monkeypatch.setattr(service, "_session_id_needs_safe_directory", lambda _value: False)
+    escaped = service._resolve_session_root(base, "../forced-escape")
+    assert escaped.name.startswith("_session_")
+
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "not-a-session.txt").write_text("x", encoding="utf-8")
+    (base / "real-session").mkdir()
+    assert "real-session" in service._collect_session_names()
+
+    summary = service._build_session_summary(
+        "mixed",
+        [
+            record("blank", "", "2026-01-01T00:00:00Z"),
+            record("named", "first nonblank", "2026-01-02T00:00:00Z"),
+        ],
+    )
+    assert summary["firstPrompt"] == "first nonblank"

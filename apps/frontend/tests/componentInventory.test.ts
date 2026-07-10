@@ -25,6 +25,11 @@ vi.mock("axios", () => ({
   }
 }));
 
+vi.mock("@/api/system", async (load) => ({
+  ...(await load<any>()),
+  updateUiPreferences: vi.fn().mockResolvedValue({ data: {}, trace: null, audit: [] })
+}));
+
 import App from "@/App.vue";
 import AccountMenu from "@/components/ActivityAccountMenu.vue";
 import ActivityBar from "@/components/ActivityBar.vue";
