@@ -14,6 +14,7 @@ function readDesktopPackageMetadata() {
 const DESKTOP_PACKAGE = readDesktopPackageMetadata();
 const DESKTOP_APP_ID = String(DESKTOP_PACKAGE.build?.appId || "cn.tensorhub.storydex").trim();
 const DESKTOP_PRODUCT_NAME = String(DESKTOP_PACKAGE.build?.productName || DESKTOP_PACKAGE.productName || "Storydex").trim();
+const DEFAULT_UPDATE_FEED_URL = resolveDefaultUpdateFeedUrl();
 const FRONTEND_DEV_URL = process.env.STORYDEX_DESKTOP_URL || "http://127.0.0.1:5173";
 const BACKEND_HOST = process.env.STORYDEX_BACKEND_HOST || "127.0.0.1";
 const BACKEND_PORT = Number(process.env.STORYDEX_BACKEND_PORT || 18081);
@@ -25,6 +26,13 @@ const DEFAULT_TITLEBAR_THEME = {
   height: DESKTOP_TITLEBAR_HEIGHT
 };
 let lastAppliedTitlebarTheme = { ...DEFAULT_TITLEBAR_THEME };
+
+function resolveDefaultUpdateFeedUrl() {
+  const publish = DESKTOP_PACKAGE.build?.publish;
+  const entries = Array.isArray(publish) ? publish : publish ? [publish] : [];
+  const genericFeed = entries.find((entry) => String(entry?.provider || "").trim() === "generic" && entry?.url);
+  return String(genericFeed?.url || "").trim();
+}
 
 let mainWindow = null;
 let backendProcess = null;
@@ -659,9 +667,12 @@ function initializeAutoUpdater() {
   autoUpdater.autoInstallOnAppQuit = true;
   autoUpdater.disableDifferentialDownload = false;
 
-  const configuredFeed = String(process.env.STORYDEX_UPDATE_URL || "").trim();
+  const configuredFeed = String(process.env.STORYDEX_UPDATE_URL || DEFAULT_UPDATE_FEED_URL || "").trim();
   if (configuredFeed) {
     autoUpdater.setFeedURL({ provider: "generic", url: configuredFeed });
+  } else {
+    setUpdaterState({ supported: false, status: "unsupported", error: "缺少桌面版更新源配置，无法自动更新。" });
+    return;
   }
 
   autoUpdater.on("checking-for-update", () => {
