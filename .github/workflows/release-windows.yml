@@ -27,7 +27,7 @@ jobs:
     name: Build and publish Windows release
     needs: quality-gate
     runs-on: windows-latest
-    environment: ${{ github.event_name == 'push' && 'production' || 'release-dry-run' }}
+    environment: ${{ (github.event_name == 'push' || inputs.dry_run == false) && 'production' || 'release-dry-run' }}
     env:
       PYTHONUTF8: "1"
       PYTHONIOENCODING: "utf-8"
@@ -224,7 +224,7 @@ jobs:
           Set-Content -LiteralPath release-assets/SHA256SUMS.txt -Value $lines -Encoding ASCII
 
       - name: Publish GitHub Release
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.metadata.outputs.tag }}
@@ -242,7 +242,7 @@ jobs:
             release-assets/DEPENDENCIES.json
 
       - name: Publish update feed to VPS
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
         shell: pwsh
         env:
           DEPLOY_HOST: ${{ secrets.STORYDEX_DEPLOY_HOST }}
@@ -327,7 +327,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Atomic latest.yml replacement failed" }
 
           $publicBase = "https://updates.septemc.com/storydex/windows"
-          $publishedLatest = (Invoke-WebRequest -UseBasicParsing -Uri "$publicBase/latest.yml").Content
+          $latestResponse = Invoke-WebRequest -UseBasicParsing -Headers @{ "Cache-Control" = "no-cache" } -Uri "$publicBase/latest.yml?run=$env:GITHUB_RUN_ID"
+          $publishedLatest = if ($latestResponse.Content -is [byte[]]) {
+            [System.Text.Encoding]::UTF8.GetString($latestResponse.Content)
+          } else {
+            [string]$latestResponse.Content
+          }
           if ($publishedLatest -notmatch "(?m)^version:\s*$([regex]::Escape('${{ steps.metadata.outputs.version }}'))\s*$") {
             throw "Published latest.yml version mismatch"
           }
