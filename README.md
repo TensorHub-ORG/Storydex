@@ -21,7 +21,7 @@
 </table>
 
 <p align="center">
-  <img alt="release" src="https://img.shields.io/badge/release-v0.3.3-2563eb?style=flat-square" />
+  <img alt="release" src="https://img.shields.io/badge/release-v0.3.4-2563eb?style=flat-square" />
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0%20%2B%20Commons%20Clause-0f766e?style=flat-square" />
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-f97316?style=flat-square" />
   <img alt="desktop" src="https://img.shields.io/badge/desktop-Electron%2034-47848f?style=flat-square&logo=electron&logoColor=white" />
@@ -111,6 +111,12 @@ Storydex/
 
 Copyright 2026 Septemc and Flowby.
 
+## v0.3.4
+
+v0.3.4 是桌面差分更新热修复版。它取消了 NSIS 替换应用文件期间强制立即拉起新进程的行为，避免更新后的首次启动因 `electron-updater/out/main.js` 尚未就位而出现 JavaScript 主进程错误。
+
+自动更新组件现在会对安装切换窗口中的临时加载失败执行确定性重试，恢复后自动回到可检查更新状态；设置页不再重复显示同一条“不支持更新”错误。桌面打包校验会强制检查 `electron-updater` 入口文件，Electron E2E 也会模拟入口文件短暂缺失并验证自动恢复。
+
 ## v0.3.3
 
 v0.3.3 修复了离线 Material Symbols 图标在冷启动或字体加载失败时显示为空白的问题，并为字体加载增加确定性重试、超时状态和可见文本降级。Coomi 现在会在请求进入后立即发送 `RunAccepted`，随后持续发送带耗时的 `TurnPhase` 和 heartbeat，因此意图识别、上下文装配或模型等待期间不会长期停留在没有过程反馈的“执行中”。
@@ -146,7 +152,7 @@ npm ci --prefix apps/desktop
 
 ## Windows 安装、便携包与应用内更新
 
-v0.3.3 发布资产包括 NSIS 安装包、`Storydex-win-unpacked.zip` 便携包、blockmap、`latest.yml`、SHA256 校验、发布说明、依赖清单和构建 manifest。安装包与便携包均内置可迁移的 Python 3.9 运行环境、后端依赖和 MinGit，用户无需另外安装 Python 或 Git 即可启动后端并使用小说项目本地版本管理。
+v0.3.4 发布资产包括 NSIS 安装包、`Storydex-win-unpacked.zip` 便携包、blockmap、`latest.yml`、SHA256 校验、发布说明、依赖清单和构建 manifest。安装包与便携包均内置可迁移的 Python 3.9 运行环境、后端依赖和 MinGit，用户无需另外安装 Python 或 Git 即可启动后端并使用小说项目本地版本管理。
 
 发布构建会执行嵌入式 Python import/preflight、MinGit 文件检查和完整打包资源扫描；测试目录、coverage 文件、pytest 缓存、日志、`.env` 和其他开发期临时文件不会进入正式包。应用内更新使用 `electron-updater` 的 generic feed；安装版可使用 blockmap 进行差分下载，便携包适合解压后直接启动和人工验证。
 
@@ -158,4 +164,4 @@ Windows desktop releases use the generic electron-updater feed at:
 https://updates.septemc.com/storydex/windows/
 ```
 
-For differential-update testing, publish both `0.3.2` and `0.3.3` installer assets to the update directory, then leave `latest.yml` pointing to `0.3.3`. Install the `0.3.2` package first, then check for updates inside Storydex to verify the `0.3.2 -> 0.3.3` update path.
+For differential-update testing, keep the `0.3.3` installer and blockmap available, publish the `0.3.4` assets, and leave `latest.yml` pointing to `0.3.4`. Install v0.3.3 first, then check for updates inside Storydex to verify the `0.3.3 -> 0.3.4` recovery path.
