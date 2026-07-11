@@ -40,6 +40,24 @@ requireDirectory("backend source", path.join(appRoot, "backend"));
 requireDirectory("embedded Python", path.join(appRoot, "python-env"));
 requireDirectory("MinGit", path.join(appRoot, "mingit"));
 requireFile("updater config", path.join(resources, "app-update.yml"));
+const forbiddenPackageEntries = walk(appRoot).filter((file) => {
+  const relative = path.relative(appRoot, file).replace(/\\/g, "/");
+  const base = path.basename(relative);
+  return (
+    /(^|\/)(tests?|test-results|htmlcov|coverage-html|\.pytest_cache|\.mypy_cache|\.ruff_cache|__pycache__)(\/|$)/i.test(relative) ||
+    /(^|\/)\.coverage(?:\.|$)/i.test(relative) ||
+    /(^|\/)\.env(?:\.|$)/i.test(relative) ||
+    /\.(pyc|log|tmp|temp)$/i.test(base)
+  );
+});
+if (forbiddenPackageEntries.length) {
+  failures.push(
+    `packaged application contains test/cache/private files: ${forbiddenPackageEntries
+      .slice(0, 20)
+      .map((file) => path.relative(appRoot, file).replace(/\\/g, "/"))
+      .join(", ")}`
+  );
+}
 const fonts = walk(path.join(appRoot, "frontend-dist")).filter((file) => /\.woff2?$/.test(file));
 if (!fonts.some((file) => file.endsWith(".woff")) || !fonts.some((file) => file.endsWith(".woff2"))) {
   failures.push("frontend build must contain both Material Symbols woff and woff2 assets");
