@@ -36,7 +36,19 @@
 Storydex 是一个面向长篇小说创作的本地优先写作工作台。它把正文编辑、项目文件管理、Coomi Agent、版本控制、预设管理、知识图谱和使用指南放在同一个桌面应用里，让 AI 参与创作时保持可观察、可审阅、可回滚。
 
 <p align="center">
-  <img src="docs/assets/readme/storydex-workbench-review.png" alt="Storydex 工作台展示图" width="100%" />
+  <a href="docs/assets/readme/storydex-workbench-review.png">点击查看 2098 × 1223 完整分辨率工作台截图</a>
+</p>
+
+<p align="center">
+  <a href="docs/assets/readme/storydex-workbench-review.png">
+    <img src="docs/assets/readme/storydex-workbench-editor-detail.png" alt="Storydex 项目浏览器、编辑器与差异审阅界面细节" width="100%" />
+  </a>
+</p>
+
+<p align="center">
+  <a href="docs/assets/readme/storydex-workbench-review.png">
+    <img src="docs/assets/readme/storydex-workbench-coomi-detail.png" alt="Storydex Coomi 助手界面细节" width="718" />
+  </a>
 </p>
 
 ## 核心能力
