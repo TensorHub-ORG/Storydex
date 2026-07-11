@@ -33,3 +33,11 @@ test("desktop source declares process cleanup and a strict IPC whitelist", () =>
   assert.ok(channels.every((channel) => channel.startsWith("storydex:")));
 });
 
+test("desktop updater retries transient module replacement and never force-relaunches during NSIS install", () => {
+  const source = fs.readFileSync(path.join(root, "electron", "main.cjs"), "utf8");
+  assert.match(source, /UPDATER_RETRY_DELAYS_MS\s*=\s*\[[^\]]+\]/);
+  assert.match(source, /scheduleAutoUpdaterRetry\(\)/);
+  assert.match(source, /quitAndInstall\(true,\s*false\)/);
+  assert.doesNotMatch(source, /quitAndInstall\(true,\s*true\)/);
+});
+
