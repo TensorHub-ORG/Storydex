@@ -229,12 +229,12 @@
                         type="button"
                         @click="installDesktopUpdate"
                       >
-                        重启并安装
+                        退出并安装
                       </button>
                     </div>
 
                     <div class="system-settings-inline-note">{{ updaterStatusText }}</div>
-                    <div v-if="updaterState.error" class="system-settings-feedback is-error">{{ updaterState.error }}</div>
+                    <div v-if="updaterState.error && updaterState.status !== 'unsupported'" class="system-settings-feedback is-error">{{ updaterState.error }}</div>
                   </template>
                 </section>
               </div>
@@ -413,7 +413,9 @@ const updaterStatusText = computed(() => {
     case "downloading":
       return "正在下载更新…";
     case "downloaded":
-      return "更新已下载完成，重启后自动安装。";
+      return "更新已下载完成；退出安装后，请重新打开 Storydex。";
+    case "initializing":
+      return "正在初始化自动更新组件…";
     case "error":
       return "更新失败，可稍后重试。";
     case "unsupported":

@@ -191,6 +191,49 @@ function parseSseFrame(frame) {
   return { event, data: JSON.parse(data) };
 }
 
+test("packaged updater recovers when its entrypoint appears after a transient install window", { timeout: 90_000 }, async (t) => {
+  if (!fs.existsSync(executable)) return t.skip(`packaged executable not found: ${executable}`);
+  const appRoot = path.join(path.dirname(executable), "resources", "app");
+  const updaterEntry = path.join(appRoot, "node_modules", "electron-updater", "out", "main.js");
+  if (!fs.existsSync(updaterEntry)) return t.skip(`packaged updater entrypoint not found: ${updaterEntry}`);
+
+  const stagedEntry = `${updaterEntry}.installing`;
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), "storydex-updater-retry-"));
+  const workspace = path.join(profile, "workspace");
+  const globalRoot = path.join(profile, ".storydex");
+  const logs = [];
+  let app = null;
+  let restored = false;
+  const restoreUpdater = () => {
+    if (!restored && fs.existsSync(stagedEntry)) {
+      fs.renameSync(stagedEntry, updaterEntry);
+      restored = true;
+    }
+  };
+
+  fs.mkdirSync(workspace, { recursive: true });
+  fs.renameSync(updaterEntry, stagedEntry);
+  const restoreWatcher = setInterval(() => {
+    if (logs.join("").includes("electron-updater unavailable")) restoreUpdater();
+  }, 50);
+
+  try {
+    app = await launchPackaged({ profile, workspace, globalRoot, logs });
+    restoreUpdater();
+    await app.page.waitForFunction(async () => {
+      const state = await window.storydexDesktop.updater.getState();
+      return state.supported && state.status !== "initializing";
+    }, null, { timeout: 15_000 });
+    const state = await app.page.evaluate(() => window.storydexDesktop.updater.getState());
+    assert.equal(state.supported, true, state.error || "updater retry must recover");
+  } finally {
+    clearInterval(restoreWatcher);
+    restoreUpdater();
+    if (app) await closePackaged(app, { force: false });
+    fs.rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+  }
+});
+
 async function streamAgent({ backendBaseUrl, prompt, sessionId, workspaceRoot, stopWhen, timeoutMs = 30_000, busyRetries = 8 }) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error("SSE timeout")), timeoutMs);
@@ -262,12 +305,21 @@ test("packaged Electron validates icons, streaming responsiveness, session recov
         return style.visibility === "hidden" || style.display === "none" || style.fontSize === "0px";
       }).length;
       const health = await fetch(window.storydexDesktop.backendBaseUrl + "/sys/health").then((response) => response.ok).catch(() => false);
-      return { count: icons.length, hidden, fontReady: document.fonts.check('400 16px "Material Symbols Rounded"'), health };
+      const updater = await window.storydexDesktop.updater.getState();
+      return {
+        count: icons.length,
+        hidden,
+        fontReady: document.fonts.check('400 16px "Material Symbols Rounded"'),
+        health,
+        updaterSupported: updater.supported,
+        updaterError: updater.error
+      };
     });
     assert.ok(visual.count > 0);
     assert.equal(visual.hidden, 0);
     assert.equal(visual.fontReady, true);
     assert.equal(visual.health, true);
+    assert.equal(visual.updaterSupported, true, visual.updaterError || "packaged updater must be available");
     await app.page.screenshot({ path: path.join(resultsDir, "packaged-cold-start.png"), fullPage: true });
 
     const created = await fetch(`${app.backendBaseUrl}/workspace/project/create`, {

@@ -611,6 +611,10 @@ async function openWithDialog(_event, absolutePath) {
 // NSIS 安装包发布时会生成 *.exe.blockmap；electron-updater 更新时对比新旧 blockmap，
 // 只下载有变化的数据块，实现增量（差分）更新。
 let updaterModule = null;
+let updaterConfigured = false;
+let updaterRetryTimer = null;
+let updaterRetryIndex = 0;
+const UPDATER_RETRY_DELAYS_MS = [1_000, 3_000, 7_000];
 let updaterState = {
   supported: false,
   status: "idle",
@@ -644,6 +648,29 @@ function setUpdaterState(patch) {
   }
 }
 
+function scheduleAutoUpdaterRetry() {
+  if (updaterRetryTimer || quitting) {
+    return;
+  }
+  if (updaterRetryIndex >= UPDATER_RETRY_DELAYS_MS.length) {
+    setUpdaterState({
+      supported: false,
+      status: "unsupported",
+      error: "自动更新组件加载失败，请完全退出 Storydex 后重新打开。"
+    });
+    return;
+  }
+
+  const delay = UPDATER_RETRY_DELAYS_MS[updaterRetryIndex];
+  updaterRetryIndex += 1;
+  setUpdaterState({ supported: false, status: "initializing", error: "" });
+  updaterRetryTimer = setTimeout(() => {
+    updaterRetryTimer = null;
+    initializeAutoUpdater();
+  }, delay);
+  updaterRetryTimer.unref?.();
+}
+
 function initializeAutoUpdater() {
   updaterState.currentVersion = app.getVersion();
   if (!app.isPackaged) {
@@ -652,7 +679,18 @@ function initializeAutoUpdater() {
   }
   const autoUpdater = resolveAutoUpdater();
   if (!autoUpdater) {
-    setUpdaterState({ supported: false, status: "unsupported", error: "缺少 electron-updater 依赖，无法自动更新。" });
+    scheduleAutoUpdaterRetry();
+    return;
+  }
+
+  if (updaterRetryTimer) {
+    clearTimeout(updaterRetryTimer);
+    updaterRetryTimer = null;
+  }
+  updaterRetryIndex = 0;
+
+  if (updaterConfigured) {
+    setUpdaterState({ supported: true, status: "idle", error: "" });
     return;
   }
 
@@ -706,6 +744,7 @@ function initializeAutoUpdater() {
     setUpdaterState({ status: "error", error: error?.message || String(error) });
   });
 
+  updaterConfigured = true;
   setUpdaterState({ supported: true, status: "idle", feedUrl: configuredFeed, error: "" });
 }
 
@@ -741,7 +780,9 @@ function installDesktopUpdate() {
   }
   quitting = true;
   stopBackendKernel();
-  autoUpdater.quitAndInstall(true, true);
+  // Never force-launch while NSIS is still replacing the unpacked application.
+  // Users can reopen Storydex after the silent install has completed.
+  autoUpdater.quitAndInstall(true, false);
   return true;
 }
 
