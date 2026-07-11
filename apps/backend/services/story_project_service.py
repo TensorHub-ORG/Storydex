@@ -4,6 +4,7 @@ import concurrent.futures
 import json
 import logging
 import re
+import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -11,6 +12,7 @@ from hashlib import sha256
 from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from uuid import uuid4
 
 from core.bounded_text_io import read_text_limited as read_bounded_text_limited
 from core.bounded_text_io import read_text_preview as read_bounded_text_preview
@@ -98,6 +100,55 @@ _PROJECT_MEMORY_TEMPLATE = """# 项目级缓存记忆
 _FAILURES_INDEX_TEMPLATE = """# 错题集
 
 - 这里记录已确认的纠错总结与关键改进规则。
+"""
+
+_MEMORY_README_TEMPLATE = """# Storydex 长期记忆与变量
+
+本目录只保存经过确认、需要跨会话长期使用的故事记忆与变量，例如人物状态、关系、物品、地点、时间线、事实、伏笔、章节摘要和创作约束。
+
+## 严格边界
+
+- 禁止保存聊天记录、历史会话、Agent执行过程、工具日志、任务方案和临时草稿。
+- 历史会话必须保存在 `.storydex/.agent/sessions/` 等 Agent 专用目录。
+- `.storydex/temp/` 是普通临时工作台，除非用户明确要求或当前任务确实需要，否则不得读取、检索或注入上下文。
+- 正文和用户明确确认是最高优先级证据；正式角色档案次之；派生摘要和推断不得覆盖正式事实。
+
+## 自适应目录
+
+AI可以根据项目实际需要创建记忆模块，不要求所有小说使用相同目录。创建模块前必须先检查现有模块，能够扩展已有模块时禁止重复创建。
+
+每个模块必须包含 README.md 或在 catalog.json 中登记：用途、数据类型、权威来源、读取场景、写入条件、消费者、schemaVersion、生命周期、canonical/derived/index 分类。
+
+- canonical：正式状态，可以影响后续创作，必须有证据和变更记录。
+- derived：摘要或概览，可重新生成，不得反向覆盖 canonical。
+- index：检索索引，可随时重建，不是事实来源。
+
+## Agent执行规范
+
+1. 先读取本 README 和 catalog.json，只加载与当前任务相关的模块，禁止全量倾倒记忆。
+2. 使用稳定的角色、物品、地点和事件ID；显示名称变化不得创建重复实体。
+3. 不直接随意覆盖正式状态。先生成包含 baseRevision、来源章节、证据和操作列表的变更集。
+4. 写入前校验 schema、引用、冲突和当前 revision；通过后使用原子写入并追加 change-ledger.jsonl。
+5. 高置信度且有正文证据的普通变化可以自动应用；删除、冲突、低置信度、角色合并和重大关系变化必须请求确认。
+6. 变量思考使用可读 Markdown，属于辅助说明，不是正式状态，缺失不构成错误。
+7. 长期未读取、重复、无消费者或失效的模块只能建议合并或归档，不得自动删除。
+8. 旧项目迁移必须先备份，兼容 UTF-8 BOM、旧快照、分片变量和旧字段；展示冲突后再写入，不删除旧数据。
+
+## 固定控制文件
+
+- `catalog.json`：自适应模块登记表。
+- `change-ledger.jsonl`：长期记忆变更账本，不保存会话内容。
+- `checkpoints/`：必要时保存可恢复状态，不要求每个片段复制完整快照。
+"""
+
+_TEMP_README_TEMPLATE = """# 临时工作台
+
+这是一个普通、灵活的临时文件夹，可用于角色草案、世界观设计、剧本、候选方案和其他中间文件。
+
+- 本目录没有索引、诊断、生命周期、自动清理或自动迁移等系统功能。
+- 内容不是正式记忆，不能直接作为后续剧情事实。
+- Agent只需知道本目录可能存在临时创作文件；除非用户明确要求或当前任务需要，否则不要读取、关注或注入上下文。
+- Agent内部运行中间数据应放在 `.storydex/.agent/temp/`，不要与本目录混用。
 """
 
 _CURRENT_STATE_README_TEMPLATE = """# 当前变量状态
@@ -380,10 +431,18 @@ class StoryProjectService:
                 indent=2,
             )
             + "\n",
+            storydex_root / "memory" / "README.md": _MEMORY_README_TEMPLATE.strip() + "\n",
+            storydex_root / "memory" / "catalog.json": json.dumps(
+                {"schemaVersion": 1, "revision": 0, "modules": []}, ensure_ascii=False, indent=2
+            ) + "\n",
+            storydex_root / "memory" / "change-ledger.jsonl": "",
+            storydex_root / "temp" / "README.md": _TEMP_README_TEMPLATE.strip() + "\n",
             storydex_root / "memory" / "chapters" / "README.md": _CHAPTER_MEMORY_README_TEMPLATE.strip() + "\n",
             storydex_root / "memory" / "current-state" / "README.md": _CURRENT_STATE_README_TEMPLATE.strip() + "\n",
             storydex_root / "memory" / "current-state" / "全部变量.json": json.dumps(
                 {
+                    "schemaVersion": 2,
+                    "revision": 0,
                     "updatedAt": "",
                     "latestSnapshotPath": "",
                     "fullState": {},
@@ -421,6 +480,7 @@ class StoryProjectService:
             if not path.exists():
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(content, encoding="utf-8")
+        (storydex_root / "memory" / "checkpoints").mkdir(parents=True, exist_ok=True)
         self._ensure_default_agent_skills(root)
         self.migrate_legacy_snapshots(root)
 
@@ -819,6 +879,12 @@ class StoryProjectService:
 
     def current_state_master_path(self, workspace_root: Path) -> Path:
         return self.storydex_root(workspace_root) / "memory" / "current-state" / "全部变量.json"
+
+    def memory_catalog_path(self, workspace_root: Path) -> Path:
+        return self.storydex_root(workspace_root) / "memory" / "catalog.json"
+
+    def memory_change_ledger_path(self, workspace_root: Path) -> Path:
+        return self.storydex_root(workspace_root) / "memory" / "change-ledger.jsonl"
 
     def latest_snapshot_index_path(self, workspace_root: Path) -> Path:
         return self.storydex_root(workspace_root) / "memory" / "current-state" / "最新快照索引.json"
@@ -1535,7 +1601,7 @@ class StoryProjectService:
             latest.get("snapshot") if isinstance(latest.get("snapshot"), dict) else {},
         )
 
-    def migrate_legacy_snapshots(self, workspace_root: Path) -> Dict[str, int]:
+    def migrate_legacy_snapshots(self, workspace_root: Path) -> Dict[str, Any]:
         root = Path(workspace_root).resolve()
         chapters_root = root / "chapters"
         if not chapters_root.exists():
@@ -1543,6 +1609,8 @@ class StoryProjectService:
 
         migrated_count = 0
         existing_count = 0
+        backup_count = 0
+        conflicts: List[str] = []
         for legacy_snapshot in chapters_root.rglob("*.variables.json"):
             if not legacy_snapshot.is_file():
                 continue
@@ -1559,17 +1627,32 @@ class StoryProjectService:
             target_path = root / target_relative
             if target_path.exists():
                 existing_count += 1
+                existing_payload = self._read_json(target_path)
+                legacy_payload = self._read_json(legacy_snapshot)
+                if existing_payload and legacy_payload and existing_payload != legacy_payload:
+                    conflicts.append(legacy_relative)
                 continue
             payload = self._read_json(legacy_snapshot)
             if not isinstance(payload, dict):
                 continue
             normalized_payload = dict(payload)
+            backup_path = self.storydex_root(root) / "memory" / "migration" / "v1-backup" / legacy_relative
+            if not backup_path.exists():
+                backup_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(legacy_snapshot, backup_path)
+                backup_count += 1
             normalized_payload.setdefault("segment_path", segment_relative)
             normalized_payload.setdefault("fragment_format", Path(segment_relative).suffix.lower().lstrip(".") or "md")
             target_path.parent.mkdir(parents=True, exist_ok=True)
             target_path.write_text(json.dumps(normalized_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             migrated_count += 1
-        return {"migratedCount": migrated_count, "existingCount": existing_count}
+        return {
+            "migratedCount": migrated_count,
+            "existingCount": existing_count,
+            "backupCount": backup_count,
+            "conflictCount": len(conflicts),
+            "conflicts": conflicts,
+        }
 
     def sync_current_state_from_snapshot_file(self, workspace_root: Path, snapshot_relative_path: str) -> List[str]:
         root = Path(workspace_root).resolve()
@@ -1594,9 +1677,29 @@ class StoryProjectService:
         current_state_root.mkdir(parents=True, exist_ok=True)
         full_state = payload.get("full_state") if isinstance(payload.get("full_state"), dict) else {}
         updated_at = str(payload.get("created_at") or datetime.now(timezone.utc).isoformat())
+        previous_master = self._read_json(self.current_state_master_path(root))
+        current_revision = int(previous_master.get("revision") or 0) if isinstance(previous_master, dict) else 0
+        base_revision = int(payload.get("base_revision")) if payload.get("base_revision") is not None else current_revision
+        snapshot_revision = int(payload.get("revision") or 0)
+        is_idempotent_replay = (
+            isinstance(previous_master, dict)
+            and str(previous_master.get("latestSnapshotPath") or "") == snapshot_relative_path
+            and snapshot_revision == current_revision
+        )
+        if is_idempotent_replay:
+            return sorted(
+                path.relative_to(root).as_posix()
+                for path in current_state_root.rglob("*")
+                if path.is_file()
+            )
+        if current_revision and base_revision != current_revision:
+            raise ValueError(f"Memory revision conflict: expected {current_revision}, received {base_revision}.")
+        revision = int(payload.get("revision") or (current_revision + 1))
         written_paths: List[str] = []
 
         master_payload = {
+            "schemaVersion": 2,
+            "revision": revision,
             "updatedAt": updated_at,
             "latestSnapshotPath": snapshot_relative_path,
             "fullState": full_state,
@@ -1645,7 +1748,60 @@ class StoryProjectService:
                 updated_at=updated_at,
             )
         )
+        self._register_memory_module(root, source_path=str(payload.get("segment_path") or ""))
+        self._append_memory_change_ledger(
+            root,
+            {
+                "schemaVersion": 1,
+                "changeSetId": str(payload.get("change_set_id") or ""),
+                "moduleId": "current-state",
+                "baseRevision": base_revision,
+                "revision": revision,
+                "sourcePath": str(payload.get("segment_path") or ""),
+                "snapshotPath": snapshot_relative_path,
+                "operationCount": len(payload.get("operations") if isinstance(payload.get("operations"), list) else []),
+                "summary": str(payload.get("snapshot_comment") or "更新当前故事变量"),
+                "createdAt": updated_at,
+            },
+        )
         return written_paths
+
+    def _register_memory_module(self, workspace_root: Path, *, source_path: str) -> None:
+        catalog_path = self.memory_catalog_path(workspace_root)
+        catalog = self._read_json(catalog_path)
+        if not isinstance(catalog, dict):
+            catalog = {"schemaVersion": 1, "revision": 0, "modules": []}
+        modules = catalog.get("modules") if isinstance(catalog.get("modules"), list) else []
+        module = next((item for item in modules if isinstance(item, dict) and item.get("id") == "current-state"), None)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        entry = {
+            "id": "current-state",
+            "path": "current-state",
+            "title": "当前故事变量",
+            "purpose": "保存经过校验的当前人物、物品、关系、地点、时间线与剧情状态。",
+            "kind": "canonical",
+            "schemaVersion": 2,
+            "authoritativeSources": [source_path] if source_path else [],
+            "readTriggers": ["相关续写、一致性检查或用户查询"],
+            "writeTriggers": ["正文或用户确认产生明确状态变化"],
+            "consumers": ["coomi-generation", "story-consistency-check"],
+            "lifecycle": "active",
+            "updatedAt": now_iso,
+        }
+        if module is None:
+            entry["createdAt"] = now_iso
+            modules.append(entry)
+        else:
+            module.update(entry)
+        catalog["modules"] = modules
+        catalog["revision"] = int(catalog.get("revision") or 0) + 1
+        catalog_path.write_text(json.dumps(catalog, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    def _append_memory_change_ledger(self, workspace_root: Path, payload: Dict[str, Any]) -> None:
+        ledger = self.memory_change_ledger_path(workspace_root)
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        with ledger.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
 
     def apply_story_generation_increment(self, workspace_root: Path, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Apply a structured post-generation increment to Storydex project files."""
@@ -2364,7 +2520,12 @@ class StoryProjectService:
         metadata = self._segment_metadata_from_relative_path(segment_relative_path)
         previous_order = previous_snapshot.get("snapshot_order") if isinstance(previous_snapshot.get("snapshot_order"), int) else 0
         now_iso = datetime.now(timezone.utc).isoformat()
+        base_revision = int(previous_snapshot.get("revision") or previous_order or 0)
         return {
+            "schema_version": 2,
+            "change_set_id": str(uuid4()),
+            "base_revision": base_revision,
+            "revision": base_revision + 1,
             "chapter_id": metadata["chapter_id"],
             "segment_id": metadata["segment_id"],
             "segment_path": segment_relative_path,
@@ -4490,15 +4651,19 @@ class StoryProjectService:
         for item in operations:
             if not isinstance(item, dict):
                 continue
-            path = str(item.get("path") or "").strip()
-            if not path:
+            path = str(item.get("path") or "").strip().strip(".")
+            op = str(item.get("op") or "set").strip().lower() or "set"
+            if not path or ".." in path or "/" in path or op not in {"set", "replace", "add", "remove"}:
                 continue
+            evidence = str(item.get("evidence") or "").strip()
             normalized.append(
                 {
-                    "op": str(item.get("op") or "set").strip().lower() or "set",
+                    "op": op,
                     "path": path,
                     "value": item.get("value"),
-                    "evidence": str(item.get("evidence") or "").strip(),
+                    "evidence": evidence,
+                    "confidence": float(item.get("confidence") or (1.0 if evidence else 0.5)),
+                    "requiresReview": bool(item.get("requiresReview", False) or op == "remove" or not evidence),
                 }
             )
         return normalized
@@ -5201,7 +5366,7 @@ class StoryProjectService:
         if not path.exists():
             return {}
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
         except Exception:
             return {}
         return payload if isinstance(payload, dict) else {}

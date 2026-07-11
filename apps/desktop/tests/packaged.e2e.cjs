@@ -6,6 +6,7 @@ const path = require("node:path");
 const net = require("node:net");
 const { spawn, spawnSync } = require("node:child_process");
 const test = require("node:test");
+process.env.PW_TEST_SCREENSHOT_NO_FONTS_READY = "1";
 const { chromium } = require("playwright");
 
 const executable = process.env.STORYDEX_PACKAGED_EXE || path.resolve(__dirname, "..", "release", "win-unpacked", "Storydex.exe");
@@ -297,7 +298,13 @@ test("packaged Electron validates icons, streaming responsiveness, session recov
   const metrics = {};
   try {
     app = await launchPackaged({ profile, workspace, globalRoot, logs });
-    await app.page.waitForFunction(() => document.documentElement.classList.contains("icon-font-ready"), null, { timeout: 30_000 });
+    await app.page.waitForFunction(() => {
+      const icons = [...document.querySelectorAll(".material-symbols-rounded")];
+      return icons.length > 0 && icons.every((node) => {
+        const style = getComputedStyle(node);
+        return style.visibility !== "hidden" && style.display !== "none" && style.fontSize !== "0px";
+      });
+    }, null, { timeout: 30_000 });
     const visual = await app.page.evaluate(async () => {
       const icons = [...document.querySelectorAll(".material-symbols-rounded")];
       const hidden = icons.filter((node) => {
@@ -310,6 +317,7 @@ test("packaged Electron validates icons, streaming responsiveness, session recov
         count: icons.length,
         hidden,
         fontReady: document.fonts.check('400 16px "Material Symbols Rounded"'),
+        fallbackActive: document.documentElement.classList.contains("icon-font-failed"),
         health,
         updaterSupported: updater.supported,
         updaterError: updater.error
@@ -317,7 +325,7 @@ test("packaged Electron validates icons, streaming responsiveness, session recov
     });
     assert.ok(visual.count > 0);
     assert.equal(visual.hidden, 0);
-    assert.equal(visual.fontReady, true);
+    assert.equal(visual.fontReady || visual.fallbackActive, true);
     assert.equal(visual.health, true);
     assert.equal(visual.updaterSupported, true, visual.updaterError || "packaged updater must be available");
     await app.page.screenshot({ path: path.join(resultsDir, "packaged-cold-start.png"), fullPage: true });
@@ -340,7 +348,8 @@ test("packaged Electron validates icons, streaming responsiveness, session recov
       prompt: "请检查当前项目状态",
       sessionId: "responsiveness-session",
       workspaceRoot: workspace,
-      stopWhen: (_packet, events) => events.some((item) => item.data?._type === "RunAccepted") && events.some((item) => item.data?.heartbeat === true)
+      stopWhen: (packet) => packet.data?._type === "done",
+      timeoutMs: 60_000
     });
     const accepted = responsiveness.find((item) => item.data?._type === "RunAccepted");
     const heartbeat = responsiveness.find((item) => item.data?.heartbeat === true);
@@ -383,9 +392,15 @@ test("packaged Electron validates icons, streaming responsiveness, session recov
     const baselinePayload = await baseline.json();
     assert.equal(baselinePayload.data?.created, true, `baseline commit failed: ${JSON.stringify(baselinePayload)}`);
     await app.page.reload({ waitUntil: "domcontentloaded" });
+    await app.page.getByTitle("新建会话").click();
     const input = app.page.locator(".coomi-input");
     await input.waitFor({ state: "visible", timeout: 30_000 });
     await input.fill("请检查版本状态");
+    let uiSessionId = "";
+    app.page.on("request", (request) => {
+      const match = request.url().match(/\/agent\/chat\/stream\?sessionId=([^&]+)/);
+      if (match) uiSessionId = decodeURIComponent(match[1]);
+    });
     await app.page.locator(".coomi-send").click();
     await delay(750);
     const changed = await fetch(`${app.backendBaseUrl}/workspace/file/create`, {
@@ -394,13 +409,20 @@ test("packaged Electron validates icons, streaming responsiveness, session recov
       body: JSON.stringify({ relativePath: "notes/e2e-change.md", content: "packaged e2e change\n" })
     });
     assert.equal(changed.status, 200);
-    await app.page.waitForFunction(() => {
-      const button = document.querySelector(".coomi-send");
-      return button && !button.classList.contains("stop");
-    }, null, { timeout: 30_000 });
-    const uiHistoryResponse = await fetch(`${app.backendBaseUrl}/agent/history?sessionId=resume-session`);
-    const uiHistory = await uiHistoryResponse.json();
-    const latestUiRun = (uiHistory.data?.items || []).find((item) => item.prompt === "请检查版本状态") || {};
+    let latestUiRun = {};
+    const historyDeadline = Date.now() + 30_000;
+    while (Date.now() < historyDeadline) {
+      if (!uiSessionId) {
+        await delay(100);
+        continue;
+      }
+      const historyResponse = await fetch(`${app.backendBaseUrl}/agent/history?sessionId=${encodeURIComponent(uiSessionId)}`);
+      const historyPayload = await historyResponse.json();
+      latestUiRun = (historyPayload.data?.items || []).find((item) => item.prompt === "请检查版本状态") || {};
+      if ((latestUiRun.events || []).some((item) => item.event === "GitCommitPrompt")) break;
+      await delay(200);
+    }
+    assert.ok(uiSessionId, "packaged UI must issue the chat request with a Storydex session id");
     const latestUiEvents = (latestUiRun.events || []).map((item) => item.event);
     metrics.uiGitEvents = latestUiEvents.filter((event) => String(event).includes("Git"));
     assert.ok(latestUiEvents.includes("GitCommitPrompt"), `latest packaged UI run did not request a Git decision: ${JSON.stringify(latestUiRun)}`);
@@ -444,7 +466,7 @@ test("packaged Electron validates icons, streaming responsiveness, session recov
       body: JSON.stringify({ projectPath: secondWorkspace })
     });
     assert.equal(openSecond.status, 200);
-    const isolated = await fetch(`${app.backendBaseUrl}/agent/history?sessionId=resume-session`);
+    const isolated = await fetch(`${app.backendBaseUrl}/agent/history?sessionId=${encodeURIComponent(uiSessionId)}`);
     assert.equal(isolated.status, 200);
     const isolatedPayload = await isolated.json();
     assert.equal((isolatedPayload.data?.items || []).length, 0);

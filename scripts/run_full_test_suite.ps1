@@ -37,7 +37,7 @@ Invoke-Step "Conflict markers" {
   if ($conflicts) { $conflicts | Write-Host; throw "Conflict markers found" }
   $global:LASTEXITCODE = 0
 }
-Invoke-Step "Version consistency" { node (Join-Path $repoRoot "scripts/validate_version_consistency.cjs") $(if ($Mode -eq "Release") { "--expected=0.3.4" }) }
+Invoke-Step "Version consistency" { node (Join-Path $repoRoot "scripts/validate_version_consistency.cjs") $(if ($Mode -eq "Release") { "--expected=0.3.5" }) }
 Invoke-Step "Python compile" { python -m compileall -q (Join-Path $backend "api") (Join-Path $backend "core") (Join-Path $backend "services") }
 Invoke-Step "Backend tests and coverage" {
   Push-Location $backend
@@ -62,7 +62,7 @@ if ($Mode -ne "Fast") {
 if ($Mode -eq "Release") {
   Invoke-Step "Windows installer" { npm --prefix $desktop run package:win }
   Invoke-Step "Installer and updater assets" { node (Join-Path $desktop "scripts/validate-packaged-assets.cjs") "--release=$(Join-Path $desktop 'release')" }
-  Invoke-Step "Local release bundle" { & (Join-Path $repoRoot "scripts/prepare_release_bundle.ps1") -Version "0.3.4" }
+  Invoke-Step "Local release bundle" { & (Join-Path $repoRoot "scripts/prepare_release_bundle.ps1") -Version "0.3.5" }
 }
 Invoke-Step "Git whitespace check" { git -C $repoRoot diff --check }
 Write-Host "`nStorydex $Mode test suite passed." -ForegroundColor Green

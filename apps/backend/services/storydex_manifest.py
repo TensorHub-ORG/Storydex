@@ -134,7 +134,16 @@ STORYDEX_MANIFEST: List[DirSpec] = [
         "role": "memory",
         "create_on_init": True,
         "description": "Story state and summaries",
-        "readme": "# 故事记忆\n\n存放小说世界事实、变量、关系和章节状态。\n",
+        "readme": """# Storydex 长期记忆与变量
+
+本目录只保存需要跨会话长期使用的故事记忆与变量。禁止保存聊天记录、历史会话、执行过程、工具日志、任务方案和临时草稿；历史会话必须保存在 `.storydex/.agent/sessions/`。
+
+目录采用受约束的自适应布局：AI可按项目实际需要创建模块，但必须优先复用现有模块，并在 `catalog.json` 或模块 README 中登记用途、数据类型、权威来源、读取场景、写入条件、消费者、schemaVersion、生命周期及 canonical/derived/index 分类。
+
+正文与用户确认是最高优先级证据。正式状态必须使用稳定实体ID，并通过包含 baseRevision、来源章节、证据和操作列表的变更集校验后原子写入，同时追加 `change-ledger.jsonl`。删除、冲突、低置信度、角色合并和重大关系变化必须确认。派生摘要不得覆盖正式事实，变量思考 Markdown 只是辅助说明。
+
+`.storydex/temp/` 是普通临时工作台。除非用户明确要求或当前任务依赖，否则 Agent 不得读取、检索或注入其中内容。旧项目迁移必须先备份并展示冲突，不自动删除旧数据；无用或重复模块只能建议合并或归档。
+""",
     },
     {
         "path": ".storydex/memory/current-state",
@@ -170,11 +179,16 @@ STORYDEX_MANIFEST: List[DirSpec] = [
     },
     {
         "path": ".storydex/temp",
-        "layer": "runtime",
+        "layer": "project",
         "role": "temp",
         "create_on_init": True,
         "description": "Storydex project temporary files",
-        "readme": "# 项目临时文件\n\n存放 Storydex 项目级临时文件。\n",
+        "readme": """# 临时工作台
+
+这是一个普通、灵活的临时文件夹，可用于角色草案、世界观设计、剧本、候选方案和其他中间文件。它没有索引、诊断、生命周期、自动清理或自动迁移等系统功能。
+
+内容不是正式记忆，不能直接影响后续剧情。Agent只需知道这里可能有临时创作文件；除非用户明确要求或当前任务需要，否则不要读取、关注或注入上下文。Agent运行中间数据应放在 `.storydex/.agent/temp/`。
+""",
     },
     {
         "path": ".storydex/.agent",

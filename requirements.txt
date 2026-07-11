@@ -1,6 +1,6 @@
 # Locked from the clean project-local Python 3.9 environment.
-# Coomi is our proprietary Agent framework, and the latest version can be installed from PyPI using: pip install -U coomi-agent
-coomi-agent
+# Coomi is pinned intentionally. Do not broaden or auto-upgrade this dependency.
+coomi-agent==1.1.2
 annotated-types==0.7.0
 anthropic==0.86.0
 anyio==4.12.1

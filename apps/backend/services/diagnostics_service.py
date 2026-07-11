@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -101,8 +102,78 @@ class DiagnosticsService:
         if suffix == ".py":
             return self._diagnose_python(path=path, relative_path=relative_path)
         if suffix == ".json" or suffix == ".ipynb":
-            return self._diagnose_json(path=path, relative_path=relative_path)
+            diagnostics = self._diagnose_json(path=path, relative_path=relative_path)
+            if not any(item.get("severity") == "error" for item in diagnostics):
+                legacy = self._legacy_memory_diagnostic(path=path, relative_path=relative_path)
+                if legacy:
+                    diagnostics.append(legacy)
+                if relative_path.replace("\\", "/") == ".storydex/memory/catalog.json":
+                    diagnostics.extend(self._memory_catalog_diagnostics(path))
+            return diagnostics
         return []
+
+    @staticmethod
+    def _legacy_memory_diagnostic(*, path: Path, relative_path: str) -> Dict[str, Any] | None:
+        normalized = relative_path.replace("\\", "/")
+        if not normalized.startswith(".storydex/memory/"):
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        version = payload.get("schemaVersion", payload.get("schema_version"))
+        if version is not None or normalized.endswith("catalog.json"):
+            return None
+        return {
+            "code": "story.memory.legacy_schema",
+            "source": "story.memory",
+            "severity": "info",
+            "relativePath": normalized,
+            "line": 1,
+            "column": 1,
+            "message": "该记忆文件使用旧格式，可在安全备份和冲突预览后迁移。",
+            "evidence": "缺少 schemaVersion 字段",
+            "fixes": [],
+        }
+
+    @staticmethod
+    def _memory_catalog_diagnostics(path: Path) -> List[Dict[str, Any]]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        except Exception:
+            return []
+        modules = payload.get("modules") if isinstance(payload, dict) and isinstance(payload.get("modules"), list) else []
+        diagnostics: List[Dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        seen_paths: set[str] = set()
+        now = datetime.now(timezone.utc)
+        for module in modules:
+            if not isinstance(module, dict):
+                continue
+            module_id = str(module.get("id") or "").strip()
+            module_path = str(module.get("path") or "").strip()
+            if not module_id or not module_path or not module.get("purpose") or not module.get("schemaVersion"):
+                diagnostics.append(DiagnosticsService._catalog_item("story.memory.module_incomplete", "warning", f"记忆模块 {module_id or module_path or '<unknown>'} 缺少用途、路径或schemaVersion。"))
+            if module_id in seen_ids or module_path in seen_paths:
+                diagnostics.append(DiagnosticsService._catalog_item("story.memory.module_duplicate", "warning", f"记忆模块 {module_id or module_path} 与现有模块重复，建议合并或归档。"))
+            seen_ids.add(module_id)
+            seen_paths.add(module_path)
+            if not module.get("consumers"):
+                diagnostics.append(DiagnosticsService._catalog_item("story.memory.module_unused", "warning", f"记忆模块 {module_id or module_path} 没有声明消费者。"))
+            timestamp = str(module.get("lastReadAt") or module.get("updatedAt") or "").replace("Z", "+00:00")
+            try:
+                age = now - datetime.fromisoformat(timestamp)
+            except (TypeError, ValueError):
+                age = None
+            if age is not None and age.days >= 90 and not module.get("lastReadAt"):
+                diagnostics.append(DiagnosticsService._catalog_item("story.memory.module_stale", "info", f"记忆模块 {module_id or module_path} 长期没有读取记录，可考虑归档，但不会自动删除。"))
+        return diagnostics
+
+    @staticmethod
+    def _catalog_item(code: str, severity: str, message: str) -> Dict[str, Any]:
+        return {"code": code, "source": "story.memory", "severity": severity, "relativePath": ".storydex/memory/catalog.json", "line": 1, "column": 1, "message": message, "evidence": "memory catalog governance", "fixes": []}
 
     @staticmethod
     def _is_too_large_for_deep_diagnostics(path: Path) -> bool:
@@ -131,7 +202,7 @@ class DiagnosticsService:
 
     def _diagnose_python(self, *, path: Path, relative_path: str) -> List[Dict[str, Any]]:
         try:
-            content = path.read_text(encoding="utf-8")
+            content = path.read_text(encoding="utf-8-sig")
         except UnicodeDecodeError as exc:
             return [
                 {
@@ -143,7 +214,10 @@ class DiagnosticsService:
                     "message": str(exc),
                 }
             ]
-        return self._diagnose_python_content(content=content, relative_path=relative_path)
+        diagnostics = self._diagnose_python_content(content=content, relative_path=relative_path)
+        if self._has_utf8_bom(path):
+            diagnostics.insert(0, self._utf8_bom_diagnostic(relative_path))
+        return diagnostics
 
     def _diagnose_python_content(self, *, content: str, relative_path: str) -> List[Dict[str, Any]]:
         try:
@@ -163,10 +237,11 @@ class DiagnosticsService:
 
     def _diagnose_json(self, *, path: Path, relative_path: str) -> List[Dict[str, Any]]:
         try:
-            content = path.read_text(encoding="utf-8")
+            content = path.read_text(encoding="utf-8-sig")
         except UnicodeDecodeError as exc:
             return [
                 {
+                    "code": "json.encoding_error",
                     "source": "json",
                     "severity": "error",
                     "relativePath": relative_path,
@@ -175,7 +250,45 @@ class DiagnosticsService:
                     "message": str(exc),
                 }
             ]
-        return self._diagnose_json_content(content=content, relative_path=relative_path)
+        diagnostics = self._diagnose_json_content(content=content, relative_path=relative_path)
+        if self._has_utf8_bom(path):
+            diagnostics.insert(0, self._utf8_bom_diagnostic(relative_path))
+        return diagnostics
+
+    @staticmethod
+    def _has_utf8_bom(path: Path) -> bool:
+        try:
+            with path.open("rb") as handle:
+                return handle.read(3) == b"\xef\xbb\xbf"
+        except OSError:
+            return False
+
+    @staticmethod
+    def _utf8_bom_diagnostic(relative_path: str) -> Dict[str, Any]:
+        return {
+            "code": "text.utf8_bom",
+            "source": "encoding",
+            "severity": "info",
+            "relativePath": relative_path,
+            "line": 1,
+            "column": 1,
+            "message": "检测到 UTF-8 BOM，已兼容读取；可移除 BOM 以统一项目编码。",
+            "evidence": "文件以 EF BB BF 开头",
+            "fixes": [{"id": "remove_utf8_bom", "label": "移除 BOM"}],
+        }
+
+    def apply_fix(self, *, relative_path: str, fix_id: str) -> Dict[str, Any]:
+        normalized = self._normalize_relative_path(relative_path)
+        if fix_id != "remove_utf8_bom" or not normalized or not self._is_safe_workspace_path(normalized):
+            raise ValueError("Unsupported diagnostic fix.")
+        path = (self.project_service.workspace_root / normalized).resolve()
+        payload = path.read_bytes()
+        changed = payload.startswith(b"\xef\xbb\xbf")
+        if changed:
+            temporary = path.with_name(f".{path.name}.storydex-bom-fix")
+            temporary.write_bytes(payload[3:])
+            temporary.replace(path)
+        return {"relativePath": normalized, "fixId": fix_id, "changed": changed}
 
     def _diagnose_json_content(self, *, content: str, relative_path: str) -> List[Dict[str, Any]]:
         try:
@@ -183,12 +296,15 @@ class DiagnosticsService:
         except json.JSONDecodeError as exc:
             return [
                 {
+                    "code": "json.parse_error",
                     "source": "json",
                     "severity": "error",
                     "relativePath": relative_path,
                     "line": int(exc.lineno),
                     "column": int(exc.colno),
                     "message": exc.msg,
+                    "evidence": f"line {exc.lineno}, column {exc.colno}",
+                    "fixes": [],
                 }
             ]
         return []
@@ -209,7 +325,7 @@ class DiagnosticsService:
     def _read_optional_text(self, relative_path: str) -> str:
         path = self.project_service.workspace_root / relative_path
         try:
-            return path.read_text(encoding="utf-8")
+            return path.read_text(encoding="utf-8-sig")
         except (OSError, UnicodeDecodeError):
             return ""
 
@@ -245,12 +361,15 @@ class DiagnosticsService:
                 continue
             normalized_items.append(
                 {
+                    "code": str(item.get("code") or "story.memory"),
                     "source": str(item.get("source") or "story.memory"),
                     "severity": str(item.get("severity") or "warning"),
                     "relativePath": str(item.get("relativePath") or relative_path),
                     "line": int(item.get("line") or 0),
                     "column": int(item.get("column") or 0),
                     "message": str(item.get("message") or "").strip(),
+                    "evidence": str(item.get("evidence") or "").strip(),
+                    "fixes": item.get("fixes") if isinstance(item.get("fixes"), list) else [],
                 }
             )
         return normalized_items

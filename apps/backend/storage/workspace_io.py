@@ -191,7 +191,7 @@ class WorkspaceIO:
             except UnicodeDecodeError:
                 return self._build_unsupported_document(path=path, message="Unable to display this file.")
         try:
-            content = path.read_text(encoding="utf-8")
+            content = path.read_text(encoding="utf-8-sig")
         except UnicodeDecodeError:
             return self._build_unsupported_document(path=path, message="此文件无法展示")
         return self._build_file_document(path=path, content=content, offset=offset, limit=limit)
@@ -223,7 +223,7 @@ class WorkspaceIO:
 
     def describe_path(self, relative_path: str) -> Dict[str, Any]:
         path = self.file_adapter.resolve_path(relative_path)
-        content = path.read_text(encoding="utf-8")
+        content = path.read_text(encoding="utf-8-sig")
         return self._build_file_document(path=path, content=content)
 
     def list_workspace_tree(self) -> Dict[str, Any]:
@@ -527,7 +527,7 @@ class WorkspaceIO:
         selected: list[str] = []
         observed_lines = 0
         has_more = False
-        with path.open("r", encoding="utf-8") as handle:
+        with path.open("r", encoding="utf-8-sig") as handle:
             for raw_line in handle:
                 line_index = observed_lines
                 observed_lines += 1

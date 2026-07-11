@@ -12,6 +12,7 @@ from api.response import ApiEnvelope, ApiTrace, success_response
 from services.editor_service import EditorService
 from services.diagnostics_service import get_diagnostics_service
 from services.git_service import get_git_service
+from services.large_file_service import get_large_file_service
 from services.project_service import get_project_service
 from services.story_project_service import get_story_project_service
 
@@ -188,6 +189,21 @@ class StoryProjectSettingsUpdateRequest(BaseModel):
     auto_update_wiki: Optional[bool] = Field(default=None, alias="autoUpdateWiki")
     agent_commit_prompt_enabled: Optional[bool] = Field(default=None, alias="agentCommitPromptEnabled")
     chapter_completion: Dict[str, bool] = Field(default_factory=dict, alias="chapterCompletion")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class FileWindowRequest(BaseModel):
+    relative_path: str = Field(alias="relativePath")
+    start_line: int = Field(default=0, alias="startLine", ge=0)
+    line_count: int = Field(default=400, alias="lineCount", ge=1, le=2000)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class DiagnosticsFixRequest(BaseModel):
+    relative_path: str = Field(alias="relativePath")
+    fix_id: str = Field(alias="fixId")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -418,6 +434,32 @@ def read_workspace_git_summary() -> ApiEnvelope:
         data=data,
         trace=_build_trace(started=started, trace_id=trace_id),
         audit=audit,
+    )
+
+
+@router.post("/file/window", response_model=ApiEnvelope)
+def read_file_window(payload: FileWindowRequest) -> ApiEnvelope:
+    started = perf_counter()
+    trace_id = str(uuid4())
+    path = editor_service.workspace.file_adapter.resolve_path(payload.relative_path)
+    data = get_large_file_service().read_window(path, start_line=payload.start_line, line_count=payload.line_count)
+    data["relativePath"] = path.relative_to(editor_service.workspace_root).as_posix()
+    return success_response(
+        data=data,
+        trace=_build_trace(started=started, trace_id=trace_id),
+        audit=[{"action": "read_file_window", "relativePath": data["relativePath"], "startLine": data["startLine"]}],
+    )
+
+
+@router.post("/workspace/diagnostics/fix", response_model=ApiEnvelope)
+def apply_workspace_diagnostic_fix(payload: DiagnosticsFixRequest) -> ApiEnvelope:
+    started = perf_counter()
+    trace_id = str(uuid4())
+    result = get_diagnostics_service().apply_fix(relative_path=payload.relative_path, fix_id=payload.fix_id)
+    return success_response(
+        data=result,
+        trace=_build_trace(started=started, trace_id=trace_id),
+        audit=[{"action": "apply_workspace_diagnostic_fix", **result}],
     )
 
 

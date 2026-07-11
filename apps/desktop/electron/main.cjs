@@ -1,8 +1,15 @@
 const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
 const fs = require("fs");
 const path = require("path");
+const { pathToFileURL } = require("url");
 const { spawn } = require("child_process");
-const { resolveUpdateFeedUrl } = require("./update-feed.cjs");
+let resolveUpdateFeedUrl = (desktopPackage, overrideUrl) =>
+  String(overrideUrl || desktopPackage?.storydexUpdateFeedUrl || desktopPackage?.build?.extraMetadata?.storydexUpdateFeedUrl || "").trim();
+try {
+  ({ resolveUpdateFeedUrl } = require("./update-feed.cjs"));
+} catch (error) {
+  console.warn("[Storydex Desktop] update feed helper is temporarily unavailable:", error.message || String(error));
+}
 
 function readDesktopPackageMetadata() {
   try {
@@ -611,6 +618,7 @@ async function openWithDialog(_event, absolutePath) {
 // NSIS 安装包发布时会生成 *.exe.blockmap；electron-updater 更新时对比新旧 blockmap，
 // 只下载有变化的数据块，实现增量（差分）更新。
 let updaterModule = null;
+let downloadedInstallerPath = "";
 let updaterConfigured = false;
 let updaterRetryTimer = null;
 let updaterRetryIndex = 0;
@@ -637,6 +645,43 @@ function resolveAutoUpdater() {
     console.warn("[Storydex Desktop] electron-updater unavailable:", error.message || String(error));
     return null;
   }
+}
+
+function updaterRuntimeRoot() {
+  const base = String(process.env.LOCALAPPDATA || app.getPath("temp") || "").trim();
+  return path.join(base, "storydex-updater");
+}
+
+function updaterInstallLockPath() {
+  return path.join(updaterRuntimeRoot(), "installing.json");
+}
+
+function readUpdaterInstallLock() {
+  try {
+    const lockPath = updaterInstallLockPath();
+    if (!fs.existsSync(lockPath)) return null;
+    const payload = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+    const updatedAt = Date.parse(String(payload?.updatedAt || ""));
+    if (Number.isFinite(updatedAt) && Date.now() - updatedAt > 30 * 60 * 1000) {
+      fs.rmSync(lockPath, { force: true });
+      return null;
+    }
+    return payload && typeof payload === "object" ? payload : null;
+  } catch {
+    return null;
+  }
+}
+
+async function showUpdateInstallInProgress() {
+  await dialog.showMessageBox({
+    type: "info",
+    title: "Storydex 正在安装更新",
+    message: "Storydex 正在安装更新",
+    detail: "应用文件正在安全替换。安装完成前请勿重复启动，完成后安装窗口会询问是否启动 Storydex。",
+    buttons: ["知道了"],
+    defaultId: 0
+  });
+  app.quit();
 }
 
 function setUpdaterState(patch) {
@@ -695,7 +740,8 @@ function initializeAutoUpdater() {
   }
 
   autoUpdater.autoDownload = false;
-  autoUpdater.autoInstallOnAppQuit = true;
+  // The persistent helper owns installation after the main process exits.
+  autoUpdater.autoInstallOnAppQuit = false;
   autoUpdater.disableDifferentialDownload = false;
 
   const configuredFeed = resolveUpdateFeedUrl(DESKTOP_PACKAGE, process.env.STORYDEX_UPDATE_URL);
@@ -733,6 +779,7 @@ function initializeAutoUpdater() {
     });
   });
   autoUpdater.on("update-downloaded", (info) => {
+    downloadedInstallerPath = String(info?.downloadedFile || downloadedInstallerPath || "").trim();
     setUpdaterState({
       status: "downloaded",
       availableVersion: String(info?.version || updaterState.availableVersion),
@@ -765,7 +812,11 @@ async function downloadDesktopUpdate() {
   if (autoUpdater) {
     try {
       setUpdaterState({ status: "downloading", error: "" });
-      await autoUpdater.downloadUpdate();
+      const downloadedFiles = await autoUpdater.downloadUpdate();
+      const installer = Array.isArray(downloadedFiles)
+        ? downloadedFiles.find((candidate) => String(candidate || "").toLowerCase().endsWith(".exe")) || downloadedFiles[0]
+        : "";
+      downloadedInstallerPath = String(installer || downloadedInstallerPath || "").trim();
     } catch (error) {
       setUpdaterState({ status: "error", error: error?.message || String(error) });
     }
@@ -778,12 +829,38 @@ function installDesktopUpdate() {
   if (!autoUpdater || updaterState.status !== "downloaded") {
     return false;
   }
-  quitting = true;
-  stopBackendKernel();
-  // Never force-launch while NSIS is still replacing the unpacked application.
-  // Users can reopen Storydex after the silent install has completed.
-  autoUpdater.quitAndInstall(true, false);
-  return true;
+  if (process.platform !== "win32" || !downloadedInstallerPath || !fs.existsSync(downloadedInstallerPath)) {
+    setUpdaterState({ status: "error", error: "未找到已下载的安装程序，请重新下载更新。" });
+    return false;
+  }
+  try {
+    const runtimeRoot = updaterRuntimeRoot();
+    fs.mkdirSync(runtimeRoot, { recursive: true });
+    const lockPath = updaterInstallLockPath();
+    const logPath = path.join(runtimeRoot, "install.log");
+    fs.writeFileSync(lockPath, JSON.stringify({ state: "preparing", updatedAt: new Date().toISOString() }), "utf8");
+    const helperScript = path.join(__dirname, "update-helper.ps1");
+    const helper = spawn(
+      "powershell.exe",
+      [
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", helperScript,
+        "-InstallerPath", downloadedInstallerPath,
+        "-AppPath", process.execPath,
+        "-LockPath", lockPath,
+        "-ParentPid", String(process.pid),
+        "-LogPath", logPath
+      ],
+      { detached: true, stdio: "ignore", windowsHide: false }
+    );
+    helper.unref();
+    quitting = true;
+    stopBackendKernel();
+    setTimeout(() => app.quit(), 150).unref?.();
+    return true;
+  } catch (error) {
+    setUpdaterState({ status: "error", error: error?.message || String(error) });
+    return false;
+  }
 }
 
 function registerDesktopIpc() {
@@ -1169,12 +1246,17 @@ async function loadRenderer(windowRef, routePath = "/", query = {}) {
 
   if (entry.kind === "file") {
     const hash = buildFileRouteHash(routePath, query);
-    if (hash === "/") {
-      await windowRef.loadFile(entry.value);
-    } else {
-      await windowRef.loadFile(entry.value, { hash });
+    const rendererUrl = pathToFileURL(entry.value);
+    if (hash !== "/") rendererUrl.hash = hash;
+    for (let index = 0; index < 20; index += 1) {
+      try {
+        await windowRef.loadURL(rendererUrl.toString());
+        return;
+      } catch (error) {
+        if (windowRef.isDestroyed() || index === 19) throw error;
+        await sleep(250);
+      }
     }
-    return;
   }
 
   for (let index = 0; index < 80; index += 1) {
@@ -1342,6 +1424,10 @@ app.on("window-all-closed", () => {
 
 app.whenReady().then(async () => {
   initializeAppMetadata();
+  if (readUpdaterInstallLock()) {
+    await showUpdateInstallInProgress();
+    return;
+  }
   registerDesktopIpc();
   initializeAutoUpdater();
   const backendReady = await startBackendKernel();

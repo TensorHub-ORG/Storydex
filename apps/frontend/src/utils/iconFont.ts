@@ -1,7 +1,7 @@
 export const ICON_FONT_CLASS_READY = "icon-font-ready";
 export const ICON_FONT_CLASS_FAILED = "icon-font-failed";
 export const ICON_FONT_SPEC = '400 16px "Material Symbols Rounded"';
-export const ICON_FONT_RETRY_DELAYS = [0, 120, 360, 900] as const;
+export const ICON_FONT_RETRY_DELAYS = [0, 120, 360, 900, 2400, 5000, 10000] as const;
 export const ICON_FONT_DEADLINE_MS = 2400;
 
 type FontFaceSetLike = Pick<FontFaceSet, "load" | "check" | "ready">;
@@ -33,12 +33,13 @@ export function initializeIconFontState(runtime: IconFontRuntime = {}): void {
   let settled = false;
   const markReadyWhenAvailable = async (): Promise<boolean> => {
     if (settled) return true;
+    let loadedFaces: FontFace[] | undefined;
     try {
-      await fonts.load(ICON_FONT_SPEC, "home history settings arrow_upward");
+      loadedFaces = await fonts.load(ICON_FONT_SPEC, "home history settings arrow_upward");
     } catch {
       return false;
     }
-    if (!fonts.check(ICON_FONT_SPEC)) return false;
+    if (!(loadedFaces?.length) && !fonts.check(ICON_FONT_SPEC)) return false;
     settled = true;
     setIconFontState(root, "ready");
     return true;
@@ -50,7 +51,6 @@ export function initializeIconFontState(runtime: IconFontRuntime = {}): void {
   void fonts.ready.then(() => markReadyWhenAvailable());
   schedule(() => {
     if (!settled) {
-      settled = true;
       setIconFontState(root, "failed");
     }
   }, deadlineMs);

@@ -6,7 +6,7 @@ const api = vi.hoisted(() => ({
   copyWorkspacePath: vi.fn(), createWorkspaceDirectory: vi.fn(), createWorkspaceFile: vi.fn(), deleteWorkspacePath: vi.fn(),
   createWorkspaceProject: vi.fn(), fetchStoryProjectSettings: vi.fn(), fetchCurrentProject: vi.fn(), fetchWorkspaceGitDiff: vi.fn(),
   fetchWorkspaceDiagnostics: vi.fn(), fetchWorkspaceTree: vi.fn(), importWorkspaceFiles: vi.fn(), initializeWorkspaceProject: vi.fn(),
-  moveWorkspacePath: vi.fn(), openWorkspaceProject: vi.fn(), readWorkspaceFile: vi.fn(), renameWorkspacePath: vi.fn(),
+  moveWorkspacePath: vi.fn(), openWorkspaceProject: vi.fn(), readWorkspaceFile: vi.fn(), readWorkspaceFileWindow: vi.fn(), applyWorkspaceDiagnosticFix: vi.fn(), renameWorkspacePath: vi.fn(),
   updateStoryChapterCompletion: vi.fn(), updateStoryProjectSettings: vi.fn(), writeWorkspaceFile: vi.fn()
 }));
 const agent = vi.hoisted(() => ({ resetSession: vi.fn(), loadSessions: vi.fn(), loadHistory: vi.fn() }));
@@ -43,6 +43,8 @@ beforeEach(() => {
   api.updateStoryChapterCompletion.mockResolvedValue(result(settings)); api.fetchWorkspaceDiagnostics.mockResolvedValue(result({ items: [] }));
   api.openWorkspaceProject.mockResolvedValue(result(project)); api.createWorkspaceProject.mockResolvedValue(result(project)); api.initializeWorkspaceProject.mockResolvedValue(result(project));
   api.readWorkspaceFile.mockImplementation(({ relativePath }: any) => Promise.resolve(result(file(relativePath, relativePath.endsWith(".json") ? "{}" : "body"))));
+  api.readWorkspaceFileWindow.mockImplementation(({ relativePath, startLine }: any) => Promise.resolve(result({ relativePath, content: `line-${startLine}\n`, size: 3 * 1024 * 1024, mtimeMs: Date.now(), startLine, loadedLines: 1, lineCount: 100000, lineCountExact: false, hasPrevious: startLine > 0, hasNext: true, mode: "progressive", readOnly: false, initialChunkBytes: 262144 })));
+  api.applyWorkspaceDiagnosticFix.mockResolvedValue(result({ relativePath: "bom.json", fixId: "remove_utf8_bom", changed: true }));
   api.writeWorkspaceFile.mockImplementation(({ relativePath, content }: any) => Promise.resolve(result(file(relativePath, content))));
   api.createWorkspaceFile.mockImplementation(({ relativePath, content }: any) => Promise.resolve(result(file(relativePath, content))));
   api.createWorkspaceDirectory.mockResolvedValue(result({ relativePath: "notes", kind: "directory" }));
@@ -109,6 +111,18 @@ describe("workspace store full action lifecycle", () => {
     store.removePathState("renamed"); expect(store.documents["renamed/a.md"]).toBeUndefined();
     store.tree = [{ kind: "file", relativePath: "keep.md" }] as any; store.reconcileWorkspaceStateWithTree();
     expect(store.pathExistsInTree("keep.md")).toBe(true); expect(store.resolveExistingPath("missing")).toBe("");
+  });
+
+  it("opens large files progressively, jumps windows, cancels stale reads and allows explicit full loading", async () => {
+    const store = useWorkspaceStore(); store.launchScreenVisible = false; store.currentProject = project as any;
+    store.tree = [{ kind: "file", relativePath: "large.md", size: 3 * 1024 * 1024, children: [] }] as any;
+    await store.openFile("large.md");
+    expect(api.readWorkspaceFileWindow).toHaveBeenCalledWith({ relativePath: "large.md", startLine: 0, lineCount: 400 });
+    expect(store.activeLargeFileWindow?.mode).toBe("progressive");
+    await store.loadLargeFileWindow(5000);
+    expect(store.activeLargeFileWindow?.startLine).toBe(5000);
+    await store.loadActiveFileFully();
+    expect(api.readWorkspaceFile).toHaveBeenCalledWith({ relativePath: "large.md" });
   });
 
   it("opens previews, Git reviews, agent diffs and help guide documents", async () => {

@@ -7,6 +7,8 @@ import type {
   WorkspaceCreateFileRequest,
   WorkspaceDiagnosticsRequest,
   WorkspaceDiagnosticsResponse,
+  WorkspaceDiagnosticFixRequest,
+  WorkspaceDiagnosticFixResponse,
   WorkspaceDeleteRequest,
   StoryCurrentStateResponse,
   WorkspaceGitCommitRequest,
@@ -20,6 +22,8 @@ import type {
   StoryLatestSnapshotResponse,
   WorkspaceFileDocument,
   WorkspaceFileReadRequest,
+  WorkspaceFileWindowRequest,
+  WorkspaceFileWindowResponse,
   WorkspaceFileWriteRequest,
   WorkspacePathInfo,
   WorkspaceProjectInfo,
@@ -253,6 +257,21 @@ export async function fetchWorkspaceGitSummary(): Promise<ApiResult<WorkspaceGit
     }
     throw error;
   }
+}
+
+export async function applyWorkspaceDiagnosticFix(
+  payload: WorkspaceDiagnosticFixRequest
+): Promise<ApiResult<WorkspaceDiagnosticFixResponse>> {
+  const response = await apiClient.post<ApiEnvelope<WorkspaceDiagnosticFixResponse>>("/workspace/diagnostics/fix", payload);
+  return unwrapEnvelope(response.data, "Workspace diagnostic fix failed.");
+}
+
+export async function readWorkspaceFileWindow(
+  payload: WorkspaceFileWindowRequest,
+  signal?: AbortSignal
+): Promise<ApiResult<WorkspaceFileWindowResponse>> {
+  const response = await apiClient.post<ApiEnvelope<WorkspaceFileWindowResponse>>("/file/window", payload, { signal });
+  return unwrapEnvelope(response.data, "Workspace file window read failed.");
 }
 
 export async function fetchWorkspaceGitDiff(): Promise<ApiResult<WorkspaceGitDiffResponse>> {

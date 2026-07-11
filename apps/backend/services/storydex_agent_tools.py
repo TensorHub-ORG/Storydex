@@ -493,8 +493,19 @@ class StorydexApplyStoryIncrementTool(_StorydexWorkspaceToolMixin, BaseTool):
                             },
                             "variableUpdates": {
                                 "type": "array",
-                                "items": {"type": "object"},
-                                "description": "Optional machine operations only when safe to merge.",
+                                "items": {
+                                    "type": "object",
+                                    "required": ["op", "path", "evidence"],
+                                    "properties": {
+                                        "op": {"type": "string", "enum": ["set", "replace", "add", "remove"]},
+                                        "path": {"type": "string", "description": "Stable-ID based dotted path; never use a mutable display name as an entity key."},
+                                        "value": {},
+                                        "evidence": {"type": "string"},
+                                        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                                        "requiresReview": {"type": "boolean"},
+                                    },
+                                },
+                                "description": "Optional revisioned change-set operations only when safe to merge and grounded in source evidence.",
                             },
                             "characterUpdates": {"type": "array", "items": {"type": "object"}},
                             "newCharacters": {"type": "array", "items": {"type": "string"}},
@@ -519,8 +530,19 @@ class StorydexApplyStoryIncrementTool(_StorydexWorkspaceToolMixin, BaseTool):
                 },
                 "variableUpdates": {
                     "type": "array",
-                    "items": {"type": "object"},
-                    "description": "Optional machine operations only when safe to merge.",
+                    "items": {
+                        "type": "object",
+                        "required": ["op", "path", "evidence"],
+                        "properties": {
+                            "op": {"type": "string", "enum": ["set", "replace", "add", "remove"]},
+                            "path": {"type": "string", "description": "Stable-ID based dotted path; never use a mutable display name as an entity key."},
+                            "value": {},
+                            "evidence": {"type": "string"},
+                            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                            "requiresReview": {"type": "boolean"},
+                        },
+                    },
+                    "description": "Optional revisioned change-set operations only when safe to merge and grounded in source evidence.",
                 },
                 "characterUpdates": {"type": "array", "items": {"type": "object"}},
                 "newCharacters": {"type": "array", "items": {"type": "string"}},

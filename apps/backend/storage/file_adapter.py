@@ -73,7 +73,7 @@ class FileAdapter:
 
     def read_text(self, relative_path: str) -> str:
         path = self.resolve_path(relative_path)
-        return path.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8-sig")
 
     def file_metadata(self, relative_path: str) -> Dict[str, object]:
         path = self.resolve_path(relative_path)
