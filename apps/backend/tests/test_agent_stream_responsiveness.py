@@ -25,7 +25,9 @@ def test_stream_sends_acceptance_and_heartbeats_before_slow_intent_finishes(monk
         completed = False
 
         async def classify_intent(self, **kwargs):
-            await asyncio.sleep(0.06)
+            # Simulate cold Coomi/OpenAI imports that block synchronously before
+            # the provider reaches its first await.
+            time.sleep(0.06)
             self.completed = True
             return {"primary": "general", "confidence": "medium", "signals": [], "method": "llm"}
 
@@ -79,7 +81,9 @@ def test_stream_sends_acceptance_and_heartbeats_before_slow_intent_finishes(monk
     assert first_completed_state is False
     packets = [_packet(chunk) for chunk in remaining]
     intent_packets = [packet for packet in packets if packet.get("phase") == "intent_classification"]
-    assert any(packet.get("heartbeat") is True for packet in intent_packets)
+    heartbeat_packets = [packet for packet in intent_packets if packet.get("heartbeat") is True]
+    assert heartbeat_packets
+    assert heartbeat_packets[0]["elapsedMs"] < 50
     assert intent_packets[-1]["status"] == "success"
     assert intent_service.completed is True
 
@@ -128,3 +132,31 @@ def test_task_planning_phase_is_emitted_before_planner_completes(monkeypatch, tm
     assert packet["phase"] == "task_planning"
     assert packet["status"] == "running"
     assert completed_at_first is False
+
+
+def test_cold_intent_workers_are_serialized_to_avoid_provider_import_races(monkeypatch):
+    class BlockingIntentService:
+        active = 0
+        max_active = 0
+
+        async def classify_intent(self, **kwargs):
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            try:
+                time.sleep(0.03)
+                return {"primary": "general"}
+            finally:
+                self.active -= 1
+
+    service = BlockingIntentService()
+    monkeypatch.setattr(routes_agent, "storydex_intent_service", service)
+
+    async def run_both():
+        return await asyncio.gather(
+            routes_agent._classify_intent_without_blocking_event_loop(prompt="one"),
+            routes_agent._classify_intent_without_blocking_event_loop(prompt="two"),
+        )
+
+    results = asyncio.run(run_both())
+    assert [item["primary"] for item in results] == ["general", "general"]
+    assert service.max_active == 1

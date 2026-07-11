@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import json
 import re
 import time
@@ -37,6 +38,7 @@ git_service = get_git_service()
 story_project_service = get_story_project_service()
 
 _AGENT_GENERATION_LOCK = Lock()
+_INTENT_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="storydex-intent")
 _PHASE_HEARTBEAT_SECONDS = 0.6
 _COMMIT_MESSAGE_TIMEOUT_SECONDS = 2.0
 
@@ -50,6 +52,23 @@ class _CancellationToken:
 
     def is_cancelled(self) -> bool:
         return self._cancelled
+
+
+async def _classify_intent_without_blocking_event_loop(**kwargs: Any) -> Dict[str, Any]:
+    """Run intent classification on a worker loop.
+
+    Coomi/OpenAI provider construction performs synchronous imports and client
+    initialization before its first await.  Keeping that work on the request
+    loop can suppress phase heartbeats for several seconds on a cold start.
+    Intent classification is read-only, so isolating it in a worker preserves
+    cancellation of the response stream while keeping progress events timely.
+    """
+
+    def classify() -> Dict[str, Any]:
+        return asyncio.run(storydex_intent_service.classify_intent(**kwargs))
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_INTENT_EXECUTOR, classify)
 
 
 class AgentChatRequest(BaseModel):
@@ -2211,7 +2230,7 @@ async def _stream_agent_chat_request_sse(
             ),
         )
         intent_task = asyncio.create_task(
-            storydex_intent_service.classify_intent(
+            _classify_intent_without_blocking_event_loop(
                 prompt=payload.prompt,
                 active_file=payload.active_file,
                 workspace_root=workspace_root,
