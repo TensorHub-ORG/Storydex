@@ -1,4 +1,6 @@
 from pathlib import Path
+from concurrent.futures import Future
+from types import SimpleNamespace
 
 from services.large_file_service import (
     LARGE_FILE_BYTES,
@@ -86,3 +88,38 @@ def test_large_file_chunk_limit_and_cached_index_clamping(tmp_path: Path):
     # A fresh schedule is ignored while a valid cached index is available.
     service._schedule_index(target, target.stat().st_size, target.stat().st_mtime_ns)  # noqa: SLF001
     assert key not in service._pending  # noqa: SLF001
+
+
+def test_large_file_byte_budget_pending_and_stale_index_branches(tmp_path: Path):
+    service = LargeFileService()
+    target = tmp_path / "byte-budget.txt"
+    target.write_text(("甲" * 100_000) + "\n" + ("乙" * 100_000) + "\n", encoding="utf-8")
+    limited = service.read_window(target, start_line=0, line_count=20)
+    assert limited["loadedLines"] == 1
+    assert limited["hasNext"] is True
+
+    key = str(target.resolve())
+    service._pending[key].result(timeout=5)  # noqa: SLF001
+    service.read_window(target, start_line=0, line_count=1)
+    cached = service._indexes[key]  # noqa: SLF001
+    assert service._get_index(target, cached.size, cached.mtime_ns + 1) is None  # noqa: SLF001
+
+    unresolved: Future[LineIndex] = Future()
+    service._pending[key] = unresolved  # noqa: SLF001
+    assert service._get_index(target, target.stat().st_size, target.stat().st_mtime_ns) is None  # noqa: SLF001
+    service._schedule_index(target, target.stat().st_size, target.stat().st_mtime_ns)  # noqa: SLF001
+    assert service._pending[key] is unresolved  # noqa: SLF001
+    unresolved.cancel()
+
+    large_response = service._response(  # noqa: SLF001
+        target=target,
+        stat=SimpleNamespace(st_size=LARGE_FILE_BYTES + 1, st_mtime=1.25),
+        content="preview",
+        start_line=5,
+        loaded_lines=1,
+        total_lines=10,
+        exact=False,
+    )
+    assert large_response["mode"] == "large-readonly"
+    assert large_response["readOnly"] is True
+    assert large_response["hasPrevious"] is True

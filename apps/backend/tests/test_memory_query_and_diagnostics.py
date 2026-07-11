@@ -3,11 +3,61 @@ from __future__ import annotations
 import json
 import subprocess
 import types
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from core.exceptions import StorydexError
 from services import diagnostics_service, fact_memory_store, relationship_memory_store, request_auth_service, storydex_coomi_runtime_tools, storydex_retrieval
+
+
+def test_memory_catalog_diagnostic_governance_branches(tmp_path):
+    catalog = tmp_path / "catalog.json"
+    stale = (datetime.now(timezone.utc) - timedelta(days=120)).isoformat()
+    catalog.write_text(
+        json.dumps(
+            {
+                "modules": [
+                    None,
+                    {"id": "partial", "path": "", "updatedAt": "not-a-time"},
+                    {
+                        "id": "canon",
+                        "path": "canon",
+                        "purpose": "facts",
+                        "schemaVersion": 1,
+                        "consumers": ["agent"],
+                        "updatedAt": stale,
+                    },
+                    {
+                        "id": "canon",
+                        "path": "canon",
+                        "purpose": "duplicate",
+                        "schemaVersion": 1,
+                        "updatedAt": stale,
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    codes = [item["code"] for item in diagnostics_service.DiagnosticsService._memory_catalog_diagnostics(catalog)]
+    assert "story.memory.module_incomplete" in codes
+    assert "story.memory.module_duplicate" in codes
+    assert "story.memory.module_unused" in codes
+    assert "story.memory.module_stale" in codes
+
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text('{"characters": []}', encoding="utf-8")
+    assert diagnostics_service.DiagnosticsService._legacy_memory_diagnostic(
+        path=legacy,
+        relative_path=".storydex/memory/legacy.json",
+    )["severity"] == "info"
+    legacy.write_text("[]", encoding="utf-8")
+    assert diagnostics_service.DiagnosticsService._legacy_memory_diagnostic(
+        path=legacy,
+        relative_path=".storydex/memory/legacy.json",
+    ) is None
 
 
 def test_fact_store_loading_relevance_context_inference_dedup_and_paths(tmp_path):
