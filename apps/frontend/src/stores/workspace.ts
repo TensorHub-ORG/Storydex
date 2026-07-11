@@ -5,6 +5,7 @@ import { fetchHelpGuide } from "@/api/help";
 import { fetchSystemBootstrap, fetchSystemHealth } from "@/api/system";
 import {
   copyWorkspacePath,
+  applyWorkspaceDiagnosticFix,
   createWorkspaceDirectory,
   createWorkspaceFile,
   deleteWorkspacePath,
@@ -19,6 +20,7 @@ import {
   moveWorkspacePath,
   openWorkspaceProject,
   readWorkspaceFile,
+  readWorkspaceFileWindow,
   renameWorkspacePath,
   updateStoryChapterCompletion,
   updateStoryProjectSettings,
@@ -33,6 +35,7 @@ import type {
   WorkspaceEditorTab,
   WorkspaceDiagnosticItem,
   WorkspaceFileDocument,
+  WorkspaceFileWindowResponse,
   WorkspaceGitDiffLineKind,
   WorkspaceGitDiffResponse,
   WorkspaceImportFileItem,
@@ -104,6 +107,8 @@ interface WorkspaceState {
 }
 
 const MAX_RECENT_PROJECTS = 8;
+const PROGRESSIVE_FILE_BYTES = 2 * 1024 * 1024;
+let largeFileAbortController: AbortController | null = null;
 
 export const useWorkspaceStore = defineStore("workspace", {
   state: (): WorkspaceState => ({
@@ -168,6 +173,12 @@ export const useWorkspaceStore = defineStore("workspace", {
       }
       const parts = state.activeFile.split("/");
       return parts[parts.length - 1] ?? state.activeFile;
+    },
+
+    activeLargeFileWindow(state): WorkspaceFileWindowResponse | null {
+      if (!state.activeFile) return null;
+      const value = state.documents[state.activeFile]?.media?.largeFileWindow;
+      return value && typeof value === "object" ? value as WorkspaceFileWindowResponse : null;
     },
 
     activeDisplayPath(state): string {
@@ -712,7 +723,7 @@ export const useWorkspaceStore = defineStore("workspace", {
       }
     },
 
-    async openFile(relativePath: string, options?: { forceReload?: boolean }): Promise<void> {
+    async openFile(relativePath: string, options?: { forceReload?: boolean; forceFull?: boolean }): Promise<void> {
       if (!relativePath) {
         return;
       }
@@ -735,15 +746,54 @@ export const useWorkspaceStore = defineStore("workspace", {
 
       this.isFileLoading = true;
       try {
-        const result = await readWorkspaceFile({ relativePath });
-        this.applyFileDocument(result.data);
-        this.fileTrace = result.trace;
+        const treeNode = findTreeNode(this.tree, relativePath);
+        const knownSize = Number(treeNode?.size || 0);
+        if (!options?.forceFull && knownSize >= PROGRESSIVE_FILE_BYTES) {
+          const result = await readWorkspaceFileWindow({ relativePath, startLine: 0, lineCount: 400 });
+          this.applyLargeFileWindow(result.data);
+          this.fileTrace = result.trace;
+        } else {
+          const result = await readWorkspaceFile({ relativePath });
+          this.applyFileDocument(result.data);
+          this.fileTrace = result.trace;
+        }
         this.workspaceError = "";
       } catch (error: unknown) {
         this.workspaceError = normalizeWorkspaceError(error);
       } finally {
         this.isFileLoading = false;
       }
+    },
+
+    async loadLargeFileWindow(startLine: number): Promise<void> {
+      if (!this.activeFile || !this.activeLargeFileWindow) return;
+      largeFileAbortController?.abort();
+      const controller = new AbortController();
+      largeFileAbortController = controller;
+      try {
+        const result = await readWorkspaceFileWindow(
+          { relativePath: this.activeFile, startLine: Math.max(0, Math.floor(startLine)), lineCount: 400 },
+          controller.signal
+        );
+        if (!controller.signal.aborted && this.activeFile === result.data.relativePath) {
+          this.applyLargeFileWindow(result.data);
+        }
+      } catch (error: unknown) {
+        if (!controller.signal.aborted) this.workspaceError = normalizeWorkspaceError(error);
+      } finally {
+        if (largeFileAbortController === controller) largeFileAbortController = null;
+      }
+    },
+
+    async applyDiagnosticFix(relativePath: string, fixId: string): Promise<void> {
+      await applyWorkspaceDiagnosticFix({ relativePath, fixId });
+      await this.refreshDiagnostics();
+      if (this.activeFile === relativePath) await this.openFile(relativePath, { forceReload: true });
+    },
+
+    async loadActiveFileFully(): Promise<void> {
+      if (!this.activeFile) return;
+      await this.openFile(this.activeFile, { forceReload: true, forceFull: true });
     },
 
     async activateTab(relativePath: string): Promise<void> {
@@ -1506,6 +1556,26 @@ export const useWorkspaceStore = defineStore("workspace", {
       this.ensureOpenTab(document.relativePath, document.extension, false, document.title);
     },
 
+    applyLargeFileWindow(window: WorkspaceFileWindowResponse): void {
+      const existing = this.documents[window.relativePath];
+      const document: WorkspaceFileDocument = {
+        relativePath: window.relativePath,
+        content: window.content,
+        size: window.size,
+        wordCount: 0,
+        lineCount: window.lineCount,
+        lineCountExact: window.lineCountExact,
+        updatedAt: new Date(window.mtimeMs).toISOString(),
+        extension: fileExtensionFromPath(window.relativePath),
+        kind: "file",
+        readOnly: window.readOnly,
+        isPartialView: true,
+        media: { ...(existing?.media || {}), largeFileWindow: window }
+      };
+      this.applyFileDocument(document);
+      this.editorMode = "preview";
+    },
+
     applyTreeProjectInfo(tree: {
       workspaceRoot: string;
       storydexRoot: string;
@@ -2244,6 +2314,18 @@ function treeContainsPath(nodes: WorkspaceTreeNode[], relativePath: string): boo
   return false;
 }
 
+function findTreeNode(nodes: WorkspaceTreeNode[], relativePath: string): WorkspaceTreeNode | null {
+  const normalized = String(relativePath || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  for (const node of nodes) {
+    if (String(node.relativePath || "").replace(/\\/g, "/") === normalized) return node;
+    if (node.kind === "directory" && Array.isArray(node.children)) {
+      const nested = findTreeNode(node.children, normalized);
+      if (nested) return nested;
+    }
+  }
+  return null;
+}
+
 function buildAgentPreviewId(relativePath: string): string {
   const normalized = normalizeRelativePath(relativePath) || "preview";
   return `.storydex/preview/${normalized.replace(/\//g, "__")}`;
@@ -2373,6 +2455,12 @@ function countVisibleCharacters(content: string): number {
 function fileNameFromPath(relativePath: string): string {
   const parts = relativePath.split("/");
   return parts[parts.length - 1] ?? relativePath;
+}
+
+function fileExtensionFromPath(relativePath: string): string {
+  const name = fileNameFromPath(relativePath);
+  const index = name.lastIndexOf(".");
+  return index > 0 ? name.slice(index).toLowerCase() : "";
 }
 
 function estimateUtf8Size(content: string): number {

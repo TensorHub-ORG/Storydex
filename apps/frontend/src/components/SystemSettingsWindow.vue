@@ -229,7 +229,7 @@
                         type="button"
                         @click="installDesktopUpdate"
                       >
-                        退出并安装
+                        安装更新
                       </button>
                     </div>
 
@@ -413,7 +413,7 @@ const updaterStatusText = computed(() => {
     case "downloading":
       return "正在下载更新…";
     case "downloaded":
-      return "更新已下载完成；退出安装后，请重新打开 Storydex。";
+      return "更新已下载完成；点击安装后将打开独立安装窗口。";
     case "initializing":
       return "正在初始化自动更新组件…";
     case "error":

@@ -34,8 +34,10 @@ if (!exists(pythonRoot)) {
 if (!failures.length) {
   const preflightCode = [
     "import sys",
+    "from importlib.metadata import version",
     "modules = ('fastapi', 'uvicorn', 'anthropic', 'pydantic_settings', 'dotenv')",
     "for name in modules: __import__(name)",
+    "assert version('coomi-agent') == '1.1.2', version('coomi-agent')",
     "print('storydex-embedded-python-ok')",
     "print(sys.executable)",
     "print(sys.prefix)"
@@ -47,7 +49,8 @@ if (!failures.length) {
       ...process.env,
       PYTHONUTF8: "1",
       PYTHONIOENCODING: "utf-8",
-      PYTHONNOUSERSITE: "1"
+      PYTHONNOUSERSITE: "1",
+      PYTHONDONTWRITEBYTECODE: "1"
     }
   });
   const output = `${result.stdout || ""}${result.stderr || ""}`.trim();

@@ -200,7 +200,7 @@ function Test-RequirementsInstalled {
         return $false
     }
 
-    & $pythonExe -c "import anthropic, fastapi, pydantic, pydantic_core, pydantic_settings, sqlalchemy, uvicorn"
+    & $pythonExe -c "from importlib.metadata import version; import anthropic, fastapi, pydantic, pydantic_core, pydantic_settings, sqlalchemy, uvicorn; raise SystemExit(0 if version('coomi-agent') == '1.1.2' else 1)"
     return $LASTEXITCODE -eq 0
 }
 
