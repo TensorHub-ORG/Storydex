@@ -157,6 +157,8 @@
             </div>
           </div>
 
+          <LargeFileViewer v-else-if="workspaceStore.activeLargeFileWindow" />
+
           <div v-else-if="workspaceStore.editorMode === 'preview'" class="doc-preview-shell">
             <div v-if="workspaceStore.isPreviewUnsupported" class="doc-unavailable">
               {{ workspaceStore.previewUnsupportedMessage }}
@@ -233,6 +235,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import GitReviewPane from "@/components/GitReviewPane.vue";
+import LargeFileViewer from "@/components/LargeFileViewer.vue";
 import WelcomeStartPage from "@/components/WelcomeStartPage.vue";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type { WorkspaceEditorTab } from "@/types/workspace";

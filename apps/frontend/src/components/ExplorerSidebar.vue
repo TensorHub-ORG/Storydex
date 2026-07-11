@@ -36,6 +36,7 @@
           </div>
         </div>
       </div>
+
     </template>
 
     <template v-else>
@@ -81,6 +82,10 @@
               >
                 <span class="material-symbols-rounded">save</span>
               </button>
+              <button class="explorer-toolbar-btn" type="button" title="问题" @click="problemsOpen = !problemsOpen">
+                <span class="material-symbols-rounded">problem</span>
+                <small v-if="workspaceStore.diagnostics.length">{{ workspaceStore.diagnostics.length }}</small>
+              </button>
             </div>
           </div>
           <div class="explorer-project">{{ projectLabel }}</div>
@@ -123,7 +128,7 @@
         <div v-else-if="workspaceStore.workspaceError" class="tree-empty tree-error">
           {{ workspaceStore.workspaceError }}
         </div>
-        <div v-else-if="rows.length === 0 && !pendingCreate" class="tree-empty">
+        <div v-else-if="rows.length === 0 && !pendingCreate" class="tree-empty tree-empty-resources">
           当前目录下还没有可展示的资源。可通过顶部图标或右键空白区域创建内容。
         </div>
         <template v-else>
@@ -174,12 +179,14 @@
                 <span class="material-symbols-rounded tree-icon">{{ iconFor(row.node) }}</span>
                 <span class="tree-label">{{ row.node.name }}</span>
                 <span v-if="row.node.kind === 'file' && row.node.extension" class="tree-meta">{{ row.node.extension }}</span>
+                <span v-if="row.node.kind === 'directory' && diagnosticCount(row.node)" class="tree-diagnostic-count" :class="`is-${diagnosticSeverity(row.node)}`">{{ diagnosticCount(row.node) }}</span>
               </button>
 
               <div v-if="!isRenamingNode(row.node) && shouldShowRowActions(row.node)" class="tree-row-actions" :style="{ right: '10px' }">
                 <span
                   v-if="showDiagnosticDot(row.node)"
                   class="tree-diagnostic-dot"
+                  :class="`is-${diagnosticSeverity(row.node)}`"
                   :title="diagnosticHint(row.node)"
                   @click.stop
                 ></span>
@@ -224,6 +231,17 @@
         </template>
       </div>
     </template>
+
+    <section v-if="problemsOpen && !workspaceStore.launchScreenVisible" class="explorer-problems" @click.stop>
+      <header><strong>问题</strong><select v-model="problemSeverity"><option value="all">全部</option><option value="error">错误</option><option value="warning">警告</option><option value="info">提示</option></select><button type="button" @click="problemsOpen = false">×</button></header>
+      <div class="explorer-problem-list">
+        <div v-for="item in filteredProblems" :key="`${item.relativePath}:${item.code}:${item.line}:${item.message}`" class="explorer-problem-item">
+          <button type="button" class="problem-open" @click="openProblem(item.relativePath)"><span class="problem-severity" :class="`is-${item.severity}`"></span><span><strong>{{ item.code || item.source }}</strong><small>{{ item.relativePath }}{{ item.line ? `:${item.line}:${item.column || 1}` : "" }}</small><em>{{ item.message }}</em></span></button>
+          <button v-if="item.fixes?.[0]" type="button" class="problem-fix" @click="applyProblemFix(item.relativePath, item.fixes[0].id)">{{ item.fixes[0].label }}</button>
+        </div>
+        <div v-if="!filteredProblems.length" class="explorer-problem-empty">没有匹配的问题</div>
+      </div>
+    </section>
 
     <Teleport to="body">
       <div
@@ -352,6 +370,11 @@ const pendingRenameInputRef = ref<HTMLInputElement | null>(null);
 const contextMenuRef = ref<HTMLDivElement | null>(null);
 const dragTargetPath = ref<string | null>(null);
 const dragDepth = ref(0);
+const problemsOpen = ref(false);
+const problemSeverity = ref<"all" | "error" | "warning" | "info">("all");
+const filteredProblems = computed(() => workspaceStore.diagnostics.filter(
+  (item) => problemSeverity.value === "all" || item.severity === problemSeverity.value
+));
 const pendingRenameValue = computed({
   get: () => pendingRename.value?.value ?? "",
   set: (value: string) => {
@@ -411,6 +434,14 @@ function hasDirectDiagnostics(node: WorkspaceTreeNode): boolean {
   return directDiagnosticCount(node) > 0;
 }
 
+function diagnosticSeverity(node: WorkspaceTreeNode): "error" | "warning" | "info" {
+  const relativePath = nodePath(node);
+  const items = relativePath ? workspaceStore.diagnosticsForPath(relativePath) : [];
+  if (items.some((item) => item.severity === "error")) return "error";
+  if (items.some((item) => item.severity === "warning")) return "warning";
+  return "info";
+}
+
 function diagnosticHint(node: WorkspaceTreeNode): string {
   const relativePath = nodePath(node);
   if (!relativePath) {
@@ -422,9 +453,17 @@ function diagnosticHint(node: WorkspaceTreeNode): string {
   }
   const preview = items
     .slice(0, 3)
-    .map((item) => `${item.message}${item.line ? ` (行 ${item.line}${item.column ? `:${item.column}` : ""})` : ""}`)
+    .map((item) => `[${String(item.severity || "info").toUpperCase()}] ${item.code ? `${item.code}: ` : ""}${item.message}${item.line ? ` (行 ${item.line}${item.column ? `:${item.column}` : ""})` : ""}${item.evidence ? `\n证据：${item.evidence}` : ""}`)
     .join("\n");
   return items.length > 3 ? `${preview}\n...还有 ${items.length - 3} 条诊断` : preview;
+}
+
+async function openProblem(relativePath: string): Promise<void> {
+  if (relativePath) await workspaceStore.openFile(relativePath);
+}
+
+async function applyProblemFix(relativePath: string, fixId: string): Promise<void> {
+  await workspaceStore.applyDiagnosticFix(relativePath, fixId);
 }
 
 function shouldShowRowActions(node: WorkspaceTreeNode): boolean {
@@ -1255,7 +1294,7 @@ defineExpose({
   __testUtils: import.meta.env.MODE === "test" ? {
     expandedPaths, contextMenu, clipboardState, pendingCreate, pendingRename, pendingRenameValue, dragTargetPath, rows,
     nodePath, normalizeNodePath, isChapterDirectory, diagnosticCount, directDiagnosticCount, hasDiagnostics,
-    hasDirectDiagnostics, diagnosticHint, shouldShowRowActions, showDiagnosticDot, chapterCompletionLabel,
+    hasDirectDiagnostics, diagnosticSeverity, diagnosticHint, shouldShowRowActions, showDiagnosticDot, chapterCompletionLabel,
     isStorySegmentNode, storyDiagnosticCount, storyDiagnosticHint, shouldShowStoryRowActions, chapterStateTitle,
     isRenamingNode, handleRefresh, handleAutoRefresh, handleWindowPointerDown, handleSave, handleRowClick,
     handleChapterCompletionToggle, openNodeContextMenu, handleRootContextMenu, openContextMenuAt, closeContextMenu,
@@ -1273,6 +1312,23 @@ defineExpose({
 </script>
 
 <style scoped>
+.tree-empty-resources {
+  padding: 10px 14px;
+  font-size: 12px;
+  line-height: 1.6;
+  letter-spacing: 0;
+}
+
+.explorer-toolbar-btn small { min-width: 14px; font-size: 9px; color: var(--state-danger); }
+.explorer-problems { position: absolute; inset: auto 8px 8px; z-index: 12; max-height: 46%; display: flex; flex-direction: column; background: var(--surface-raised, #fff); border: 1px solid var(--border-ghost); box-shadow: 0 8px 28px rgba(15, 35, 65, .16); }
+.explorer-problems header { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--border-ghost); font-size: 12px; }
+.explorer-problems header strong { flex: 1; }.explorer-problems header select { font: inherit; }.explorer-problems header button { border: 0; background: transparent; cursor: pointer; }
+.explorer-problem-list { overflow: auto; }.explorer-problem-item { display: flex; align-items: flex-start; border-bottom: 1px solid var(--border-ghost); }
+.problem-open { flex: 1; min-width: 0; display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px; border: 0; background: transparent; text-align: left; cursor: pointer; }
+.problem-open > span:nth-child(2) { flex: 1; min-width: 0; }.problem-open strong,.problem-open small,.problem-open em { display: block; font-size: 11px; font-style: normal; }.problem-open small { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; }.problem-open em { margin-top: 3px; color: var(--text-secondary); }
+.problem-severity { width: 8px; height: 8px; margin-top: 4px; border-radius: 50%; background: #4b83d1; }.problem-severity.is-error { background: var(--danger); }.problem-severity.is-warning { background: #d99524; }
+.problem-fix { flex: none; align-self: center; margin-right: 8px; border: 1px solid var(--border-ghost); background: transparent; padding: 3px 6px; font-size: 10px; cursor: pointer; }.explorer-problem-empty { padding: 16px; color: var(--text-muted); font-size: 12px; text-align: center; }
+
 .tree-row-shell {
   position: relative;
 }
@@ -1298,14 +1354,7 @@ defineExpose({
 }
 
 .tree-row.has-diagnostics {
-  color: var(--danger);
-}
-
-.tree-row.has-diagnostics .tree-caret,
-.tree-row.has-diagnostics .tree-icon,
-.tree-row.has-diagnostics .tree-label,
-.tree-row.has-diagnostics .tree-meta {
-  color: var(--danger);
+  color: inherit;
 }
 
 .tree-row-actions {
@@ -1330,6 +1379,11 @@ defineExpose({
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 14%, transparent);
   cursor: default;
 }
+
+.tree-diagnostic-dot.is-warning { background: #d99524; box-shadow: 0 0 0 3px color-mix(in srgb, #d99524 14%, transparent); }
+.tree-diagnostic-dot.is-info { background: #4b83d1; box-shadow: 0 0 0 3px color-mix(in srgb, #4b83d1 14%, transparent); }
+.tree-diagnostic-count { min-width: 16px; height: 16px; padding: 0 4px; display: inline-flex; align-items: center; justify-content: center; border-radius: 8px; background: #4b83d1; color: #fff; font-size: 9px; line-height: 1; }
+.tree-diagnostic-count.is-error { background: var(--danger); }.tree-diagnostic-count.is-warning { background: #d99524; }
 
 .tree-complete-toggle {
   position: relative;

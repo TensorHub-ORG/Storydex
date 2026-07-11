@@ -21,7 +21,7 @@
 </table>
 
 <p align="center">
-  <img alt="release" src="https://img.shields.io/badge/release-v0.3.4-2563eb?style=flat-square" />
+  <img alt="release" src="https://img.shields.io/badge/release-v0.3.5-2563eb?style=flat-square" />
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0%20%2B%20Commons%20Clause-0f766e?style=flat-square" />
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-f97316?style=flat-square" />
   <img alt="desktop" src="https://img.shields.io/badge/desktop-Electron%2034-47848f?style=flat-square&logo=electron&logoColor=white" />
@@ -111,6 +111,16 @@ Storydex/
 
 Copyright 2026 Septemc and Flowby.
 
+## v0.3.5
+
+v0.3.5 改进了大文件、长期记忆、文件诊断和桌面差分安装体验。小文件继续完整编辑，2～20MB 文件采用渐进读取，大于 20MB 默认使用只读快速预览；首屏按约 256KB 分块读取，滚动时按需跳转并取消过期请求，避免大文件阻塞界面。
+
+`.storydex/memory` 现在只保存变量、事实、人物状态、关系、时间线等长期记忆，历史会话仍位于 `.storydex/.agent/sessions`。memory 使用带模块目录、稳定 ID、schemaVersion、revision、变更账本和恢复点的受约束自适应布局；`.storydex/temp` 只是用户可见的普通临时工作台，不参与索引、诊断、自动清理或常规上下文注入。每个新项目都会在 memory README 中写入完整治理规范。
+
+资源浏览器增加统一问题面板和分级诊断：错误、警告、迁移提示与 Git 修改状态互相独立，UTF-8 BOM 可兼容读取并一键移除。Coomi 运行环境严格固定为 `coomi-agent==1.1.2`，开发、CI 和内嵌 Python 均验证实际安装版本。
+
+差分安装改由独立辅助窗口接管，持续显示等待退出、安装、成功或失败状态。安装锁会阻止半更新状态的主程序启动；完成后由用户选择立即启动或稍后启动，失败时保留旧版本及安装日志。
+
 ## v0.3.4
 
 v0.3.4 是桌面差分更新热修复版。它取消了 NSIS 替换应用文件期间强制立即拉起新进程的行为，避免更新后的首次启动因 `electron-updater/out/main.js` 尚未就位而出现 JavaScript 主进程错误。
@@ -152,7 +162,7 @@ npm ci --prefix apps/desktop
 
 ## Windows 安装、便携包与应用内更新
 
-v0.3.4 发布资产包括 NSIS 安装包、`Storydex-win-unpacked.zip` 便携包、blockmap、`latest.yml`、SHA256 校验、发布说明、依赖清单和构建 manifest。安装包与便携包均内置可迁移的 Python 3.9 运行环境、后端依赖和 MinGit，用户无需另外安装 Python 或 Git 即可启动后端并使用小说项目本地版本管理。
+v0.3.5 发布资产包括 NSIS 安装包、`Storydex-win-unpacked.zip` 便携包、blockmap、`latest.yml`、SHA256 校验、发布说明、依赖清单和构建 manifest。安装包与便携包均内置可迁移的 Python 3.9 运行环境、后端依赖、固定版本的 `coomi-agent==1.1.2` 和 MinGit，用户无需另外安装 Python 或 Git即可启动后端并使用小说项目本地版本管理。
 
 发布构建会执行嵌入式 Python import/preflight、MinGit 文件检查和完整打包资源扫描；测试目录、coverage 文件、pytest 缓存、日志、`.env` 和其他开发期临时文件不会进入正式包。应用内更新使用 `electron-updater` 的 generic feed；安装版可使用 blockmap 进行差分下载，便携包适合解压后直接启动和人工验证。
 
@@ -164,4 +174,4 @@ Windows desktop releases use the generic electron-updater feed at:
 https://updates.septemc.com/storydex/windows/
 ```
 
-For differential-update testing, keep the `0.3.3` installer and blockmap available, publish the `0.3.4` assets, and leave `latest.yml` pointing to `0.3.4`. Install v0.3.3 first, then check for updates inside Storydex to verify the `0.3.3 -> 0.3.4` recovery path.
+For differential-update testing, keep the `0.3.4` installer and blockmap available, publish the `0.3.5` assets, and leave `latest.yml` pointing to `0.3.5`. Install v0.3.4 first, then check for updates inside Storydex to verify the `0.3.4 -> 0.3.5` assisted-install and recovery path.

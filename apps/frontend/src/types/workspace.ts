@@ -2,6 +2,28 @@ export interface WorkspaceFileReadRequest {
   relativePath: string;
 }
 
+export interface WorkspaceFileWindowRequest {
+  relativePath: string;
+  startLine: number;
+  lineCount?: number;
+}
+
+export interface WorkspaceFileWindowResponse {
+  relativePath: string;
+  content: string;
+  size: number;
+  mtimeMs: number;
+  startLine: number;
+  loadedLines: number;
+  lineCount: number;
+  lineCountExact: boolean;
+  hasPrevious: boolean;
+  hasNext: boolean;
+  mode: "full" | "progressive" | "large-readonly";
+  readOnly: boolean;
+  initialChunkBytes: number;
+}
+
 export interface WorkspaceFileWriteRequest {
   relativePath: string;
   content: string;
@@ -106,6 +128,10 @@ export interface WorkspaceFileDocument {
   boundRelativePath?: string;
   previewLines?: WorkspacePreviewLine[];
   media?: Record<string, unknown>;
+  isPartialView?: boolean;
+  lineCountExact?: boolean;
+  offset?: number | null;
+  limit?: number | null;
 }
 
 export interface WorkspacePathInfo {
@@ -138,16 +164,28 @@ export interface WorkspaceDiagnosticsRequest {
 }
 
 export interface WorkspaceDiagnosticItem {
+  code?: string;
   source: string;
   severity: string;
   relativePath: string;
   line: number;
   column: number;
   message: string;
+  evidence?: string;
+  fixes?: Array<{ id: string; label: string }>;
 }
 
 export interface WorkspaceDiagnosticsResponse {
   items: WorkspaceDiagnosticItem[];
+}
+
+export interface WorkspaceDiagnosticFixRequest {
+  relativePath: string;
+  fixId: string;
+}
+
+export interface WorkspaceDiagnosticFixResponse extends WorkspaceDiagnosticFixRequest {
+  changed: boolean;
 }
 
 export interface WorkspaceGitChangedFile {

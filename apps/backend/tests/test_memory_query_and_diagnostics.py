@@ -107,10 +107,12 @@ def test_diagnostics_files_operations_story_large_and_helpers(tmp_path):
     good_py = tmp_path / "good.py"
     bad_py = tmp_path / "bad.py"
     bad_json = tmp_path / "bad.json"
+    bom_json = tmp_path / "bom.json"
     story = tmp_path / "story.md"
     good_py.write_text("x = 1\n", encoding="utf-8")
     bad_py.write_text("def broken(:\n", encoding="utf-8")
     bad_json.write_text("{broken", encoding="utf-8")
+    bom_json.write_bytes(b"\xef\xbb\xbf{\"ok\": true}\n")
     story.write_text("story", encoding="utf-8")
     diagnostics = service.diagnose_paths(["", "../outside.py", "good.py", "bad.py", "bad.json", "story.md", "missing.py"])
     assert any(item["source"] == "python.ast" for item in diagnostics)
@@ -119,6 +121,10 @@ def test_diagnostics_files_operations_story_large_and_helpers(tmp_path):
     assert service._diagnose_python_content(content="x=1", relative_path="a.py") == []
     assert service._diagnose_json_content(content="{}", relative_path="a.json") == []
     assert service._diagnose_text(content="bad", relative_path="a.txt") == []
+    bom_diagnostics = service.diagnose_paths(["bom.json"])
+    assert [item["code"] for item in bom_diagnostics] == ["text.utf8_bom"]
+    assert service.apply_fix(relative_path="bom.json", fix_id="remove_utf8_bom")["changed"] is True
+    assert not bom_json.read_bytes().startswith(b"\xef\xbb\xbf")
 
     operation_diagnostics = service.diagnose_workspace_operations([
         None,

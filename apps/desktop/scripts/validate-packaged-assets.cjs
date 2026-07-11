@@ -41,6 +41,7 @@ requireDirectory("embedded Python", path.join(appRoot, "python-env"));
 requireDirectory("MinGit", path.join(appRoot, "mingit"));
 requireFile("updater config", path.join(resources, "app-update.yml"));
 requireFile("electron-updater entrypoint", path.join(resources, "app", "node_modules", "electron-updater", "out", "main.js"));
+requireFile("persistent update helper", path.join(resources, "app", "electron", "update-helper.ps1"));
 const forbiddenPackageEntries = walk(appRoot).filter((file) => {
   const relative = path.relative(appRoot, file).replace(/\\/g, "/");
   const base = path.basename(relative);

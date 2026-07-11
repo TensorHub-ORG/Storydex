@@ -677,7 +677,7 @@ class StorydexCoomiAgentService:
         except Exception as exc:
             raise StorydexCoomiUnavailable(
                 "Coomi is not installed in the active Storydex Python environment. "
-                "Install or update it with: python -m pip install -U coomi-agent"
+                "Install the supported version with: python -m pip install coomi-agent==1.1.2"
             ) from exc
 
     def get_status(self, *, workspace_root: Path) -> Dict[str, Any]:
@@ -1536,6 +1536,11 @@ async def _build_coomi_system_prompt(
         + "Never invent past plot facts; if retrieval finds nothing, treat the detail as unestablished and either "
         + "avoid it or establish it explicitly as new canon. WIKI query results may contain model inference — "
         + "when confidence is low or needsReview is true, confirm against chapters, character files, or variable memory.\n"
+        + "Storydex memory governance: `.storydex/memory/` is only for durable story memory and variables. Never write chat history, "
+        + "session transcripts, execution logs, plans, tool output, or temporary drafts there; sessions belong under `.storydex/.agent/sessions/`. "
+        + "Before reading or writing memory, follow `.storydex/memory/README.md` and its adaptive module catalog. Reuse an existing module when possible, "
+        + "keep canonical/derived/index data distinct, require stable entity IDs and evidence, and apply canonical changes through a validated revisioned change set. "
+        + "`.storydex/temp/` is only a plain optional creative scratch folder: do not inspect or inject it during normal work unless the user asks or the active task explicitly depends on it.\n"
         + "For story creation or continuation turns, use `StorydexApplyStoryIncrement` after drafting fragments to apply structured increments: "
         + "fragments, variableThoughts or variableNotes as readable Markdown, characterUpdates/newCharacters, "
         + "itemUpdates/newItems, factUpdates, relationshipUpdates, chapterSummary (a 150-300 character rolling "
