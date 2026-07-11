@@ -67,10 +67,16 @@ function shouldCopyBackend(sourcePath) {
   if (normalized.includes("/__pycache__/")) return false;
   if (normalized.includes("/.pytest_cache/")) return false;
   if (normalized.includes("/.mypy_cache/")) return false;
+  if (normalized.includes("/.ruff_cache/")) return false;
+  if (normalized.includes("/test-results/")) return false;
+  if (normalized.includes("/htmlcov/")) return false;
+  if (normalized.includes("/coverage-html/")) return false;
   if (normalized.includes("/tests/")) return false;
   if (normalized.includes("/test_support/")) return false;
   if (normalized.includes("/-p/")) return false;
   if (fileName === ".env" || fileName.startsWith(".env.")) return false;
+  if (fileName === ".coverage" || fileName.startsWith(".coverage.")) return false;
+  if (/^(coverage|pytest)(\.json|\.xml)$/i.test(fileName)) return false;
   if (/\.(log|err|out|tmp|temp|pyc)$/i.test(fileName)) return false;
   if (/\/\.codex-[^/]+\.log$/i.test(normalized)) return false;
   if (/\/\.uvicorn-[^/]+\.log$/i.test(normalized)) return false;
@@ -110,6 +116,7 @@ function copyMinGit() {
 
 function shouldCopyPythonEnv(sourcePath) {
   const normalized = String(sourcePath).replace(/\\/g, "/");
+  if (/(^|\/)(test|tests)(\/|$)/i.test(normalized)) return false;
   if (normalized.includes("/__pycache__/")) return false;
   if (normalized.includes("/.pytest_cache/")) return false;
   if (normalized.includes("/.mypy_cache/")) return false;
@@ -246,4 +253,12 @@ function run() {
   console.log("[Storydex Desktop] Synced app assets (frontend, backend, docs, MinGit, embedded python, icon) to apps/desktop/app.");
 }
 
-run();
+if (require.main === module) {
+  run();
+}
+
+module.exports = {
+  shouldCopyBackend,
+  shouldCopyPythonEnv,
+  shouldCopyPythonRuntime
+};

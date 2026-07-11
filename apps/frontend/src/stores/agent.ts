@@ -466,6 +466,12 @@ export const useAgentStore = defineStore("agent", {
       this.currentSessionId = sessionId;
       try {
         const result = await fetchAgentHistory(limit, sessionId);
+        // AgentPanel may still be finishing its mount-time history request when
+        // the user starts typing.  Never let that stale response replace a live
+        // run or history belonging to a newly selected session.
+        if (this.isRunning || this.currentSessionId !== sessionId) {
+          return;
+        }
         this.executionHistory = normalizeHistoryRuns(result.data.items, sessionId);
         const activeRun = this.executionHistory[0] ?? null;
         this.currentTraceId = activeRun?.traceId || "";
