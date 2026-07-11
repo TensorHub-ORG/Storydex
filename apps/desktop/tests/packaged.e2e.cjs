@@ -191,7 +191,7 @@ function parseSseFrame(frame) {
   return { event, data: JSON.parse(data) };
 }
 
-async function streamAgent({ backendBaseUrl, prompt, sessionId, workspaceRoot, stopWhen, timeoutMs = 30_000 }) {
+async function streamAgent({ backendBaseUrl, prompt, sessionId, workspaceRoot, stopWhen, timeoutMs = 30_000, busyRetries = 8 }) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error("SSE timeout")), timeoutMs);
   const started = performance.now();
@@ -201,6 +201,12 @@ async function streamAgent({ backendBaseUrl, prompt, sessionId, workspaceRoot, s
     body: JSON.stringify({ prompt, workspaceRoot, activeFile: "chapters/001.md" }),
     signal: controller.signal
   });
+  if (response.status === 409 && busyRetries > 0) {
+    clearTimeout(timer);
+    controller.abort();
+    await delay(250);
+    return streamAgent({ backendBaseUrl, prompt, sessionId, workspaceRoot, stopWhen, timeoutMs, busyRetries: busyRetries - 1 });
+  }
   assert.equal(response.status, 200);
   const events = [];
   const reader = response.body.getReader();
