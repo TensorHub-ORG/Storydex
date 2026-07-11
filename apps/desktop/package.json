@@ -17,7 +17,7 @@
     "check:release": "node scripts/validate-release-config.cjs",
     "check:packaged": "node scripts/validate-packaged-assets.cjs",
     "test": "npm run test:unit",
-    "test:unit": "node --test tests/update-feed.test.cjs tests/release-contract.test.cjs",
+    "test:unit": "node --test tests/update-feed.test.cjs tests/release-contract.test.cjs tests/packaging-policy.test.cjs",
     "test:e2e": "node --test tests/packaged.e2e.cjs",
     "test:update-feed": "node --test tests/update-feed.test.cjs",
     "build:desktop": "npm run build:frontend && npm run sync:assets && npm run check:embedded-python && set ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/&& electron-builder --dir --win --config.win.signAndEditExecutable=false && npm run patch:win-exe && npm run write:update-config",

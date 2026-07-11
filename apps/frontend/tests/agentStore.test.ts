@@ -106,6 +106,23 @@ describe("agent store sessions and Git decision UX", () => {
     expect(store.executionHistory[0].traceId).toBe("trace-old");
   });
 
+  it("does not let a stale mount-time history response overwrite a live run", async () => {
+    let resolveHistory!: (value: unknown) => void;
+    api.fetchAgentHistory.mockReturnValue(new Promise((resolve) => { resolveHistory = resolve; }));
+    const store = useAgentStore();
+    store.currentSessionId = "session-a";
+    const loading = store.loadHistory();
+    store.isRunning = true;
+    store.executionHistory = [{
+      traceId: "trace-live", sessionId: "session-a", prompt: "live", route: "coomi", agentMode: "coomi", llmModel: "", llmProvider: "",
+      status: "running", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastAction: "chat", reply: "", trace: null,
+      audit: [], events: [], tasks: [], changeLedger: { traceId: "trace-live", sessionId: "session-a", changedFiles: [], changedFileCount: 0, added: 0, removed: 0, commitHash: "", shortHash: "", diffSource: "", updatedAt: "" }, items: [], errorMessage: "", errorCode: null
+    }];
+    resolveHistory({ data: { items: [{ traceId: "trace-old", sessionId: "session-a", prompt: "old", reply: "old", events: [] }] } });
+    await loading;
+    expect(store.executionHistory[0].traceId).toBe("trace-live");
+  });
+
   it("shows operation state synchronously and does not await background Git refresh", async () => {
     let resolveDecision!: (value: unknown) => void;
     api.submitAgentRunCommitDecision.mockReturnValue(new Promise((resolve) => { resolveDecision = resolve; }));
