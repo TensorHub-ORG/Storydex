@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from services.coomi_version_service import check_coomi_version, read_expected_coomi_version
+from services.coomi_version_service import (
+    SUPPORTED_COOMI_VERSION,
+    check_coomi_version,
+    read_expected_coomi_version,
+)
+
+
+def test_repository_pin_matches_supported_version():
+    assert read_expected_coomi_version() == SUPPORTED_COOMI_VERSION
 
 
 def test_reads_single_pinned_coomi_version(tmp_path):
@@ -18,6 +26,11 @@ def test_rejects_unpinned_coomi_requirement(tmp_path):
         assert "must pin" in str(exc)
     else:
         raise AssertionError("expected unpinned requirement to fail")
+
+
+def test_packaged_runtime_uses_supported_version_when_requirements_are_absent(tmp_path, monkeypatch):
+    monkeypatch.setattr("services.coomi_version_service.repository_root", lambda: tmp_path)
+    assert read_expected_coomi_version() == SUPPORTED_COOMI_VERSION
 
 
 def test_version_check_reports_metadata_and_module_mismatch(tmp_path):
