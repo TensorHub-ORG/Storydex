@@ -116,6 +116,16 @@ playwright/
 docs/archive/
 docs/superpowers/
 
+# Local-only drafts, plans, promotional pages, and handoff artifacts.
+# These directories intentionally never become part of the repository.
+/local/
+/docs/local/
+/CONTEXT.md
+/docs/adr/
+/docs/plans/
+/evals/
+/apps/backend/tests/fixtures/llm_replay/t3-*/
+
 # ----- Release -----
 release/
 releases/

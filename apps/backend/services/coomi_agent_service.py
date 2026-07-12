@@ -178,9 +178,9 @@ class StorydexCoomiAgentService:
         with _storydex_coomi_home():
             self._ensure_coomi_installed()
             try:
-                from coomi.services import get_llm_provider
+                from services.llm_replay import get_replayable_llm_provider
 
-                provider = get_llm_provider()
+                provider = get_replayable_llm_provider()
                 response = await _call_provider_chat(
                     provider,
                     _task_planner_messages(
@@ -211,9 +211,9 @@ class StorydexCoomiAgentService:
         with _storydex_coomi_home():
             self._ensure_coomi_installed()
             try:
-                from coomi.services import get_llm_provider
+                from services.llm_replay import get_replayable_llm_provider
 
-                provider = get_llm_provider()
+                provider = get_replayable_llm_provider()
                 response = await _call_provider_chat(
                     provider,
                     _commit_message_messages(
@@ -429,9 +429,9 @@ class StorydexCoomiAgentService:
             from coomi.engine.loop import AgentLoop
             from coomi.engine.session import SessionManager
             from coomi.security import PermissionLevel, PermissionMode, PermissionSystem
-            from coomi.services import get_llm_provider
+            from services.llm_replay import get_replayable_llm_provider
 
-            provider = get_llm_provider()
+            provider = get_replayable_llm_provider()
             registry = _create_storydex_tool_registry(workspace_root)
             permissions = self._permissions.get(runtime_key)
             if permissions is None:
@@ -565,10 +565,10 @@ class StorydexCoomiAgentService:
             return
 
         from coomi.engine.loop_runner import LoopRunner
-        from coomi.services import get_llm_provider
+        from services.llm_replay import get_replayable_llm_provider
         from coomi.services.memory import MemoryManager, MemoryRecall
 
-        provider = get_llm_provider()
+        provider = get_replayable_llm_provider()
         registry = _create_storydex_tool_registry(workspace_root)
         permissions = self._permissions.get(session_id)
         if permissions is None:
@@ -1501,10 +1501,10 @@ async def _build_coomi_system_prompt(
     plan_mode: bool = False,
 ) -> str:
     from coomi.engine.session import build_system_prompt
-    from coomi.services import get_llm_provider
+    from services.llm_replay import get_replayable_llm_provider
     from coomi.services.memory import MemoryManager, MemoryRecall
 
-    provider = get_llm_provider()
+    provider = get_replayable_llm_provider()
     memory_manager = MemoryManager(project_path=workspace_root.as_posix())
     memory_recall = MemoryRecall(provider, memory_manager)
     system_prompt = await build_system_prompt(

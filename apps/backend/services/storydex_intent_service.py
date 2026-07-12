@@ -486,9 +486,9 @@ class StorydexIntentService:
             from services.coomi_agent_service import _call_provider_chat, _storydex_coomi_home
 
             with _storydex_coomi_home():
-                from coomi.services import get_llm_provider
+                from services.llm_replay import get_replayable_llm_provider
 
-                provider = get_llm_provider()
+                provider = get_replayable_llm_provider()
                 response = await asyncio.wait_for(
                     _call_provider_chat(
                         provider,

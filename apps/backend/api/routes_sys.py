@@ -11,6 +11,7 @@ from api.response import ApiEnvelope, ApiTrace, success_response
 from core.config import get_settings
 from services.global_config_service import get_global_config_service
 from services.project_service import get_project_service
+from services.coomi_version_service import check_coomi_version
 
 router = APIRouter(tags=["sys"])
 
@@ -74,6 +75,7 @@ def health_check() -> ApiEnvelope:
     trace_id = str(uuid4())
     settings = get_settings()
     project = get_project_service().current_project()
+    coomi_version = check_coomi_version()
     data = {
         "status": "ok",
         "service": settings.app_name,
@@ -85,6 +87,8 @@ def health_check() -> ApiEnvelope:
         "requiresInitialization": project["requiresInitialization"],
         "missingDirectories": project["missingDirectories"],
         "frontendStaticMode": settings.serve_frontend_static,
+        "coomiVersion": coomi_version,
+        "warnings": coomi_version["warnings"],
     }
     trace = ApiTrace(traceId=trace_id, durationMs=int((perf_counter() - started) * 1000))
     return success_response(data=data, trace=trace, audit=[])
@@ -138,5 +142,4 @@ def read_workspace_state() -> ApiEnvelope:
     audit = [{"action": "read_workspace_state"}]
     trace = ApiTrace(traceId=trace_id, durationMs=int((perf_counter() - started) * 1000))
     return success_response(data=data.model_dump(by_alias=True), trace=trace, audit=audit)
-
 
