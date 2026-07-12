@@ -114,11 +114,6 @@ function Get-PythonCandidate {
         return $configured
     }
 
-    $condaCandidate = Get-CondaPython39Candidate
-    if ($null -ne $condaCandidate) {
-        return $condaCandidate
-    }
-
     $candidates = @(
         @{ Label = "py -3.9"; Command = "py"; Args = @("-3.9") },
         @{ Label = "python"; Command = "python"; Args = @() }
@@ -155,6 +150,14 @@ function Get-PythonCandidate {
         } catch {
             continue
         }
+    }
+
+    # Prefer an official/system Python 3.9 over arbitrary Conda environments.
+    # Copying a Conda venv can retain mismatched OpenSSL DLLs and cause HTTPS
+    # providers to fail with SSLEOFError after the runtime is relocated.
+    $condaCandidate = Get-CondaPython39Candidate
+    if ($null -ne $condaCandidate) {
+        return $condaCandidate
     }
 
     return $null
