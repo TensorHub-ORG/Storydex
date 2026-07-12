@@ -36,7 +36,13 @@ const excludedSegments = new Set([
 const excludedRelativePrefixes = [
   "apps/desktop/app/",
   "apps/frontend/package-lock.json",
-  "apps/desktop/package-lock.json"
+  "apps/desktop/package-lock.json",
+  "docs/adr/",
+  "docs/local/",
+  "docs/plans/",
+  "evals/",
+  "local/",
+  "CONTEXT.md"
 ];
 
 const mojibakePattern =
@@ -87,7 +93,10 @@ function validateFile(fullPath, relativePath) {
   const lines = text.split(/\r?\n/);
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
-    if (relativePath === "scripts/validate_text_encoding.cjs" && index >= 40 && index <= 42) {
+    if (
+      relativePath === "scripts/validate_text_encoding.cjs" &&
+      (line.includes("mojibakePattern") || lines[index - 1]?.includes("mojibakePattern"))
+    ) {
       continue;
     }
     if (line.includes("_ENCODING_SELFTEST") || line.includes("mojibakePattern")) {

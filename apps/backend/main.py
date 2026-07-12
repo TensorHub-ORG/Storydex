@@ -19,6 +19,7 @@ from core.config import get_settings
 from core.exceptions import StorydexError
 from core.logger import get_logger, with_trace
 from services.project_service import get_project_service
+from services.coomi_version_service import check_coomi_version
 
 settings = get_settings()
 app_logger = get_logger(__name__)
@@ -56,6 +57,11 @@ app.include_router(presets_router, prefix="/api/v1")
 def bootstrap_workspace() -> None:
     project = get_project_service().current_project()
     app_logger.info("Workspace bootstrap completed at %s", project["workspaceRoot"])
+    coomi_status = check_coomi_version()
+    if coomi_status["ok"]:
+        app_logger.info("Coomi version check passed: %s", coomi_status["expected"])
+    else:
+        app_logger.error("Coomi version check failed: %s", "; ".join(coomi_status["warnings"]))
 
 
 def _resolve_trace_id(request: Request) -> str:
