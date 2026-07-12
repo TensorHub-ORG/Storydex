@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 
+SUPPORTED_COOMI_VERSION = "1.1.2"
 _COOMI_REQUIREMENT = re.compile(
     r"^\s*coomi-agent\s*==\s*([A-Za-z0-9_.+!-]+)\s*(?:#.*)?$",
     re.IGNORECASE | re.MULTILINE,
@@ -18,6 +19,10 @@ def repository_root() -> Path:
 
 def read_expected_coomi_version(requirements_path: Path | None = None) -> str:
     path = Path(requirements_path or repository_root() / "requirements.txt")
+    if not path.is_file():
+        if requirements_path is not None:
+            raise FileNotFoundError(path)
+        return SUPPORTED_COOMI_VERSION
     match = _COOMI_REQUIREMENT.search(path.read_text(encoding="utf-8"))
     if match is None:
         raise RuntimeError(f"requirements.txt must pin coomi-agent with ==: {path}")
