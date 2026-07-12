@@ -401,6 +401,10 @@ test("packaged Electron validates icons, streaming responsiveness, session recov
       const match = request.url().match(/\/agent\/chat\/stream\?sessionId=([^&]+)/);
       if (match) uiSessionId = decodeURIComponent(match[1]);
     });
+    await app.page.waitForFunction(() => {
+      const button = document.querySelector(".coomi-send");
+      return button && !button.disabled;
+    }, null, { timeout: 30_000 });
     await app.page.locator(".coomi-send").click();
     await delay(750);
     const changed = await fetch(`${app.backendBaseUrl}/workspace/file/create`, {

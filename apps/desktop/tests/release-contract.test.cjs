@@ -27,6 +27,7 @@ test("desktop source declares process cleanup and a strict IPC whitelist", () =>
   const source = fs.readFileSync(path.join(root, "electron", "main.cjs"), "utf8");
   assert.match(source, /app\.on\("before-quit"[\s\S]*stopBackendKernel\(\)/);
   assert.match(source, /taskkill[\s\S]*\/t[\s\S]*\/f/i);
+  assert.match(source, /PYTHONDONTWRITEBYTECODE:\s*"1"/);
   const channels = [...source.matchAll(/ipcMain\.handle\("([^"]+)"/g)].map((match) => match[1]);
   assert.ok(channels.length >= 8);
   assert.equal(new Set(channels).size, channels.length);

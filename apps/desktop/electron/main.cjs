@@ -925,6 +925,7 @@ function buildBackendEnvironment(candidate, runtimeEnvironment) {
     PATH: nextPath,
     PYTHONIOENCODING: "utf-8",
     PYTHONNOUSERSITE: "1",
+    PYTHONDONTWRITEBYTECODE: "1",
     STORYDEX_WORKSPACE_ROOT: runtimeEnvironment.workspaceRoot,
     STORYDEX_GLOBAL_ROOT: runtimeEnvironment.globalRoot,
     STORYDEX_HELP_GUIDE_ROOT: helpGuideRoot,
