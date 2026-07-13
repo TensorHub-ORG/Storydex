@@ -113,13 +113,9 @@ Copyright 2026 Septemc and Flowby.
 
 ## v0.3.7
 
-v0.3.7 修复了部分 Windows 环境中 Agent 调用 LLM 时持续出现 `APIConnectionError: Connection error` 的问题。根因是构建脚本优先复制任意 Conda Python 3.9 环境，迁移后可能保留不匹配的 OpenSSL DLL，导致特定 HTTPS Provider 在握手阶段触发 `SSLEOFError`。
+v0.3.7 同时包含原计划 v0.3.6 的稳定性改进：提升 AI 对话与任务执行在不同安装环境下的稳定性和一致性，加强启动时的运行环境检查与异常诊断，并完善安装包、便携包的兼容性验证。
 
-项目 Python 构建现在优先选择明确配置的运行时、官方 `py -3.9` 或系统 Python 3.9，仅在没有可用标准运行时时回退到 Conda。正式包继续固定并验证 `coomi-agent==1.1.2`，同时保留内嵌 Python 和 MinGit。
-
-## v0.3.6
-
-v0.3.6 是补丁级稳定性更新，进一步加强 AI 运行链路的一致性保障、启动依赖异常识别和运行环境兼容性检查。
+同时修复部分 Windows 环境中 Agent 调用 LLM 时持续出现 `APIConnectionError` 或 `SSLEOFError` 的问题。项目 Python 构建现在优先选择明确配置的运行时、官方 `py -3.9` 或系统 Python 3.9，避免迁移环境中不匹配的 OpenSSL 组件影响 HTTPS 连接。正式包继续内置并验证统一的 Python 3.9 运行环境、后端依赖和 MinGit。
 
 ## v0.3.5
 
