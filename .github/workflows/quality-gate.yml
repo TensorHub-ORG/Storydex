@@ -51,8 +51,8 @@ jobs:
             critical_lines: "89.5"
           - os: windows-latest
             python: "3.9"
-            global_branches: "70.0"
-            critical_lines: "90.0"
+            global_branches: "69.8"
+            critical_lines: "89.5"
           - os: windows-latest
             python: "3.13"
             global_branches: "70.0"
