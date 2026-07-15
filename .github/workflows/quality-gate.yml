@@ -58,12 +58,14 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
           cache-dependency-path: |
-            requirements.txt
+            requirements.lock
             apps/backend/requirements-test.txt
       - name: Install backend test dependencies
-        run: python -m pip install -r apps/backend/requirements-test.txt
+        run: |
+          python -m pip install --require-hashes -r requirements.lock
+          python -m pip install -r apps/backend/requirements-test.txt
       - name: Verify pinned Coomi runtime
-        run: python -c "from importlib.metadata import version; assert version('coomi-agent') == '1.1.2', version('coomi-agent')"
+        run: python scripts/verify_coomi_runtime.py
       - name: Run backend tests with coverage
         working-directory: apps/backend
         run: >-
@@ -92,8 +94,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.13" }
+      - run: python -m pip install --require-hashes -r requirements.lock
       - run: python -m pip install -r apps/backend/requirements-test.txt
-      - run: python -c "from importlib.metadata import version; assert version('coomi-agent') == '1.1.2', version('coomi-agent')"
+      - run: python scripts/verify_coomi_runtime.py
       - name: Compile and import all backend modules
         working-directory: apps/backend
         run: |
@@ -157,9 +160,12 @@ jobs:
         with:
           python-version: "3.9"
           cache: pip
-          cache-dependency-path: apps/backend/requirements-test.txt
+          cache-dependency-path: |
+            requirements.lock
+            apps/backend/requirements-test.txt
+      - run: python -m pip install --require-hashes -r requirements.lock
       - run: python -m pip install -r apps/backend/requirements-test.txt
-      - run: python -c "from importlib.metadata import version; assert version('coomi-agent') == '1.1.2', version('coomi-agent')"
+      - run: python scripts/verify_coomi_runtime.py
       - name: Session, SSE, Git, and runtime integration regressions
         working-directory: apps/backend
         run: >-

@@ -16,6 +16,8 @@ $projectRoot = (Resolve-Path (Join-Path $scriptRoot "..")).Path
 $pythonRoot = Join-Path $projectRoot ".python39"
 $pythonExe = Join-Path $pythonRoot "Scripts\python.exe"
 $requirementsFile = Join-Path $projectRoot "requirements.txt"
+$requirementsLockFile = Join-Path $projectRoot "requirements.lock"
+$coomiVerifier = Join-Path $projectRoot "scripts\verify_coomi_runtime.py"
 
 function Write-Storydex([string]$Message) {
     Write-Host "[Storydex] $Message"
@@ -203,7 +205,12 @@ function Test-RequirementsInstalled {
         return $false
     }
 
-    & $pythonExe -c "from importlib.metadata import version; import anthropic, fastapi, pydantic, pydantic_core, pydantic_settings, sqlalchemy, uvicorn; raise SystemExit(0 if version('coomi-agent') == '1.1.2' else 1)"
+    & $pythonExe -c "import anthropic, fastapi, pydantic, pydantic_core, pydantic_settings, sqlalchemy, uvicorn"
+    if ($LASTEXITCODE -ne 0) {
+        return $false
+    }
+
+    & $pythonExe $coomiVerifier | Out-Null
     return $LASTEXITCODE -eq 0
 }
 
@@ -216,7 +223,7 @@ function Install-RequirementsWithRetry {
     $attempts = 3
     for ($attempt = 1; $attempt -le $attempts; $attempt++) {
         Write-Storydex "Installing locked Python dependencies into $pythonRoot (attempt $attempt/$attempts)"
-        & $pythonExe -m pip install --disable-pip-version-check --only-binary=:all: --retries 8 --timeout 30 -r $Path
+        & $pythonExe -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: --retries 8 --timeout 30 -r $Path
         if ($LASTEXITCODE -eq 0) {
             return
         }
@@ -238,11 +245,14 @@ if ($InstallRequirements) {
     if (-not (Test-Path $requirementsFile)) {
         throw "requirements.txt was not found: $requirementsFile"
     }
+    if (-not (Test-Path $requirementsLockFile)) {
+        throw "requirements.lock was not found: $requirementsLockFile"
+    }
 
     if (Test-RequirementsInstalled) {
         Write-Storydex "Python dependencies already satisfy startup requirements."
     } else {
-        Install-RequirementsWithRetry -Path $requirementsFile
+        Install-RequirementsWithRetry -Path $requirementsLockFile
     }
 }
 

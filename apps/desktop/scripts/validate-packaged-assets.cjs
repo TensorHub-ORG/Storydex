@@ -37,11 +37,23 @@ requireDirectory("Electron resources", resources);
 const appRoot = fs.existsSync(path.join(resources, "app", "app")) ? path.join(resources, "app", "app") : path.join(resources, "app");
 requireFile("frontend index", path.join(appRoot, "frontend-dist", "index.html"));
 requireDirectory("backend source", path.join(appRoot, "backend"));
+requireFile("runtime requirements", path.join(appRoot, "backend", "requirements-runtime.txt"));
+requireFile("runtime requirements lock", path.join(appRoot, "backend", "requirements-runtime.lock"));
 requireDirectory("embedded Python", path.join(appRoot, "python-env"));
 requireDirectory("MinGit", path.join(appRoot, "mingit"));
 requireFile("updater config", path.join(resources, "app-update.yml"));
 requireFile("electron-updater entrypoint", path.join(resources, "app", "node_modules", "electron-updater", "out", "main.js"));
 requireFile("persistent update helper", path.join(resources, "app", "electron", "update-helper.ps1"));
+for (const [sourceName, packagedName] of [
+  ["requirements.txt", "requirements-runtime.txt"],
+  ["requirements.lock", "requirements-runtime.lock"]
+]) {
+  const source = path.join(repoRoot, sourceName);
+  const packaged = path.join(appRoot, "backend", packagedName);
+  if (fs.existsSync(source) && fs.existsSync(packaged) && sha256(source) !== sha256(packaged)) {
+    failures.push(`packaged ${packagedName} does not match root ${sourceName}`);
+  }
+}
 const forbiddenPackageEntries = walk(appRoot).filter((file) => {
   const relative = path.relative(appRoot, file).replace(/\\/g, "/");
   const base = path.basename(relative);

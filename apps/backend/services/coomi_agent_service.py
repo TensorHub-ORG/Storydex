@@ -677,7 +677,7 @@ class StorydexCoomiAgentService:
         except Exception as exc:
             raise StorydexCoomiUnavailable(
                 "Coomi is not installed in the active Storydex Python environment. "
-                "Install the supported version with: python -m pip install coomi-agent==1.1.2"
+                "Install the dependencies pinned by requirements.txt via requirements.lock."
             ) from exc
 
     def get_status(self, *, workspace_root: Path) -> Dict[str, Any]:
@@ -1848,11 +1848,31 @@ class _StorydexApprovalContext:
             self.pending_ids.discard(approval_id)
 
 
+def _knowledge_review_from_tool_preview(tool_name: str, result_preview: str) -> Dict[str, Any] | None:
+    if tool_name != "StorydexApplyStoryIncrement":
+        return None
+    marker = '"knowledgeReview":'
+    marker_index = result_preview.find(marker)
+    if marker_index < 0:
+        return None
+    value_start = marker_index + len(marker)
+    try:
+        value, _ = json.JSONDecoder().raw_decode(result_preview[value_start:])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict) or value.get("code") != "knowledge_review_required":
+        return None
+    return value
+
+
 class _CoomiEventTranslator:
     def __init__(self, *, session_id: str) -> None:
         self.session_id = session_id
         self.sequence = 0
         self.active_by_tool: dict[str, list[str]] = {}
+        self.awaiting_execution_by_tool: dict[str, list[str]] = {}
+        self.ready_by_tool: dict[str, list[str]] = {}
+        self.running_by_tool: dict[str, list[str]] = {}
 
     def translate(self, event: Any) -> tuple[str, Dict[str, Any]] | None:
         name = type(event).__name__
@@ -1863,6 +1883,9 @@ class _CoomiEventTranslator:
         if name == "ToolStart":
             tool_name = str(getattr(event, "tool_name", ""))
             event_tool_call_id = str(getattr(event, "tool_call_id", "") or "").strip()
+            announced_id = self._claim_announced_tool(tool_name, event_tool_call_id or None)
+            if announced_id is not None:
+                return None
             tool_call_id = self._start_tool(tool_name, event_tool_call_id or None)
             return "ToolStart", {
                 "_type": "ToolStart",
@@ -1878,7 +1901,7 @@ class _CoomiEventTranslator:
                 "_type": "ToolRunning",
                 "_version": 1,
                 "tool_name": tool_name,
-                "tool_call_id": event_tool_call_id or self._current_tool_id(tool_name),
+                "tool_call_id": self._mark_tool_running(tool_name, event_tool_call_id or None),
                 "progress": "running",
             }
         if name == "ToolDone":
@@ -1886,17 +1909,27 @@ class _CoomiEventTranslator:
             elapsed = float(getattr(event, "elapsed", 0.0) or 0.0)
             event_tool_call_id = str(getattr(event, "tool_call_id", "") or "").strip()
             tool_call_id = self._finish_tool(tool_name, event_tool_call_id or None)
-            return "ToolDone", {
+            result_preview = str(getattr(event, "result_preview", "") or "")
+            payload = {
                 "_type": "ToolDone",
                 "_version": 1,
                 "tool_name": tool_name,
                 "tool_call_id": tool_call_id,
                 "is_error": bool(getattr(event, "is_error", False)),
-                "result_preview": str(getattr(event, "result_preview", "") or ""),
+                "result_preview": result_preview,
                 "duration_ms": int(elapsed * 1000),
                 "metrics": {"durationMs": int(elapsed * 1000)},
             }
+            knowledge_review = _knowledge_review_from_tool_preview(tool_name, result_preview)
+            if knowledge_review is not None:
+                payload["knowledge_review"] = knowledge_review
+            return "ToolDone", payload
         if name == "UsageUpdate":
+            self.awaiting_execution_by_tool = {
+                tool_name: list(tool_call_ids)
+                for tool_name, tool_call_ids in self.active_by_tool.items()
+                if tool_call_ids
+            }
             return "UsageUpdate", {"_type": "UsageUpdate", "_version": 1, "usage": getattr(event, "usage", {}) or {}}
         if name == "CompressionEvent":
             before_count = int(getattr(event, "before", 0) or 0)
@@ -1948,19 +1981,78 @@ class _CoomiEventTranslator:
             return active[0]
         return self._start_tool(tool_name)
 
+    def _claim_announced_tool(self, tool_name: str, tool_call_id: str | None = None) -> str | None:
+        awaiting = self.awaiting_execution_by_tool.get(tool_name)
+        if not awaiting:
+            return None
+        if tool_call_id and tool_call_id in awaiting:
+            awaiting.remove(tool_call_id)
+            resolved = tool_call_id
+        else:
+            resolved = awaiting.pop(0)
+        if not awaiting:
+            self.awaiting_execution_by_tool.pop(tool_name, None)
+        self.ready_by_tool.setdefault(tool_name, []).append(resolved)
+        return resolved
+
+    def _mark_tool_running(self, tool_name: str, tool_call_id: str | None = None) -> str:
+        resolved = tool_call_id
+        ready = self.ready_by_tool.get(tool_name)
+        if resolved and ready and resolved in ready:
+            ready.remove(resolved)
+        elif resolved is None and ready:
+            resolved = ready.pop(0)
+        if ready is not None and not ready:
+            self.ready_by_tool.pop(tool_name, None)
+
+        if resolved is None:
+            awaiting = self.awaiting_execution_by_tool.get(tool_name)
+            if awaiting:
+                resolved = awaiting.pop(0)
+                if not awaiting:
+                    self.awaiting_execution_by_tool.pop(tool_name, None)
+        if resolved is None:
+            resolved = self._current_tool_id(tool_name)
+        running = self.running_by_tool.setdefault(tool_name, [])
+        if resolved not in running:
+            running.append(resolved)
+        return resolved
+
     def _finish_tool(self, tool_name: str, tool_call_id: str | None = None) -> str:
+        resolved = tool_call_id
+        running = self.running_by_tool.get(tool_name)
+        if resolved and running and resolved in running:
+            running.remove(resolved)
+        elif resolved is None and running:
+            resolved = running.pop(0)
+        if running is not None and not running:
+            self.running_by_tool.pop(tool_name, None)
+
+        if resolved is None:
+            ready = self.ready_by_tool.get(tool_name)
+            if ready:
+                resolved = ready.pop(0)
+                if not ready:
+                    self.ready_by_tool.pop(tool_name, None)
+        if resolved is None:
+            awaiting = self.awaiting_execution_by_tool.get(tool_name)
+            if awaiting:
+                resolved = awaiting.pop(0)
+                if not awaiting:
+                    self.awaiting_execution_by_tool.pop(tool_name, None)
+
         active = self.active_by_tool.get(tool_name)
-        if tool_call_id and active and tool_call_id in active:
-            active.remove(tool_call_id)
+        if resolved and active and resolved in active:
+            active.remove(resolved)
             if not active:
                 self.active_by_tool.pop(tool_name, None)
-            return tool_call_id
+            return resolved
         if active:
             resolved = active.pop(0)
             if not active:
                 self.active_by_tool.pop(tool_name, None)
             return resolved
-        return tool_call_id or self._new_tool_call_id(tool_name)
+        return resolved or self._new_tool_call_id(tool_name)
 
 
 def _install_coomi_home_redirects() -> bool:

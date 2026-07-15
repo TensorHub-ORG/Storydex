@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 
 const desktopRoot = path.resolve(__dirname, "..");
+const repoRoot = path.resolve(desktopRoot, "..", "..");
 const appRoot = path.join(desktopRoot, "app");
 const frontendDistSource = path.resolve(desktopRoot, "..", "frontend", "dist");
 const backendSource = path.resolve(desktopRoot, "..", "backend");
@@ -24,6 +25,8 @@ const helpGuideTarget = path.join(appRoot, "docs", "使用指南");
 const minGitTarget = path.join(appRoot, "mingit");
 const embeddedPythonTarget = path.join(appRoot, "python-env");
 const desktopIconTarget = path.join(appRoot, "assets", "Storydex_icon", "storydex_icon_01.png");
+const requirementsSource = path.join(repoRoot, "requirements.txt");
+const requirementsLockSource = path.join(repoRoot, "requirements.lock");
 
 function ensureSource(pathValue, label) {
   if (!fs.existsSync(pathValue)) {
@@ -91,6 +94,13 @@ function copyBackendSource() {
     recursive: true,
     filter: shouldCopyBackend
   });
+}
+
+function copyRuntimeDependencyManifests() {
+  ensureSource(requirementsSource, "root Python requirements");
+  ensureSource(requirementsLockSource, "hashed Python requirements lock");
+  fs.copyFileSync(requirementsSource, path.join(backendTarget, "requirements-runtime.txt"));
+  fs.copyFileSync(requirementsLockSource, path.join(backendTarget, "requirements-runtime.lock"));
 }
 
 function copyHelpGuide() {
@@ -246,11 +256,12 @@ function run() {
   fs.mkdirSync(appRoot, { recursive: true });
   copyFrontendDist();
   copyBackendSource();
+  copyRuntimeDependencyManifests();
   copyHelpGuide();
   copyMinGit();
   copyEmbeddedPythonEnv();
   copyDesktopIcon();
-  console.log("[Storydex Desktop] Synced app assets (frontend, backend, docs, MinGit, embedded python, icon) to apps/desktop/app.");
+  console.log("[Storydex Desktop] Synced app assets (frontend, backend, dependency manifests, docs, MinGit, embedded python, icon) to apps/desktop/app.");
 }
 
 if (require.main === module) {

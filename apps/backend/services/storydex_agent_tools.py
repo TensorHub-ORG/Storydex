@@ -558,8 +558,19 @@ class StorydexApplyStoryIncrementTool(_StorydexWorkspaceToolMixin, BaseTool):
         payload = dict(arguments or {})
         workspace_root = self._resolve_workspace_root(payload.get("workspaceRoot"))
         result = get_story_project_service().apply_story_generation_increment(workspace_root, payload)
+        knowledge_review = result.get("knowledgeReview") if isinstance(result.get("knowledgeReview"), dict) else None
+        if knowledge_review is not None:
+            result = {
+                "knowledgeReview": knowledge_review,
+                **{key: value for key, value in result.items() if key != "knowledgeReview"},
+            }
         return ToolResult(
             success=True,
-            output=json.dumps(result, ensure_ascii=False, indent=2),
+            output=json.dumps(
+                result,
+                ensure_ascii=False,
+                indent=None if knowledge_review is not None else 2,
+                separators=(",", ":") if knowledge_review is not None else None,
+            ),
             error=None,
         )

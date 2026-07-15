@@ -1,5 +1,5 @@
-# Locked from the clean project-local Python 3.9 environment.
-# Coomi is pinned intentionally. Do not broaden or auto-upgrade this dependency.
+# Approved Python dependency pins and the single Coomi version decision source.
+# Regenerate requirements.lock with pip-compile --generate-hashes --no-strip-extras after any change.
 coomi-agent==1.1.2
 annotated-types==0.7.0
 anthropic==0.86.0

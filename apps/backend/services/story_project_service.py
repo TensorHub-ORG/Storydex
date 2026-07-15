@@ -1833,6 +1833,9 @@ class StoryProjectService:
         applied_relationships: List[Dict[str, Any]] = []
         applied_items: List[Dict[str, Any]] = []
         all_character_updates: List[Dict[str, Any]] = []
+        knowledge_review_items: List[Dict[str, Any]] = []
+        applied_knowledge_command_count = 0
+        applied_non_command_snapshot_updates = False
         has_variable_payload = self._story_increment_has_variable_payload(top_level_increment)
         now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -1867,11 +1870,26 @@ class StoryProjectService:
                 for item in stage2_output.get("item_updates", [])
                 if isinstance(item, dict)
             ]
+            normalized_fragment_operations = self._normalize_snapshot_operations(
+                stage2_output.get("variable_updates", [])
+            )
+            accepted_fragment_operations, review_required_fragment_operations = (
+                self._partition_snapshot_operations(normalized_fragment_operations)
+            )
+            has_non_command_snapshot_updates = any(
+                isinstance(stage2_output.get(key), list) and bool(stage2_output.get(key))
+                for key in ("memory_updates", "event_updates")
+            )
+            review_only_fragment = (
+                bool(review_required_fragment_operations)
+                and not accepted_fragment_operations
+                and not has_non_command_snapshot_updates
+            )
 
             snapshot_written = False
             if apply_variables:
                 variable_thoughts = stage2_output.get("variable_thoughts")
-                if isinstance(variable_thoughts, list) and variable_thoughts:
+                if isinstance(variable_thoughts, list) and variable_thoughts and not review_only_fragment:
                     thought_path = root / thought_relative_path
                     thought_path.parent.mkdir(parents=True, exist_ok=True)
                     thought_path.write_text(
@@ -1894,19 +1912,26 @@ class StoryProjectService:
                         previous_snapshot=previous_snapshot if isinstance(previous_snapshot, dict) else {},
                         stage2_output=stage2_output,
                         segment_relative_path=segment_relative_path,
+                        operations=accepted_fragment_operations,
                     )
-                    snapshot_path = root / snapshot_relative_path
-                    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-                    snapshot_path.write_text(json.dumps(snapshot_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-                    written_paths.append(snapshot_path.relative_to(root).as_posix())
-                    written_paths.extend(
-                        self.sync_current_state_from_snapshot_payload(
-                            root,
-                            snapshot_relative_path,
-                            snapshot_payload,
+                    knowledge_review_items.extend(review_required_fragment_operations)
+                    applied_knowledge_command_count += len(snapshot_payload.get("operations", []))
+                    if snapshot_payload.get("operations") or has_non_command_snapshot_updates:
+                        snapshot_path = root / snapshot_relative_path
+                        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+                        snapshot_path.write_text(json.dumps(snapshot_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                        written_paths.append(snapshot_path.relative_to(root).as_posix())
+                        written_paths.extend(
+                            self.sync_current_state_from_snapshot_payload(
+                                root,
+                                snapshot_relative_path,
+                                snapshot_payload,
+                            )
                         )
-                    )
-                    snapshot_written = True
+                        snapshot_written = True
+                        applied_non_command_snapshot_updates = (
+                            applied_non_command_snapshot_updates or has_non_command_snapshot_updates
+                        )
                 elif stage2_output.get("character_updates"):
                     current_state = self.read_current_state(root)
                     full_state = current_state.get("fullState") if isinstance(current_state.get("fullState"), dict) else {}
@@ -1988,8 +2013,19 @@ class StoryProjectService:
             if chapter_summary_path:
                 written_paths.append(chapter_summary_path)
 
+        review_only_knowledge_batch = bool(knowledge_review_items) and not any(
+            (
+                applied_knowledge_command_count,
+                applied_non_command_snapshot_updates,
+                applied_facts,
+                applied_relationships,
+                applied_items,
+                all_character_updates,
+            )
+        )
+        wiki_applied = apply_wiki and not review_only_knowledge_batch
         wiki_payload: Dict[str, Any] = {}
-        if apply_wiki:
+        if wiki_applied:
             from services.story_wiki_service import get_story_wiki_service
 
             wiki_service = get_story_wiki_service()
@@ -2011,7 +2047,12 @@ class StoryProjectService:
                     "message": "变量更新默认需要询问用户；用户同意后用 applyVariables=true 重新应用增量。",
                 }
             )
-        if apply_variables and not apply_wiki and bool(settings.get("autoUpdateWiki", False)) is False:
+        if (
+            apply_variables
+            and not apply_wiki
+            and not review_only_knowledge_batch
+            and bool(settings.get("autoUpdateWiki", False)) is False
+        ):
             required_decisions.append(
                 {
                     "type": "update_wiki",
@@ -2019,11 +2060,11 @@ class StoryProjectService:
                 }
             )
 
-        return {
+        result = {
             "ok": True,
             "applied": {
                 "variables": apply_variables,
-                "wiki": apply_wiki,
+                "wiki": wiki_applied,
                 "facts": apply_variables and bool(applied_facts),
                 "relationships": apply_variables and bool(applied_relationships),
                 "items": apply_variables and bool(applied_items),
@@ -2048,6 +2089,14 @@ class StoryProjectService:
                 "memoryPath": ".storydex/memory/current/items.json",
             },
         }
+        if knowledge_review_items:
+            result["knowledgeReview"] = {
+                "status": "review_required",
+                "code": "knowledge_review_required",
+                "items": knowledge_review_items,
+                "appliedCount": applied_knowledge_command_count,
+            }
+        return result
 
     @staticmethod
     def _chapter_key_for_segment(segment_relative_path: str) -> str:
@@ -2512,10 +2561,10 @@ class StoryProjectService:
         previous_snapshot: Dict[str, Any],
         stage2_output: Dict[str, Any],
         segment_relative_path: str,
+        operations: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         previous_full_state = previous_snapshot.get("full_state") if isinstance(previous_snapshot.get("full_state"), dict) else {}
         full_state = json.loads(json.dumps(previous_full_state, ensure_ascii=False)) if previous_full_state else {}
-        operations = self._normalize_snapshot_operations(stage2_output.get("variable_updates", []))
         self._apply_operations_to_full_state(full_state=full_state, operations=operations)
         metadata = self._segment_metadata_from_relative_path(segment_relative_path)
         previous_order = previous_snapshot.get("snapshot_order") if isinstance(previous_snapshot.get("snapshot_order"), int) else 0
@@ -4624,14 +4673,15 @@ class StoryProjectService:
             path = str(item.get("path") or "").strip()
             if not path:
                 continue
-            normalized_variables.append(
-                {
-                    "op": str(item.get("op") or "set").strip().lower() or "set",
-                    "path": path,
-                    "value": item.get("value"),
-                    "evidence": str(item.get("evidence") or "").strip(),
-                }
-            )
+            normalized_item = {
+                "op": str(item.get("op") or "set").strip().lower() or "set",
+                "path": path,
+                "value": item.get("value"),
+                "evidence": str(item.get("evidence") or "").strip(),
+            }
+            if "requiresReview" in item:
+                normalized_item["requiresReview"] = bool(item.get("requiresReview"))
+            normalized_variables.append(normalized_item)
 
         return {
             "memory_updates": memory_updates,
@@ -4656,6 +4706,13 @@ class StoryProjectService:
             if not path or ".." in path or "/" in path or op not in {"set", "replace", "add", "remove"}:
                 continue
             evidence = str(item.get("evidence") or "").strip()
+            review_reasons: List[str] = []
+            if bool(item.get("requiresReview", False)):
+                review_reasons.append("explicit_requires_review")
+            if op == "remove":
+                review_reasons.append("remove_operation")
+            if not evidence:
+                review_reasons.append("missing_evidence")
             normalized.append(
                 {
                     "op": op,
@@ -4663,10 +4720,31 @@ class StoryProjectService:
                     "value": item.get("value"),
                     "evidence": evidence,
                     "confidence": float(item.get("confidence") or (1.0 if evidence else 0.5)),
-                    "requiresReview": bool(item.get("requiresReview", False) or op == "remove" or not evidence),
+                    "requiresReview": bool(review_reasons),
+                    "reviewReasons": review_reasons,
                 }
             )
         return normalized
+
+    @staticmethod
+    def _partition_snapshot_operations(
+        operations: List[Dict[str, Any]],
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        accepted: List[Dict[str, Any]] = []
+        review_required: List[Dict[str, Any]] = []
+        for operation in operations:
+            if bool(operation.get("requiresReview", False)):
+                reasons = operation.get("reviewReasons")
+                review_required.append(
+                    {
+                        "path": str(operation.get("path") or ""),
+                        "op": str(operation.get("op") or "set"),
+                        "reasons": list(reasons) if isinstance(reasons, list) else ["requires_review"],
+                    }
+                )
+                continue
+            accepted.append({key: value for key, value in operation.items() if key != "reviewReasons"})
+        return accepted, review_required
 
     def _apply_operations_to_full_state(self, *, full_state: Dict[str, Any], operations: List[Dict[str, Any]]) -> None:
         for operation in operations:

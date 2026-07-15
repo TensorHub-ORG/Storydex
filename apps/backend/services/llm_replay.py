@@ -145,18 +145,27 @@ class ReplayableLLMProvider:
         self._count_call("chat_stream_with_tools")
         if self._mode == "replay":
             record = self._next_record(request)
-            for chunk in record.get("response") or []:
-                value = _sanitize(chunk)
+            values = [_sanitize(chunk) for chunk in record.get("response") or []]
+            for value in _collapse_stream_usage(values):
                 self._count_usage(_usage_from_stream_chunk(value))
                 yield value
             return
 
         chunks: list[dict[str, Any]] = []
+        latest_usage: dict[str, int] | None = None
         async for chunk in self._provider.chat_stream_with_tools(messages, tools, **kwargs):
             value = _sanitize(chunk)
+            usage = _usage_from_stream_chunk(value)
+            if usage is not None:
+                latest_usage = _prefer_usage_snapshot(latest_usage, usage)
+                continue
             chunks.append(value)
-            self._count_usage(_usage_from_stream_chunk(value))
             yield chunk
+        if latest_usage is not None:
+            usage_chunk = {"type": "usage", "data": latest_usage}
+            chunks.append(usage_chunk)
+            self._count_usage(latest_usage)
+            yield usage_chunk
         if self._mode == "record":
             self._append_record(request, chunks)
 
@@ -315,7 +324,55 @@ def _usage_from_stream_chunk(chunk: Any) -> dict[str, int] | None:
     if not isinstance(chunk, dict) or chunk.get("type") != "usage":
         return None
     usage = chunk.get("data")
-    return usage if isinstance(usage, dict) else None
+    return _normalize_usage_snapshot(usage)
+
+
+def _normalize_usage_snapshot(value: Any) -> dict[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    usage: dict[str, int] = {}
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        raw = value.get(key)
+        if isinstance(raw, bool):
+            continue
+        try:
+            parsed = int(raw)
+        except (TypeError, ValueError):
+            continue
+        usage[key] = max(0, parsed)
+    if "total_tokens" not in usage and "prompt_tokens" in usage and "completion_tokens" in usage:
+        usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+    return usage or None
+
+
+def _prefer_usage_snapshot(
+    current: dict[str, int] | None,
+    candidate: dict[str, int],
+) -> dict[str, int]:
+    if current is None:
+        return dict(candidate)
+
+    def rank(usage: dict[str, int]) -> tuple[int, int, int]:
+        prompt = int(usage.get("prompt_tokens", 0))
+        completion = int(usage.get("completion_tokens", 0))
+        total = int(usage.get("total_tokens", prompt + completion))
+        return total, completion, prompt
+
+    return dict(candidate) if rank(candidate) >= rank(current) else current
+
+
+def _collapse_stream_usage(chunks: list[Any]) -> list[Any]:
+    normalized: list[Any] = []
+    latest_usage: dict[str, int] | None = None
+    for chunk in chunks:
+        usage = _usage_from_stream_chunk(chunk)
+        if usage is not None:
+            latest_usage = _prefer_usage_snapshot(latest_usage, usage)
+            continue
+        normalized.append(chunk)
+    if latest_usage is not None:
+        normalized.append({"type": "usage", "data": latest_usage})
+    return normalized
 
 
 def _diff_values(expected: Any, actual: Any, path: str = "request") -> list[str]:
