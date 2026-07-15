@@ -47,10 +47,16 @@ jobs:
         include:
           - os: ubuntu-latest
             python: "3.9"
+            global_branches: "69.8"
+            critical_lines: "89.5"
           - os: windows-latest
             python: "3.9"
+            global_branches: "70.0"
+            critical_lines: "90.0"
           - os: windows-latest
             python: "3.13"
+            global_branches: "70.0"
+            critical_lines: "90.0"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -77,7 +83,10 @@ jobs:
           --junitxml=test-results/pytest.xml
       - name: Enforce detailed coverage gates
         working-directory: apps/backend
-        run: python tests/assert_coverage.py test-results/coverage.json
+        run: >-
+          python tests/assert_coverage.py test-results/coverage.json
+          --global-branches ${{ matrix.global_branches }}
+          --critical-lines ${{ matrix.critical_lines }}
       - name: Upload backend reports
         if: always()
         uses: actions/upload-artifact@v4
