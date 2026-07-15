@@ -1878,7 +1878,7 @@ class StoryProjectService:
             )
             has_non_command_snapshot_updates = any(
                 isinstance(stage2_output.get(key), list) and bool(stage2_output.get(key))
-                for key in ("memory_updates", "event_updates")
+                for key in ("memory_updates", "character_updates", "event_updates")
             )
             review_only_fragment = (
                 bool(review_required_fragment_operations)

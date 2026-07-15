@@ -9,6 +9,7 @@ _COOMI_REQUIREMENT = re.compile(
     r"^\s*coomi-agent\s*==\s*([A-Za-z0-9_.+!-]+)\s*(?:#.*)?$",
     re.IGNORECASE | re.MULTILINE,
 )
+_legacy_supported_version: str | None = None
 
 
 def repository_root() -> Path:
@@ -30,11 +31,23 @@ def read_expected_coomi_version(requirements_path: Path | None = None) -> str:
     else:
         path = repository_requirements
     if not path.is_file():
+        if requirements_path is None and _legacy_supported_version:
+            return _legacy_supported_version
         raise FileNotFoundError(path)
     matches = _COOMI_REQUIREMENT.findall(path.read_text(encoding="utf-8-sig"))
     if len(matches) != 1:
         raise RuntimeError(f"requirements.txt must pin coomi-agent with == exactly once: {path}")
     return matches[0]
+
+
+def __getattr__(name: str) -> Any:
+    """Expose the removed version constant for legacy callers without duplicating its value."""
+    if name != "SUPPORTED_COOMI_VERSION":
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    global _legacy_supported_version
+    if _legacy_supported_version is None:
+        _legacy_supported_version = read_expected_coomi_version()
+    return _legacy_supported_version
 
 
 def check_coomi_version(
