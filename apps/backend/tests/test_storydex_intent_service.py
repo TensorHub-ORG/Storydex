@@ -16,6 +16,7 @@ import sys
 import types
 from contextlib import contextmanager
 
+from services.llm_replay import get_llm_metrics, llm_trace, reset_llm_metrics
 from services.storydex_intent_service import (
     StorydexIntentService,
     _extract_json_object,
@@ -62,11 +63,14 @@ def test_classify_intent_uses_llm_structured_output(monkeypatch):
 
     _install_fake_provider(monkeypatch, FakeProvider())
     service = StorydexIntentService()
-    frame = asyncio.run(service.classify_intent(prompt="帮我完善一下大陆的魔法体系设定", active_file=""))
+    reset_llm_metrics("intent-test")
+    with llm_trace("intent-test"):
+        frame = asyncio.run(service.classify_intent(prompt="帮我完善一下大陆的魔法体系设定", active_file=""))
     assert frame["primary"] == "worldbook_work"
     assert frame["confidence"] == "high"
     assert frame["method"] == "llm"
     assert frame["signals"] == ["llm_classifier"]
+    assert get_llm_metrics("intent-test")["llmCalls"][0]["purpose"] == "intent"
 
 
 def test_parse_intent_frame_accepts_fenced_json_and_normalizes_confidence():

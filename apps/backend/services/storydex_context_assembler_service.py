@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import re
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Set, Tuple
 
 from core.bounded_text_io import read_text_preview as read_bounded_text_preview
+from services.context_trace_service import (
+    build_context_trace,
+    create_context_source,
+    finalize_context_source,
+)
 from services.entity_registry import EntityRegistry
 from services.fact_memory_store import FactMemoryStore
 from services.relationship_memory_store import RelationshipMemoryStore
@@ -30,6 +36,7 @@ class StorydexContextAssemblerService:
         active_file: str = "",
         turn_plan: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
+        assemble_started = time.perf_counter()
         root = Path(workspace_root).resolve()
         self.story_project_service.ensure_project_structure(root)
         generation_context = self.story_project_service.build_generation_context(
@@ -43,6 +50,7 @@ class StorydexContextAssemblerService:
         notes: List[str] = []
         max_total_chars = 10000
 
+        source_started = time.perf_counter()
         preset_paths = self._runtime_preset_paths(root)
         preset_runtime_context = self._build_preset_runtime_context(
             generation_context,
@@ -65,7 +73,15 @@ class StorydexContextAssemblerService:
         # 并把全局预算按溢出扩容，保证其他上下文块的预算不被挤占。
         preset_block_budget = max(2200, len(preset_block))
         max_total_chars += max(0, preset_block_budget - 2200)
-        sources.append(self._source("runtime_presets", preset_paths, policy="active_or_compiled_safe_only"))
+        sources.append(
+            self._source(
+                "runtime_presets",
+                preset_paths,
+                candidate=preset_block,
+                policy="active_or_compiled_safe_only",
+                elapsed_ms=(time.perf_counter() - source_started) * 1000,
+            )
+        )
         self._append_block(
             blocks,
             block_id="runtime_presets",
@@ -76,28 +92,49 @@ class StorydexContextAssemblerService:
             max_chars=preset_block_budget,
             max_total_chars=max_total_chars,
             notes=notes,
+            trace_source=sources[-1],
         )
 
         # 最近正文片段紧随预设：续写时上文是第一上下文，
         # 不能被后续硬约束/记忆块把预算挤占殆尽。
+        source_started = time.perf_counter()
         recent_segments = self._recent_segments(root, generation_context=generation_context, active_file=active_file)
         recent_segment_paths = [str(item.get("relativePath") or "") for item in recent_segments if str(item.get("relativePath") or "")]
-        sources.append(self._source("recent_segments", recent_segment_paths, policy="compact_recent_only"))
+        recent_segment_block = self._render_recent_segments(recent_segments)
+        sources.append(
+            self._source(
+                "recent_segments",
+                recent_segment_paths,
+                candidate=recent_segment_block,
+                policy="compact_recent_only",
+                elapsed_ms=(time.perf_counter() - source_started) * 1000,
+            )
+        )
         self._append_block(
             blocks,
             block_id="recent_segments",
             title="Recent story segments",
             kind="segment",
-            content=self._render_recent_segments(recent_segments),
+            content=recent_segment_block,
             source_paths=recent_segment_paths,
             max_chars=1400,
             max_total_chars=max_total_chars,
             notes=notes,
+            trace_source=sources[-1],
         )
 
         # 滚动章节摘要：介于"紧邻上文"与"实体记忆"之间的中程剧情脉络。
+        source_started = time.perf_counter()
         rolling_summaries, rolling_paths = self._render_rolling_summaries(root)
-        sources.append(self._source("rolling_summaries", rolling_paths, policy="latest_chapters_only"))
+        sources.append(
+            self._source(
+                "rolling_summaries",
+                rolling_paths,
+                candidate=rolling_summaries,
+                policy="latest_chapters_only",
+                elapsed_ms=(time.perf_counter() - source_started) * 1000,
+            )
+        )
         self._append_block(
             blocks,
             block_id="rolling_summaries",
@@ -108,8 +145,10 @@ class StorydexContextAssemblerService:
             max_chars=800,
             max_total_chars=max_total_chars,
             notes=notes,
+            trace_source=sources[-1],
         )
 
+        source_started = time.perf_counter()
         character_block = self.story_project_service._build_character_hard_constraints_context(  # noqa: SLF001
             root,
             max_files=6,
@@ -119,7 +158,15 @@ class StorydexContextAssemblerService:
             active_file=active_file,
         )
         character_paths = self._extract_context_paths(character_block)
-        sources.append(self._source("active_characters", character_paths, policy="recent_or_relevant_only"))
+        sources.append(
+            self._source(
+                "active_characters",
+                character_paths,
+                candidate=character_block,
+                policy="recent_or_relevant_only",
+                elapsed_ms=(time.perf_counter() - source_started) * 1000,
+            )
+        )
         self._append_block(
             blocks,
             block_id="active_characters",
@@ -130,8 +177,10 @@ class StorydexContextAssemblerService:
             max_chars=1600,
             max_total_chars=max_total_chars,
             notes=notes,
+            trace_source=sources[-1],
         )
 
+        source_started = time.perf_counter()
         worldbook_block = self.story_project_service._build_worldbook_hard_constraints_context(  # noqa: SLF001
             root,
             max_files=4,
@@ -141,7 +190,15 @@ class StorydexContextAssemblerService:
             active_file=active_file,
         )
         worldbook_paths = self._extract_context_paths(worldbook_block)
-        sources.append(self._source("worldbook", worldbook_paths, policy="relevant_only"))
+        sources.append(
+            self._source(
+                "worldbook",
+                worldbook_paths,
+                candidate=worldbook_block,
+                policy="relevant_only",
+                elapsed_ms=(time.perf_counter() - source_started) * 1000,
+            )
+        )
         self._append_block(
             blocks,
             block_id="worldbook",
@@ -152,8 +209,10 @@ class StorydexContextAssemblerService:
             max_chars=1200,
             max_total_chars=max_total_chars,
             notes=notes,
+            trace_source=sources[-1],
         )
 
+        source_started = time.perf_counter()
         fact_block = FactMemoryStore(root).project_context(
             prompt=prompt,
             active_file=active_file,
@@ -162,7 +221,16 @@ class StorydexContextAssemblerService:
             max_chars=1000,
         )
         fact_count = self._count_context_rows(fact_block)
-        sources.append(self._source("facts", [".storydex/memory/current/facts.json"], count=fact_count, policy="relevant_only"))
+        sources.append(
+            self._source(
+                "facts",
+                [".storydex/memory/current/facts.json"],
+                candidate=fact_block,
+                count=fact_count,
+                policy="relevant_only",
+                elapsed_ms=(time.perf_counter() - source_started) * 1000,
+            )
+        )
         self._append_block(
             blocks,
             block_id="facts",
@@ -173,8 +241,10 @@ class StorydexContextAssemblerService:
             max_chars=1000,
             max_total_chars=max_total_chars,
             notes=notes,
+            trace_source=sources[-1],
         )
 
+        source_started = time.perf_counter()
         relationship_block = RelationshipMemoryStore(root).project_context(
             prompt=prompt,
             active_file=active_file,
@@ -187,8 +257,10 @@ class StorydexContextAssemblerService:
             self._source(
                 "relationships",
                 [".storydex/memory/current/relationship_graph.json"],
+                candidate=relationship_block,
                 count=relationship_count,
                 policy="neighborhood_only",
+                elapsed_ms=(time.perf_counter() - source_started) * 1000,
             )
         )
         self._append_block(
@@ -201,11 +273,22 @@ class StorydexContextAssemblerService:
             max_chars=1000,
             max_total_chars=max_total_chars,
             notes=notes,
+            trace_source=sources[-1],
         )
 
+        source_started = time.perf_counter()
         item_block = self._render_item_memory(root, prompt=prompt, active_file=active_file)
         item_count = self._count_context_rows(item_block)
-        sources.append(self._source("items", [".storydex/memory/current/items.json"], count=item_count, policy="compact_relevant_only"))
+        sources.append(
+            self._source(
+                "items",
+                [".storydex/memory/current/items.json"],
+                candidate=item_block,
+                count=item_count,
+                policy="compact_relevant_only",
+                elapsed_ms=(time.perf_counter() - source_started) * 1000,
+            )
+        )
         self._append_block(
             blocks,
             block_id="items",
@@ -216,8 +299,10 @@ class StorydexContextAssemblerService:
             max_chars=900,
             max_total_chars=max_total_chars,
             notes=notes,
+            trace_source=sources[-1],
         )
 
+        source_started = time.perf_counter()
         related_passages, related_paths = self._render_related_passages(
             root,
             prompt=prompt,
@@ -225,7 +310,15 @@ class StorydexContextAssemblerService:
             # rolling_summaries 块已注入的摘要不再重复召回。
             exclude_paths={*recent_segment_paths, *rolling_paths, str(active_file or "").replace("\\", "/")},
         )
-        sources.append(self._source("related_passages", related_paths, policy="fts5_bm25_top_hits"))
+        sources.append(
+            self._source(
+                "related_passages",
+                related_paths,
+                candidate=related_passages,
+                policy="fts5_bm25_top_hits",
+                elapsed_ms=(time.perf_counter() - source_started) * 1000,
+            )
+        )
         self._append_block(
             blocks,
             block_id="related_passages",
@@ -236,11 +329,22 @@ class StorydexContextAssemblerService:
             max_chars=1000,
             max_total_chars=max_total_chars,
             notes=notes,
+            trace_source=sources[-1],
         )
 
+        source_started = time.perf_counter()
         wiki_reference, wiki_entry_count = self._render_wiki_reference(root, active_entities=active_entities)
         wiki_paths = [_WIKI_GRAPH_PATH] if wiki_entry_count else []
-        sources.append(self._source("wiki_reference", wiki_paths, count=wiki_entry_count, policy="entity_matched_reference_only"))
+        sources.append(
+            self._source(
+                "wiki_reference",
+                wiki_paths,
+                candidate=wiki_reference,
+                count=wiki_entry_count,
+                policy="entity_matched_reference_only",
+                elapsed_ms=(time.perf_counter() - source_started) * 1000,
+            )
+        )
         self._append_block(
             blocks,
             block_id="wiki_reference",
@@ -251,8 +355,10 @@ class StorydexContextAssemblerService:
             max_chars=800,
             max_total_chars=max_total_chars,
             notes=notes,
+            trace_source=sources[-1],
         )
 
+        source_started = time.perf_counter()
         scripts = self.story_project_service.list_relevant_scripts(
             root,
             prompt=prompt,
@@ -262,22 +368,42 @@ class StorydexContextAssemblerService:
             max_chars=700,
         )
         script_paths = [str(item.get("relativePath") or "") for item in scripts if str(item.get("relativePath") or "")]
-        sources.append(self._source("story_scripts", script_paths, policy="relevant_only"))
+        script_block = self._render_story_scripts(scripts)
+        sources.append(
+            self._source(
+                "story_scripts",
+                script_paths,
+                candidate=script_block,
+                policy="relevant_only",
+                elapsed_ms=(time.perf_counter() - source_started) * 1000,
+            )
+        )
         self._append_block(
             blocks,
             block_id="story_scripts",
             title="Relevant story scripts",
             kind="script",
-            content=self._render_story_scripts(scripts),
+            content=script_block,
             source_paths=script_paths,
             max_chars=1000,
             max_total_chars=max_total_chars,
             notes=notes,
+            trace_source=sources[-1],
         )
 
+        source_started = time.perf_counter()
         variable_block = self._render_variable_snapshot(generation_context)
         variable_count = 1 if variable_block else 0
-        sources.append(self._source("variable_snapshot", [_VARIABLE_SNAPSHOT_PATH], count=variable_count, policy="compact_preview_only"))
+        sources.append(
+            self._source(
+                "variable_snapshot",
+                [_VARIABLE_SNAPSHOT_PATH],
+                candidate=variable_block,
+                count=variable_count,
+                policy="compact_preview_only",
+                elapsed_ms=(time.perf_counter() - source_started) * 1000,
+            )
+        )
         self._append_block(
             blocks,
             block_id="variable_snapshot",
@@ -288,9 +414,15 @@ class StorydexContextAssemblerService:
             max_chars=900,
             max_total_chars=max_total_chars,
             notes=notes,
+            trace_source=sources[-1],
         )
 
         total_chars = sum(int(block.get("charCount") or 0) for block in blocks)
+        context_trace = build_context_trace(
+            sources,
+            blocks,
+            assemble_ms=(time.perf_counter() - assemble_started) * 1000,
+        )
         return {
             "_type": "ContextAssembly",
             "_version": 1,
@@ -310,6 +442,7 @@ class StorydexContextAssemblerService:
             "activeEntities": list(active_entities),
             "sources": sources,
             "promptBlocks": blocks,
+            "contextTrace": context_trace,
             "notes": notes,
             "turnPlanRef": {
                 "fragmentCount": int((turn_plan or {}).get("fragmentCount") or 0),
@@ -752,14 +885,23 @@ class StorydexContextAssemblerService:
         return StorydexContextAssemblerService._truncate("\n".join(lines), max_chars=900)
 
     @staticmethod
-    def _source(kind: str, paths: Sequence[str], *, count: int | None = None, policy: str = "") -> Dict[str, Any]:
-        clean_paths = [str(path).strip().replace("\\", "/") for path in paths if str(path).strip()]
-        return {
-            "kind": kind,
-            "count": len(clean_paths) if count is None else max(0, int(count or 0)),
-            "paths": clean_paths[:12],
-            "policy": policy,
-        }
+    def _source(
+        kind: str,
+        paths: Sequence[str],
+        *,
+        candidate: str = "",
+        count: int | None = None,
+        policy: str = "",
+        elapsed_ms: float = 0.0,
+    ) -> Dict[str, Any]:
+        return create_context_source(
+            kind,
+            paths,
+            candidate=candidate,
+            count=count,
+            policy=policy,
+            elapsed_ms=elapsed_ms,
+        )
 
     @staticmethod
     def _append_block(
@@ -773,17 +915,31 @@ class StorydexContextAssemblerService:
         max_chars: int,
         max_total_chars: int,
         notes: List[str],
+        trace_source: Dict[str, Any] | None = None,
     ) -> None:
         text = str(content or "").strip()
         if not text:
+            finalize_context_source(
+                trace_source,
+                content="",
+                included=False,
+                drop_reason="empty",
+            )
             return
         used = sum(int(block.get("charCount") or 0) for block in blocks)
         remaining = max_total_chars - used
         if remaining < 160:
             notes.append(f"context_budget_exhausted_before_{block_id}")
+            finalize_context_source(
+                trace_source,
+                content="",
+                included=False,
+                drop_reason="budget_exhausted",
+            )
             return
         limit = min(max(160, int(max_chars or 160)), remaining)
         truncated = StorydexContextAssemblerService._truncate(text, max_chars=limit)
+        was_truncated = len(truncated) < len(text)
         blocks.append(
             {
                 "id": block_id,
@@ -794,7 +950,14 @@ class StorydexContextAssemblerService:
                 "content": truncated,
             }
         )
-        if len(truncated) < len(text):
+        finalize_context_source(
+            trace_source,
+            content=truncated,
+            included=True,
+            truncated=was_truncated,
+            drop_reason="truncated_to_budget" if was_truncated else "",
+        )
+        if was_truncated:
             notes.append(f"{block_id}_truncated_to_budget")
 
     @staticmethod

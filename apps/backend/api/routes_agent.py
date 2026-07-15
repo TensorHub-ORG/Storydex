@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import copy
 from concurrent.futures import ThreadPoolExecutor
 import json
+import logging
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -19,7 +22,10 @@ from api.response import ApiEnvelope, ApiTrace, success_response
 from core.exceptions import GitServiceError, StorydexError
 from services.agent_git_autocommit_service import AgentGitSnapshot, get_agent_git_autocommit_service
 from services.coomi_agent_service import get_storydex_coomi_agent_service
+from services.context_trace_service import merge_llm_metrics, summarize_context_trace
+from services.execution_log_service import ExecutionLogSession, create_execution_log_session
 from services.git_service import get_git_service
+from services.llm_replay import get_llm_metrics, llm_trace, reset_llm_metrics
 from services.project_service import get_project_service
 from services.story_project_service import get_story_project_service
 from services.storydex_intent_service import get_storydex_intent_service
@@ -41,6 +47,7 @@ _AGENT_GENERATION_LOCK = Lock()
 _INTENT_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="storydex-intent")
 _PHASE_HEARTBEAT_SECONDS = 0.6
 _COMMIT_MESSAGE_TIMEOUT_SECONDS = 2.0
+_LOGGER = logging.getLogger(__name__)
 
 
 class _CancellationToken:
@@ -68,7 +75,8 @@ async def _classify_intent_without_blocking_event_loop(**kwargs: Any) -> Dict[st
         return asyncio.run(storydex_intent_service.classify_intent(**kwargs))
 
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_INTENT_EXECUTOR, classify)
+    context = contextvars.copy_context()
+    return await loop.run_in_executor(_INTENT_EXECUTOR, context.run, classify)
 
 
 class AgentChatRequest(BaseModel):
@@ -217,6 +225,23 @@ def _resolve_agent_workspace_root(payload: AgentChatRequest) -> Path:
                 project_service.open_project(resolved.as_posix())
             return resolved
     return project_service.workspace_root
+
+
+def _create_agent_execution_log_session(
+    *,
+    trace_id: str,
+    session_id: str,
+) -> ExecutionLogSession | None:
+    try:
+        return create_execution_log_session(
+            trace_id=trace_id,
+            session_id=session_id,
+            request_kind="agent_chat",
+            metadata={"runtime": "coomi"},
+        )
+    except OSError as exc:
+        _LOGGER.warning("Unable to create context Trace execution log for %s: %s", trace_id, exc)
+        return None
 
 
 def _normalize_story_generation_options(value: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -513,7 +538,12 @@ def _event_to_trace_event(event_name: str, payload: Dict[str, Any], index: int) 
     }
 
 
-def _extract_trace_metrics(events: List[Dict[str, Any]], trace_id: str, duration_ms: int) -> Dict[str, Any]:
+def _extract_trace_metrics(
+    events: List[Dict[str, Any]],
+    trace_id: str,
+    duration_ms: int,
+    llm_metrics: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     tool_calls = len([item for item in events if item.get("event") == "ToolDone"])
     total_tokens = 0
     for item in reversed(events):
@@ -522,15 +552,30 @@ def _extract_trace_metrics(events: List[Dict[str, Any]], trace_id: str, duration
         data = item.get("data") if isinstance(item.get("data"), dict) else {}
         total_tokens = int(data.get("total_tokens") or data.get("totalTokens") or 0)
         break
+    observed = llm_metrics if isinstance(llm_metrics, dict) else {}
+    observed_calls = int(observed.get("calls") or 0)
+    usage_calls = int(observed.get("usageCalls") or 0)
     return {
         "traceId": trace_id,
         "durationMs": duration_ms,
         "toolCalls": tool_calls,
-        "llmCalls": 1,
-        "promptTokens": 0,
-        "completionTokens": total_tokens,
+        "llmCalls": observed_calls or (1 if total_tokens else 0),
+        "promptTokens": int(observed.get("promptTokens") or 0) if usage_calls else 0,
+        "completionTokens": int(observed.get("completionTokens") or 0) if usage_calls else total_tokens,
         "estimatedCost": 0.0,
     }
+
+
+def _extract_context_trace(events: List[Dict[str, Any]]) -> Dict[str, Any]:
+    for item in reversed(events):
+        if item.get("event") != "TurnContract":
+            continue
+        data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        context_assembly = data.get("contextAssembly") if isinstance(data.get("contextAssembly"), dict) else {}
+        context_trace = context_assembly.get("contextTrace")
+        if isinstance(context_trace, dict):
+            return context_trace
+    return {}
 
 
 def _build_audit(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -595,12 +640,16 @@ def _build_chat_payload(
     events: List[Dict[str, Any]],
     started: float,
     workspace_root: Path,
+    session_id: str = "default",
+    execution_log_session: ExecutionLogSession | None = None,
     status: str = "completed",
     error_message: str = "",
 ) -> Dict[str, Any]:
     status_data = get_storydex_coomi_agent_service().get_status(workspace_root=workspace_root)
     duration_ms = int((time.perf_counter() - started) * 1000)
-    trace = _extract_trace_metrics(events, trace_id, duration_ms)
+    llm_metrics = get_llm_metrics(trace_id)
+    trace = _extract_trace_metrics(events, trace_id, duration_ms, llm_metrics)
+    context_trace = merge_llm_metrics(_extract_context_trace(events), llm_metrics)
     audit = _build_audit(events)
     data = AgentChatData(
         route="coomi",
@@ -610,21 +659,32 @@ def _build_chat_payload(
         events=[AgentTraceEvent(**event) for event in events],
         assistant={"runtime": "coomi", "status": status_data},
     ).model_dump(by_alias=True)
+    record = _build_history_record(
+        trace_id=trace_id,
+        prompt=prompt,
+        data=data,
+        trace=trace,
+        audit=audit,
+        events=events,
+        workspace_root=workspace_root,
+        status=status,
+        error_message=error_message,
+        context_trace=copy.deepcopy(context_trace),
+    )
+    if execution_log_session is not None:
+        try:
+            execution_log_session.write(
+                "context_trace_summary",
+                summarize_context_trace(context_trace),
+                category="observability",
+            )
+        except OSError as exc:
+            _LOGGER.warning("Unable to write context Trace execution log for %s: %s", trace_id, exc)
     return {
         "data": data,
         "trace": trace,
         "audit": audit,
-        "record": _build_history_record(
-            trace_id=trace_id,
-            prompt=prompt,
-            data=data,
-            trace=trace,
-            audit=audit,
-            events=events,
-            workspace_root=workspace_root,
-            status=status,
-            error_message=error_message,
-        ),
+        "record": record,
     }
 
 
@@ -639,6 +699,7 @@ def _build_history_record(
     workspace_root: Path,
     status: str,
     error_message: str = "",
+    context_trace: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     now = _now_iso()
     return {
@@ -659,6 +720,7 @@ def _build_history_record(
         "trace": trace,
         "audit": audit,
         "assistant": data.get("assistant") if isinstance(data.get("assistant"), dict) else {},
+        "contextTrace": context_trace if isinstance(context_trace, dict) else {},
         "workspaceRoot": workspace_root.as_posix(),
         "errorMessage": error_message,
         "errorCode": "coomi_agent_error" if error_message else None,
@@ -1057,6 +1119,7 @@ async def _stream_coomi_sse(
     git_snapshot: AgentGitSnapshot,
     request: Request,
     cancellation_token: _CancellationToken,
+    execution_log_session: ExecutionLogSession | None = None,
 ) -> AsyncIterator[str]:
     started = time.perf_counter()
     reply_chunks: List[str] = []
@@ -1307,6 +1370,8 @@ async def _stream_coomi_sse(
             events=events,
             started=started,
             workspace_root=workspace_root,
+            session_id=session_id,
+            execution_log_session=execution_log_session,
             status=status,
             error_message=error_message,
         )
@@ -1565,6 +1630,7 @@ async def agent_run_commit_decision(
                         changed_files=current_changed_files,
                         diff_summary=_build_commit_message_diff_summary(workspace_root, current_changed_files),
                         prompt=original_prompt,
+                        trace_id=trace_id,
                     ),
                     timeout=_COMMIT_MESSAGE_TIMEOUT_SECONDS,
                 )
@@ -2056,19 +2122,25 @@ async def agent_chat(
     session_id = str(session_id_query or "").strip() or _resolve_agent_session_id(request)
     if not _try_acquire_agent_generation_slot():
         raise _agent_busy_error(trace_id=trace_id, session_id=session_id)
+    reset_llm_metrics(trace_id)
     started = time.perf_counter()
     cancellation_token = _CancellationToken()
     workspace_root = _resolve_agent_workspace_root(payload)
+    execution_log_session = _create_agent_execution_log_session(
+        trace_id=trace_id,
+        session_id=session_id,
+    )
     git_snapshot = agent_git_autocommit_service.begin_turn(workspace_root)
     git_finished = False
     try:
         story_generation = _normalize_story_generation_options(payload.story_generation)
-        intent_frame = await storydex_intent_service.classify_intent(
-            prompt=payload.prompt,
-            active_file=payload.active_file,
-            workspace_root=workspace_root,
-            session_id=session_id,
-        )
+        with llm_trace(trace_id):
+            intent_frame = await storydex_intent_service.classify_intent(
+                prompt=payload.prompt,
+                active_file=payload.active_file,
+                workspace_root=workspace_root,
+                session_id=session_id,
+            )
         turn_contract = storydex_orchestration_service.build_turn_contract(
             workspace_root,
             prompt=payload.prompt,
@@ -2165,6 +2237,8 @@ async def agent_chat(
             events=events,
             started=started,
             workspace_root=workspace_root,
+            session_id=session_id,
+            execution_log_session=execution_log_session,
             status="failed" if git_failed else "completed" if completed and not error_message else "failed",
             error_message=error_message,
         )
@@ -2182,6 +2256,7 @@ async def agent_chat(
                 commit_prompt_enabled=_agent_commit_prompt_enabled(workspace_root),
             )
         _release_agent_generation_slot()
+        reset_llm_metrics(trace_id)
 
 
 async def _stream_agent_chat_request_sse(
@@ -2192,6 +2267,7 @@ async def _stream_agent_chat_request_sse(
     session_id: str,
     cancellation_token: _CancellationToken,
 ) -> AsyncIterator[str]:
+    reset_llm_metrics(trace_id)
     request_started = time.perf_counter()
     accepted = {
         "_type": "RunAccepted",
@@ -2212,8 +2288,13 @@ async def _stream_agent_chat_request_sse(
     delegated = False
     git_task: asyncio.Task[AgentGitSnapshot] | None = None
     intent_task: asyncio.Task[Dict[str, Any]] | None = None
+    execution_log_session: ExecutionLogSession | None = None
     try:
         workspace_root = _resolve_agent_workspace_root(payload)
+        execution_log_session = _create_agent_execution_log_session(
+            trace_id=trace_id,
+            session_id=session_id,
+        )
         story_generation = _normalize_story_generation_options(payload.story_generation)
         git_task = asyncio.create_task(asyncio.to_thread(agent_git_autocommit_service.begin_turn, workspace_root))
 
@@ -2229,14 +2310,15 @@ async def _stream_agent_chat_request_sse(
                 phase_started=intent_started,
             ),
         )
-        intent_task = asyncio.create_task(
-            _classify_intent_without_blocking_event_loop(
-                prompt=payload.prompt,
-                active_file=payload.active_file,
-                workspace_root=workspace_root,
-                session_id=session_id,
+        with llm_trace(trace_id):
+            intent_task = asyncio.create_task(
+                _classify_intent_without_blocking_event_loop(
+                    prompt=payload.prompt,
+                    active_file=payload.active_file,
+                    workspace_root=workspace_root,
+                    session_id=session_id,
+                )
             )
-        )
         while not intent_task.done():
             done, _ = await asyncio.wait({intent_task}, timeout=_PHASE_HEARTBEAT_SECONDS)
             if done:
@@ -2370,6 +2452,7 @@ async def _stream_agent_chat_request_sse(
             git_snapshot=git_snapshot,
             request=request,
             cancellation_token=cancellation_token,
+            execution_log_session=execution_log_session,
         ):
             yield chunk
     except Exception as exc:
@@ -2399,6 +2482,7 @@ async def _stream_agent_chat_request_sse(
                 except Exception:
                     pass
             _release_agent_generation_slot()
+        reset_llm_metrics(trace_id)
 
 
 @router.post("/agent/chat/stream")

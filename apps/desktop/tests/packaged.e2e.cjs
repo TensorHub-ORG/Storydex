@@ -457,12 +457,35 @@ test("packaged Electron validates icons, streaming responsiveness, session recov
       }));
       throw new Error(`Git prompt exists in the stream but is not visible: ${JSON.stringify(uiState)}`, { cause: error });
     }
-    const skipStarted = performance.now();
+    await app.page.evaluate(() => {
+      const menu = document.querySelector(".coomi-commit-menu");
+      const button = menu?.querySelector(".coomi-command-option:last-of-type");
+      const state = { armedAt: performance.now(), clickEventAt: null, hiddenAt: null };
+      window.__storydexGitSkipTiming = state;
+      button?.addEventListener("click", () => { state.clickEventAt = performance.now(); }, { capture: true, once: true });
+      const observer = new MutationObserver(() => {
+        if (!document.querySelector(".coomi-commit-menu")) {
+          state.hiddenAt = performance.now();
+          observer.disconnect();
+        }
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+    });
+    const automationStarted = performance.now();
     await commitMenu.locator(".coomi-command-option").last().click();
     await commitMenu.waitFor({ state: "hidden", timeout: 5_000 });
-    const skipResponseMs = performance.now() - skipStarted;
+    const automationResponseMs = performance.now() - automationStarted;
+    const browserTiming = await app.page.evaluate(() => {
+      const timing = window.__storydexGitSkipTiming;
+      delete window.__storydexGitSkipTiming;
+      return timing;
+    });
+    assert.ok(Number.isFinite(browserTiming?.clickEventAt), "Git skip click event was not observed");
+    assert.ok(Number.isFinite(browserTiming?.hiddenAt), "Git skip panel removal was not observed");
+    const skipResponseMs = browserTiming.hiddenAt - browserTiming.clickEventAt;
     assert.ok(skipResponseMs < 100, `Git skip panel took ${skipResponseMs.toFixed(1)}ms to close`);
     metrics.gitSkipResponseMs = Number(skipResponseMs.toFixed(2));
+    metrics.gitSkipAutomationMs = Number(automationResponseMs.toFixed(2));
 
     const openSecond = await fetch(`${app.backendBaseUrl}/workspace/project/open`, {
       method: "POST",

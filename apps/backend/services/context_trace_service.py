@@ -1,0 +1,323 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import unicodedata
+from functools import lru_cache
+from typing import Any, Dict, Iterable, Sequence
+
+
+_TOKEN_ENCODING = "cl100k_base"
+_PARAGRAPH_BREAK_RE = re.compile(r"(?:\r?\n\s*){2,}")
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+@lru_cache(maxsize=1)
+def _token_encoder() -> Any:
+    import tiktoken
+
+    return tiktoken.get_encoding(_TOKEN_ENCODING)
+
+
+def estimate_tokens(value: Any) -> int:
+    text = str(value or "")
+    if not text:
+        return 0
+    return len(_token_encoder().encode(text, disallowed_special=()))
+
+
+def normalized_content_hash(value: Any) -> str:
+    normalized = _normalize_for_hash(value)
+    if not normalized:
+        return ""
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def create_context_source(
+    kind: str,
+    paths: Sequence[str],
+    *,
+    candidate: Any = "",
+    count: int | None = None,
+    policy: str = "",
+    elapsed_ms: float = 0.0,
+) -> Dict[str, Any]:
+    clean_paths = [str(path).strip().replace("\\", "/") for path in paths if str(path).strip()]
+    candidate_text = str(candidate or "").strip()
+    return {
+        "kind": str(kind or "unknown"),
+        "count": len(clean_paths) if count is None else max(0, int(count or 0)),
+        "paths": clean_paths[:12],
+        "candidateChars": len(candidate_text),
+        "candidateEstTokens": estimate_tokens(candidate_text),
+        "chars": 0,
+        "estTokens": 0,
+        "included": False,
+        "truncated": False,
+        "dropReason": "empty" if not candidate_text else "not_included",
+        "messageIndex": -1,
+        "startEstToken": 0,
+        "endEstToken": 0,
+        "elapsedMs": round(max(0.0, float(elapsed_ms or 0.0)), 3),
+        "policy": str(policy or ""),
+        "contentHash": "",
+    }
+
+
+def finalize_context_source(
+    source: Dict[str, Any] | None,
+    *,
+    content: Any = "",
+    included: bool,
+    truncated: bool = False,
+    drop_reason: str = "",
+) -> None:
+    if not isinstance(source, dict):
+        return
+    text = str(content or "").strip()
+    source.update(
+        {
+            "chars": len(text),
+            "estTokens": estimate_tokens(text),
+            "included": bool(included),
+            "truncated": bool(truncated),
+            "dropReason": str(drop_reason or ""),
+            "contentHash": normalized_content_hash(text),
+        }
+    )
+
+
+def build_context_trace(
+    sources: Sequence[Dict[str, Any]],
+    blocks: Sequence[Dict[str, Any]],
+    *,
+    assemble_ms: float,
+) -> Dict[str, Any]:
+    source_records = [source for source in sources if isinstance(source, dict)]
+    context_chars = sum(int(source.get("chars") or 0) for source in source_records)
+    context_tokens = sum(int(source.get("estTokens") or 0) for source in source_records)
+    return {
+        "_type": "ContextTrace",
+        "_version": 2,
+        "tokenEstimator": f"tiktoken:{_TOKEN_ENCODING}",
+        "sources": source_records,
+        "duplicates": _detect_duplicates(blocks),
+        "llmCalls": [],
+        "providerRequests": [],
+        "totals": {
+            "contextChars": context_chars,
+            "estContextTokens": context_tokens,
+            "assembleMs": round(max(0.0, float(assemble_ms or 0.0)), 3),
+            "contextRequestIndex": None,
+            "contextRequestChars": 0,
+            "contextRequestEstTokens": 0,
+            "contextRequestHash": "",
+            "providerRequestCount": 0,
+            "providerRequestEstTokens": 0,
+            "providerUsageRequestCount": 0,
+            "providerUsageRequestEstTokens": 0,
+            "providerInputTokens": None,
+            "providerOutputTokens": None,
+            "providerTotalTokens": None,
+            "providerInputEstimateErrorTokens": None,
+            "providerInputEstimateErrorPct": None,
+        },
+    }
+
+
+def capture_provider_request(
+    context_assembly: Dict[str, Any] | None,
+    *,
+    request_index: int,
+    purpose: str,
+    method: str,
+    messages: Sequence[Dict[str, Any]],
+    tools: Sequence[Dict[str, Any]] | None,
+    kwargs: Dict[str, Any] | None,
+    request_hash: str,
+) -> Dict[str, Any]:
+    """Measure one Provider request and locate assembled Storydex blocks once.
+
+    Positions are estimated within each message's content. The message index keeps
+    those offsets unambiguous without pretending that Provider usage can be split
+    among individual blocks. The returned record is later paired with this exact
+    call's Provider usage by ``llm_replay``.
+    """
+
+    normalized_request = {
+        "messages": list(messages),
+        "tools": list(tools or []),
+        "kwargs": dict(kwargs or {}),
+    }
+    request_text = _stable_json(normalized_request)
+    request_record = {
+        "index": max(0, int(request_index or 0)),
+        "purpose": str(purpose or "unknown"),
+        "method": str(method or "unknown"),
+        "requestChars": len(request_text),
+        "requestEstTokens": estimate_tokens(request_text),
+        "requestHash": str(request_hash or ""),
+        "inputTokens": None,
+        "outputTokens": None,
+        "totalTokens": None,
+        "estimateErrorTokens": None,
+        "estimateErrorPct": None,
+    }
+
+    assembly = context_assembly if isinstance(context_assembly, dict) else {}
+    trace = assembly.get("contextTrace") if isinstance(assembly.get("contextTrace"), dict) else None
+    if trace is None:
+        return request_record
+    totals = trace.get("totals") if isinstance(trace.get("totals"), dict) else {}
+    if str(totals.get("contextRequestHash") or ""):
+        return request_record
+
+    blocks = assembly.get("promptBlocks") if isinstance(assembly.get("promptBlocks"), list) else []
+    sources = trace.get("sources") if isinstance(trace.get("sources"), list) else []
+    source_by_kind = {
+        str(source.get("kind") or ""): source
+        for source in sources
+        if isinstance(source, dict) and str(source.get("kind") or "")
+    }
+    message_texts = [_message_content_text(message) for message in messages]
+    cursors = [0 for _ in message_texts]
+    found = 0
+    for raw_block in blocks:
+        block = raw_block if isinstance(raw_block, dict) else {}
+        block_kind = str(block.get("id") or "").strip()
+        block_content = str(block.get("content") or "").strip()
+        source = source_by_kind.get(block_kind)
+        if source is None or not block_content:
+            continue
+        for message_index, message_text in enumerate(message_texts):
+            char_index = message_text.find(block_content, cursors[message_index])
+            if char_index < 0:
+                continue
+            start_token = estimate_tokens(message_text[:char_index])
+            source.update(
+                {
+                    "messageIndex": message_index,
+                    "startEstToken": start_token,
+                    "endEstToken": start_token + estimate_tokens(block_content),
+                }
+            )
+            cursors[message_index] = char_index + len(block_content)
+            found += 1
+            break
+
+    included_count = sum(1 for source in source_by_kind.values() if bool(source.get("included")))
+    if included_count and found == 0:
+        return request_record
+
+    totals.update(
+        {
+            "contextRequestIndex": request_record["index"],
+            "contextRequestChars": request_record["requestChars"],
+            "contextRequestEstTokens": request_record["requestEstTokens"],
+            "contextRequestHash": request_record["requestHash"],
+        }
+    )
+    trace["totals"] = totals
+    return request_record
+
+
+def merge_llm_metrics(context_trace: Dict[str, Any] | None, metrics: Dict[str, Any] | None) -> Dict[str, Any]:
+    trace = context_trace if isinstance(context_trace, dict) else {}
+    metric_values = metrics if isinstance(metrics, dict) else {}
+    calls = metric_values.get("llmCalls") if isinstance(metric_values.get("llmCalls"), list) else []
+    trace["llmCalls"] = [dict(call) for call in calls if isinstance(call, dict)]
+    raw_requests = (
+        metric_values.get("providerRequests")
+        if isinstance(metric_values.get("providerRequests"), list)
+        else []
+    )
+    provider_requests = [dict(request) for request in raw_requests if isinstance(request, dict)]
+    trace["providerRequests"] = provider_requests
+    totals = trace.get("totals") if isinstance(trace.get("totals"), dict) else {}
+    usage_calls = int(metric_values.get("usageCalls") or 0)
+    usage_requests = [request for request in provider_requests if request.get("inputTokens") is not None]
+    compared_est_tokens = sum(int(request.get("requestEstTokens") or 0) for request in usage_requests)
+    compared_input_tokens = sum(int(request.get("inputTokens") or 0) for request in usage_requests)
+    estimate_error_tokens = compared_est_tokens - compared_input_tokens
+    totals.update(
+        {
+            "providerRequestCount": len(provider_requests),
+            "providerRequestEstTokens": sum(
+                int(request.get("requestEstTokens") or 0) for request in provider_requests
+            ),
+            "providerUsageRequestCount": len(usage_requests),
+            "providerUsageRequestEstTokens": compared_est_tokens,
+            "providerInputTokens": int(metric_values.get("promptTokens") or 0) if usage_calls else None,
+            "providerOutputTokens": int(metric_values.get("completionTokens") or 0) if usage_calls else None,
+            "providerTotalTokens": int(metric_values.get("totalTokens") or 0) if usage_calls else None,
+            "providerInputEstimateErrorTokens": estimate_error_tokens if usage_requests else None,
+            "providerInputEstimateErrorPct": (
+                round((estimate_error_tokens / compared_input_tokens) * 100, 4)
+                if compared_input_tokens
+                else None
+            ),
+        }
+    )
+    trace["totals"] = totals
+    return trace
+
+
+def summarize_context_trace(context_trace: Dict[str, Any] | None) -> Dict[str, Any]:
+    trace = context_trace if isinstance(context_trace, dict) else {}
+    sources = trace.get("sources") if isinstance(trace.get("sources"), list) else []
+    duplicates = trace.get("duplicates") if isinstance(trace.get("duplicates"), list) else []
+    calls = trace.get("llmCalls") if isinstance(trace.get("llmCalls"), list) else []
+    provider_requests = (
+        trace.get("providerRequests") if isinstance(trace.get("providerRequests"), list) else []
+    )
+    totals = trace.get("totals") if isinstance(trace.get("totals"), dict) else {}
+    return {
+        "estContextTokens": int(totals.get("estContextTokens") or 0),
+        "sourceCount": len(sources),
+        "truncatedCount": sum(1 for source in sources if isinstance(source, dict) and bool(source.get("truncated"))),
+        "droppedCount": sum(1 for source in sources if isinstance(source, dict) and not bool(source.get("included"))),
+        "duplicateCount": len(duplicates),
+        "llmCallCount": sum(int(call.get("count") or 0) for call in calls if isinstance(call, dict)),
+        "providerRequestCount": len(provider_requests),
+        "providerUsageRequestCount": int(totals.get("providerUsageRequestCount") or 0),
+        "providerTotalTokens": totals.get("providerTotalTokens"),
+        "providerInputEstimateErrorPct": totals.get("providerInputEstimateErrorPct"),
+    }
+
+
+def _detect_duplicates(blocks: Sequence[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    occurrences: dict[str, Dict[str, Any]] = {}
+    for raw_block in blocks:
+        block = raw_block if isinstance(raw_block, dict) else {}
+        kind = str(block.get("id") or block.get("kind") or "unknown").strip() or "unknown"
+        for paragraph in _paragraphs(str(block.get("content") or "")):
+            digest = hashlib.sha256(paragraph.encode("utf-8")).hexdigest()
+            item = occurrences.setdefault(digest, {"hash": digest, "kinds": [], "chars": len(paragraph)})
+            if kind not in item["kinds"]:
+                item["kinds"].append(kind)
+    return [item for item in occurrences.values() if len(item["kinds"]) > 1]
+
+
+def _paragraphs(value: str) -> Iterable[str]:
+    normalized = unicodedata.normalize("NFKC", str(value or "")).strip()
+    if not normalized:
+        return ()
+    return tuple(
+        compact
+        for paragraph in _PARAGRAPH_BREAK_RE.split(normalized)
+        if (compact := _WHITESPACE_RE.sub("", paragraph))
+    )
+
+
+def _normalize_for_hash(value: Any) -> str:
+    return _WHITESPACE_RE.sub("", unicodedata.normalize("NFKC", str(value or "")))
+
+
+def _message_content_text(message: Dict[str, Any]) -> str:
+    content = message.get("content") if isinstance(message, dict) else ""
+    return content if isinstance(content, str) else _stable_json(content)
+
+
+def _stable_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

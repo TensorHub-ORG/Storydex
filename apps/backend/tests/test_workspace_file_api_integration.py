@@ -176,7 +176,14 @@ def test_story_increment_snapshot_memory_wiki_and_sync(workspace_client):
                 "path": "chapters/第一章/001.md",
                 "text": "林舟抵达云港。",
                 "variableThoughts": [{"人物": "林舟抵达云港", "物品": ["铜钥匙"]}],
-                "variableUpdates": [{"op": "set", "path": "plot.location", "value": "云港"}],
+                    "variableUpdates": [
+                        {
+                            "op": "set",
+                            "path": "plot.location",
+                            "value": "云港",
+                            "evidence": "001 正文明示林舟抵达云港",
+                        }
+                    ],
                 "characterUpdates": [{
                     "character": "林舟", "role": "主角", "summary": "来自北境的旅人",
                     "state": {"location": "云港", "mood": "警觉"}, "aliases": ["阿舟"],

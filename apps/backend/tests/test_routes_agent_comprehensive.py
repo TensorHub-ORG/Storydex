@@ -134,7 +134,23 @@ def test_trace_audit_history_tasks_and_ledger_helpers(monkeypatch, tmp_path):
             "status": "ready", "intentFrame": {"primary": "story_generation"},
             "turnPlan": {"fragmentCount": 2, "fragmentWordCount": 500},
             "skillRegistry": {"skillCount": 3}, "toolRegistry": {"toolCount": 4},
-            "contextAssembly": {"budget": {"blockCount": 5, "totalChars": 100}},
+            "contextAssembly": {
+                "budget": {"blockCount": 5, "totalChars": 100},
+                "contextTrace": {
+                    "sources": [
+                        {
+                            "kind": "recent_segments",
+                            "included": True,
+                            "truncated": False,
+                            "chars": 100,
+                            "estTokens": 20,
+                        }
+                    ],
+                    "duplicates": [],
+                    "llmCalls": [],
+                    "totals": {"contextChars": 100, "estContextTokens": 20},
+                },
+            },
         }, 4),
         routes._event_to_trace_event("GitCommitResult", {
             "created": True, "target": "workspace", "workspaceRoot": tmp_path.as_posix(),
@@ -165,10 +181,22 @@ def test_trace_audit_history_tasks_and_ledger_helpers(monkeypatch, tmp_path):
 
     fake_service = types.SimpleNamespace(get_status=lambda **kwargs: {"model": "m", "providerId": "p"})
     monkeypatch.setattr(routes, "get_storydex_coomi_agent_service", lambda: fake_service)
+    routes.reset_llm_metrics("t")
+    log_rows = []
+    execution_log = types.SimpleNamespace(write=lambda event, payload, **kwargs: log_rows.append((event, payload, kwargs)))
     built = routes._build_chat_payload(
-        trace_id="t", prompt="p", reply="r", events=events, started=0.0, workspace_root=tmp_path
+        trace_id="t",
+        prompt="p",
+        reply="r",
+        events=events,
+        started=0.0,
+        workspace_root=tmp_path,
+        session_id="s",
+        execution_log_session=execution_log,
     )
     assert built["data"]["reply"] == "r" and built["record"]["workspaceRoot"] == tmp_path.as_posix()
+    assert built["record"]["contextTrace"]["sources"][0]["kind"] == "recent_segments"
+    assert log_rows[0][0] == "context_trace_summary" and log_rows[0][1]["sourceCount"] == 1
 
     assert routes._turn_contract_needs_user_input({"status": "needs_user_input"}) is True
     contract = {"requiredQuestions": [None, {}, {"message": "choose"}]}
@@ -506,6 +534,7 @@ def test_run_diff_empty_summary_commit_summary_and_record_append(monkeypatch, tm
 
 def test_agent_clear_conversation_and_chat_paths(monkeypatch, tmp_path):
     calls = []
+    reset_calls = []
     service = types.SimpleNamespace(clear_session=lambda *args, **kwargs: calls.append(("clear", args, kwargs)))
     monkeypatch.setattr(routes, "get_storydex_coomi_agent_service", lambda: service)
     monkeypatch.setattr(routes, "project_service", types.SimpleNamespace(workspace_root=tmp_path))
@@ -519,6 +548,8 @@ def test_agent_clear_conversation_and_chat_paths(monkeypatch, tmp_path):
         upsert_record=lambda record, session: calls.append(("record", session)),
     )
     monkeypatch.setattr(routes, "trace_history_service", history)
+    monkeypatch.setattr(routes, "reset_llm_metrics", lambda trace_id=None: reset_calls.append(("reset", trace_id)))
+
     cleared = routes.agent_clear_conversation(FakeRequest({"x-session-id": "header"}), session_id_query="query")
     assert cleared.data["historyClearedCount"] == 3 and cleared.data["sessionId"] == "query"
 
@@ -544,34 +575,49 @@ def test_agent_clear_conversation_and_chat_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(routes, "agent_git_autocommit_service", Git())
     monkeypatch.setattr(routes, "_agent_commit_prompt_enabled", lambda root: True)
     monkeypatch.setattr(routes, "_create_agent_task_plan", lambda **kwargs: asyncio.sleep(0, result=[{"title": "Inspect"}, {"title": "Git commit"}]))
-    monkeypatch.setattr(routes, "_build_chat_payload", lambda **kwargs: {
-        "data": {"route": "coomi", "reply": kwargs["reply"], "events": [], "assistant": {}},
-        "trace": {"traceId": kwargs["trace_id"], "durationMs": 1, "toolCalls": 0},
-        "audit": [], "record": {"traceId": kwargs["trace_id"]},
-    })
+    def build_chat_payload(**kwargs):
+        reset_calls.append(("build", kwargs["trace_id"]))
+        return {
+            "data": {"route": "coomi", "reply": kwargs["reply"], "events": [], "assistant": {}},
+            "trace": {"traceId": kwargs["trace_id"], "durationMs": 1, "toolCalls": 0},
+            "audit": [], "record": {"traceId": kwargs["trace_id"]},
+        }
+
+    monkeypatch.setattr(routes, "_build_chat_payload", build_chat_payload)
 
     orchestration = types.SimpleNamespace(build_turn_contract=lambda *args, **kwargs: {
         "status": "needs_user_input", "requiredQuestions": [{"message": "choose"}], "turnPlan": {}
     })
     monkeypatch.setattr(routes, "storydex_orchestration_service", orchestration)
+    reset_calls.clear()
     response = asyncio.run(routes.agent_chat(routes.AgentChatRequest(prompt="p"), FakeRequest(), session_id_query="s"))
     assert response.data["reply"] == "choose"
+    assert [item[0] for item in reset_calls] == ["reset", "build", "reset"]
+    assert len({item[1] for item in reset_calls}) == 1
 
     orchestration.build_turn_contract = lambda *args, **kwargs: {"status": "ready", "turnPlan": {}}
     monkeypatch.setattr(routes, "_collect_coomi_run", lambda **kwargs: asyncio.sleep(0, result=("reply", [
         routes._event_to_trace_event("ToolDone", {"tool_name": "Read"}, 1)
     ], True, "")))
+    reset_calls.clear()
     response = asyncio.run(routes.agent_chat(routes.AgentChatRequest(prompt="p"), FakeRequest(), session_id_query="s"))
     assert response.data["reply"] == "reply"
+    assert [item[0] for item in reset_calls] == ["reset", "build", "reset"]
+    assert len({item[1] for item in reset_calls}) == 1
 
     broken_intent = types.SimpleNamespace(classify_intent=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("intent failed")))
     monkeypatch.setattr(routes, "storydex_intent_service", broken_intent)
+    reset_calls.clear()
     with pytest.raises(RuntimeError):
         asyncio.run(routes.agent_chat(routes.AgentChatRequest(prompt="p"), FakeRequest(), session_id_query="s"))
+    assert [item[0] for item in reset_calls] == ["reset", "reset"]
+    assert len({item[1] for item in reset_calls}) == 1
     assert any(item[0] == "released" for item in calls)
 
 
 def test_stream_request_wrapper_success_error_and_chat_stream(monkeypatch, tmp_path):
+    reset_calls = []
+    monkeypatch.setattr(routes, "reset_llm_metrics", lambda trace_id=None: reset_calls.append(("reset", trace_id)))
     monkeypatch.setattr(routes, "_release_agent_generation_slot", lambda: None)
     monkeypatch.setattr(routes, "_resolve_agent_workspace_root", lambda payload: tmp_path)
     monkeypatch.setattr(routes, "_normalize_story_generation_options", lambda value: {})
@@ -599,10 +645,13 @@ def test_stream_request_wrapper_success_error_and_chat_stream(monkeypatch, tmp_p
     events = asyncio.run(collect())
     names = [name for name, _ in events]
     assert names[0] == "RunAccepted" and "TextChunk" in names and names[-1] == "done"
+    assert reset_calls == [("reset", "t"), ("reset", "t")]
 
+    reset_calls.clear()
     intent.classify_intent = lambda **kwargs: asyncio.sleep(0, result=(_ for _ in ()).throw(RuntimeError("bad")))
     failed = asyncio.run(collect())
     assert [name for name, _ in failed][-2:] == ["AgentError", "done"]
+    assert reset_calls == [("reset", "t"), ("reset", "t")]
 
     monkeypatch.setattr(routes, "_try_acquire_agent_generation_slot", lambda: False)
     with pytest.raises(routes.StorydexError):

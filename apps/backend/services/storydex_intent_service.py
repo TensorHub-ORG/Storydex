@@ -486,22 +486,23 @@ class StorydexIntentService:
             from services.coomi_agent_service import _call_provider_chat, _storydex_coomi_home
 
             with _storydex_coomi_home():
-                from services.llm_replay import get_replayable_llm_provider
+                from services.llm_replay import get_replayable_llm_provider, llm_purpose
 
-                provider = get_replayable_llm_provider()
-                response = await asyncio.wait_for(
-                    _call_provider_chat(
-                        provider,
-                        _intent_messages(
-                            prompt=prompt,
-                            active_file=active_file,
-                            catalog=catalog,
-                            previous_turn=previous_turn,
+                with llm_purpose("intent"):
+                    provider = get_replayable_llm_provider()
+                    response = await asyncio.wait_for(
+                        _call_provider_chat(
+                            provider,
+                            _intent_messages(
+                                prompt=prompt,
+                                active_file=active_file,
+                                catalog=catalog,
+                                previous_turn=previous_turn,
+                            ),
+                            None,
                         ),
-                        None,
-                    ),
-                    timeout=self.llm_timeout_seconds,
-                )
+                        timeout=self.llm_timeout_seconds,
+                    )
         except Exception:
             return None
         return _parse_intent_frame(

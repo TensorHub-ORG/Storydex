@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 import services.coomi_agent_service as coomi
+from services.llm_replay import get_llm_metrics, reset_llm_metrics
 
 
 @contextmanager
@@ -104,6 +105,8 @@ def test_task_plan_and_commit_message_provider_paths(monkeypatch, tmp_path):
 
     _install_provider(monkeypatch, Provider())
     service = coomi.StorydexCoomiAgentService()
+    reset_llm_metrics("t")
+    reset_llm_metrics("commit-trace")
     tasks = asyncio.run(
         service.create_task_plan(
             prompt="work", trace_id="t", session_id="s", workspace_root=tmp_path, active_file="chapter.md"
@@ -112,10 +115,16 @@ def test_task_plan_and_commit_message_provider_paths(monkeypatch, tmp_path):
     assert tasks and tasks[0]["title"] == "Read project"
     message = asyncio.run(
         service.generate_commit_message(
-            workspace_root=tmp_path, changed_files=["chapter.md"], diff_summary="+ text", prompt="continue"
+            workspace_root=tmp_path,
+            changed_files=["chapter.md"],
+            diff_summary="+ text",
+            prompt="continue",
+            trace_id="commit-trace",
         )
     )
     assert message == "update chapter"
+    assert get_llm_metrics("t")["llmCalls"][0]["purpose"] == "plan"
+    assert get_llm_metrics("commit-trace")["llmCalls"][0]["purpose"] == "commit"
 
     class BrokenProvider:
         async def chat(self, messages, options):
@@ -304,6 +313,33 @@ def test_event_translator_all_events_and_tool_ids():
     assert orphan[1]["tool_call_id"].startswith("coomi-")
 
 
+def test_event_translator_deduplicates_announced_and_executing_tool_starts():
+    translator = coomi._CoomiEventTranslator(session_id="s")
+    events = [
+        _event("ToolStart", tool_name="StorydexProjectSearch", arguments={}),
+        _event("ToolStart", tool_name="StorydexProjectSearch", arguments={}),
+        _event("UsageUpdate", usage={"total_tokens": 10}),
+        _event("ToolStart", tool_name="StorydexProjectSearch", arguments={"query": "first"}),
+        _event("ToolStart", tool_name="StorydexProjectSearch", arguments={"query": "second"}),
+        _event("ToolRunning", tool_name="StorydexProjectSearch"),
+        _event("ToolRunning", tool_name="StorydexProjectSearch"),
+        _event("ToolDone", tool_name="StorydexProjectSearch", result_preview="first"),
+        _event("ToolDone", tool_name="StorydexProjectSearch", result_preview="second"),
+    ]
+
+    translated = [item for event in events if (item := translator.translate(event)) is not None]
+    starts = [payload for name, payload in translated if name == "ToolStart"]
+    running = [payload for name, payload in translated if name == "ToolRunning"]
+    done = [payload for name, payload in translated if name == "ToolDone"]
+
+    start_ids = [payload["tool_call_id"] for payload in starts]
+    assert len(start_ids) == 2
+    assert len(set(start_ids)) == 2
+    assert [payload["tool_call_id"] for payload in running] == start_ids
+    assert [payload["tool_call_id"] for payload in done] == start_ids
+    assert translator.active_by_tool == {}
+
+
 def test_config_status_models_sessions_and_permission_modes(monkeypatch, tmp_path):
     config = tmp_path / "providers.json"
     monkeypatch.setattr(coomi, "STORYDEX_COOMI_CONFIG", config)
@@ -459,6 +495,13 @@ def test_render_contract_context_templates_and_snapshots(monkeypatch, tmp_path):
     assert "waiting_for_user" in rendered
     assert "Serial (serial)" in rendered
     assert "Storydex assembled context blocks" in rendered
+    contract["contextAssembly"]["contextTrace"] = {
+        "sources": [{"kind": "recent", "chars": 4}],
+        "duplicates": [],
+        "llmCalls": [],
+        "totals": {"estContextTokens": 1},
+    }
+    assert coomi._render_turn_contract(contract) == rendered, "Trace 元数据不得改变模型可见 Prompt"
     assert coomi._render_turn_contract(None) == ""
 
     selected = dict(contract)
@@ -883,3 +926,110 @@ def test_provider_config_file_and_redirected_home_fast_path(monkeypatch, tmp_pat
     with coomi._storydex_coomi_home():
         pass
     assert dict(os.environ) == before
+
+
+def test_cross_workspace_session_isolation_and_clear(monkeypatch, tmp_path):
+    """Verify that the same Storydex sessionId in two different workspaces:
+
+    - produces distinct runtime keys (runtime, intent, permissions)
+    - does not create cross-workspace Coomi session bindings
+    - clearing one workspace does not evict the other
+    """
+    import services.storydex_intent_service as intent_mod
+
+    service = coomi.StorydexCoomiAgentService()
+    monkeypatch.setattr(coomi, "_build_coomi_system_prompt", lambda **kwargs: asyncio.sleep(0, result="system"))
+    monkeypatch.setattr(coomi, "_resolve_context_window", lambda: 4096)
+    monkeypatch.setattr(coomi, "_create_storydex_tool_registry", lambda root: "registry")
+    monkeypatch.setattr(coomi, "_write_coomi_session_binding", lambda **kwargs: None)
+    monkeypatch.setattr(coomi, "_sync_coomi_runtime_workspace", lambda **kwargs: setattr(kwargs["session"], "synced", True))
+    monkeypatch.setattr(coomi, "_restore_bound_coomi_session", lambda **kwargs: None)
+
+    class Provider:
+        model = "fake-model"
+
+    services = types.ModuleType("coomi.services")
+    services.get_llm_provider = lambda: Provider()
+    monkeypatch.setitem(sys.modules, "coomi.services", services)
+
+    class SessionManager:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+        def create_session(self, **kwargs):
+            return types.SimpleNamespace(**kwargs)
+
+    monkeypatch.setitem(sys.modules, "coomi.engine.session", types.ModuleType("coomi.engine.session"))
+    sys.modules["coomi.engine.session"].SessionManager = SessionManager
+
+    class AgentLoop:
+        def __init__(self, provider, registry, **kwargs):
+            self.provider = provider
+            self.registry = registry
+            self.plan_mode = False
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+    monkeypatch.setitem(sys.modules, "coomi.engine.loop", types.ModuleType("coomi.engine.loop"))
+    sys.modules["coomi.engine.loop"].AgentLoop = AgentLoop
+
+    security = types.ModuleType("coomi.security")
+    security.PermissionLevel = types.SimpleNamespace()
+    security.PermissionMode = types.SimpleNamespace()
+    security.PermissionSystem = object
+    monkeypatch.setitem(sys.modules, "coomi.security", security)
+
+    permission = types.SimpleNamespace()
+    monkeypatch.setattr(service, "_create_permission_system", lambda *args, **kwargs: permission)
+
+    ws_a = tmp_path / "workspace_a"
+    ws_b = tmp_path / "workspace_b"
+    ws_a.mkdir(); ws_b.mkdir()
+
+    shared_session = "shared-session"
+
+    async def create(ws):
+        return await service._get_or_create_runtime(
+            session_id=shared_session, workspace_root=ws, prompt="hello", app_context="ctx"
+        )
+
+    # Create runtime in both workspaces with the same sessionId
+    agent_a, session_a = asyncio.run(create(ws_a))
+    agent_b, session_b = asyncio.run(create(ws_b))
+    assert agent_a is not agent_b, "different workspaces must create separate agents"
+    assert session_a is not session_b, "different workspaces must create separate sessions"
+
+    key_a = service._runtime_key(session_id=shared_session, workspace_root=ws_a)
+    key_b = service._runtime_key(session_id=shared_session, workspace_root=ws_b)
+    assert key_a != key_b, "runtime keys must differ across workspaces"
+    assert service._sessions[key_a] is session_a
+    assert service._sessions[key_b] is session_b
+
+    # Permissions cached per key
+    assert service._permissions[key_a] is permission
+
+    # Same sessionId, different workspace: intent service also isolates
+    k_a = intent_mod.StorydexIntentService._session_key(workspace_root=ws_a, session_id=shared_session)
+    k_b = intent_mod.StorydexIntentService._session_key(workspace_root=ws_b, session_id=shared_session)
+    assert k_a != k_b, "intent session keys must differ across workspaces"
+
+    # Clear workspace A → workspace B must remain
+    service.clear_session(shared_session, workspace_root=ws_a)
+    assert key_a not in service._sessions
+    assert key_a not in service._agents
+    assert key_a not in service._permissions
+    assert service._sessions.get(key_b) is session_b, "ws_b session must survive clearance of ws_a"
+    assert service._agents.get(key_b) is agent_b
+    assert service._permissions.get(key_b) is permission
+
+    # Binding validation: cross-workspace binding file must be rejected
+    binding_path = coomi._coomi_binding_path(ws_a, shared_session)
+    binding_path.parent.mkdir(parents=True, exist_ok=True)
+    cross_ws_binding = {
+        "version": 1,
+        "workspaceRoot": str(ws_b.resolve()),
+        "storydexSessionId": shared_session,
+        "coomiSessionId": "coomi-cross",
+    }
+    binding_path.write_text(json.dumps(cross_ws_binding), encoding="utf-8")
+    result = coomi._read_coomi_session_binding(workspace_root=ws_a, storydex_session_id=shared_session)
+    assert result == {}, "cross-workspace binding must be rejected"

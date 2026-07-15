@@ -178,20 +178,21 @@ class StorydexCoomiAgentService:
         with _storydex_coomi_home():
             self._ensure_coomi_installed()
             try:
-                from services.llm_replay import get_replayable_llm_provider
+                from services.llm_replay import get_replayable_llm_provider, llm_purpose, llm_trace
 
-                provider = get_replayable_llm_provider()
-                response = await _call_provider_chat(
-                    provider,
-                    _task_planner_messages(
-                        prompt=prompt,
-                        workspace_root=workspace,
-                        active_file=active_file,
-                        story_generation=story_generation,
-                        turn_contract=turn_contract,
-                    ),
-                    None,
-                )
+                with llm_trace(trace_id), llm_purpose("plan"):
+                    provider = get_replayable_llm_provider()
+                    response = await _call_provider_chat(
+                        provider,
+                        _task_planner_messages(
+                            prompt=prompt,
+                            workspace_root=workspace,
+                            active_file=active_file,
+                            story_generation=story_generation,
+                            turn_contract=turn_contract,
+                        ),
+                        None,
+                    )
                 content = str(getattr(response, "content", "") or "")
                 tasks = _parse_task_plan_content(content, trace_id=trace_id)
                 if tasks:
@@ -207,22 +208,24 @@ class StorydexCoomiAgentService:
         changed_files: list[str],
         diff_summary: str = "",
         prompt: str = "",
+        trace_id: str = "",
     ) -> str:
         with _storydex_coomi_home():
             self._ensure_coomi_installed()
             try:
-                from services.llm_replay import get_replayable_llm_provider
+                from services.llm_replay import get_replayable_llm_provider, llm_purpose, llm_trace
 
-                provider = get_replayable_llm_provider()
-                response = await _call_provider_chat(
-                    provider,
-                    _commit_message_messages(
-                        changed_files=changed_files,
-                        diff_summary=diff_summary,
-                        prompt=prompt,
-                    ),
-                    None,
-                )
+                with llm_trace(trace_id or "default"), llm_purpose("commit"):
+                    provider = get_replayable_llm_provider()
+                    response = await _call_provider_chat(
+                        provider,
+                        _commit_message_messages(
+                            changed_files=changed_files,
+                            diff_summary=diff_summary,
+                            prompt=prompt,
+                        ),
+                        None,
+                    )
                 message = _parse_commit_message_content(str(getattr(response, "content", "") or ""))
             except Exception as exc:
                 raise StorydexCoomiUnavailable(f"Failed to generate commit message: {exc}") from exc
@@ -278,43 +281,48 @@ class StorydexCoomiAgentService:
                 trace_id=trace_id,
                 session_id=session_id,
             )
-            agent, session = await self._get_or_create_runtime(
-                session_id=session_id,
-                workspace_root=workspace,
-                prompt=prompt,
-                story_generation=story_generation,
-                turn_contract=turn_contract,
-                app_context=app_context,
-            )
+            from services.llm_replay import llm_context_assembly, llm_purpose, llm_trace
+
+            context_assembly = _dict_value(_dict_value(turn_contract).get("contextAssembly"))
+            with llm_trace(trace_id), llm_context_assembly(context_assembly):
+                agent, session = await self._get_or_create_runtime(
+                    session_id=session_id,
+                    workspace_root=workspace,
+                    prompt=prompt,
+                    story_generation=story_generation,
+                    turn_contract=turn_contract,
+                    app_context=app_context,
+                )
             status = self.get_status(workspace_root=workspace)
             yield _agent_started(session_id=session_id, prompt=prompt, status=status, mode="coomi")
 
             translator = _CoomiEventTranslator(session_id=session_id)
             async def produce_events() -> None:
                 try:
-                    async for event in agent.run_stream(session, prompt):
-                        if _is_cancelled(cancellation_token):
-                            try:
-                                agent.cancel_token.cancel()
-                            except Exception:
-                                pass
-                            await event_queue.put((
-                                "AgentCancelled",
-                                {
-                                    "_type": "AgentCancelled",
-                                    "_version": 1,
-                                    "session_id": session_id,
-                                    "reason": "client_disconnected",
-                                },
-                            ))
-                            return
-                        translated = translator.translate(event)
-                        if translated is not None:
-                            if translated[0] == "UsageUpdate":
-                                _attach_context_snapshot(translated[1], session=session, agent=agent)
-                            elif translated[0] == "CompressionEvent":
-                                _attach_context_snapshot(translated[1], session=session, agent=agent, compressed=True)
-                            await event_queue.put(translated)
+                    with llm_trace(trace_id), llm_context_assembly(context_assembly), llm_purpose("chat"):
+                        async for event in agent.run_stream(session, prompt):
+                            if _is_cancelled(cancellation_token):
+                                try:
+                                    agent.cancel_token.cancel()
+                                except Exception:
+                                    pass
+                                await event_queue.put((
+                                    "AgentCancelled",
+                                    {
+                                        "_type": "AgentCancelled",
+                                        "_version": 1,
+                                        "session_id": session_id,
+                                        "reason": "client_disconnected",
+                                    },
+                                ))
+                                return
+                            translated = translator.translate(event)
+                            if translated is not None:
+                                if translated[0] == "UsageUpdate":
+                                    _attach_context_snapshot(translated[1], session=session, agent=agent)
+                                elif translated[0] == "CompressionEvent":
+                                    _attach_context_snapshot(translated[1], session=session, agent=agent, compressed=True)
+                                await event_queue.put(translated)
                 except Exception as exc:
                     await event_queue.put((
                         "AgentError",
@@ -499,20 +507,24 @@ class StorydexCoomiAgentService:
         workspace_root: Path,
     ) -> AsyncIterator[tuple[str, Dict[str, Any]]]:
         started = time.perf_counter()
-        agent, session = await self._get_or_create_runtime(
-            session_id=session_id,
-            workspace_root=workspace_root,
-            prompt=prompt,
-        )
+        from services.llm_replay import llm_trace
+
+        with llm_trace(trace_id):
+            agent, session = await self._get_or_create_runtime(
+                session_id=session_id,
+                workspace_root=workspace_root,
+                prompt=prompt,
+            )
         plan_mode = command == "plan"
         setter = getattr(agent, "set_plan_mode", None)
         if callable(setter):
             setter(plan_mode)
-        session.system_prompt = await _build_coomi_system_prompt(
-            workspace_root=workspace_root,
-            prompt=prompt,
-            plan_mode=plan_mode,
-        )
+        with llm_trace(trace_id):
+            session.system_prompt = await _build_coomi_system_prompt(
+                workspace_root=workspace_root,
+                prompt=prompt,
+                plan_mode=plan_mode,
+            )
         _sync_coomi_runtime_workspace(
             agent=agent,
             session=session,
@@ -565,7 +577,7 @@ class StorydexCoomiAgentService:
             return
 
         from coomi.engine.loop_runner import LoopRunner
-        from services.llm_replay import get_replayable_llm_provider
+        from services.llm_replay import get_replayable_llm_provider, llm_purpose, llm_trace
         from coomi.services.memory import MemoryManager, MemoryRecall
 
         provider = get_replayable_llm_provider()
@@ -604,32 +616,33 @@ class StorydexCoomiAgentService:
 
         async def produce_loop_events() -> None:
             try:
-                async for event in runner.start_loop(
-                    cwd=workspace_root.as_posix(),
-                    spec_path=spec_path,
-                    spec=spec,
-                    memory_manager=memory_manager,
-                    memory_recall=memory_recall,
-                    display_name=_model_display(provider),
-                ):
-                    if _is_cancelled(cancellation_token):
-                        try:
-                            runner.cancel_token.cancel()
-                        except Exception:
-                            pass
-                        await event_queue.put((
-                            "AgentCancelled",
-                            {
-                                "_type": "AgentCancelled",
-                                "_version": 1,
-                                "session_id": session_id,
-                                "reason": "client_disconnected",
-                            },
-                        ))
-                        return
-                    translated = translator.translate(event)
-                    if translated is not None:
-                        await event_queue.put(translated)
+                with llm_trace(trace_id), llm_purpose("loop"):
+                    async for event in runner.start_loop(
+                        cwd=workspace_root.as_posix(),
+                        spec_path=spec_path,
+                        spec=spec,
+                        memory_manager=memory_manager,
+                        memory_recall=memory_recall,
+                        display_name=_model_display(provider),
+                    ):
+                        if _is_cancelled(cancellation_token):
+                            try:
+                                runner.cancel_token.cancel()
+                            except Exception:
+                                pass
+                            await event_queue.put((
+                                "AgentCancelled",
+                                {
+                                    "_type": "AgentCancelled",
+                                    "_version": 1,
+                                    "session_id": session_id,
+                                    "reason": "client_disconnected",
+                                },
+                            ))
+                            return
+                        translated = translator.translate(event)
+                        if translated is not None:
+                            await event_queue.put(translated)
             except Exception as exc:
                 await event_queue.put((
                     "AgentError",
@@ -1501,19 +1514,20 @@ async def _build_coomi_system_prompt(
     plan_mode: bool = False,
 ) -> str:
     from coomi.engine.session import build_system_prompt
-    from services.llm_replay import get_replayable_llm_provider
+    from services.llm_replay import get_replayable_llm_provider, llm_purpose
     from coomi.services.memory import MemoryManager, MemoryRecall
 
     provider = get_replayable_llm_provider()
     memory_manager = MemoryManager(project_path=workspace_root.as_posix())
     memory_recall = MemoryRecall(provider, memory_manager)
-    system_prompt = await build_system_prompt(
-        memory_manager=memory_manager,
-        memory_recall=memory_recall,
-        current_context=prompt,
-        cwd=workspace_root.as_posix(),
-        model_display=_model_display(provider),
-    )
+    with llm_purpose("memory_recall"):
+        system_prompt = await build_system_prompt(
+            memory_manager=memory_manager,
+            memory_recall=memory_recall,
+            current_context=prompt,
+            cwd=workspace_root.as_posix(),
+            model_display=_model_display(provider),
+        )
     skills_dir = (workspace_root / ".storydex" / ".agent" / "skills").as_posix()
     story_options = _render_story_generation_options(story_generation)
     contract_options = _render_turn_contract(turn_contract)

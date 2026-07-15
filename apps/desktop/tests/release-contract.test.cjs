@@ -5,6 +5,7 @@ const test = require("node:test");
 const { resolveUpdateFeedUrl } = require("../electron/update-feed.cjs");
 
 const root = path.resolve(__dirname, "..");
+const projectRoot = path.resolve(root, "..", "..");
 const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 const lock = JSON.parse(fs.readFileSync(path.join(root, "package-lock.json"), "utf8"));
 
@@ -32,6 +33,39 @@ test("desktop source declares process cleanup and a strict IPC whitelist", () =>
   assert.ok(channels.length >= 8);
   assert.equal(new Set(channels).size, channels.length);
   assert.ok(channels.every((channel) => channel.startsWith("storydex:")));
+});
+
+test("local release scripts derive version from package.json, not hardcoded strings", () => {
+  const runSuite = fs.readFileSync(path.join(projectRoot, "scripts", "run_full_test_suite.ps1"), "utf8");
+  const prepareBundle = fs.readFileSync(path.join(projectRoot, "scripts", "prepare_release_bundle.ps1"), "utf8");
+
+  // These scripts must NOT contain a literal three-segment version number as a standalone string
+  // that would drift from apps/desktop/package.json.
+  const versionPattern = /(?:^|[^.\d])\d+\.\d+\.\d+(?:[^.\d]|$)/g;
+  const suiteMatches = [...runSuite.matchAll(versionPattern)].map((m) => m[0].trim());
+  const bundleMatches = [...prepareBundle.matchAll(versionPattern)].map((m) => m[0].trim());
+
+  const allowedSuite = suiteMatches.filter(
+    (match) => match === pkg.version || match === "69.8" || match === "89.5" || match === "70.0" || match === "90.0"
+  );
+  assert.equal(
+    suiteMatches.length,
+    allowedSuite.length,
+    "run_full_test_suite.ps1 contains hardcoded version drift: " +
+      suiteMatches.filter((m) => !allowedSuite.includes(m)).join(", ")
+  );
+
+  // prepare_release_bundle.ps1 default is a dynamic expression; the only literal version allowed
+  // is the current package version appearing in a fallback or comment context.
+  const allowedBundle = bundleMatches.filter(
+    (match) => match === "1.0" || match === "88.0"
+  );
+  assert.equal(
+    bundleMatches.length,
+    allowedBundle.length,
+    "prepare_release_bundle.ps1 contains hardcoded version drift: " +
+      bundleMatches.filter((m) => !allowedBundle.includes(m)).join(", ")
+  );
 });
 
 test("desktop updater retries transient module replacement and delegates installation to a persistent helper", () => {

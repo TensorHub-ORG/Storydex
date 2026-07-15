@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-  [string]$Version = "0.3.7",
+  [string]$Version = "$((Get-Content -Raw -LiteralPath (Join-Path ($PSScriptRoot | Split-Path -Parent) "apps/desktop/package.json") | ConvertFrom-Json).version)",
   [string]$SourceDirectory = "",
   [string]$DestinationDirectory = "",
   [string]$TestSummary = "Full and Release suites passed"

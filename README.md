@@ -21,7 +21,7 @@
 </table>
 
 <p align="center">
-  <img alt="release" src="https://img.shields.io/badge/release-v0.3.9-2563eb?style=flat-square" />
+  <img alt="release" src="https://img.shields.io/badge/release-v0.3.10-2563eb?style=flat-square" />
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0%20%2B%20Commons%20Clause-0f766e?style=flat-square" />
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-f97316?style=flat-square" />
   <img alt="desktop" src="https://img.shields.io/badge/desktop-Electron%2034-47848f?style=flat-square&logo=electron&logoColor=white" />
@@ -111,6 +111,12 @@ Storydex/
 
 Copyright 2026 Septemc and Flowby.
 
+## v0.3.10
+
+v0.3.10 加强长会话与发布稳定性：Agent 现在按项目与 sessionId 隔离运行态和上下文，完整记录上下文来源、截断、Provider 请求与 token 估算，长期运行结束后会及时回收请求级指标；录制/回放对工具参数、稳定路径和累计 usage 的处理也更一致。
+
+故事知识门禁继续坚持“需复核即不写入”，混合批次只持久化已接受的安全操作。工具开始事件去重、工作区解析和发布门禁同步得到修复；本地 Release 脚本不再硬编码旧版本，前端生产构建会在依赖构建产物的回归测试之前完成。
+
 ## v0.3.9
 
 v0.3.9 是稳定性更新：修复兼容模型服务下的流式 token 统计异常和工具状态重复显示，加强故事知识变更保护，并完善内置运行环境的一致性检查。
@@ -172,7 +178,7 @@ npm ci --prefix apps/desktop
 
 ## Windows 安装、便携包与应用内更新
 
-v0.3.9 发布资产包括 NSIS 安装包、`Storydex-win-unpacked.zip` 便携包、blockmap、`latest.yml`、SHA256 校验、发布说明、依赖清单和构建 manifest。安装包与便携包均内置可迁移的 Python 3.9 运行环境、后端依赖、固定版本的 `coomi-agent==1.1.2` 和 MinGit，用户无需另外安装 Python 或 Git 即可启动后端并使用小说项目本地版本管理。
+v0.3.10 发布资产包括 NSIS 安装包、`Storydex-win-unpacked.zip` 便携包、blockmap、`latest.yml`、SHA256 校验、发布说明、依赖清单和构建 manifest。安装包与便携包均内置可迁移的 Python 3.9 运行环境、后端依赖、固定版本的 `coomi-agent==1.1.2` 和 MinGit，用户无需另外安装 Python 或 Git 即可启动后端并使用小说项目本地版本管理。
 
 发布构建会执行嵌入式 Python import/preflight、MinGit 文件检查和完整打包资源扫描；测试目录、coverage 文件、pytest 缓存、日志、`.env` 和其他开发期临时文件不会进入正式包。应用内更新使用 `electron-updater` 的 generic feed；安装版可使用 blockmap 进行差分下载，便携包适合解压后直接启动和人工验证。
 
@@ -184,4 +190,4 @@ Windows desktop releases use the generic electron-updater feed at:
 https://updates.septemc.com/storydex/windows/
 ```
 
-For differential-update testing, keep the `0.3.7` installer and blockmap available, publish the `0.3.9` assets, and leave `latest.yml` pointing to `0.3.9`. Install v0.3.7 first, then check for updates inside Storydex to verify the `0.3.7 -> 0.3.9` assisted-install and recovery path.
+For differential-update testing, keep the `0.3.9` installer and blockmap available, publish the `0.3.10` assets, and leave `latest.yml` pointing to `0.3.10`. Install v0.3.9 first, then check for updates inside Storydex to verify the `0.3.9 -> 0.3.10` assisted-install and recovery path.

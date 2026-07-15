@@ -304,6 +304,177 @@ def test_assembler_orders_recent_segments_before_memory_blocks(tmp_path):
         assert block_ids.index("recent_segments") < block_ids.index("active_characters")
 
 
+def test_context_trace_records_complete_sources_and_cross_kind_duplicates(tmp_path, monkeypatch):
+    service = get_story_project_service()
+    service.ensure_project_structure(tmp_path)
+    shared_paragraph = "沈青在云桥留下同一条可核验的证据。"
+
+    monkeypatch.setattr(
+        StorydexContextAssemblerService,
+        "_render_related_passages",
+        lambda self, *args, **kwargs: (shared_paragraph, ["chapters/001.md"]),
+    )
+    monkeypatch.setattr(
+        StorydexContextAssemblerService,
+        "_render_wiki_reference",
+        staticmethod(lambda *args, **kwargs: (shared_paragraph, 1)),
+    )
+    assembly = StorydexContextAssemblerService(service).assemble(
+        tmp_path,
+        prompt="核对沈青在云桥的事实",
+        active_file="",
+    )
+
+    trace = assembly["contextTrace"]
+    required_source_fields = {
+        "kind",
+        "paths",
+        "candidateChars",
+        "candidateEstTokens",
+        "chars",
+        "estTokens",
+        "included",
+        "truncated",
+        "dropReason",
+        "messageIndex",
+        "startEstToken",
+        "endEstToken",
+        "elapsedMs",
+        "policy",
+        "contentHash",
+    }
+    assert trace["_type"] == "ContextTrace"
+    assert all(required_source_fields <= set(source) for source in trace["sources"])
+    by_kind = {source["kind"]: source for source in trace["sources"]}
+    assert by_kind["related_passages"]["candidateChars"] == len(shared_paragraph)
+    assert by_kind["related_passages"]["chars"] == len(shared_paragraph)
+    assert by_kind["wiki_reference"]["included"] is True
+    duplicate = next(item for item in trace["duplicates"] if "related_passages" in item["kinds"])
+    assert set(duplicate["kinds"]) == {"related_passages", "wiki_reference"}
+    assert trace["totals"]["contextChars"] == sum(source["chars"] for source in trace["sources"])
+    assert trace["totals"]["assembleMs"] >= 0
+
+
+def test_context_trace_invariants_excluded_and_truncated_sources():
+    """Verify invariants of create_context_source + finalize_context_source + build_context_trace.
+
+    - Included sources: chars/estTokens reflect finalized content (not candidate).
+    - Dropped (empty) sources: chars=0, estTokens=0, included=False, contentHash="".
+    - Budget-exhausted sources: chars=0, estTokens=0, included=False, dropReason="empty".
+    - Truncated sources: truncated=True, dropReason="truncated_to_budget", content is shortened.
+    - Duplicate detection ignores empty paragraphs and does not treat same-kind repeats as cross-source.
+    - totals.contextChars aggregates only finalized chars.
+    """
+    from services.context_trace_service import (
+        build_context_trace,
+        create_context_source,
+        finalize_context_source,
+    )
+
+    # Source 1: included (normal)
+    s1 = create_context_source("active_characters", ["ch/001.md"], candidate="林拾烟轻叹一声。")
+    finalize_context_source(s1, content="林拾烟轻叹一声。", included=True)
+    assert s1["included"] is True
+    assert s1["chars"] > 0
+    assert s1["estTokens"] > 0
+    assert s1["dropReason"] == ""
+
+    # Source 2: empty → dropped
+    s2 = create_context_source("empty_source", [], candidate="")
+    finalize_context_source(s2, content="", included=False, drop_reason="empty")
+    assert s2["included"] is False
+    assert s2["chars"] == 0
+    assert s2["estTokens"] == 0
+    assert s2["dropReason"] == "empty"
+    assert s2["contentHash"] == ""
+
+    # Source 3: budget exhausted → dropped
+    s3 = create_context_source("budget_exhausted", [".storydex/memory/facts.json"], candidate="some candidate text")
+    finalize_context_source(s3, content="", included=False, drop_reason="budget_exhausted")
+    assert s3["included"] is False
+    assert s3["chars"] == 0
+    assert s3["candidateChars"] > 0  # candidate recorded but not counted in totals
+    assert s3["candidateEstTokens"] > 0
+    assert s3["estTokens"] == 0
+
+    # Source 4: truncated
+    s4 = create_context_source("truncated_source", ["ch/002.md"], candidate="A" * 500)
+    finalize_context_source(s4, content="A" * 100, included=True, truncated=True, drop_reason="truncated_to_budget")
+    assert s4["included"] is True
+    assert s4["truncated"] is True
+    assert s4["chars"] == 100
+    assert s4["dropReason"] == "truncated_to_budget"
+    assert s4["estTokens"] > 0
+
+    blocks = [
+        {"id": "active_characters", "content": "林拾烟轻叹一声。"},
+        {"id": "truncated_source", "content": "A" * 100},
+    ]
+    trace = build_context_trace([s1, s2, s3, s4], blocks, assemble_ms=1.5)
+    totals = trace["totals"]
+
+    # totals must sum only finalized chars/estTokens (not candidate)
+    assert totals["contextChars"] == s1["chars"] + s4["chars"]
+    assert totals["estContextTokens"] == s1["estTokens"] + s4["estTokens"]
+    assert totals["contextChars"] > 0
+    assert totals["assembleMs"] >= 1.5
+
+    # Dropped sources must not inflate totals
+    assert s2["chars"] == 0
+    assert s3["chars"] == 0
+    # The empty/budget-exhausted blocks[1] do not appear in duplicates either
+    duplicate_kinds = {kind for dup in trace["duplicates"] for kind in dup["kinds"]}
+    assert "empty_source" not in duplicate_kinds
+    assert "budget_exhausted" not in duplicate_kinds
+
+
+def test_context_trace_duplicate_detection_requires_cross_kind_and_ignores_empty():
+    """_detect_duplicates uses block['id'] as the kind identifier and must only flag
+    paragraphs that appear under ≥2 different block ids, ignore whitespace-only
+    paragraphs, and not flag the same block id appearing multiple times.
+    """
+    from services.context_trace_service import build_context_trace, create_context_source, finalize_context_source
+
+    shared = "云桥之上的真实证据。"
+    unique_1 = "每段章节独有的文本一。"
+    unique_2 = "每段章节独有的文本二。"
+
+    blocks = [
+        {"id": "active_characters", "content": f"{shared}\n\n{unique_1}"},
+        {"id": "worldbook", "content": f"A unique line.\n\n{shared}"},
+        {"id": "worldbook", "content": shared},  # same id as previous — NOT cross-source
+        {"id": "empty_block", "content": ""},
+        {"id": "whitespace", "content": "   \n  \n   "},
+    ]
+    sources = [
+        create_context_source(b["id"], [], candidate=b["content"]) for b in blocks
+    ]
+    for source, block in zip(sources, blocks):
+        finalize_context_source(source, content=block["content"], included=True)
+
+    trace = build_context_trace(sources, blocks, assemble_ms=0.0)
+    duplicates = trace["duplicates"]
+
+    # The shared paragraph appears under "active_characters" AND "worldbook" → flagged
+    assert len(duplicates) >= 1
+    dup = duplicates[0]
+    assert "active_characters" in dup["kinds"]
+    assert "worldbook" in dup["kinds"]
+
+    # unique_1 only under "active_characters" → NOT cross-source
+    # unique_2 only under "worldbook" → NOT cross-source
+    # The duplicate "worldbook" (same id, same content) → NOT cross-source (same kind)
+    assert len(duplicates) == 1, f"expected 1 cross-source duplicate, got {len(duplicates)}: {duplicates}"
+
+    # Empty / whitespace blocks → not in duplicates at all
+    all_kinds = set()
+    for dup in duplicates:
+        for kind in dup["kinds"]:
+            all_kinds.add(kind)
+    assert "empty_block" not in all_kinds, "empty blocks must not appear in duplicates"
+    assert "whitespace" not in all_kinds, "whitespace-only blocks must not appear in duplicates"
+
+
 def test_related_passage_query_excludes_prompt_instruction_words():
     terms = StorydexContextAssemblerService._related_passage_query_terms(
         "继续写下一段剧情，节奏放慢一些", ["林拾烟", "云桥"]
