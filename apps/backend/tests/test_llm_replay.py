@@ -43,7 +43,13 @@ class FakeProvider:
         self.calls += 1
         return FakeResponse(
             content=f"response-{self.calls}",
-            usage={"prompt_tokens": self.calls, "completion_tokens": 2, "total_tokens": self.calls + 2},
+            usage={
+                "source": "provider_response",
+                "protocol": "openai_chat",
+                "prompt_tokens": self.calls,
+                "completion_tokens": 2,
+                "total_tokens": self.calls + 2,
+            },
         )
 
     async def chat_stream(self, messages, **kwargs):
@@ -52,16 +58,52 @@ class FakeProvider:
 
     async def chat_stream_with_tools(self, messages, tools=None, **kwargs):
         yield {"type": "content", "content": "hello"}
-        yield {"type": "usage", "data": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7}}
+        yield {
+            "type": "usage",
+            "data": {
+                "source": "provider_response",
+                "protocol": "openai_chat",
+                "prompt_tokens": 3,
+                "completion_tokens": 4,
+                "total_tokens": 7,
+            },
+        }
 
 
 class CumulativeStreamUsageProvider(FakeProvider):
     async def chat_stream_with_tools(self, messages, tools=None, **kwargs):
-        yield {"type": "usage", "data": {"prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11}}
+        yield {
+            "type": "usage",
+            "data": {
+                "source": "provider_response",
+                "protocol": "openai_chat",
+                "prompt_tokens": 10,
+                "completion_tokens": 1,
+                "total_tokens": 11,
+            },
+        }
         yield {"type": "content", "content": "hello"}
-        yield {"type": "usage", "data": {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14}}
+        yield {
+            "type": "usage",
+            "data": {
+                "source": "provider_response",
+                "protocol": "openai_chat",
+                "prompt_tokens": 10,
+                "completion_tokens": 4,
+                "total_tokens": 14,
+            },
+        }
         yield {"type": "tool_call_start", "tool_name": "probe", "index": 0}
-        yield {"type": "usage", "data": {"prompt_tokens": 10, "completion_tokens": 6, "total_tokens": 16}}
+        yield {
+            "type": "usage",
+            "data": {
+                "source": "provider_response",
+                "protocol": "openai_chat",
+                "prompt_tokens": 10,
+                "completion_tokens": 6,
+                "total_tokens": 16,
+            },
+        }
         yield {
             "type": "tool_call",
             "data": {
@@ -71,6 +113,48 @@ class CumulativeStreamUsageProvider(FakeProvider):
                 "parse_error": None,
             },
         }
+
+
+class MixedUsageProvider(FakeProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.usages = [
+            {
+                "_type": "LLMUsage",
+                "_version": 1,
+                "source": "provider_response",
+                "protocol": "openai_chat",
+                "request_id": "req-rich",
+                "requested_model": "fake-model",
+                "reported_model": "routed-model",
+                "input_tokens": 10,
+                "output_tokens": 2,
+                "total_tokens": 12,
+                "cache_read_input_tokens": 4,
+                "cache_creation_input_tokens": 3,
+                "reasoning_tokens": 1,
+                "estimated_input_tokens": 9,
+                "estimator": "coomi:test",
+                "usage_snapshot_count": 1,
+                "provider_details": {"relay": "公益站"},
+            },
+            {
+                "_type": "LLMUsage",
+                "_version": 1,
+                "source": "missing",
+                "protocol": "openai_chat",
+                "cache_read_input_tokens": 999,
+                "cache_creation_input_tokens": 998,
+                "reasoning_tokens": 997,
+                "estimated_input_tokens": 20,
+                "estimator": "coomi:test",
+            },
+            {"prompt_tokens": 7, "completion_tokens": 1, "total_tokens": 8},
+        ]
+
+    async def chat(self, messages, tools=None, **kwargs):
+        self.calls += 1
+        return FakeResponse(content=f"mixed-{self.calls}", usage=self.usages.pop(0))
 
 
 def test_off_mode_proxies_attributes_and_behavior(monkeypatch):
@@ -344,11 +428,12 @@ def test_stream_collapses_cumulative_usage_snapshots(monkeypatch):
         "tool_call",
         "usage",
     ]
-    assert chunks[-1]["data"] == {
-        "prompt_tokens": 10,
-        "completion_tokens": 6,
-        "total_tokens": 16,
-    }
+    assert chunks[-1]["data"]["source"] == "provider_response"
+    assert chunks[-1]["data"]["protocol"] == "openai_chat"
+    assert chunks[-1]["data"]["prompt_tokens"] == 10
+    assert chunks[-1]["data"]["completion_tokens"] == 6
+    assert chunks[-1]["data"]["total_tokens"] == 16
+    assert chunks[-1]["data"]["usageSnapshotCount"] == 3
     metrics = get_llm_metrics("cumulative-usage")
     provider_requests = metrics.pop("providerRequests")
     assert metrics == {
@@ -438,10 +523,108 @@ def test_chat_requests_capture_context_position_and_aggregate_per_request_estima
     assert totals["providerInputEstimateErrorPct"] is not None
 
 
+def test_mixed_usage_provenance_only_aggregates_reported_requests(monkeypatch):
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "off")
+    monkeypatch.delenv("STORYDEX_LLM_FIXTURE_DIR", raising=False)
+    reset_llm_metrics("mixed-provenance")
+    provider = get_replayable_llm_provider(MixedUsageProvider())
+
+    with llm_trace("mixed-provenance"), llm_purpose("chat"):
+        for index in range(3):
+            asyncio.run(
+                provider.chat(
+                    [{"role": "user", "content": f"growing conversation turn {index}"}]
+                )
+            )
+
+    metrics = get_llm_metrics("mixed-provenance")
+    assert metrics["promptTokens"] == 10
+    assert metrics["completionTokens"] == 2
+    assert metrics["totalTokens"] == 12
+    assert metrics["usageCalls"] == 1
+    requests = metrics["providerRequests"]
+    assert [request["usageSource"] for request in requests] == [
+        "provider_response",
+        "missing",
+        "legacy_unknown",
+    ]
+    assert requests[0]["requestId"] == "req-rich"
+    assert requests[0]["reportedModel"] == "routed-model"
+    assert requests[0]["cacheReadInputTokens"] == 4
+    assert requests[0]["cacheCreationInputTokens"] == 3
+    assert requests[0]["reasoningTokens"] == 1
+    assert requests[0]["providerDetails"] == {"relay": "公益站"}
+    assert requests[1]["providerReportedInputTokens"] is None
+    assert requests[1]["estimatedInputTokens"] == 20
+    assert requests[1]["cacheReadInputTokens"] is None
+    assert requests[1]["cacheCreationInputTokens"] is None
+    assert requests[1]["reasoningTokens"] is None
+    assert requests[2]["providerReportedInputTokens"] is None
+    assert requests[2]["usage"]["inputTokens"] == 7
+
+    trace = build_context_trace([], [], assemble_ms=0)
+    merged = merge_llm_metrics(trace, metrics)
+    totals = merged["totals"]
+    assert totals["providerReportedUsageRequestCount"] == 1
+    assert totals["providerReportedInputTokens"] == 10
+    assert totals["providerReportedOutputTokens"] == 2
+    assert totals["providerReportedTotalTokens"] == 12
+    assert totals["providerReportedCacheReadInputTokens"] == 4
+    assert totals["providerReportedCacheCreationInputTokens"] == 3
+    assert totals["providerReportedReasoningTokens"] == 1
+    assert totals["estimatedUsageRequestCount"] == 3
+    assert totals["missingUsageRequestCount"] == 1
+    assert totals["legacyUnknownUsageRequestCount"] == 1
+    assert totals["reportedUsageCoveragePct"] == pytest.approx(33.3333)
+    assert totals["providerUsageRequestCount"] == 1
+    assert totals["providerTotalTokens"] == 12
+
+
+def test_partial_reported_usage_preserves_missing_fields(monkeypatch):
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "off")
+    monkeypatch.delenv("STORYDEX_LLM_FIXTURE_DIR", raising=False)
+    reset_llm_metrics("partial-reported")
+
+    class PartialUsageProvider(FakeProvider):
+        async def chat(self, messages, tools=None, **kwargs):
+            return FakeResponse(
+                content="partial",
+                usage={
+                    "source": "provider_response",
+                    "protocol": "openai_chat",
+                    "output_tokens": 5,
+                    "total_tokens": 5,
+                },
+            )
+
+    provider = get_replayable_llm_provider(PartialUsageProvider())
+    with llm_trace("partial-reported"), llm_purpose("chat"):
+        asyncio.run(provider.chat([{"role": "user", "content": "partial usage"}]))
+
+    metrics = get_llm_metrics("partial-reported")
+    request = metrics["providerRequests"][0]
+    assert request["usageSource"] == "provider_response"
+    assert request["providerReportedInputTokens"] is None
+    assert request["providerReportedOutputTokens"] == 5
+    assert request["providerReportedTotalTokens"] == 5
+    assert request["estimateErrorTokens"] is None
+
+    merged = merge_llm_metrics(build_context_trace([], [], assemble_ms=0), metrics)
+    totals = merged["totals"]
+    assert totals["providerReportedUsageRequestCount"] == 1
+    assert totals["providerReportedUsageRequestEstTokens"] == request["requestEstTokens"]
+    assert totals["providerReportedInputTokens"] is None
+    assert totals["providerReportedOutputTokens"] == 5
+    assert totals["providerReportedTotalTokens"] == 5
+    assert totals["providerReportedInputEstimateErrorTokens"] is None
+    assert totals["reportedUsageCoveragePct"] == 100.0
+
+
 def test_checked_in_smoke_fixture_replays_without_provider_call(monkeypatch):
     fixture_dir = Path(__file__).parent / "fixtures" / "llm_replay" / "smoke"
     monkeypatch.setenv("STORYDEX_LLM_FIXTURE_DIR", str(fixture_dir))
     monkeypatch.setenv("STORYDEX_LLM_MODE", "replay")
+    reset_llm_metrics("default")
 
     class OfflineProvider:
         model = "deepseek-v4-flash"
@@ -457,6 +640,17 @@ def test_checked_in_smoke_fixture_replays_without_provider_call(monkeypatch):
     ]
     replay.assert_replay_complete()
     assert all(response.content for response in responses)
+    metrics = get_llm_metrics("default")
+    assert metrics["usageCalls"] == 0
+    assert metrics["totalTokens"] == 0
+    assert [request["usageSource"] for request in metrics["providerRequests"]] == [
+        "legacy_unknown",
+        "legacy_unknown",
+    ]
+    assert all(
+        request["providerReportedTotalTokens"] is None
+        for request in metrics["providerRequests"]
+    )
 
 
 def test_get_after_read_returns_metrics_then_reset_clears_exact_trace_and_leaves_others():

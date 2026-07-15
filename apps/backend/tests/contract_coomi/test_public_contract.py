@@ -2,8 +2,35 @@ from __future__ import annotations
 
 import inspect
 import asyncio
+from importlib.metadata import version
 
 from services.coomi_agent_service import _CoomiEventTranslator
+
+
+def test_usage_provenance_public_contract_or_pinned_legacy_baseline():
+    try:
+        from coomi.services import LLMUsage
+        from coomi.services.llm import UsageStreamAccumulator, usage_from_response
+    except ImportError:
+        # Storydex remains installable against the published pin until the T8 wheel ships.
+        assert version("coomi-agent") == "1.1.2"
+        return
+
+    missing = LLMUsage(
+        source="missing",
+        protocol="openai_chat",
+        requested_model="contract-model",
+        estimated_input_tokens=12,
+        estimator="contract-estimator",
+    )
+    payload = missing.to_dict()
+    assert payload["_type"] == "LLMUsage"
+    assert payload["_version"] == 1
+    assert payload["source"] == "missing"
+    assert payload["prompt_tokens"] is None
+    assert payload["estimated_input_tokens"] == 12
+    assert UsageStreamAccumulator is not None
+    assert usage_from_response is not None
 
 
 def test_agent_and_loop_public_signatures():

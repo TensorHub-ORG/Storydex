@@ -178,19 +178,39 @@ class ReplayableLLMProvider:
         if self._mode == "replay":
             record = self._next_record(request)
             response = _decode_chat_response(record.get("response"))
+            self._count_usage(
+                call_ref,
+                _usage_from_chat_response(
+                    response,
+                    requested_model=str(request.get("model") or ""),
+                ),
+            )
         else:
             response = await self._provider.chat(messages, tools, **kwargs)
+            normalized_usage = self._count_usage(
+                call_ref,
+                _usage_from_chat_response(
+                    response,
+                    requested_model=str(request.get("model") or ""),
+                ),
+            )
             if self._mode == "record":
-                self._append_record(request, _encode_value(response))
-        self._count_usage(call_ref, _usage_from_chat_response(response))
+                encoded_response = _encode_value(response)
+                if isinstance(encoded_response, dict):
+                    encoded_response["usage"] = normalized_usage
+                self._append_record(request, encoded_response)
         return response
 
     async def chat_stream(self, messages: list[dict[str, Any]], **kwargs: Any) -> AsyncIterator[str]:
-        request, _call_ref = self._request("chat_stream", messages, None, kwargs)
+        request, call_ref = self._request("chat_stream", messages, None, kwargs)
         if self._mode == "replay":
             record = self._next_record(request)
             for chunk in record.get("response") or []:
                 yield str(chunk)
+            self._count_usage(
+                call_ref,
+                _missing_usage(requested_model=str(request.get("model") or "")),
+            )
             return
 
         chunks: list[str] = []
@@ -198,6 +218,10 @@ class ReplayableLLMProvider:
             value = str(chunk)
             chunks.append(value)
             yield value
+        self._count_usage(
+            call_ref,
+            _missing_usage(requested_model=str(request.get("model") or "")),
+        )
         if self._mode == "record":
             self._append_record(request, chunks)
 
@@ -211,26 +235,45 @@ class ReplayableLLMProvider:
         if self._mode == "replay":
             record = self._next_record(request)
             values = [_sanitize(chunk) for chunk in record.get("response") or []]
-            for value in _collapse_stream_usage(values):
-                self._count_usage(call_ref, _usage_from_stream_chunk(value))
-                yield value
+            normalized = _collapse_stream_usage(values)
+            usage_seen = False
+            for value in normalized:
+                usage = _usage_from_stream_chunk(value)
+                if usage is None:
+                    yield value
+                    continue
+                usage_seen = True
+                counted_usage = self._count_usage(call_ref, usage)
+                yield {"type": "usage", "data": counted_usage}
+            if not usage_seen:
+                counted_usage = self._count_usage(
+                    call_ref,
+                    _missing_usage(requested_model=str(request.get("model") or "")),
+                )
+                yield {"type": "usage", "data": counted_usage}
             return
 
         chunks: list[dict[str, Any]] = []
-        latest_usage: dict[str, int] | None = None
+        latest_usage: dict[str, Any] | None = None
+        usage_snapshot_count = 0
         async for chunk in self._provider.chat_stream_with_tools(messages, tools, **kwargs):
             value = _sanitize(chunk)
             usage = _usage_from_stream_chunk(value)
             if usage is not None:
                 latest_usage = _prefer_usage_snapshot(latest_usage, usage)
+                usage_snapshot_count += _usage_snapshot_increment(usage)
                 continue
             chunks.append(value)
             yield chunk
-        if latest_usage is not None:
-            usage_chunk = {"type": "usage", "data": latest_usage}
-            chunks.append(usage_chunk)
-            self._count_usage(call_ref, latest_usage)
-            yield usage_chunk
+        if latest_usage is None:
+            latest_usage = _missing_usage(requested_model=str(request.get("model") or ""))
+        else:
+            latest_usage = dict(latest_usage)
+            latest_usage["usageSnapshotCount"] = usage_snapshot_count
+        counted_usage = self._count_usage(call_ref, latest_usage)
+        usage_chunk = {"type": "usage", "data": counted_usage}
+        chunks.append(usage_chunk)
+        yield usage_chunk
         if self._mode == "record":
             self._append_record(request, chunks)
 
@@ -390,6 +433,7 @@ class ReplayableLLMProvider:
             kwargs=request.get("kwargs") if isinstance(request.get("kwargs"), dict) else {},
             request_hash=request_hash,
         )
+        request_record["requestedModel"] = str(request.get("model") or "")
         with _COUNTERS_LOCK:
             counter = _COUNTERS.get(trace_id, {})
             provider_requests = (
@@ -401,49 +445,114 @@ class ReplayableLLMProvider:
                 provider_requests[request_index].update(request_record)
         return trace_id, group_key, request_index
 
-    def _count_usage(self, call_ref: tuple[str, str, int], usage: dict[str, int] | None) -> None:
-        normalized_usage = _normalize_usage_snapshot(usage)
-        if not normalized_usage:
-            return
+    def _count_usage(
+        self,
+        call_ref: tuple[str, str, int],
+        usage: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        normalized_usage = _normalize_usage_snapshot(usage) or _missing_usage()
         trace_id, group_key, request_index = call_ref
         with _COUNTERS_LOCK:
             counter = _COUNTERS.setdefault(trace_id, {"calls": 0, "byMethod": {}, "callGroups": {}})
-            prompt_tokens = int(normalized_usage.get("prompt_tokens", 0))
-            completion_tokens = int(normalized_usage.get("completion_tokens", 0))
-            total_tokens = int(normalized_usage.get("total_tokens", prompt_tokens + completion_tokens))
-            counter["promptTokens"] = int(counter.get("promptTokens", 0)) + prompt_tokens
-            counter["completionTokens"] = int(counter.get("completionTokens", 0)) + int(
-                completion_tokens
-            )
-            counter["totalTokens"] = int(counter.get("totalTokens", 0)) + total_tokens
-            counter["usageCalls"] = int(counter.get("usageCalls", 0)) + 1
-            group = counter.setdefault("callGroups", {}).get(group_key)
-            if isinstance(group, dict):
-                group["inputTokens"] = int(group.get("inputTokens", 0)) + prompt_tokens
-                group["outputTokens"] = int(group.get("outputTokens", 0)) + completion_tokens
-                group["usageCalls"] = int(group.get("usageCalls", 0)) + 1
             provider_requests = (
                 counter.get("providerRequests")
                 if isinstance(counter.get("providerRequests"), list)
                 else []
             )
-            if request_index < len(provider_requests) and isinstance(provider_requests[request_index], dict):
+            request_record = (
+                provider_requests[request_index]
+                if request_index < len(provider_requests)
+                and isinstance(provider_requests[request_index], dict)
+                else None
+            )
+            if isinstance(request_record, dict):
+                if normalized_usage.get("estimatedInputTokens") is None:
+                    normalized_usage = dict(normalized_usage)
+                    normalized_usage["estimatedInputTokens"] = int(
+                        request_record.get("requestEstTokens") or 0
+                    )
+                    normalized_usage["estimator"] = "storydex:tiktoken:cl100k_base"
+                if not str(normalized_usage.get("requestedModel") or ""):
+                    normalized_usage = dict(normalized_usage)
+                    normalized_usage["requestedModel"] = str(
+                        request_record.get("requestedModel") or ""
+                    )
+
+            source = str(normalized_usage.get("source") or "legacy_unknown")
+            is_reported = source in {"provider_response", "provider_query"}
+            reported_input_tokens = normalized_usage.get("inputTokens")
+            reported_output_tokens = normalized_usage.get("outputTokens")
+            reported_total_tokens = normalized_usage.get("totalTokens")
+            prompt_tokens = int(reported_input_tokens or 0)
+            completion_tokens = int(reported_output_tokens or 0)
+            total_tokens = int(reported_total_tokens or 0)
+            if is_reported:
+                counter["promptTokens"] = int(counter.get("promptTokens", 0)) + prompt_tokens
+                counter["completionTokens"] = int(counter.get("completionTokens", 0)) + int(
+                    completion_tokens
+                )
+                counter["totalTokens"] = int(counter.get("totalTokens", 0)) + total_tokens
+                counter["usageCalls"] = int(counter.get("usageCalls", 0)) + 1
+                group = counter.setdefault("callGroups", {}).get(group_key)
+                if isinstance(group, dict):
+                    group["inputTokens"] = int(group.get("inputTokens", 0)) + prompt_tokens
+                    group["outputTokens"] = int(group.get("outputTokens", 0)) + completion_tokens
+                    group["usageCalls"] = int(group.get("usageCalls", 0)) + 1
+
+            if isinstance(request_record, dict):
                 request_record = provider_requests[request_index]
                 request_est_tokens = int(request_record.get("requestEstTokens") or 0)
-                estimate_error_tokens = request_est_tokens - prompt_tokens
+                estimate_error_tokens = (
+                    request_est_tokens - prompt_tokens
+                    if is_reported and reported_input_tokens is not None
+                    else None
+                )
                 request_record.update(
                     {
-                        "inputTokens": prompt_tokens,
-                        "outputTokens": completion_tokens,
-                        "totalTokens": total_tokens,
+                        "usage": dict(normalized_usage),
+                        "usageSource": source,
+                        "protocol": str(normalized_usage.get("protocol") or "unknown"),
+                        "requestId": str(normalized_usage.get("requestId") or ""),
+                        "requestedModel": str(normalized_usage.get("requestedModel") or ""),
+                        "reportedModel": str(normalized_usage.get("reportedModel") or ""),
+                        "providerReportedInputTokens": (
+                            reported_input_tokens if is_reported else None
+                        ),
+                        "providerReportedOutputTokens": (
+                            reported_output_tokens if is_reported else None
+                        ),
+                        "providerReportedTotalTokens": (
+                            reported_total_tokens if is_reported else None
+                        ),
+                        "cacheReadInputTokens": normalized_usage.get("cacheReadInputTokens"),
+                        "cacheCreationInputTokens": normalized_usage.get(
+                            "cacheCreationInputTokens"
+                        ),
+                        "reasoningTokens": normalized_usage.get("reasoningTokens"),
+                        "estimatedInputTokens": normalized_usage.get("estimatedInputTokens"),
+                        "estimator": str(normalized_usage.get("estimator") or ""),
+                        "totalDerived": bool(normalized_usage.get("totalDerived")),
+                        "usageSnapshotCount": int(
+                            normalized_usage.get("usageSnapshotCount") or 0
+                        ),
+                        "providerDetails": dict(
+                            normalized_usage.get("providerDetails")
+                            if isinstance(normalized_usage.get("providerDetails"), dict)
+                            else {}
+                        ),
+                        # Deprecated aliases retained for existing T1 readers.
+                        "inputTokens": reported_input_tokens if is_reported else None,
+                        "outputTokens": reported_output_tokens if is_reported else None,
+                        "totalTokens": reported_total_tokens if is_reported else None,
                         "estimateErrorTokens": estimate_error_tokens,
                         "estimateErrorPct": (
                             round((estimate_error_tokens / prompt_tokens) * 100, 4)
-                            if prompt_tokens
+                            if estimate_error_tokens is not None and prompt_tokens
                             else None
                         ),
                     }
                 )
+        return normalized_usage
 
 
 def _stable_json(value: Any) -> str:
@@ -637,67 +746,215 @@ def _decode_chat_response(value: Any) -> Any:
         return SimpleNamespace(**payload)
 
 
-def _usage_from_chat_response(response: Any) -> dict[str, int] | None:
+def _usage_from_chat_response(
+    response: Any,
+    *,
+    requested_model: str = "",
+) -> dict[str, Any]:
     usage = getattr(response, "usage", None)
-    return usage if isinstance(usage, dict) else None
+    normalized = _normalize_usage_snapshot(usage)
+    if normalized is None:
+        return _missing_usage(requested_model=requested_model)
+    if not str(normalized.get("requestedModel") or ""):
+        normalized["requestedModel"] = str(requested_model or "")
+    return normalized
 
 
-def _usage_from_stream_chunk(chunk: Any) -> dict[str, int] | None:
+def _usage_from_stream_chunk(chunk: Any) -> dict[str, Any] | None:
     if not isinstance(chunk, dict) or chunk.get("type") != "usage":
         return None
     usage = chunk.get("data")
     return _normalize_usage_snapshot(usage)
 
 
-def _normalize_usage_snapshot(value: Any) -> dict[str, int] | None:
-    if not isinstance(value, dict):
+def _normalize_usage_snapshot(value: Any) -> dict[str, Any] | None:
+    payload = _sanitize(value)
+    if not isinstance(payload, dict):
         return None
-    usage: dict[str, int] = {}
-    aliases = {
-        "prompt_tokens": ("prompt_tokens", "promptTokens", "input_tokens", "inputTokens"),
-        "completion_tokens": ("completion_tokens", "completionTokens", "output_tokens", "outputTokens"),
-        "total_tokens": ("total_tokens", "totalTokens"),
+
+    raw_source = str(payload.get("source") or "legacy_unknown").strip().lower()
+    source = (
+        raw_source
+        if raw_source
+        in {"provider_response", "provider_query", "missing", "legacy_unknown"}
+        else "legacy_unknown"
+    )
+    raw_protocol = str(payload.get("protocol") or "unknown").strip().lower()
+    protocol = (
+        raw_protocol
+        if raw_protocol in {"openai_chat", "anthropic_messages", "unknown"}
+        else "unknown"
+    )
+    input_tokens = _usage_int(
+        payload,
+        "inputTokens",
+        "input_tokens",
+        "promptTokens",
+        "prompt_tokens",
+    )
+    output_tokens = _usage_int(
+        payload,
+        "outputTokens",
+        "output_tokens",
+        "completionTokens",
+        "completion_tokens",
+    )
+    total_tokens = _usage_int(payload, "totalTokens", "total_tokens")
+    cache_read_input_tokens = _usage_int(
+        payload,
+        "cacheReadInputTokens",
+        "cache_read_input_tokens",
+    )
+    cache_creation_input_tokens = _usage_int(
+        payload,
+        "cacheCreationInputTokens",
+        "cache_creation_input_tokens",
+    )
+    reasoning_tokens = _usage_int(payload, "reasoningTokens", "reasoning_tokens")
+    total_derived = bool(payload.get("totalDerived") or payload.get("total_derived"))
+    if source == "missing":
+        input_tokens = None
+        output_tokens = None
+        total_tokens = None
+        cache_read_input_tokens = None
+        cache_creation_input_tokens = None
+        reasoning_tokens = None
+        total_derived = False
+    elif total_tokens is None and input_tokens is not None and output_tokens is not None:
+        total_tokens = input_tokens + output_tokens
+        total_derived = True
+
+    provider_details = payload.get("providerDetails", payload.get("provider_details"))
+    canonical: dict[str, Any] = {
+        "_type": "LLMUsage",
+        "_version": 1,
+        "source": source,
+        "protocol": protocol,
+        "requestId": str(payload.get("requestId") or payload.get("request_id") or ""),
+        "requestedModel": str(
+            payload.get("requestedModel") or payload.get("requested_model") or ""
+        ),
+        "reportedModel": str(
+            payload.get("reportedModel") or payload.get("reported_model") or ""
+        ),
+        "inputTokens": input_tokens,
+        "outputTokens": output_tokens,
+        "totalTokens": total_tokens,
+        "cacheReadInputTokens": cache_read_input_tokens,
+        "cacheCreationInputTokens": cache_creation_input_tokens,
+        "reasoningTokens": reasoning_tokens,
+        "estimatedInputTokens": _usage_int(
+            payload,
+            "estimatedInputTokens",
+            "estimated_input_tokens",
+        ),
+        "estimator": str(payload.get("estimator") or ""),
+        "totalDerived": total_derived,
+        "usageSnapshotCount": _usage_int(
+            payload,
+            "usageSnapshotCount",
+            "usage_snapshot_count",
+        ),
+        "providerDetails": (
+            dict(provider_details) if isinstance(provider_details, dict) else {}
+        ),
     }
-    for key, candidates in aliases.items():
-        raw = next((value.get(candidate) for candidate in candidates if candidate in value), None)
-        if isinstance(raw, bool):
+    if canonical["usageSnapshotCount"] is None:
+        canonical["usageSnapshotCount"] = 0 if source == "missing" else 1
+    # Coomi <= 1.1.5 reads these aliases. Omit null aliases so legacy addition stays safe.
+    if input_tokens is not None:
+        canonical["prompt_tokens"] = input_tokens
+    if output_tokens is not None:
+        canonical["completion_tokens"] = output_tokens
+    if total_tokens is not None:
+        canonical["total_tokens"] = total_tokens
+    return canonical
+
+
+def _missing_usage(
+    *,
+    requested_model: str = "",
+    estimated_input_tokens: int | None = None,
+    estimator: str = "",
+) -> dict[str, Any]:
+    return {
+        "_type": "LLMUsage",
+        "_version": 1,
+        "source": "missing",
+        "protocol": "unknown",
+        "requestId": "",
+        "requestedModel": str(requested_model or ""),
+        "reportedModel": "",
+        "inputTokens": None,
+        "outputTokens": None,
+        "totalTokens": None,
+        "cacheReadInputTokens": None,
+        "cacheCreationInputTokens": None,
+        "reasoningTokens": None,
+        "estimatedInputTokens": estimated_input_tokens,
+        "estimator": str(estimator or "") if estimated_input_tokens is not None else "",
+        "totalDerived": False,
+        "usageSnapshotCount": 0,
+        "providerDetails": {},
+    }
+
+
+def _usage_int(value: dict[str, Any], *names: str) -> int | None:
+    for name in names:
+        if name not in value or isinstance(value.get(name), bool):
             continue
         try:
-            parsed = int(raw)
-        except (TypeError, ValueError):
+            parsed = int(value.get(name))
+        except (TypeError, ValueError, OverflowError):
             continue
-        usage[key] = max(0, parsed)
-    if "total_tokens" not in usage and "prompt_tokens" in usage and "completion_tokens" in usage:
-        usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
-    return usage or None
+        if parsed >= 0:
+            return parsed
+    return None
 
 
 def _prefer_usage_snapshot(
-    current: dict[str, int] | None,
-    candidate: dict[str, int],
-) -> dict[str, int]:
+    current: dict[str, Any] | None,
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
     if current is None:
         return dict(candidate)
 
-    def rank(usage: dict[str, int]) -> tuple[int, int, int]:
-        prompt = int(usage.get("prompt_tokens", 0))
-        completion = int(usage.get("completion_tokens", 0))
-        total = int(usage.get("total_tokens", prompt + completion))
-        return total, completion, prompt
+    def rank(usage: dict[str, Any]) -> tuple[int, int, int, int]:
+        source_rank = {
+            "missing": 0,
+            "legacy_unknown": 1,
+            "provider_response": 2,
+            "provider_query": 3,
+        }.get(str(usage.get("source") or "legacy_unknown"), 0)
+        prompt = int(usage.get("inputTokens") or 0)
+        completion = int(usage.get("outputTokens") or 0)
+        total = int(usage.get("totalTokens") or prompt + completion)
+        return source_rank, total, completion, prompt
 
     return dict(candidate) if rank(candidate) >= rank(current) else current
 
 
+def _usage_snapshot_increment(usage: dict[str, Any]) -> int:
+    count = int(usage.get("usageSnapshotCount") or 0)
+    if count > 0:
+        return count
+    return 0 if str(usage.get("source") or "") == "missing" else 1
+
+
 def _collapse_stream_usage(chunks: list[Any]) -> list[Any]:
     normalized: list[Any] = []
-    latest_usage: dict[str, int] | None = None
+    latest_usage: dict[str, Any] | None = None
+    usage_snapshot_count = 0
     for chunk in chunks:
         usage = _usage_from_stream_chunk(chunk)
         if usage is not None:
             latest_usage = _prefer_usage_snapshot(latest_usage, usage)
+            usage_snapshot_count += _usage_snapshot_increment(usage)
             continue
         normalized.append(chunk)
     if latest_usage is not None:
+        latest_usage = dict(latest_usage)
+        latest_usage["usageSnapshotCount"] = usage_snapshot_count
         normalized.append({"type": "usage", "data": latest_usage})
     return normalized
 

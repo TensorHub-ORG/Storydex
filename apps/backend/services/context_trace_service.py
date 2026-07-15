@@ -99,8 +99,19 @@ def build_context_trace(
     context_tokens = sum(int(source.get("estTokens") or 0) for source in source_records)
     return {
         "_type": "ContextTrace",
-        "_version": 2,
+        "_version": 3,
         "tokenEstimator": f"tiktoken:{_TOKEN_ENCODING}",
+        "usageContract": {
+            "_type": "LLMUsage",
+            "_version": 1,
+            "reportedSources": ["provider_response", "provider_query"],
+            "deprecatedAliases": {
+                "providerUsageRequestCount": "providerReportedUsageRequestCount",
+                "providerInputTokens": "providerReportedInputTokens",
+                "providerOutputTokens": "providerReportedOutputTokens",
+                "providerTotalTokens": "providerReportedTotalTokens",
+            },
+        },
         "sources": source_records,
         "duplicates": _detect_duplicates(blocks),
         "llmCalls": [],
@@ -122,6 +133,20 @@ def build_context_trace(
             "providerTotalTokens": None,
             "providerInputEstimateErrorTokens": None,
             "providerInputEstimateErrorPct": None,
+            "providerReportedUsageRequestCount": 0,
+            "providerReportedUsageRequestEstTokens": 0,
+            "providerReportedInputTokens": None,
+            "providerReportedOutputTokens": None,
+            "providerReportedTotalTokens": None,
+            "providerReportedCacheReadInputTokens": None,
+            "providerReportedCacheCreationInputTokens": None,
+            "providerReportedReasoningTokens": None,
+            "providerReportedInputEstimateErrorTokens": None,
+            "providerReportedInputEstimateErrorPct": None,
+            "estimatedUsageRequestCount": 0,
+            "missingUsageRequestCount": 0,
+            "legacyUnknownUsageRequestCount": 0,
+            "reportedUsageCoveragePct": None,
         },
     }
 
@@ -158,6 +183,23 @@ def capture_provider_request(
         "requestChars": len(request_text),
         "requestEstTokens": estimate_tokens(request_text),
         "requestHash": str(request_hash or ""),
+        "usage": None,
+        "usageSource": "",
+        "protocol": "unknown",
+        "requestId": "",
+        "requestedModel": "",
+        "reportedModel": "",
+        "providerReportedInputTokens": None,
+        "providerReportedOutputTokens": None,
+        "providerReportedTotalTokens": None,
+        "cacheReadInputTokens": None,
+        "cacheCreationInputTokens": None,
+        "reasoningTokens": None,
+        "estimatedInputTokens": None,
+        "estimator": "",
+        "totalDerived": False,
+        "usageSnapshotCount": 0,
+        "providerDetails": {},
         "inputTokens": None,
         "outputTokens": None,
         "totalTokens": None,
@@ -235,28 +277,89 @@ def merge_llm_metrics(context_trace: Dict[str, Any] | None, metrics: Dict[str, A
     provider_requests = [dict(request) for request in raw_requests if isinstance(request, dict)]
     trace["providerRequests"] = provider_requests
     totals = trace.get("totals") if isinstance(trace.get("totals"), dict) else {}
-    usage_calls = int(metric_values.get("usageCalls") or 0)
-    usage_requests = [request for request in provider_requests if request.get("inputTokens") is not None]
-    compared_est_tokens = sum(int(request.get("requestEstTokens") or 0) for request in usage_requests)
-    compared_input_tokens = sum(int(request.get("inputTokens") or 0) for request in usage_requests)
-    estimate_error_tokens = compared_est_tokens - compared_input_tokens
+    reported_requests = [
+        request
+        for request in provider_requests
+        if str(request.get("usageSource") or "") in {"provider_response", "provider_query"}
+    ]
+    estimated_requests = [
+        request for request in provider_requests if request.get("estimatedInputTokens") is not None
+    ]
+    missing_requests = [
+        request for request in provider_requests if str(request.get("usageSource") or "") == "missing"
+    ]
+    legacy_requests = [
+        request
+        for request in provider_requests
+        if str(request.get("usageSource") or "") == "legacy_unknown"
+    ]
+    input_reported_requests = [
+        request
+        for request in reported_requests
+        if request.get("providerReportedInputTokens") is not None
+    ]
+    reported_request_est_tokens = sum(
+        int(request.get("requestEstTokens") or 0) for request in reported_requests
+    )
+    compared_est_tokens = sum(
+        int(request.get("requestEstTokens") or 0) for request in input_reported_requests
+    )
+    compared_input_tokens = sum(
+        int(request.get("providerReportedInputTokens") or 0)
+        for request in input_reported_requests
+    )
+    estimate_error_tokens = (
+        compared_est_tokens - compared_input_tokens if input_reported_requests else None
+    )
+    reported_input_tokens = _sum_optional(reported_requests, "providerReportedInputTokens")
+    reported_output_tokens = _sum_optional(reported_requests, "providerReportedOutputTokens")
+    reported_total_tokens = _sum_optional(reported_requests, "providerReportedTotalTokens")
+    reported_cache_read = _sum_optional(reported_requests, "cacheReadInputTokens")
+    reported_cache_creation = _sum_optional(
+        reported_requests,
+        "cacheCreationInputTokens",
+    )
+    reported_reasoning = _sum_optional(reported_requests, "reasoningTokens")
+    coverage_pct = (
+        round((len(reported_requests) / len(provider_requests)) * 100, 4)
+        if provider_requests
+        else None
+    )
     totals.update(
         {
             "providerRequestCount": len(provider_requests),
             "providerRequestEstTokens": sum(
                 int(request.get("requestEstTokens") or 0) for request in provider_requests
             ),
-            "providerUsageRequestCount": len(usage_requests),
-            "providerUsageRequestEstTokens": compared_est_tokens,
-            "providerInputTokens": int(metric_values.get("promptTokens") or 0) if usage_calls else None,
-            "providerOutputTokens": int(metric_values.get("completionTokens") or 0) if usage_calls else None,
-            "providerTotalTokens": int(metric_values.get("totalTokens") or 0) if usage_calls else None,
-            "providerInputEstimateErrorTokens": estimate_error_tokens if usage_requests else None,
+            "providerUsageRequestCount": len(reported_requests),
+            "providerUsageRequestEstTokens": reported_request_est_tokens,
+            "providerInputTokens": reported_input_tokens,
+            "providerOutputTokens": reported_output_tokens,
+            "providerTotalTokens": reported_total_tokens,
+            "providerInputEstimateErrorTokens": estimate_error_tokens,
             "providerInputEstimateErrorPct": (
                 round((estimate_error_tokens / compared_input_tokens) * 100, 4)
                 if compared_input_tokens
                 else None
             ),
+            "providerReportedUsageRequestCount": len(reported_requests),
+            "providerReportedUsageRequestEstTokens": reported_request_est_tokens,
+            "providerReportedInputTokens": reported_input_tokens,
+            "providerReportedOutputTokens": reported_output_tokens,
+            "providerReportedTotalTokens": reported_total_tokens,
+            "providerReportedCacheReadInputTokens": reported_cache_read,
+            "providerReportedCacheCreationInputTokens": reported_cache_creation,
+            "providerReportedReasoningTokens": reported_reasoning,
+            "providerReportedInputEstimateErrorTokens": estimate_error_tokens,
+            "providerReportedInputEstimateErrorPct": (
+                round((estimate_error_tokens / compared_input_tokens) * 100, 4)
+                if compared_input_tokens
+                else None
+            ),
+            "estimatedUsageRequestCount": len(estimated_requests),
+            "missingUsageRequestCount": len(missing_requests),
+            "legacyUnknownUsageRequestCount": len(legacy_requests),
+            "reportedUsageCoveragePct": coverage_pct,
         }
     )
     trace["totals"] = totals
@@ -283,7 +386,22 @@ def summarize_context_trace(context_trace: Dict[str, Any] | None) -> Dict[str, A
         "providerUsageRequestCount": int(totals.get("providerUsageRequestCount") or 0),
         "providerTotalTokens": totals.get("providerTotalTokens"),
         "providerInputEstimateErrorPct": totals.get("providerInputEstimateErrorPct"),
+        "providerReportedUsageRequestCount": int(
+            totals.get("providerReportedUsageRequestCount") or 0
+        ),
+        "providerReportedTotalTokens": totals.get("providerReportedTotalTokens"),
+        "estimatedUsageRequestCount": int(totals.get("estimatedUsageRequestCount") or 0),
+        "missingUsageRequestCount": int(totals.get("missingUsageRequestCount") or 0),
+        "legacyUnknownUsageRequestCount": int(
+            totals.get("legacyUnknownUsageRequestCount") or 0
+        ),
+        "reportedUsageCoveragePct": totals.get("reportedUsageCoveragePct"),
     }
+
+
+def _sum_optional(requests: Sequence[Dict[str, Any]], key: str) -> int | None:
+    values = [int(request.get(key) or 0) for request in requests if request.get(key) is not None]
+    return sum(values) if values else None
 
 
 def _detect_duplicates(blocks: Sequence[Dict[str, Any]]) -> list[Dict[str, Any]]:
