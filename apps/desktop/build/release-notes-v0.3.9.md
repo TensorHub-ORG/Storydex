@@ -1,4 +1,4 @@
-# Storydex v0.3.8
+# Storydex v0.3.9
 
 本次为稳定性更新。
 
