@@ -157,6 +157,24 @@ class MixedUsageProvider(FakeProvider):
         return FakeResponse(content=f"mixed-{self.calls}", usage=self.usages.pop(0))
 
 
+class TransientModelCatalogProvider(FakeProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.stream_calls = 0
+
+    async def chat(self, messages, tools=None, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("model_not_supported: not supported on the lite model list; use GET /models")
+        return FakeResponse(content="recovered", usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2})
+
+    async def chat_stream_with_tools(self, messages, tools=None, **kwargs):
+        self.stream_calls += 1
+        if self.stream_calls == 1:
+            raise RuntimeError("Model fake-model is not supported on the lite model list. Use GET /v1/models")
+        yield {"type": "content", "content": "recovered"}
+
+
 def test_off_mode_proxies_attributes_and_behavior(monkeypatch):
     monkeypatch.delenv("STORYDEX_LLM_MODE", raising=False)
     provider = FakeProvider()
@@ -168,6 +186,28 @@ def test_off_mode_proxies_attributes_and_behavior(monkeypatch):
     response = asyncio.run(replayable.chat([{"role": "user", "content": "hello"}]))
     assert response.content == "response-1"
     assert provider.calls == 1
+
+
+def test_model_catalog_mismatch_retries_once_before_failing(monkeypatch):
+    monkeypatch.delenv("STORYDEX_LLM_MODE", raising=False)
+
+    async def no_delay(_seconds):
+        return None
+
+    monkeypatch.setattr("services.llm_replay.asyncio.sleep", no_delay)
+    provider = TransientModelCatalogProvider()
+    replayable = get_replayable_llm_provider(provider)
+
+    response = asyncio.run(replayable.chat([{"role": "user", "content": "hello"}]))
+    assert response.content == "recovered"
+    assert provider.calls == 2
+
+    async def collect_stream():
+        return [item async for item in replayable.chat_stream_with_tools([{"role": "user", "content": "hello"}])]
+
+    chunks = asyncio.run(collect_stream())
+    assert provider.stream_calls == 2
+    assert chunks[0] == {"type": "content", "content": "recovered"}
 
 
 def test_record_then_replay_two_calls(monkeypatch, tmp_path):

@@ -148,6 +148,31 @@ describe("agent store sessions and Git decision UX", () => {
     expect(git.refreshSummary).toHaveBeenCalledWith({ silent: true });
   });
 
+  it("clears only live changes after a successful commit and preserves history", async () => {
+    api.submitAgentRunCommitDecision.mockResolvedValue({
+      data: { created: true, status: "success", changedFiles: ["chapters/001.md"], changedFileCount: 1, commitHash: "abc", shortHash: "abc" }
+    });
+    const store = useAgentStore();
+    store.pendingCommitPrompt = {
+      traceId: "trace-commit", sessionId: "session", workspaceRoot: "C:/isolated/story", message: "commit?",
+      changedFiles: ["chapters/001.md"], changedFileCount: 1, added: 2, removed: 1
+    };
+    store.liveChangeLedger = {
+      traceId: "trace-commit", sessionId: "session", changedFiles: ["chapters/001.md"], changedFileCount: 1,
+      added: 2, removed: 1, diffSource: "working_tree", commitHash: "", shortHash: "", updatedAt: new Date().toISOString()
+    };
+    store.executionHistory = [{
+      traceId: "trace-commit", sessionId: "session", prompt: "write", route: "coomi", agentMode: "coomi", llmModel: "", llmProvider: "",
+      status: "completed", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastAction: "chat", reply: "", trace: null,
+      audit: [], events: [], tasks: [], changeLedger: { ...store.liveChangeLedger }, items: [], errorMessage: "", errorCode: null
+    }];
+
+    await store.resolvePendingCommitPrompt("manual", "story: update");
+    expect(store.liveChangeLedger).toBeNull();
+    expect(store.executionHistory[0].changeLedger.commitHash).toBe("abc");
+    expect(store.executionHistory[0].changeLedger.changedFiles).toEqual(["chapters/001.md"]);
+  });
+
   it("requires a manual commit message before sending", async () => {
     const store = useAgentStore();
     store.pendingCommitPrompt = {

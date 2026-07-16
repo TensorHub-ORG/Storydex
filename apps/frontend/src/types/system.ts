@@ -13,6 +13,7 @@ export interface SystemHealthResponse {
   requiresInitialization: boolean;
   missingDirectories: string[];
   frontendStaticMode: boolean;
+  memoryUsageMb?: number | null;
 }
 
 export interface UIPreferencesResponse {

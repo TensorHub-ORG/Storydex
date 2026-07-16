@@ -136,6 +136,7 @@ def assert_success(response, *, status=200):
 def test_system_envelopes_and_preferences_round_trip(client):
     health = assert_success(client.get("/api/v1/sys/health"))
     assert health["data"]["status"] == "ok"
+    assert health["data"]["memoryUsageMb"] is None or isinstance(health["data"]["memoryUsageMb"], int)
     assert health["trace"]["traceId"]
     bootstrap = assert_success(client.get("/api/v1/sys/bootstrap"))
     assert bootstrap["data"]["uiPreferences"]["theme"] == "default"

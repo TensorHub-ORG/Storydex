@@ -9,7 +9,7 @@ const api = vi.hoisted(() => ({
   deleteAgentSession: vi.fn(), cycleAgentCoomiPermission: vi.fn(), setAgentCoomiPermission: vi.fn(),
   resolveAgentCoomiApproval: vi.fn()
 }));
-const git = vi.hoisted(() => ({ refreshSummary: vi.fn().mockResolvedValue(undefined) }));
+const git = vi.hoisted(() => ({ summary: null as any, refreshSummary: vi.fn().mockResolvedValue(undefined) }));
 const workspace = vi.hoisted(() => ({
   launchScreenVisible: false,
   currentProject: { workspaceRoot: "C:/isolated/story" },
@@ -64,6 +64,56 @@ describe("AgentPanel", () => {
     await nextTick();
     expect(wrapper.find(".coomi-phase-text").text()).toContain("0.5s");
     expect(wrapper.text()).not.toContain("chain-of-thought-secret");
+    wrapper.unmount();
+  });
+
+  it("pauses stream following after user scroll and formats run duration", async () => {
+    const store = useAgentStore();
+    const wrapper = shallowMount(AgentPanel);
+    const utils = (wrapper.vm as any).__testUtils;
+    const stream = wrapper.find(".coomi-stream").element as HTMLElement;
+    let scrollTop = 120;
+    Object.defineProperty(stream, "scrollTop", { configurable: true, get: () => scrollTop, set: (value) => { scrollTop = Number(value); } });
+    Object.defineProperty(stream, "scrollHeight", { configurable: true, value: 1000 });
+    Object.defineProperty(stream, "clientHeight", { configurable: true, value: 300 });
+
+    utils.handleStreamScroll();
+    await nextTick();
+    expect(wrapper.find(".coomi-scroll-latest").exists()).toBe(true);
+
+    store.executionHistory = [{
+      traceId: "scroll-run", sessionId: "session", prompt: "p", route: "coomi", agentMode: "coomi", llmModel: "", llmProvider: "",
+      status: "running", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastAction: "chat", reply: "new output", trace: null,
+      audit: [], events: [], tasks: [], changeLedger: { traceId: "scroll-run", sessionId: "session", changedFiles: [], changedFileCount: 0, added: 0, removed: 0, commitHash: "", shortHash: "", diffSource: "", updatedAt: "" }, items: [], errorMessage: "", errorCode: null
+    }];
+    await nextTick();
+    expect(scrollTop).toBe(120);
+
+    utils.scrollToBottom(true);
+    await nextTick();
+    expect(scrollTop).toBe(1000);
+    expect(wrapper.find(".coomi-scroll-latest").exists()).toBe(false);
+    expect(utils.formatRunDuration(56_000)).toBe("56s");
+    expect(utils.formatRunDuration(76_000)).toBe("1m16s");
+    expect(utils.formatRunDuration(3_676_000)).toBe("1h1m16s");
+    wrapper.unmount();
+  });
+
+  it("does not duplicate an AgentError in the composer footer", async () => {
+    const store = useAgentStore();
+    store.currentTraceId = "failed-run";
+    store.lastError = "provider failed";
+    store.executionHistory = [{
+      traceId: "failed-run", sessionId: "session", prompt: "p", route: "coomi", agentMode: "coomi", llmModel: "", llmProvider: "",
+      status: "failed", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastAction: "chat", reply: "", trace: null,
+      audit: [], events: [], tasks: [], changeLedger: { traceId: "failed-run", sessionId: "session", changedFiles: [], changedFileCount: 0, added: 0, removed: 0, commitHash: "", shortHash: "", diffSource: "", updatedAt: "" },
+      items: [{ id: "error", type: "error", status: "error", title: "Error", content: "provider failed", timestamp: new Date().toISOString(), raw: {} }],
+      errorMessage: "provider failed", errorCode: "provider"
+    }];
+    const wrapper = shallowMount(AgentPanel);
+    await nextTick();
+    expect(wrapper.findAll(".coomi-error-text")).toHaveLength(1);
+    expect(wrapper.find("footer .coomi-error").exists()).toBe(false);
     wrapper.unmount();
   });
 

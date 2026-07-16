@@ -8,7 +8,9 @@ import EditorPane from "@/components/EditorPane.vue";
 import FilePreviewView from "@/views/FilePreviewView.vue";
 import PresetManagementSidebar from "@/components/PresetManagementSidebar.vue";
 import SourceControlSidebar from "@/components/SourceControlSidebar.vue";
+import StatusBar from "@/components/StatusBar.vue";
 import TracePanel from "@/components/TracePanel.vue";
+import { useGitStore } from "@/stores/git";
 import { useWorkspaceStore } from "@/stores/workspace";
 import { apiClient } from "@/api/client";
 
@@ -63,6 +65,12 @@ describe("high-density component handler matrices", () => {
       ]
     }] as never;
     store.diagnostics = [{ relativePath: "chapters/root.md", message: "warning", line: 2, column: 3 }] as never;
+    const gitStore = useGitStore();
+    gitStore.summary = {
+      available: true, gitInstalled: true, initialized: true, branch: "develop", clean: false,
+      changedFiles: [{ status: " M", relativePath: "chapters/001/one.md", staged: false, unstaged: true }],
+      recentCommits: [], graphLines: [], defaultBranch: "develop", message: ""
+    };
     for (const name of ["refreshTree", "refreshDiagnostics", "saveActiveFile", "openFile", "setChapterCompletion", "createFile", "createDirectory", "renamePath", "deletePath", "copyPath", "movePath", "importFiles"] as const) {
       (store as any)[name] = vi.fn().mockResolvedValue(undefined);
     }
@@ -76,12 +84,31 @@ describe("high-density component handler matrices", () => {
       relatedTarget: null, preventDefault: vi.fn(), stopPropagation: vi.fn(),
       dataTransfer: { types: ["Files"], files: [], dropEffect: "copy", effectAllowed: "all" }
     };
+    const directory = { ...hybrid, kind: "directory", relativePath: "chapters/001", name: "001" };
+    expect((utils.gitDecoration as Function)(hybrid)).toMatchObject({ label: "U", tone: "uncommitted" });
+    expect((utils.gitDecoration as Function)(directory)).toMatchObject({ label: "1", tone: "uncommitted" });
+    expect((utils.diagnosticCounts as Function)({ ...hybrid, relativePath: "chapters/root.md" })).toMatchObject({ info: 1 });
+    expect((utils.treeRowTrailingWidth as Function)(directory)).toBeGreaterThan(30);
+    expect((utils.formatBadgeCount as Function)(120)).toBe("99+");
     expect(await invokeExposedHandlers(utils, hybrid)).toBeGreaterThan(70);
 
-    const directory = { ...hybrid, kind: "directory", relativePath: "chapters/001", name: "001" };
     for (const name of ["toggleDirectory", "iconFor", "isChapterDirectory", "chapterStateTitle", "startCreate", "handleCopy", "handleCut"]) {
       await Promise.resolve((utils[name] as Function)(directory, hybrid)).catch(() => undefined);
     }
+    wrapper.unmount();
+  });
+
+  it("renders the compact status bar with real health memory data", async () => {
+    const store = useWorkspaceStore();
+    store.launchScreenVisible = false;
+    store.currentProject = { projectName: "Demo", workspaceRoot: "C:/story", openedAt: "" } as never;
+    store.health = { status: "ok", projectName: "Demo", memoryUsageMb: 218 } as never;
+    store.refreshHealth = vi.fn().mockResolvedValue(undefined);
+    const wrapper = mount(StatusBar);
+    expect(wrapper.text()).toContain("Ready");
+    expect(wrapper.text()).toContain("Memory Usage: 218 MB");
+    expect(wrapper.text()).toContain("Demo");
+    expect(wrapper.text()).not.toContain("Trace:");
     wrapper.unmount();
   });
 

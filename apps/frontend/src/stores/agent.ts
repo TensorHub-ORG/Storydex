@@ -64,6 +64,8 @@ interface AgentState {
   compressionSummary: string;
   pendingApprovals: AgentPendingApproval[];
   pendingCommitPrompt: AgentPendingCommitPrompt | null;
+  liveChangeLedger: AgentRunChangeLedger | null;
+  runStartedAt: number | null;
   isCommittingGit: boolean;
   commitActionLabel: string;
   storyFragmentCount: number;
@@ -79,6 +81,7 @@ const DEFAULT_CHAPTER_TEMPLATE_ID = "default_chapter_directory";
 let activeStreamAbortController: AbortController | null = null;
 let commitProgressTimer: number | null = null;
 let commitActionClearTimer: number | null = null;
+let gitSummaryRefreshTimer: number | null = null;
 
 export const useAgentStore = defineStore("agent", {
   state: (): AgentState => ({
@@ -109,6 +112,8 @@ export const useAgentStore = defineStore("agent", {
     compressionSummary: "",
     pendingApprovals: [],
     pendingCommitPrompt: null,
+    liveChangeLedger: null,
+    runStartedAt: null,
     isCommittingGit: false,
     commitActionLabel: "",
     storyFragmentCount: 1,
@@ -121,16 +126,7 @@ export const useAgentStore = defineStore("agent", {
 
   getters: {
     statusLabel(state): string {
-      if (state.isRunning) return "Coomi 运行中";
-      if (state.lastError) return "Coomi 出错";
-      const activeRun = state.executionHistory.find((run) => run.traceId === state.currentTraceId);
-      if (activeRun?.status === "committed") return "Coomi \u5df2\u521b\u5efa\u672c\u5730\u7248\u672c";
-      if (activeRun?.status === "discarded") return "Coomi \u5df2\u4e22\u5f03";
-      if (activeRun?.status === "completed") return "Coomi 已完成";
-      if (activeRun?.status === "cancelled" || activeRun?.status === "stopped") return "Coomi 已停止";
-      if (activeRun?.status === "failed") return "Coomi 出错";
-      if (state.lastTrace) return "Coomi \u5df2\u5b8c\u6210";
-      return "Coomi 已就绪";
+      return state.isRunning ? "Coomi · Running" : "Coomi · Ready";
     },
 
     permissionModeLabel(state): string {
@@ -190,6 +186,8 @@ export const useAgentStore = defineStore("agent", {
       this.lastSuccess = "";
       this.pendingApprovals = [];
       this.pendingCommitPrompt = null;
+      this.liveChangeLedger = null;
+      this.runStartedAt = null;
       this.isCommittingGit = false;
       this.commitActionLabel = "";
       if (commitProgressTimer !== null) {
@@ -199,6 +197,10 @@ export const useAgentStore = defineStore("agent", {
       if (commitActionClearTimer !== null) {
         window.clearTimeout(commitActionClearTimer);
         commitActionClearTimer = null;
+      }
+      if (gitSummaryRefreshTimer !== null) {
+        window.clearTimeout(gitSummaryRefreshTimer);
+        gitSummaryRefreshTimer = null;
       }
       if (options?.clearSessionId) {
         this.currentSessionId = "";
@@ -306,6 +308,9 @@ export const useAgentStore = defineStore("agent", {
         );
         this.applyStreamPacket(prompt.traceId, buildCommitDecisionPacket(prompt, result.data));
         this.pendingCommitPrompt = null;
+        if (mode !== "skip" && Boolean(result.data.created)) {
+          this.clearLiveChanges();
+        }
         this.commitActionLabel = mode === "skip" ? "已保留未提交修改" : "本地版本已创建";
         void useGitStore().refreshSummary({ silent: true });
       } catch (error: unknown) {
@@ -322,6 +327,9 @@ export const useAgentStore = defineStore("agent", {
             );
             this.applyStreamPacket(prompt.traceId, buildCommitDecisionPacket(prompt, result.data));
             this.pendingCommitPrompt = null;
+            if (Boolean(result.data.created)) {
+              this.clearLiveChanges();
+            }
             this.commitActionLabel = "本地版本已创建";
             void useGitStore().refreshSummary({ silent: true });
             return;
@@ -589,6 +597,7 @@ export const useAgentStore = defineStore("agent", {
       this.lastSuccess = "";
       this.pendingApprovals = [];
       this.pendingCommitPrompt = null;
+      this.runStartedAt = Date.now();
       this.isRunning = true;
       this.promptInput = "";
       this.upsertExecutionRun(run);
@@ -626,8 +635,13 @@ export const useAgentStore = defineStore("agent", {
         this.finishRun(traceId, status, normalized.message, normalized.code);
       } finally {
         this.isRunning = false;
+        this.runStartedAt = null;
         activeStreamAbortController = null;
       }
+    },
+
+    clearLiveChanges(): void {
+      this.liveChangeLedger = null;
     },
 
     applyStreamPacket(traceId: string, packet: AgentStreamPacket): void {
@@ -673,6 +687,13 @@ export const useAgentStore = defineStore("agent", {
             traceId,
             nextRun.sessionId
           );
+          this.liveChangeLedger = mergeChangeLedgerPaths(
+            this.liveChangeLedger,
+            changedPaths,
+            traceId,
+            nextRun.sessionId
+          );
+          scheduleGitSummaryRefresh();
         }
       }
 
@@ -757,6 +778,17 @@ export const useAgentStore = defineStore("agent", {
           }
         ];
         nextRun.changeLedger = normalizeChangeLedger(visiblePacket, traceId, nextRun.sessionId, nextRun.changeLedger);
+        const created = Boolean(visiblePacket.created);
+        if (created && (eventName === "GitAutoCommit" || eventName === "GitCommitResult")) {
+          this.clearLiveChanges();
+        } else if (eventName === "GitCommitPrompt" || eventName === "GitCommitResult") {
+          this.liveChangeLedger = normalizeChangeLedger(
+            visiblePacket,
+            traceId,
+            nextRun.sessionId,
+            this.liveChangeLedger || nextRun.changeLedger
+          );
+        }
         if (eventName === "GitCommitPrompt") {
           this.pendingCommitPrompt = normalizeCommitPrompt(visiblePacket, traceId, nextRun.sessionId);
         } else if (eventName === "GitCommitResult") {
@@ -1693,7 +1725,7 @@ function asRecord(value: unknown): Record<string, unknown> {
 }
 
 function mergeChangeLedgerPaths(
-  fallback: AgentRunChangeLedger | undefined,
+  fallback: AgentRunChangeLedger | null | undefined,
   paths: string[],
   traceId: string,
   sessionId: string
@@ -1712,6 +1744,16 @@ function mergeChangeLedgerPaths(
     shortHash: String(fallback?.shortHash || "").trim(),
     updatedAt: new Date().toISOString()
   };
+}
+
+function scheduleGitSummaryRefresh(): void {
+  if (gitSummaryRefreshTimer !== null) {
+    window.clearTimeout(gitSummaryRefreshTimer);
+  }
+  gitSummaryRefreshTimer = window.setTimeout(() => {
+    gitSummaryRefreshTimer = null;
+    void useGitStore().refreshSummary({ silent: true });
+  }, 350);
 }
 
 function isWriteLikeToolPacket(packet: AgentStreamPacket): boolean {

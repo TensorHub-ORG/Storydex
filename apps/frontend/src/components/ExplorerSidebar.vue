@@ -82,9 +82,9 @@
               >
                 <span class="material-symbols-rounded">save</span>
               </button>
-              <button class="explorer-toolbar-btn" type="button" title="问题" @click="problemsOpen = !problemsOpen">
+              <button class="explorer-toolbar-btn explorer-problems-trigger" type="button" title="问题" @click="problemsOpen = !problemsOpen">
                 <span class="material-symbols-rounded">problem</span>
-                <small v-if="workspaceStore.diagnostics.length">{{ workspaceStore.diagnostics.length }}</small>
+                <small v-if="workspaceStore.diagnostics.length" class="explorer-problem-badge">{{ formatBadgeCount(workspaceStore.diagnostics.length) }}</small>
               </button>
             </div>
           </div>
@@ -163,7 +163,10 @@
                   'has-diagnostics': hasDiagnostics(row.node),
                   'has-direct-diagnostics': hasDirectDiagnostics(row.node)
                 }"
-                :style="{ paddingLeft: `${12 + row.depth * 16}px` }"
+                :style="{
+                  paddingLeft: `${12 + row.depth * 16}px`,
+                  paddingRight: `${treeRowTrailingWidth(row.node)}px`
+                }"
                 :disabled="workspaceStore.isFileLoading && row.node.kind === 'file'"
                 :title="rowTitle(row.node) || undefined"
                 @click.stop="handleRowClick(row.node)"
@@ -179,32 +182,43 @@
                 <span class="material-symbols-rounded tree-icon">{{ iconFor(row.node) }}</span>
                 <span class="tree-label">{{ row.node.name }}</span>
                 <span v-if="row.node.kind === 'file' && row.node.extension" class="tree-meta">{{ row.node.extension }}</span>
-                <span v-if="row.node.kind === 'directory' && diagnosticCount(row.node)" class="tree-diagnostic-count" :class="`is-${diagnosticSeverity(row.node)}`">{{ diagnosticCount(row.node) }}</span>
               </button>
-
-              <div v-if="!isRenamingNode(row.node) && shouldShowRowActions(row.node)" class="tree-row-actions" :style="{ right: '10px' }">
-                <span
-                  v-if="showDiagnosticDot(row.node)"
-                  class="tree-diagnostic-dot"
-                  :class="`is-${diagnosticSeverity(row.node)}`"
-                  :title="diagnosticHint(row.node)"
-                  @click.stop
-                ></span>
-
+              <div
+                v-if="hasNodeDecorations(row.node) || isChapterDirectory(row.node)"
+                class="tree-row-trailing"
+                @click.stop
+              >
+                <span v-if="hasNodeDecorations(row.node)" class="tree-status-cluster">
+                  <span
+                    v-for="severity in diagnosticSeverities"
+                    v-show="diagnosticCounts(row.node)[severity] > 0"
+                    :key="severity"
+                    class="tree-diagnostic-number"
+                    :class="`is-${severity}`"
+                    :title="diagnosticHint(row.node)"
+                  >{{ diagnosticCounts(row.node)[severity] }}</span>
+                  <span
+                    v-if="gitDecoration(row.node)"
+                    class="tree-git-decoration"
+                    :class="`is-${gitDecoration(row.node)?.tone}`"
+                    :title="gitDecoration(row.node)?.title"
+                  >{{ gitDecoration(row.node)?.label }}</span>
+                </span>
                 <label
-                  v-if="isChapterDirectory(row.node)"
-                  class="tree-complete-toggle"
+                  v-if="!isRenamingNode(row.node) && isChapterDirectory(row.node)"
+                  class="tree-chapter-state"
+                  :class="{ completed: workspaceStore.isChapterCompleted(nodePath(row.node)) }"
                   :title="chapterStateTitle(row.node)"
                   @click.stop
                 >
-                  <span class="tree-complete-toggle-label">完成</span>
                   <input
                     :checked="workspaceStore.isChapterCompleted(nodePath(row.node))"
                     type="checkbox"
+                    :aria-label="chapterStateTitle(row.node)"
                     :disabled="workspaceStore.isStorySettingsLoading"
                     @change="handleChapterCompletionToggle(row.node, $event)"
                   />
-                  <span class="tree-complete-toggle-track"></span>
+                  <span class="material-symbols-rounded">{{ workspaceStore.isChapterCompleted(nodePath(row.node)) ? "check_circle" : "radio_button_unchecked" }}</span>
                 </label>
               </div>
             </div>
@@ -233,7 +247,15 @@
     </template>
 
     <section v-if="problemsOpen && !workspaceStore.launchScreenVisible" class="explorer-problems" @click.stop>
-      <header><strong>问题</strong><select v-model="problemSeverity"><option value="all">全部</option><option value="error">错误</option><option value="warning">警告</option><option value="info">提示</option></select><button type="button" @click="problemsOpen = false">×</button></header>
+      <header class="explorer-problems-header">
+        <strong>问题</strong>
+        <label class="explorer-problem-filter">
+          <span class="material-symbols-rounded">filter_alt</span>
+          <select v-model="problemSeverity" aria-label="筛选问题级别"><option value="all">全部</option><option value="error">错误</option><option value="warning">警告</option><option value="info">提示</option></select>
+          <span class="material-symbols-rounded filter-chevron">expand_more</span>
+        </label>
+        <button class="explorer-problems-close" type="button" title="关闭问题面板" aria-label="关闭问题面板" @click="problemsOpen = false"><span class="material-symbols-rounded">close</span></button>
+      </header>
       <div class="explorer-problem-list">
         <div v-for="item in filteredProblems" :key="`${item.relativePath}:${item.code}:${item.line}:${item.message}`" class="explorer-problem-item">
           <button type="button" class="problem-open" @click="openProblem(item.relativePath)"><span class="problem-severity" :class="`is-${item.severity}`"></span><span><strong>{{ item.code || item.source }}</strong><small>{{ item.relativePath }}{{ item.line ? `:${item.line}:${item.column || 1}` : "" }}</small><em>{{ item.message }}</em></span></button>
@@ -311,8 +333,9 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useProjectLauncher } from "@/composables/useProjectLauncher";
 import { useAgentStore } from "@/stores/agent";
+import { useGitStore } from "@/stores/git";
 import { useWorkspaceStore } from "@/stores/workspace";
-import type { WorkspaceTreeNode } from "@/types/workspace";
+import type { WorkspaceDiagnosticItem, WorkspaceGitChangedFile, WorkspaceTreeNode } from "@/types/workspace";
 
 interface TreeRow {
   key: string;
@@ -351,8 +374,15 @@ const AUTO_REFRESH_INTERVAL_MS = 4000;
 
 const workspaceStore = useWorkspaceStore();
 const agentStore = useAgentStore();
+const gitStore = useGitStore();
 const { handleOpenProjectRequest, openCreateProjectDialog } = useProjectLauncher();
 let autoRefreshTimer: number | null = null;
+let lastGitRefreshAt = 0;
+const GIT_REFRESH_INTERVAL_MS = 8000;
+const diagnosticSeverities = ["error", "warning", "info"] as const;
+type DiagnosticSeverity = (typeof diagnosticSeverities)[number];
+type DiagnosticCounts = Record<DiagnosticSeverity, number>;
+type GitDecoration = { label: string; tone: "uncommitted"; title: string };
 
 const expandedPaths = ref<Record<string, boolean>>({});
 const contextMenu = ref<ContextMenuState>({
@@ -375,6 +405,8 @@ const problemSeverity = ref<"all" | "error" | "warning" | "info">("all");
 const filteredProblems = computed(() => workspaceStore.diagnostics.filter(
   (item) => problemSeverity.value === "all" || item.severity === problemSeverity.value
 ));
+const diagnosticIndex = computed(() => buildPathIndex(workspaceStore.diagnostics));
+const gitIndex = computed(() => buildPathIndex(gitStore.summary?.changedFiles || []));
 const pendingRenameValue = computed({
   get: () => pendingRename.value?.value ?? "",
   set: (value: string) => {
@@ -416,6 +448,88 @@ function diagnosticCount(node: WorkspaceTreeNode): number {
     return 0;
   }
   return workspaceStore.diagnosticCountForPath(relativePath);
+}
+
+function diagnosticsForNode(node: WorkspaceTreeNode): WorkspaceDiagnosticItem[] {
+  const relativePath = nodePath(node);
+  if (!relativePath) return [];
+  return node.kind === "directory"
+    ? diagnosticIndex.value.aggregate.get(relativePath) || []
+    : diagnosticIndex.value.direct.get(relativePath) || [];
+}
+
+function diagnosticCounts(node: WorkspaceTreeNode): DiagnosticCounts {
+  const counts: DiagnosticCounts = { error: 0, warning: 0, info: 0 };
+  for (const item of diagnosticsForNode(node)) {
+    const severity = diagnosticSeverities.includes(item.severity as DiagnosticSeverity)
+      ? item.severity as DiagnosticSeverity
+      : "info";
+    counts[severity] += 1;
+  }
+  return counts;
+}
+
+function gitFilesForNode(node: WorkspaceTreeNode): WorkspaceGitChangedFile[] {
+  const relativePath = nodePath(node);
+  if (!relativePath) return [];
+  return node.kind === "directory"
+    ? gitIndex.value.aggregate.get(relativePath) || []
+    : gitIndex.value.direct.get(relativePath) || [];
+}
+
+function buildPathIndex<T extends { relativePath: string }>(items: T[]): {
+  direct: Map<string, T[]>;
+  aggregate: Map<string, T[]>;
+} {
+  const direct = new Map<string, T[]>();
+  const aggregate = new Map<string, T[]>();
+  for (const item of items) {
+    const relativePath = normalizeNodePath(item.relativePath);
+    if (!relativePath) continue;
+    direct.set(relativePath, [...(direct.get(relativePath) || []), item]);
+    const parts = relativePath.split("/");
+    for (let index = 1; index <= parts.length; index += 1) {
+      const ancestor = parts.slice(0, index).join("/");
+      aggregate.set(ancestor, [...(aggregate.get(ancestor) || []), item]);
+    }
+  }
+  return { direct, aggregate };
+}
+
+function gitDecoration(node: WorkspaceTreeNode): GitDecoration | null {
+  const files = gitFilesForNode(node);
+  if (!files.length) return null;
+  if (node.kind === "directory") {
+    return { label: String(files.length), tone: "uncommitted", title: `${files.length} 个未提交文件` };
+  }
+  return gitFileDecoration(files[0]);
+}
+
+function gitFileDecoration(file: WorkspaceGitChangedFile): GitDecoration {
+  const status = String(file.status || "").padEnd(2, " ").slice(0, 2);
+  const stageState = [file.staged ? "已暂存" : "", file.unstaged ? "未暂存" : ""].filter(Boolean).join("、");
+  return {
+    label: "U",
+    tone: "uncommitted",
+    title: `未提交${stageState ? ` · ${stageState}` : ""} · Git ${status}`
+  };
+}
+
+function hasNodeDecorations(node: WorkspaceTreeNode): boolean {
+  return diagnosticsForNode(node).length > 0 || gitFilesForNode(node).length > 0;
+}
+
+function treeRowTrailingWidth(node: WorkspaceTreeNode): number {
+  const counts = diagnosticCounts(node);
+  const diagnosticSlots = diagnosticSeverities.filter((severity) => counts[severity] > 0).length;
+  const gitSlots = gitDecoration(node) ? 1 : 0;
+  const chapterSlots = isChapterDirectory(node) ? 1 : 0;
+  const totalSlots = diagnosticSlots + gitSlots + chapterSlots;
+  return totalSlots > 0 ? 14 + totalSlots * 14 + Math.max(0, totalSlots - 1) * 3 : 10;
+}
+
+function formatBadgeCount(count: number): string {
+  return count > 99 ? "99+" : String(Math.max(0, count));
 }
 
 function directDiagnosticCount(node: WorkspaceTreeNode): number {
@@ -560,6 +674,10 @@ onMounted(() => {
   window.addEventListener("click", closeContextMenu);
   window.addEventListener("blur", closeContextMenu);
   autoRefreshTimer = window.setInterval(handleAutoRefresh, AUTO_REFRESH_INTERVAL_MS);
+  if (!workspaceStore.launchScreenVisible) {
+    lastGitRefreshAt = Date.now();
+    void gitStore.refreshSummary({ silent: true });
+  }
 });
 
 onBeforeUnmount(() => {
@@ -577,7 +695,11 @@ function handleRefresh(): void {
   cancelPendingCreate();
   cancelPendingRename();
   workspaceStore.collapseTree();
-  void workspaceStore.refreshTree({ silent: false });
+  lastGitRefreshAt = Date.now();
+  void Promise.all([
+    workspaceStore.refreshTree({ silent: false }),
+    gitStore.refreshSummary({ silent: true })
+  ]);
 }
 
 function handleAutoRefresh(): void {
@@ -592,6 +714,10 @@ function handleAutoRefresh(): void {
     return;
   }
   void workspaceStore.refreshTree({ silent: true });
+  if (Date.now() - lastGitRefreshAt >= GIT_REFRESH_INTERVAL_MS) {
+    lastGitRefreshAt = Date.now();
+    void gitStore.refreshSummary({ silent: true });
+  }
 }
 
 function handleWindowPointerDown(event: PointerEvent): void {
@@ -1294,6 +1420,7 @@ defineExpose({
   __testUtils: import.meta.env.MODE === "test" ? {
     expandedPaths, contextMenu, clipboardState, pendingCreate, pendingRename, pendingRenameValue, dragTargetPath, rows,
     nodePath, normalizeNodePath, isChapterDirectory, diagnosticCount, directDiagnosticCount, hasDiagnostics,
+    diagnosticsForNode, diagnosticCounts, gitFilesForNode, gitDecoration, gitFileDecoration, buildPathIndex, hasNodeDecorations, treeRowTrailingWidth, formatBadgeCount,
     hasDirectDiagnostics, diagnosticSeverity, diagnosticHint, shouldShowRowActions, showDiagnosticDot, chapterCompletionLabel,
     isStorySegmentNode, storyDiagnosticCount, storyDiagnosticHint, shouldShowStoryRowActions, chapterStateTitle,
     isRenamingNode, handleRefresh, handleAutoRefresh, handleWindowPointerDown, handleSave, handleRowClick,
@@ -1319,14 +1446,33 @@ defineExpose({
   letter-spacing: 0;
 }
 
-.explorer-toolbar-btn small { min-width: 14px; font-size: 9px; color: var(--state-danger); }
-.explorer-problems { position: absolute; inset: auto 8px 8px; z-index: 12; max-height: 46%; display: flex; flex-direction: column; background: var(--surface-raised, #fff); border: 1px solid var(--border-ghost); box-shadow: 0 8px 28px rgba(15, 35, 65, .16); }
-.explorer-problems header { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--border-ghost); font-size: 12px; }
-.explorer-problems header strong { flex: 1; }.explorer-problems header select { font: inherit; }.explorer-problems header button { border: 0; background: transparent; cursor: pointer; }
+.explorer-header,
+.explorer-header-main,
+.explorer-header-row,
+.explorer-toolbar { overflow: visible; }
+.explorer-header-row { min-width: 0; gap: 4px; }
+.explorer-title { flex: 1 1 auto; min-width: 0; }
+.explorer-toolbar { flex: 0 0 auto; gap: 0; padding-right: 2px; }
+.explorer-toolbar-btn { flex: 0 0 26px; box-sizing: border-box; }
+.explorer-problems-trigger { position: relative; display: inline-flex; align-items: center; justify-content: center; overflow: visible; padding: 0; }
+.explorer-problems-trigger > .material-symbols-rounded { width: 18px; display: inline-flex; align-items: center; justify-content: center; overflow: visible; font-size: 18px; line-height: 1; }
+.explorer-problem-badge { position: absolute; right: 0; bottom: 0; min-width: 13px; height: 13px; padding: 0 3px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--bg-panel); border-radius: 7px; background: var(--state-danger); color: var(--accent-contrast, #fff); font-size: 8px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+.explorer-problems { position: absolute; inset: auto 8px 8px; z-index: 12; max-height: 46%; display: flex; flex-direction: column; overflow: hidden; opacity: 1; border: 1px solid var(--border-ghost); border-radius: 5px; background: var(--bg-sidebar, #fff); box-shadow: var(--shadow-popover); backdrop-filter: none; }
+.explorer-problems-header { display: flex; align-items: center; gap: 7px; padding: 7px 8px 7px 10px; border-bottom: 1px solid var(--border-ghost); font-size: 12px; }
+.explorer-problems-header strong { flex: 1; }
+.explorer-problem-filter { position: relative; height: 26px; display: inline-flex; align-items: center; gap: 3px; padding-left: 7px; border: 1px solid color-mix(in srgb, var(--text-muted) 22%, transparent); border-radius: 4px; background: color-mix(in srgb, var(--bg-card) 92%, transparent); color: var(--text-muted); }
+.explorer-problem-filter:hover { border-color: color-mix(in srgb, var(--accent) 36%, var(--border-subtle)); color: var(--text-main); }
+.explorer-problem-filter:focus-within { border-color: var(--accent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent); }
+.explorer-problem-filter .material-symbols-rounded { flex: none; font-size: 15px; pointer-events: none; }
+.explorer-problem-filter select { height: 100%; min-width: 52px; padding: 0 19px 0 1px; border: 0; outline: 0; appearance: none; background: transparent; color: var(--text-main); font: inherit; cursor: pointer; }
+.explorer-problem-filter .filter-chevron { position: absolute; right: 3px; font-size: 16px; }
+.explorer-problems-close { width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 4px; background: transparent; color: var(--text-muted); cursor: pointer; }
+.explorer-problems-close:hover { background: var(--bg-hover); color: var(--text-main); }
+.explorer-problems-close .material-symbols-rounded { font-size: 17px; }
 .explorer-problem-list { overflow: auto; }.explorer-problem-item { display: flex; align-items: flex-start; border-bottom: 1px solid var(--border-ghost); }
 .problem-open { flex: 1; min-width: 0; display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px; border: 0; background: transparent; text-align: left; cursor: pointer; }
 .problem-open > span:nth-child(2) { flex: 1; min-width: 0; }.problem-open strong,.problem-open small,.problem-open em { display: block; font-size: 11px; font-style: normal; }.problem-open small { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; }.problem-open em { margin-top: 3px; color: var(--text-secondary); }
-.problem-severity { width: 8px; height: 8px; margin-top: 4px; border-radius: 50%; background: #4b83d1; }.problem-severity.is-error { background: var(--danger); }.problem-severity.is-warning { background: #d99524; }
+.problem-severity { width: 8px; height: 8px; margin-top: 4px; border-radius: 50%; background: var(--state-info); }.problem-severity.is-error { background: var(--state-danger); }.problem-severity.is-warning { background: var(--state-warning); }
 .problem-fix { flex: none; align-self: center; margin-right: 8px; border: 1px solid var(--border-ghost); background: transparent; padding: 3px 6px; font-size: 10px; cursor: pointer; }.explorer-problem-empty { padding: 16px; color: var(--text-muted); font-size: 12px; text-align: center; }
 
 .tree-row-shell {
@@ -1334,8 +1480,63 @@ defineExpose({
 }
 
 .tree-row {
-  padding-right: 56px;
+  padding-right: 10px;
 }
+
+.tree-row-trailing {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  z-index: 2;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.tree-chapter-state {
+  position: relative;
+  flex: 0 0 16px;
+  width: 16px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: color-mix(in srgb, var(--text-muted) 60%, transparent);
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.tree-chapter-state.completed { color: var(--state-success); }
+.tree-chapter-state:hover { color: var(--text-main); }
+.tree-chapter-state.completed:hover { color: color-mix(in srgb, var(--state-success) 82%, var(--text-main)); }
+.tree-chapter-state input { position: absolute; width: 16px; height: 20px; margin: 0; opacity: 0; cursor: pointer; }
+.tree-chapter-state input:focus-visible + .material-symbols-rounded { outline: 1px solid var(--accent); outline-offset: 1px; border-radius: 50%; }
+.tree-chapter-state .material-symbols-rounded { width: 14px; height: 14px; display: inline-flex; align-items: center; justify-content: center; overflow: visible; font-size: 13px; line-height: 14px; pointer-events: none; }
+
+.tree-status-cluster {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  height: 22px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 22px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: auto;
+}
+
+.tree-diagnostic-number { min-width: 7px; height: 22px; display: inline-flex; align-items: center; justify-content: center; background: transparent; text-align: center; }
+.tree-diagnostic-number.is-error { color: var(--state-danger); }
+.tree-diagnostic-number.is-warning { color: var(--state-warning); }
+.tree-diagnostic-number.is-info { color: var(--state-info); }
+.tree-git-decoration { min-width: 10px; background: transparent; text-align: right; letter-spacing: -.02em; }
+.tree-git-decoration.is-uncommitted { color: var(--state-success); }
 
 .tree-view.is-import-drop-target {
   outline: 1px solid rgba(196, 100, 48, 0.45);

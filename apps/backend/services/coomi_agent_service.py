@@ -330,7 +330,7 @@ class StorydexCoomiAgentService:
                             "_type": "AgentError",
                             "_version": 1,
                             "error_type": type(exc).__name__,
-                            "message": str(exc),
+                            "message": _coomi_error_message(exc),
                             "details": {"traceId": trace_id, "runtime": "coomi"},
                         },
                     ))
@@ -650,7 +650,7 @@ class StorydexCoomiAgentService:
                         "_type": "AgentError",
                         "_version": 1,
                         "error_type": type(exc).__name__,
-                        "message": str(exc),
+                        "message": _coomi_error_message(exc),
                         "details": {"traceId": trace_id, "runtime": "coomi-loop"},
                     },
                 ))
@@ -1975,7 +1975,7 @@ class _CoomiEventTranslator:
                 "_type": "AgentError",
                 "_version": 1,
                 "error_type": "CoomiAgentError",
-                "message": str(getattr(event, "message", "") or ""),
+                "message": _coomi_error_message(getattr(event, "message", "") or ""),
                 "details": {"fatal": bool(getattr(event, "is_fatal", False))},
             }
         return None
@@ -2371,6 +2371,23 @@ def _model_display(provider: Any) -> str:
         except Exception:
             pass
     return str(getattr(provider, "model", "") or "coomi")
+
+
+def _coomi_error_message(error: Any) -> str:
+    message = str(error or "").strip()
+    lowered = message.lower()
+    if (
+        "model_not_supported" in lowered
+        or "not supported on the lite model list" in lowered
+        or ("model" in lowered and "use get" in lowered and "/models" in lowered)
+    ):
+        matched = re.search(r"model\s+([^\s'\"},]+)\s+is\s+not\s+supported", message, flags=re.IGNORECASE)
+        model = matched.group(1) if matched else "当前模型"
+        return (
+            f"模型 {model} 暂时未被服务端模型目录接受。Storydex 已自动重试一次仍未成功；"
+            "请打开 Coomi 设置，重新获取模型列表，选择可用模型后点击“应用”。"
+        )
+    return message or "Coomi 执行失败。"
 
 
 def _is_cancelled(token: Any) -> bool:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import os
+import sys
 from time import perf_counter
 from uuid import uuid4
 
@@ -89,9 +91,65 @@ def health_check() -> ApiEnvelope:
         "frontendStaticMode": settings.serve_frontend_static,
         "coomiVersion": coomi_version,
         "warnings": coomi_version["warnings"],
+        "memoryUsageMb": _process_memory_usage_mb(),
     }
     trace = ApiTrace(traceId=trace_id, durationMs=int((perf_counter() - started) * 1000))
     return success_response(data=data, trace=trace, audit=[])
+
+
+def _process_memory_usage_mb() -> int | None:
+    """Read resident memory without requiring a third-party package."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            from ctypes import wintypes
+
+            class ProcessMemoryCounters(ctypes.Structure):
+                _fields_ = [
+                    ("cb", wintypes.DWORD),
+                    ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                ]
+
+            counters = ProcessMemoryCounters()
+            counters.cb = ctypes.sizeof(counters)
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            psapi = ctypes.WinDLL("psapi", use_last_error=True)
+            get_current_process = kernel32.GetCurrentProcess
+            get_current_process.argtypes = []
+            get_current_process.restype = wintypes.HANDLE
+            get_process_memory_info = psapi.GetProcessMemoryInfo
+            get_process_memory_info.argtypes = [
+                wintypes.HANDLE,
+                ctypes.POINTER(ProcessMemoryCounters),
+                wintypes.DWORD,
+            ]
+            get_process_memory_info.restype = wintypes.BOOL
+            if not get_process_memory_info(get_current_process(), ctypes.byref(counters), counters.cb):
+                return None
+            return max(0, round(counters.WorkingSetSize / (1024 * 1024)))
+
+        statm = "/proc/self/statm"
+        if os.path.exists(statm):
+            with open(statm, "r", encoding="ascii") as handle:
+                resident_pages = int(handle.read().split()[1])
+            page_size = int(os.sysconf("SC_PAGE_SIZE"))
+            return max(0, round(resident_pages * page_size / (1024 * 1024)))
+
+        import resource
+
+        usage = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        bytes_used = usage if sys.platform == "darwin" else usage * 1024
+        return max(0, round(bytes_used / (1024 * 1024)))
+    except (ImportError, OSError, ValueError, AttributeError, IndexError):
+        return None
 
 
 @router.get("/sys/bootstrap", response_model=ApiEnvelope)
