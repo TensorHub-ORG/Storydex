@@ -261,6 +261,7 @@ const updatedAt = ref("");
 const errorMessage = ref("");
 const modelFetchMessage = ref("");
 const modelOptions = ref<string[]>([]);
+const modelsLoaded = ref(false);
 const configData = ref<Record<string, unknown>>(emptyConfig());
 const selectedProviderId = ref("");
 const formProviderId = ref("");
@@ -457,15 +458,31 @@ async function fetchModels(): Promise<void> {
   try {
     const result = await fetchAgentCoomiModels({ baseUrl, apiKey });
     modelOptions.value = normalizeModelOptions(result.data.models);
+    modelsLoaded.value = true;
     if (!modelOptions.value.length) {
       modelFetchMessage.value = "未获取到模型列表，可继续保留当前模型。";
       return;
     }
-    if (!form.model.trim()) {
+    const previousModel = form.model.trim();
+    const previousFastModel = form.fastModel.trim();
+    const modelChanged = !previousModel || !modelOptions.value.includes(previousModel);
+    const fastModelChanged = Boolean(previousFastModel) && !modelOptions.value.includes(previousFastModel);
+    if (modelChanged) {
       form.model = modelOptions.value[0];
+    }
+    if (fastModelChanged) {
+      form.fastModel = form.model || modelOptions.value[0];
+    }
+    if (modelChanged || fastModelChanged) {
       syncProviderFields();
     }
-    modelFetchMessage.value = `已获取 ${modelOptions.value.length} 个模型。`;
+    const adjustments = [
+      modelChanged && previousModel ? `标准模型已从 ${previousModel} 切换为 ${form.model}` : "",
+      fastModelChanged ? `快速模型已从 ${previousFastModel} 切换为 ${form.fastModel}` : ""
+    ].filter(Boolean);
+    modelFetchMessage.value = adjustments.length
+      ? `已获取 ${modelOptions.value.length} 个模型；${adjustments.join("；")}。请保存或应用配置。`
+      : `已获取 ${modelOptions.value.length} 个模型。`;
   } catch (error: unknown) {
     modelFetchMessage.value = error instanceof Error ? error.message : "获取模型失败。";
   } finally {
@@ -475,6 +492,9 @@ async function fetchModels(): Promise<void> {
 
 function optionsWithCurrentModel(currentModel: string): string[] {
   const current = currentModel.trim();
+  if (modelsLoaded.value && modelOptions.value.length > 0) {
+    return modelOptions.value;
+  }
   if (!current || modelOptions.value.includes(current)) {
     return modelOptions.value;
   }
@@ -497,6 +517,7 @@ function normalizeModelOptions(values: string[]): string[] {
 
 function resetModelOptions(): void {
   modelOptions.value = [];
+  modelsLoaded.value = false;
   modelFetchMessage.value = "";
 }
 

@@ -133,4 +133,6 @@ releases/
 # ----- Other -----
 .codex_tmp/
 videos/
+.kilo/
+.coomi/
 docs/宣发文档/

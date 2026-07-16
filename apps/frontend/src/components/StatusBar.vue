@@ -1,47 +1,55 @@
 <template>
   <footer class="status-bar">
     <div class="status-left">
-      <span>{{ workspaceStore.health?.service ?? "Storydex Core" }}</span>
-      <span>{{ connectionLabel }}</span>
+      <span>{{ readinessLabel }}</span>
+      <span>Memory Usage: {{ memoryUsageLabel }}</span>
       <span>{{ projectLabel }}</span>
-      <span v-if="workspaceStore.activeFile">File: {{ workspaceStore.activeFile }}</span>
-    </div>
-    <div class="status-right">
-      <span>Chars: {{ workspaceStore.wordCount }}</span>
-      <span>Lines: {{ workspaceStore.lineCount }}</span>
-      <span v-if="agentStore.lastTrace">Trace: {{ shortTrace(agentStore.lastTrace.traceId) }}</span>
     </div>
   </footer>
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
-import { useAgentStore } from "@/stores/agent";
+import { computed, onBeforeUnmount, onMounted } from "vue";
 import { useWorkspaceStore } from "@/stores/workspace";
 
-const agentStore = useAgentStore();
 const workspaceStore = useWorkspaceStore();
+const HEALTH_REFRESH_INTERVAL_MS = 15000;
+let healthRefreshTimer: number | null = null;
 
-const connectionLabel = computed(() => {
-  if (workspaceStore.isBootstrapping) return "Backend connecting";
-  if (workspaceStore.health?.status === "ok") return "Backend connected";
-  if (workspaceStore.workspaceError) return "Backend error";
+const readinessLabel = computed(() => {
+  if (workspaceStore.isBootstrapping) return "Connecting";
+  if (workspaceStore.health?.status === "ok") return "Ready";
+  if (workspaceStore.workspaceError) return "Error";
   return "Waiting";
 });
 
-const projectLabel = computed(() => {
-  if (workspaceStore.launchScreenVisible) {
-    return "No project";
+const memoryUsageLabel = computed(() => {
+  const rawValue = workspaceStore.health?.memoryUsageMb;
+  if (typeof rawValue !== "number" || !Number.isFinite(rawValue) || rawValue < 0) {
+    return "-- MB";
   }
+  return `${Math.round(rawValue)} MB`;
+});
+
+const projectLabel = computed(() => {
+  if (workspaceStore.launchScreenVisible) return "No project";
   return workspaceStore.currentProject?.projectName || workspaceStore.health?.projectName || "No project";
 });
 
-function shortTrace(traceId: string): string {
-  if (!traceId) {
-    return "unknown";
+onMounted(() => {
+  healthRefreshTimer = window.setInterval(() => {
+    if (!workspaceStore.isBootstrapping) {
+      void workspaceStore.refreshHealth();
+    }
+  }, HEALTH_REFRESH_INTERVAL_MS);
+});
+
+onBeforeUnmount(() => {
+  if (healthRefreshTimer !== null) {
+    window.clearInterval(healthRefreshTimer);
+    healthRefreshTimer = null;
   }
-  return `${traceId.slice(0, 8)}...${traceId.slice(-4)}`;
-}
+});
 </script>
 
 <style scoped></style>

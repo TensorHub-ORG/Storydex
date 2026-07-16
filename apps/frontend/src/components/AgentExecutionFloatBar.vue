@@ -64,7 +64,7 @@ const emit = defineEmits<{
 const taskPopoverOpen = ref(false);
 
 const activeRun = computed(() => agentStore.activeTraceRun);
-const ledger = computed(() => activeRun.value?.changeLedger || null);
+const ledger = computed(() => agentStore.liveChangeLedger);
 const changedCount = computed(() => ledger.value?.changedFileCount || ledger.value?.changedFiles?.length || 0);
 const diffTotals = computed(() => ({
   files: changedCount.value,

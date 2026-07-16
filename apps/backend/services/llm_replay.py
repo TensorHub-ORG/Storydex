@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import hashlib
 import json
@@ -186,7 +187,9 @@ class ReplayableLLMProvider:
                 ),
             )
         else:
-            response = await self._provider.chat(messages, tools, **kwargs)
+            response = await _call_with_model_catalog_retry(
+                lambda: self._provider.chat(messages, tools, **kwargs)
+            )
             normalized_usage = self._count_usage(
                 call_ref,
                 _usage_from_chat_response(
@@ -214,7 +217,9 @@ class ReplayableLLMProvider:
             return
 
         chunks: list[str] = []
-        async for chunk in self._provider.chat_stream(messages, **kwargs):
+        async for chunk in _iterate_with_model_catalog_retry(
+            lambda: self._provider.chat_stream(messages, **kwargs)
+        ):
             value = str(chunk)
             chunks.append(value)
             yield value
@@ -256,7 +261,9 @@ class ReplayableLLMProvider:
         chunks: list[dict[str, Any]] = []
         latest_usage: dict[str, Any] | None = None
         usage_snapshot_count = 0
-        async for chunk in self._provider.chat_stream_with_tools(messages, tools, **kwargs):
+        async for chunk in _iterate_with_model_catalog_retry(
+            lambda: self._provider.chat_stream_with_tools(messages, tools, **kwargs)
+        ):
             value = _sanitize(chunk)
             usage = _usage_from_stream_chunk(value)
             if usage is not None:
@@ -285,7 +292,6 @@ class ReplayableLLMProvider:
                 f"Replay has {len(self._records) - consumed} unused record(s): "
                 f"consumed={consumed}, total={len(self._records)}"
             )
-
     def _request(
         self,
         method: str,
@@ -553,6 +559,39 @@ class ReplayableLLMProvider:
                     }
                 )
         return normalized_usage
+
+
+async def _call_with_model_catalog_retry(factory: Any) -> Any:
+    try:
+        return await factory()
+    except Exception as exc:
+        if not _is_model_catalog_mismatch(exc):
+            raise
+        await asyncio.sleep(0.65)
+        return await factory()
+
+
+async def _iterate_with_model_catalog_retry(factory: Any) -> AsyncIterator[Any]:
+    for attempt in range(2):
+        emitted = False
+        try:
+            async for item in factory():
+                emitted = True
+                yield item
+            return
+        except Exception as exc:
+            if attempt > 0 or emitted or not _is_model_catalog_mismatch(exc):
+                raise
+            await asyncio.sleep(0.65)
+
+
+def _is_model_catalog_mismatch(error: Exception) -> bool:
+    message = str(error or "").lower()
+    return (
+        "model_not_supported" in message
+        or "not supported on the lite model list" in message
+        or ("model" in message and "use get" in message and "/models" in message)
+    )
 
 
 def _stable_json(value: Any) -> str:

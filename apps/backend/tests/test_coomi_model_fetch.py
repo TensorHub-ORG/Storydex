@@ -84,6 +84,16 @@ def test_list_models_sanitizes_transport_errors():
     assert "Model list request failed" in message
 
 
+def test_model_catalog_error_is_rewritten_as_actionable_message():
+    message = coomi_module._coomi_error_message(
+        "BadRequestError: Model deepseek-v4-pro is not supported on the lite model list. "
+        "Use GET /inference/go/openai/v1/models; source C:/secret/loop.py"
+    )
+    assert "deepseek-v4-pro" in message
+    assert "自动重试一次" in message
+    assert "C:/secret" not in message
+
+
 def test_write_config_preserves_user_chat_completion_url(monkeypatch, tmp_path):
     config_path = tmp_path / ".storydex" / ".coomi" / "config" / "providers.json"
     monkeypatch.setattr(coomi_module, "STORYDEX_COOMI_HOME", tmp_path / ".storydex")

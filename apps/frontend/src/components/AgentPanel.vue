@@ -16,12 +16,13 @@
         </button>
         <div class="coomi-run-state" :class="{ running: agentStore.isRunning }">
           <span class="coomi-dot"></span>
-          <span>{{ agentStore.statusLabel }}</span>
+          <span>{{ headerStatusLabel }}</span>
         </div>
       </div>
     </header>
 
-    <main ref="streamRef" class="coomi-stream" :class="{ 'config-open': configPanelOpen }">
+    <div class="coomi-stream-shell">
+      <main ref="streamRef" class="coomi-stream" :class="{ 'config-open': configPanelOpen }" @scroll.passive="handleStreamScroll">
       <CoomiConfigPanel
         v-if="configPanelOpen"
         :visible="configPanelOpen"
@@ -160,10 +161,21 @@
           </div>
         </article>
       </section>
-    </main>
+      </main>
+      <button
+        v-if="showScrollToLatest"
+        class="coomi-scroll-latest"
+        type="button"
+        title="回到最新输出"
+        aria-label="回到最新输出"
+        @click="scrollToBottom(true)"
+      >
+        <span class="material-symbols-rounded">south</span>
+      </button>
+    </div>
 
     <footer ref="composerRef" class="coomi-composer">
-      <div v-if="agentStore.lastError" class="coomi-error">{{ agentStore.lastError }}</div>
+      <div v-if="composerError" class="coomi-error">{{ composerError }}</div>
       <div v-if="collapsedHandlesVisible" class="coomi-collapsed-handles">
         <button
           v-if="executionFloatVisible && executionFloatCollapsed"
@@ -510,6 +522,7 @@ import MarkdownIt from "markdown-it";
 import AgentExecutionFloatBar from "@/components/AgentExecutionFloatBar.vue";
 import CoomiConfigPanel from "@/components/CoomiConfigPanel.vue";
 import { useAgentStore } from "@/stores/agent";
+import { useGitStore } from "@/stores/git";
 import { useWorkspaceStore } from "@/stores/workspace";
 import {
   findMarkdownLinkAnchor,
@@ -553,6 +566,7 @@ type ApprovalDraft = { value: string; text: string };
 
 const TOOL_CHUNK_SIZE = 5;
 const agentStore = useAgentStore();
+const gitStore = useGitStore();
 const workspaceStore = useWorkspaceStore();
 const configPanelOpen = ref(false);
 const sessionMenuOpen = ref(false);
@@ -574,12 +588,17 @@ const commitPromptMode = ref<"auto" | "manual" | "skip" | "">("");
 const commitMessage = ref("");
 const executionFloatCollapsed = ref(false);
 const promptDockCollapsed = ref(false);
+const shouldFollowOutput = ref(true);
+const showScrollToLatest = ref(false);
+const runtimeNow = ref(Date.now());
+let runtimeTimer: number | null = null;
+const SCROLL_BOTTOM_THRESHOLD = 48;
 const executionFloatSignature = computed(() => {
   if (workspaceStore.launchScreenVisible) {
     return "";
   }
   const run = agentStore.activeTraceRun;
-  const ledger = run?.changeLedger || null;
+  const ledger = agentStore.liveChangeLedger;
   const changedFiles = ledger?.changedFiles || [];
   const changedCount = ledger?.changedFileCount || changedFiles.length || 0;
   if (!run || changedCount <= 0) {
@@ -595,6 +614,20 @@ const executionFloatSignature = computed(() => {
   ].join("::");
 });
 const executionFloatVisible = computed(() => Boolean(executionFloatSignature.value));
+const headerStatusLabel = computed(() => {
+  if (!agentStore.isRunning) {
+    return "Coomi · Ready";
+  }
+  const startedAt = agentStore.runStartedAt || Date.parse(agentStore.activeTraceRun?.createdAt || "") || runtimeNow.value;
+  return `Coomi · Running ${formatRunDuration(runtimeNow.value - startedAt)}`;
+});
+const composerError = computed(() => {
+  const message = agentStore.lastError.trim();
+  if (!message || message === agentStore.activeTraceRun?.errorMessage?.trim()) {
+    return "";
+  }
+  return message;
+});
 const slashCommands = [
   { value: "/plan", description: "进入计划模式" },
   { value: "/exit_plan", description: "退出计划模式" },
@@ -816,14 +849,54 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener("pointerdown", handleDocumentPointerDown);
+  stopRuntimeTimer();
 });
 
 watch(
   () => agentStore.executionHistory,
   () => {
-    void nextTick(scrollToBottom);
+    void nextTick(() => {
+      if (shouldFollowOutput.value) {
+        scrollToBottom(false);
+      } else {
+        updateScrollFollowState();
+      }
+    });
   },
   { deep: true }
+);
+
+watch(
+  () => agentStore.currentTraceId,
+  (traceId, previousTraceId) => {
+    if (traceId && traceId !== previousTraceId && agentStore.isRunning) {
+      shouldFollowOutput.value = true;
+      showScrollToLatest.value = false;
+      void nextTick(() => scrollToBottom(false));
+    }
+  }
+);
+
+watch(
+  () => agentStore.isRunning,
+  (running) => {
+    if (running) {
+      startRuntimeTimer();
+      return;
+    }
+    stopRuntimeTimer();
+  },
+  { immediate: true }
+);
+
+watch(
+  () => gitStore.summary?.clean,
+  (clean) => {
+    if (clean === true) {
+      agentStore.clearLiveChanges();
+    }
+  },
+  { immediate: true }
 );
 
 watch(
@@ -1290,11 +1363,60 @@ function approvalOptionDescription(value: string): string {
   return value === "allow" ? "批准本次工具调用。" : "拒绝本次工具调用。";
 }
 
-function scrollToBottom(): void {
+function isStreamNearBottom(stream: HTMLElement): boolean {
+  return stream.scrollHeight - stream.scrollTop - stream.clientHeight <= SCROLL_BOTTOM_THRESHOLD;
+}
+
+function updateScrollFollowState(): void {
   const stream = streamRef.value;
-  if (stream) {
-    stream.scrollTop = stream.scrollHeight;
+  if (!stream) {
+    return;
   }
+  const nearBottom = isStreamNearBottom(stream);
+  shouldFollowOutput.value = nearBottom;
+  showScrollToLatest.value = !nearBottom;
+}
+
+function handleStreamScroll(): void {
+  updateScrollFollowState();
+}
+
+function scrollToBottom(resumeFollow = true): void {
+  const stream = streamRef.value;
+  if (!stream) {
+    return;
+  }
+  if (resumeFollow) {
+    shouldFollowOutput.value = true;
+  }
+  stream.scrollTop = stream.scrollHeight;
+  showScrollToLatest.value = false;
+}
+
+function formatRunDuration(durationMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(durationMs / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h${minutes}m${seconds}s`;
+  if (minutes > 0) return `${minutes}m${seconds}s`;
+  return `${seconds}s`;
+}
+
+function startRuntimeTimer(): void {
+  stopRuntimeTimer();
+  runtimeNow.value = Date.now();
+  runtimeTimer = window.setInterval(() => {
+    runtimeNow.value = Date.now();
+  }, 1000);
+}
+
+function stopRuntimeTimer(): void {
+  if (runtimeTimer !== null) {
+    window.clearInterval(runtimeTimer);
+    runtimeTimer = null;
+  }
+  runtimeNow.value = Date.now();
 }
 
 function displayEntries(run: AgentExecutionRun): DisplayEntry[] {
@@ -1645,7 +1767,13 @@ defineExpose({
     handleCommitPromptSkip,
     approvalOptionLabel,
     approvalOptionDescription,
+    isStreamNearBottom,
+    updateScrollFollowState,
+    handleStreamScroll,
     scrollToBottom,
+    formatRunDuration,
+    startRuntimeTimer,
+    stopRuntimeTimer,
     displayEntries,
     toolGroupStatus,
     isFoldOpen,
@@ -1773,12 +1901,45 @@ defineExpose({
 }
 
 .coomi-stream {
-  flex: 1 1 0;
-  min-height: 0;
+  height: 100%;
   max-height: 100%;
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 16px 18px 22px;
+}
+
+.coomi-stream-shell {
+  position: relative;
+  flex: 1 1 0;
+  min-height: 0;
+}
+
+.coomi-scroll-latest {
+  position: absolute;
+  right: 18px;
+  bottom: 12px;
+  z-index: 7;
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid color-mix(in srgb, var(--text-muted) 22%, transparent);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--bg-card) 96%, transparent);
+  color: var(--text-secondary);
+  box-shadow: var(--shadow-popover);
+  cursor: pointer;
+}
+
+.coomi-scroll-latest:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent-soft) 24%, var(--bg-card));
+  color: var(--accent);
+}
+
+.coomi-scroll-latest .material-symbols-rounded {
+  font-size: 18px;
 }
 
 .coomi-stream.config-open {
@@ -2238,6 +2399,13 @@ defineExpose({
   overflow: visible;
 }
 
+.coomi-composer-status > .coomi-status-pill,
+.coomi-composer-status > .coomi-status-control {
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+}
+
 .coomi-status-pill {
   min-width: 0;
   max-width: 145px;
@@ -2250,10 +2418,13 @@ defineExpose({
 
 .coomi-status-button {
   flex: 0 0 auto;
+  min-height: 24px;
+  padding: 0;
   border: 0;
   background: transparent;
   color: var(--text-soft);
   font-family: inherit;
+  line-height: 1;
   cursor: pointer;
 }
 
@@ -2314,12 +2485,15 @@ defineExpose({
   align-items: center;
   gap: 3px;
   max-width: 118px;
+  height: 24px;
+  vertical-align: middle;
 }
 
 .coomi-story-toggle .material-symbols-rounded {
   flex: 0 0 auto;
   font-size: 15px;
   line-height: 1;
+  align-self: center;
 }
 
 .coomi-story-toggle span:nth-child(2) {
