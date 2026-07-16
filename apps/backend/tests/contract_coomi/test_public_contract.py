@@ -5,16 +5,14 @@ import asyncio
 from importlib.metadata import version
 
 from services.coomi_agent_service import _CoomiEventTranslator
+from services.coomi_version_service import read_expected_coomi_version
 
 
 def test_usage_provenance_public_contract_or_pinned_legacy_baseline():
-    try:
-        from coomi.services import LLMUsage
-        from coomi.services.llm import UsageStreamAccumulator, usage_from_response
-    except ImportError:
-        # Storydex remains installable against the published pin until the T8 wheel ships.
-        assert version("coomi-agent") == "1.1.2"
-        return
+    from coomi.services import LLMUsage
+    from coomi.services.llm import UsageStreamAccumulator, usage_from_response
+
+    assert version("coomi-agent") == read_expected_coomi_version()
 
     missing = LLMUsage(
         source="missing",

@@ -30,6 +30,12 @@ function walk(directory) {
 function sha256(filePath) {
   return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex").toUpperCase();
 }
+function readExpectedCoomiVersion() {
+  const content = fs.readFileSync(path.join(repoRoot, "requirements.txt"), "utf8");
+  const matches = [...content.matchAll(/^\s*coomi-agent\s*==\s*([A-Za-z0-9_.+!-]+)\s*(?:#.*)?$/gim)];
+  if (matches.length !== 1) throw new Error("root requirements.txt must pin coomi-agent exactly once");
+  return matches[0][1];
+}
 
 requireFile("Storydex executable", path.join(unpacked, "Storydex.exe"));
 const resources = path.join(unpacked, "resources");
@@ -39,6 +45,16 @@ requireFile("frontend index", path.join(appRoot, "frontend-dist", "index.html"))
 requireDirectory("backend source", path.join(appRoot, "backend"));
 requireFile("runtime requirements", path.join(appRoot, "backend", "requirements-runtime.txt"));
 requireFile("runtime requirements lock", path.join(appRoot, "backend", "requirements-runtime.lock"));
+requireFile(
+  "Storydex Coomi usage wheel",
+  path.join(
+    appRoot,
+    "backend",
+    "vendor",
+    "python",
+    `coomi_agent-${readExpectedCoomiVersion()}-py3-none-any.whl`
+  )
+);
 requireDirectory("embedded Python", path.join(appRoot, "python-env"));
 requireDirectory("MinGit", path.join(appRoot, "mingit"));
 requireFile("updater config", path.join(resources, "app-update.yml"));

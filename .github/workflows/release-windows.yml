@@ -98,7 +98,7 @@ jobs:
             setup_name = "StorydexSetup-x64-$version.exe"
             blockmap_name = "StorydexSetup-x64-$version.exe.blockmap"
             unpacked_zip_name = "Storydex-win-unpacked.zip"
-            release_name = "Storydex $tag"
+            release_name = $tag
           }
 
           foreach ($entry in $outputs.GetEnumerator()) {

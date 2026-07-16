@@ -46,3 +46,11 @@ test("Python bootstrap prefers standard Python 3.9 before Conda fallback", () =>
   assert.ok(candidateSource.indexOf('$candidates = @(') < candidateSource.indexOf("Get-CondaPython39Candidate"));
   assert.match(candidateSource, /STORYDEX_PYTHON_SOURCE/);
 });
+
+test("embedded Python validation accepts only the vendored wheel source", () => {
+  const source = fs.readFileSync(
+    path.resolve(__dirname, "../scripts/validate-embedded-python.cjs"),
+    "utf8"
+  );
+  assert.match(source, /\^--find-links\\s\+vendor\\\/python\$/i);
+});

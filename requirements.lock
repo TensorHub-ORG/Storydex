@@ -4,6 +4,8 @@
 #
 #    pip-compile --generate-hashes --no-strip-extras --output-file=requirements.lock requirements.txt
 #
+--find-links vendor/python
+
 annotated-types==0.7.0 \
     --hash=sha256:1f02e8b43a8fbbc3f3e0d4f0f4bfc8131bcb4eebe8849b8e5c773f3a1c582a53 \
     --hash=sha256:aff07c09a53a08bc8cfccb9c85b05f1aa9a2a6f23728d790723543408344ce89
@@ -167,9 +169,8 @@ colorama==0.4.6 \
     #   click
     #   pytest
     #   tqdm
-coomi-agent==1.1.2 \
-    --hash=sha256:0e2e5d358593680463dd4bf5cc6ddd6fc1252fccb16d6151c0614ccfae4c5e6c \
-    --hash=sha256:75cbfd41538bf34d2a646e5ba4cbfd9139de6bcabf0b88139bedda957b7ba578
+coomi-agent==1.1.2+storydex.usage1 \
+    --hash=sha256:e7d1ebc547225d525e06ac6bcd1861949ff01b85408eee2cd8ab0a04d9b8a16b
     # via -r requirements.txt
 distro==1.9.0 \
     --hash=sha256:2fa77c6fd8940f116ee1d6b94a2f90b13b5ea8d019b98bc8bafdcabcdd9bdbed \

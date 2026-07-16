@@ -1,7 +1,7 @@
 {
   "name": "storydex-desktop",
   "private": true,
-  "version": "0.3.10",
+  "version": "0.4.0",
   "description": "Storydex desktop app",
   "main": "electron/main.cjs",
   "scripts": {
@@ -42,7 +42,7 @@
       "output": "release"
     },
     "extraMetadata": {
-      "version": "0.3.10",
+      "version": "0.4.0",
       "storydexUpdateFeedUrl": "https://updates.septemc.com/storydex/windows/"
     },
     "files": [
