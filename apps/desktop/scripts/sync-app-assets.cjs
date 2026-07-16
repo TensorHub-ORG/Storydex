@@ -27,6 +27,7 @@ const embeddedPythonTarget = path.join(appRoot, "python-env");
 const desktopIconTarget = path.join(appRoot, "assets", "Storydex_icon", "storydex_icon_01.png");
 const requirementsSource = path.join(repoRoot, "requirements.txt");
 const requirementsLockSource = path.join(repoRoot, "requirements.lock");
+const pythonWheelSource = path.join(repoRoot, "vendor", "python");
 
 function ensureSource(pathValue, label) {
   if (!fs.existsSync(pathValue)) {
@@ -99,8 +100,10 @@ function copyBackendSource() {
 function copyRuntimeDependencyManifests() {
   ensureSource(requirementsSource, "root Python requirements");
   ensureSource(requirementsLockSource, "hashed Python requirements lock");
+  ensureSource(pythonWheelSource, "vendored Python wheels");
   fs.copyFileSync(requirementsSource, path.join(backendTarget, "requirements-runtime.txt"));
   fs.copyFileSync(requirementsLockSource, path.join(backendTarget, "requirements-runtime.lock"));
+  fs.cpSync(pythonWheelSource, path.join(backendTarget, "vendor", "python"), { recursive: true });
 }
 
 function copyHelpGuide() {

@@ -21,7 +21,7 @@
 </table>
 
 <p align="center">
-  <img alt="release" src="https://img.shields.io/badge/release-v0.3.10-2563eb?style=flat-square" />
+  <img alt="release" src="https://img.shields.io/badge/release-v0.4.0-2563eb?style=flat-square" />
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0%20%2B%20Commons%20Clause-0f766e?style=flat-square" />
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-f97316?style=flat-square" />
   <img alt="desktop" src="https://img.shields.io/badge/desktop-Electron%2034-47848f?style=flat-square&logo=electron&logoColor=white" />
@@ -110,6 +110,16 @@ Storydex/
 ## 作者与版权
 
 Copyright 2026 Septemc and Flowby.
+
+## v0.4.0
+
+v0.4.0 为 Storydex 接入基于 Coomi 1.1.2 的专用 usage 适配版，重点提升长会话用量统计的可信度与发布一致性。
+
+- 区分 Provider 上游报告、缺失、历史未知和本地估算 usage，避免把字符估算误记为真实用量。
+- 支持 OpenAI-compatible 与 Anthropic usage、缓存与推理 token，并正确折叠流式累计快照。
+- 项目 Python、全哈希依赖锁、桌面内嵌 Python 和安装包统一使用 `coomi-agent==1.1.2+storydex.usage1`。
+- 加强专用 wheel 的 SHA-256、运行时版本、桌面同步和打包资产校验。
+- 真实增长会话连续 3 轮、11 次 Provider 请求通过，usage 覆盖率 100%，录制/回放零差异。
 
 ## v0.3.10
 

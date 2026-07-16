@@ -59,6 +59,7 @@ function readLockedVersions(filePath) {
   const versions = {};
   for (const line of logicalLines) {
     if (!line || line.startsWith("#")) continue;
+    if (/^--find-links\s+vendor\/python$/i.test(line)) continue;
     const match = line.match(/^([A-Za-z0-9_.-]+)(?:\[[^\]]+\])?==([^\s;\\]+)/);
     if (!match) throw new Error(`unrecognized locked requirement: ${line}`);
     const hashes = line.match(/--hash=sha256:[a-f0-9]{64}/gi) || [];
