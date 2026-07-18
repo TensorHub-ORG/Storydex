@@ -26,12 +26,11 @@ $env:STORYDEX_TESTING = "1"
 
 Invoke-Step "Encoding policy" { node (Join-Path $repoRoot "scripts/validate_text_encoding.cjs") }
 Invoke-Step "Conflict markers" {
-  $conflicts = & rg -n '^(<<<<<<< .+|=======|>>>>>>> .+)$' `
-    --glob '!apps/desktop/app/python-env/**' `
-    --glob '!apps/desktop/vendor/**' `
-    --glob '!apps/desktop/release/**' `
-    --glob '!releases/**' `
-    $repoRoot
+  $conflicts = & git -C $repoRoot grep -n -E '^(<<<<<<< .+|=======|>>>>>>> .+)$' -- . `
+    ':(exclude)apps/desktop/app/**' `
+    ':(exclude)apps/desktop/vendor/**' `
+    ':(exclude)apps/desktop/release/**' `
+    ':(exclude)releases/**'
   $searchCode = $LASTEXITCODE
   if ($searchCode -gt 1) { throw "Conflict-marker scan failed with exit code $searchCode" }
   if ($conflicts) { $conflicts | Write-Host; throw "Conflict markers found" }
