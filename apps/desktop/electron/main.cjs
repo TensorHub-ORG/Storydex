@@ -269,9 +269,23 @@ function resolveBackendDirectory() {
 
 function resolveHelpGuideRoot() {
   if (app.isPackaged) {
-    return path.join(resolvePackagedContentRoot(), "docs", "使用指南");
+    return path.join(resolvePackagedContentRoot(), "docs", "guide");
   }
-  return path.resolve(__dirname, "..", "..", "..", "docs", "使用指南");
+  return path.resolve(__dirname, "..", "..", "..", "docs", "guide");
+}
+
+function resolvePromptRepositoryRoot() {
+  if (app.isPackaged) {
+    return path.join(resolvePackagedContentRoot(), "docs", "prompts");
+  }
+  return path.resolve(__dirname, "..", "..", "..", "docs", "prompts");
+}
+
+function resolveBuiltinSkillsRoot() {
+  if (app.isPackaged) {
+    return path.join(resolvePackagedContentRoot(), "docs", "skills");
+  }
+  return path.resolve(__dirname, "..", "..", "..", "docs", "skills");
 }
 
 function resolveMinGitDirectory() {
@@ -915,6 +929,8 @@ function buildBackendEnvironment(candidate, runtimeEnvironment) {
   const gitExecutable = resolveMinGitExecutable();
   const mingitRoot = resolveMinGitDirectory();
   const helpGuideRoot = resolveHelpGuideRoot();
+  const promptRepositoryRoot = resolvePromptRepositoryRoot();
+  const builtinSkillsRoot = resolveBuiltinSkillsRoot();
   const pathEntries = [...buildMinGitPathEntries(), ...(candidate.pathEntries || [])].filter((entry) => !!entry);
   const currentPath = String(process.env.PATH || "");
   const nextPath = pathEntries.length
@@ -929,6 +945,8 @@ function buildBackendEnvironment(candidate, runtimeEnvironment) {
     STORYDEX_WORKSPACE_ROOT: runtimeEnvironment.workspaceRoot,
     STORYDEX_GLOBAL_ROOT: runtimeEnvironment.globalRoot,
     STORYDEX_HELP_GUIDE_ROOT: helpGuideRoot,
+    STORYDEX_PROMPT_REPOSITORY_ROOT: promptRepositoryRoot,
+    STORYDEX_BUILTIN_SKILLS_ROOT: builtinSkillsRoot,
     STORYDEX_MINGIT_ROOT: mingitRoot,
     STORYDEX_GIT_EXECUTABLE: gitExecutable,
     PYTHONUTF8: "1"

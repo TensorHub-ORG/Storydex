@@ -72,6 +72,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare_release_bund
 
 安装包和便携包都必须包含可启动的桌面应用、前端生产资源、后端服务、内置 Python 运行时、固定依赖和 MinGit。便携 ZIP 解压后必须能找到 `Storydex.exe`。
 
+以下创作资源目录必须递归完整封装，并与仓库源文件逐文件一致：
+
+- `docs/guide`：应用内使用指南。
+- `docs/prompts`：指令仓库及分类提示词模板。
+- `docs/skills`：新建小说项目时使用的详细通用内置技能模板。
+
+封装校验不得只检查目录或 `README.md` 是否存在，必须比对递归文件列表和文件内容摘要，防止分类子目录或技能模板漏包。
+
 ## 5. Git 提交、标签与 GitHub Release
 
 1. 检查 `git status`，确认提交内容只包含本次发行需要的源码、文档和版本文件。
@@ -153,3 +161,4 @@ Invoke-WebRequest -UseBasicParsing -Method Head "$base/StorydexSetup-x64-1.0.0.e
 - 安装包：`StorydexSetup-x64-1.0.0.exe`
 - 更新目录：`/www/wwwroot/updates.septemc.com/storydex/windows`
 - 更新元数据：`https://updates.septemc.com/storydex/windows/latest.yml`
+- 必须内置：`docs/guide`、`docs/prompts`、`docs/skills`

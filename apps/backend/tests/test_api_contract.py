@@ -60,6 +60,14 @@ class _Help:
     def search(self, query, *, max_results):
         return {"query": query, "items": [{"title": "Result"}] * min(max_results, 2)}
 
+    def read_repository(self, *, query, category):
+        return {
+            "query": query,
+            "category": category,
+            "categories": [{"id": "项目包装", "label": "项目包装", "count": 1}],
+            "items": [{"id": "项目包装/简介", "title": "生成简介", "promptText": "请生成简介"}],
+        }
+
 
 class _History:
     def list_session_summaries(self):
@@ -117,6 +125,7 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setattr(routes_sys, "get_project_service", lambda: project)
     monkeypatch.setattr(routes_sys, "get_global_config_service", lambda: global_config)
     monkeypatch.setattr(routes_help, "get_help_guide_service", lambda: _Help())
+    monkeypatch.setattr(routes_help, "get_prompt_repository_service", lambda: _Help())
     monkeypatch.setattr(routes_agent, "project_service", project)
     monkeypatch.setattr(routes_agent, "trace_history_service", _History())
     monkeypatch.setattr(routes_agent, "get_storydex_coomi_agent_service", lambda: coomi)
@@ -149,6 +158,8 @@ def test_system_envelopes_and_preferences_round_trip(client):
 def test_help_contract_and_validation_error_envelope(client):
     assert len(assert_success(client.get("/api/v1/help/guide"))["data"]["items"]) == 1
     assert len(assert_success(client.get("/api/v1/help/guide/search?q=agent&limit=2"))["data"]["items"]) == 2
+    prompts = assert_success(client.get("/api/v1/help/prompts?q=简介&category=项目包装"))["data"]
+    assert prompts["items"][0]["title"] == "生成简介"
     invalid = client.get("/api/v1/help/guide/search?limit=0", headers={"x-trace-id": "trace-validation"})
     assert invalid.status_code == 422
     assert invalid.json()["error"]["code"] == "request_validation_error"

@@ -43,6 +43,7 @@ import MessageBubble from "@/components/MessageBubble.vue";
 import PresetEditor from "@/components/PresetEditor.vue";
 import PresetImportPreview from "@/components/PresetImportPreview.vue";
 import PresetSidebar from "@/components/PresetManagementSidebar.vue";
+import PromptRepositorySidebar from "@/components/PromptRepositorySidebar.vue";
 import SearchToolSidebar from "@/components/SourceControlSidebar.vue";
 import StatusBar from "@/components/StatusBar.vue";
 import StorySettingsPanel from "@/components/StorySettingsPanel.vue";
@@ -62,7 +63,7 @@ describe("frontend component inventory", () => {
   const components = [
     App, AccountMenu, ActivityBar, AgentFloatBar, AgentPanel, AuthConfigPanel,
     EditorPane, ExplorerSidebar, FilePreviewPane, MessageBubble, PresetEditor,
-    PresetImportPreview, PresetSidebar, SearchToolSidebar, StatusBar,
+    PresetImportPreview, PresetSidebar, PromptRepositorySidebar, SearchToolSidebar, StatusBar,
     StorySettingsPanel, StoryStatePanel, SettingsWindow, ToolCallCard, TopHeader,
     TracePanel, WorkspaceStartPage, WorkbenchLayout, FilePreviewView, WorkbenchView
   ];

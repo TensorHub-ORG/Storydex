@@ -3,6 +3,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import logging
+import os
 import re
 import shutil
 from dataclasses import dataclass
@@ -164,7 +165,7 @@ _CHAPTER_MEMORY_README_TEMPLATE = """# 剧情片段变量更新
 - `<片段名>.variables.json` 是可选机器快照，仅在存在明确结构化变量操作时生成。
 """
 
-_DEFAULT_AGENT_SKILLS: Dict[str, str] = {
+_LEGACY_AGENT_SKILLS_V1: Dict[str, str] = {
     "设计角色.md": """# 设计角色
 
 用途：创建或补全角色档案。
@@ -240,14 +241,219 @@ _DEFAULT_AGENT_SKILLS: Dict[str, str] = {
 """,
 }
 
+
+def _build_default_skill_document(
+    *,
+    title: str,
+    purpose: str,
+    triggers: List[str],
+    inputs: List[str],
+    asset_targets: List[str],
+    steps: List[str],
+    output_template: str,
+    checks: List[str],
+    boundaries: Optional[List[str]] = None,
+) -> str:
+    lines = [
+        f"# {title}",
+        "",
+        "> 模板版本：2｜适用范围：任意 Storydex 小说项目｜性质：可直接执行的通用技能模板",
+        "",
+        "## 1. 技能用途",
+        "",
+        purpose.strip(),
+        "",
+        "## 2. 适用触发",
+        "",
+        *[f"- {item}" for item in triggers],
+        "",
+        "## 3. 通用前置规则",
+        "",
+        "- 先确认当前工作区是 Storydex 小说项目，并以当前项目根目录作为唯一工作范围。",
+        "- 先读取与任务直接相关的正文、角色、世界书、剧本、记忆、WIKI 和有效预设；禁止无目的全量读取。",
+        "- 证据优先级：用户本轮明确要求 > 正文与用户确认内容 > 正式角色/世界书/剧本 > WIKI 与结构化记忆 > 派生摘要与推测。",
+        "- 项目没有提供的信息必须写“未知”“待确认”或“候选”，不得补成既定事实。",
+        "- 写入前检查目标文件是否存在；保留用户已有结构、字段和自定义内容，不得静默覆盖。",
+        "",
+        "## 4. 输入检查清单",
+        "",
+        *[f"- {item}" for item in inputs],
+        "",
+        "## 5. 允许的资产落点",
+        "",
+        *[f"- `{item}`" for item in asset_targets],
+        "",
+        "除非用户明确要求，本技能不得把中间分析写入正文目录；草案可先放在回答中或 `.storydex/temp/`。",
+        "",
+        "## 6. 执行步骤",
+        "",
+        *[f"{index}. {item}" for index, item in enumerate(steps, start=1)],
+        "",
+        "## 7. 输出模板",
+        "",
+        "```markdown",
+        output_template.strip(),
+        "```",
+        "",
+        "## 8. 完成前自检",
+        "",
+        *[f"- [ ] {item}" for item in checks],
+        "",
+        "## 9. 安全边界",
+        "",
+        "- 不删除用户文件，不改写无关内容，不越过当前项目目录。",
+        "- 不把聊天记录、工具日志、临时推理或未经确认的候选设定写入长期记忆。",
+        "- 遇到事实冲突、重大关系变化、删除、角色合并或不可逆修改时，先列出影响并请求确认。",
+        "- 用户只要求分析或草案时，不执行落盘；用户要求写入时，先给出目标路径和变更摘要。",
+    ]
+    for item in boundaries or []:
+        lines.append(f"- {item}")
+    return "\n".join(lines).strip() + "\n"
+
+
+_DEFAULT_AGENT_SKILLS: Dict[str, str] = {
+    "设计角色.md": _build_default_skill_document(
+        title="设计角色",
+        purpose="创建一个与当前项目世界规则、剧情需求和现有角色网络相兼容的新角色，或把角色草案补全为可持续使用的正式档案。",
+        triggers=["用户要求创建新角色、补充角色卡或设计人物弧线。", "剧情需要新的对手、盟友、导师、线索人物或功能角色。"],
+        inputs=["角色定位、剧情功能、首次出场阶段和用户明确约束。", "现有角色档案、世界规则、组织/势力、当前剧情状态和角色命名习惯。"],
+        asset_targets=[".storydex/characters/", ".storydex/temp/（未确认草案）"],
+        steps=[
+            "检查现有角色，判断是否可以扩展已有角色，避免同功能角色重复。",
+            "提取世界观、时代、力量体系、组织与剧情阶段约束。",
+            "设计身份定位、叙事功能、外在目标、内在需求、恐惧、秘密、能力边界和行为模式。",
+            "建立与现有角色、势力、地点或事件的关系钩子，并标记事实与候选设定。",
+            "按项目角色模板生成档案；用户确认后选择不冲突的文件名写入。",
+        ],
+        output_template="""# [角色名]\n\n## 定位\n- 身份：\n- 叙事功能：\n- 当前剧情作用：\n\n## 基本信息\n- 年龄：未知\n- 外貌：未知\n- 身份/职业：未知\n- 常驻地点：未知\n\n## 性格与行为模式\n- 核心性格：\n- 说话方式：\n- 压力下的反应：\n\n## 关系网络\n- [关系对象]：关系、利益、冲突、信任与信息差\n\n## 动机、秘密与边界\n- 外在目标：\n- 内在需求：\n- 核心恐惧：\n- 秘密/未知信息：\n- 能力与行为边界：\n\n## 角色弧线与出场建议\n- 初始状态：\n- 变化触发：\n- 可能终点：\n\n## 事实状态\n- 已确认：\n- 本次建议：\n- 待确认：""",
+        checks=["角色没有违反现有时代、世界规则或力量成本。", "角色功能不与已有角色无意义重叠。", "所有缺失信息均明确标为未知或待确认。", "关系和秘密不会让角色提前知道不该知道的信息。"],
+    ),
+    "角色更新.md": _build_default_skill_document(
+        title="角色更新",
+        purpose="根据新正文或用户确认内容，增量更新角色状态、关系、知识边界与人物弧线，同时保留角色档案中的稳定设定。",
+        triggers=["新章节改变了角色状态、位置、关系、物品、能力或认知。", "用户要求同步角色档案、检查人物连续性或补录新角色。"],
+        inputs=["本次变更对应的章节/片段和直接证据。", "目标角色现有档案、相关角色档案、当前变量与知识图谱。"],
+        asset_targets=[".storydex/characters/", ".storydex/memory/（有证据的长期状态）"],
+        steps=[
+            "读取变更前角色档案与本次剧情证据，区分稳定属性和阶段状态。",
+            "列出新增、修改、保持不变、冲突和待确认项。",
+            "检查角色知识边界、关系变化和物品/位置连续性。",
+            "以最小差异更新原档案；新角色使用项目角色模板新建文件。",
+            "记录证据来源和需要复核的冲突，不删除仍可能有效的历史信息。",
+        ],
+        output_template="""# [角色名]增量更新\n\n## 证据来源\n- 文件/章节：\n- 关键证据：\n\n## 变更摘要\n- 新增：\n- 修改：\n- 保持：\n- 冲突/待确认：\n\n## 状态更新\n- 时间与位置：\n- 身体/情绪：\n- 关系：\n- 物品/能力：\n- 已知信息：\n- 未知或误解：\n\n## 建议写入\n- 目标文件：\n- 最小修改范围：""",
+        checks=["每项变化都有正文或用户确认依据。", "没有把短期情绪误写为稳定性格。", "没有让派生摘要覆盖正式角色事实。", "原文件中的用户自定义字段与历史信息得到保留。"],
+    ),
+    "设计世界书条目.md": _build_default_skill_document(
+        title="设计世界书条目",
+        purpose="创建或补全地点、势力、物品、制度、历史、能力体系、种族、技术与规则等可复用世界设定。",
+        triggers=["用户要求设计世界观、地点、组织、物品、规则或力量体系。", "正文出现需要沉淀为长期设定的新概念。"],
+        inputs=["条目主题、题材、时代、规模、氛围和用户约束。", "现有世界书、正文证据、角色档案、势力关系和相关 WIKI。"],
+        asset_targets=[".storydex/worldbook/", ".storydex/temp/（候选方案）"],
+        steps=[
+            "检索现有条目，决定新建、扩展还是建立关联，避免重复概念。",
+            "识别该条目在剧情中的功能，以及它与人物选择和冲突的关系。",
+            "定义核心规则、适用范围、成本、限制、反制、例外和失败后果。",
+            "补充历史、日常影响、关联实体、已知证据和待确认问题。",
+            "用户确认后按项目命名习惯写入独立条目，并更新必要关联。",
+        ],
+        output_template="""# [条目名称]\n\n## 分类与定位\n- 类型：地点/势力/物品/制度/能力/历史/其他\n- 剧情功能：\n\n## 核心定义\n\n## 规则、成本与限制\n- 生效条件：\n- 成本：\n- 限制：\n- 反制：\n- 失败后果：\n\n## 历史与现状\n\n## 对普通生活和剧情的影响\n\n## 关联对象\n- 角色：\n- 势力：\n- 地点/事件：\n\n## 证据与状态\n- 已确认：\n- 建议设定：\n- 待确认：""",
+        checks=["规则具有边界、成本和反制，不是无限能力。", "条目与已有设定没有未说明的冲突。", "设定能够服务人物行动或剧情冲突。", "确认内容、建议内容和推测内容已清晰区分。"],
+    ),
+    "设计剧本.md": _build_default_skill_document(
+        title="设计剧本",
+        purpose="规划卷纲、章节路线、关键场景、冲突升级、人物弧线和伏笔回收，为后续正文生成提供可审阅路线。",
+        triggers=["用户要求设计大纲、卷纲、章节计划、场景或剧情分支。", "当前剧情缺少明确目标、冲突或后续推进路线。"],
+        inputs=["当前剧情起点、目标篇幅、章节数量、节奏和必须发生的事件。", "现有正文、未解决线索、角色状态、世界规则、预设与既有剧本。"],
+        asset_targets=[".storydex/scripts/", ".storydex/temp/（未确认草案）"],
+        steps=[
+            "总结当前故事状态、角色目标、未解决冲突和不可违反的连续性。",
+            "确定阶段目标、阻力、升级链、关键选择、人物变化和阶段终点。",
+            "拆分为可执行章节/场景，确保每段都有目标、冲突、变化与钩子。",
+            "建立伏笔埋设、强化和回收表，检查知识边界与因果链。",
+            "输出风险与替代方案；用户确认后写入剧本目录，不直接覆盖正文。",
+        ],
+        output_template="""# [卷名/剧情阶段]剧本\n\n## 起点状态\n\n## 阶段目标与核心冲突\n\n## 人物弧线\n- [角色]：起点 → 触发 → 选择 → 阶段结果\n\n## 章节/场景计划\n### [章节或场景]\n- 目标：\n- 冲突：\n- 关键行动：\n- 信息揭示：\n- 状态变化：\n- 结尾钩子：\n\n## 伏笔表\n- [伏笔]：埋设 / 强化 / 回收\n\n## 连续性风险与备选路线\n""",
+        checks=["每章/场景都产生有效变化而非重复信息。", "冲突升级有因果链，不依赖无依据巧合。", "角色只使用其当前能够知道的信息。", "剧本不会未经授权直接改写正文。"],
+    ),
+    "变量思考.md": _build_default_skill_document(
+        title="变量思考",
+        purpose="分析剧情片段造成的时间、地点、角色、关系、物品、事件和世界状态变化，优先生成可读的增量说明。",
+        triggers=["新剧情生成或用户修改正文后需要同步状态。", "用户要求总结变量变化、检查状态连续性或生成章节快照。"],
+        inputs=["本次剧情片段及其前一状态。", "当前变量、角色档案、关系图、物品与时间线。"],
+        asset_targets=[".storydex/memory/chapters/", ".storydex/memory/current-state/（仅明确结构化变更）"],
+        steps=[
+            "定位本次片段前后的状态边界，提取明确发生的事实变化。",
+            "按时间地点、角色、关系、物品、事件、线索和环境分类。",
+            "区分持续状态、瞬时状态、未知、冲突和待确认内容。",
+            "先生成 Markdown 变量思考；仅对确定且适合合并的变化给出结构化操作。",
+            "写入前校验 baseRevision、证据、引用与冲突，重大变化请求确认。",
+        ],
+        output_template="""# [章节/片段]变量思考\n\n## 来源\n- 文件：\n- 时间范围：\n\n## 明确变化\n### 时间、地点与环境\n### 角色状态与知识\n### 关系\n### 物品与资源\n### 事件、任务与伏笔\n\n## 保持不变但需要关注\n\n## 冲突与待确认\n\n## 可选结构化操作\n- 仅在变化确定时列出 path / op / value / evidence / baseRevision\n""",
+        checks=["变化全部来自本次片段或用户确认。", "没有把变量思考当成高优先级正式事实。", "结构化操作只包含可安全合并的明确变化。", "删除、冲突和重大关系变化已进入人工确认。"],
+    ),
+    "WIKI整理.md": _build_default_skill_document(
+        title="WIKI 整理",
+        purpose="生成、更新、审阅或修复项目 WIKI 与知识图谱，使角色、事件、关系、地点和设定可检索且具有证据来源。",
+        triggers=["用户要求整理 WIKI、知识图谱、实体关系或伏笔。", "正文或项目资产发生变化，需要增量同步知识结构。"],
+        inputs=["待处理的章节、角色、世界书、剧本和现有 WIKI。", "实体命名、稳定 ID、证据来源和当前关系图。"],
+        asset_targets=[".storydex/wiki/", ".storydex/memory/current/relationship_graph.json（通过受控更新）"],
+        steps=[
+            "读取现有 WIKI 索引并识别本次相关实体，优先更新已有稳定 ID。",
+            "从权威来源提取实体、事实、关系、事件和伏笔证据。",
+            "区分新增、更新、冲突、过时、别名和待确认条目。",
+            "以最小增量更新条目与关系，保留证据路径和可追溯说明。",
+            "检查孤立实体、重复实体、无证据关系和知识边界泄露。",
+        ],
+        output_template="""# WIKI 增量整理报告\n\n## 处理范围\n\n## 实体变更\n- 新增：\n- 更新：\n- 别名/合并候选：\n\n## 关系变更\n- 主体 → 关系 → 客体\n- 证据：\n- 置信度：\n\n## 事件与伏笔\n\n## 冲突、过时与待确认\n\n## 建议写入路径\n""",
+        checks=["每个正式事实和关系都有来源。", "显示名称变化没有制造重复实体。", "推测、候选和冲突没有被写成确定事实。", "WIKI 没有反向覆盖正文或正式角色设定。"],
+    ),
+    "项目目录整理.md": _build_default_skill_document(
+        title="项目目录整理",
+        purpose="在不破坏 Storydex 基础骨架和用户文件的前提下，整理小说项目目录、命名、归类和说明文档。",
+        triggers=["用户要求整理文件、迁移目录、统一命名或修复项目结构。", "项目存在散落文件、重复目录、职责不清或旧结构。"],
+        inputs=["当前完整目录树、项目 Manifest、用户指定的整理目标。", "文件引用、打开标签、Git 状态和可能依赖旧路径的配置。"],
+        asset_targets=[".storydex/", "chapters/", "项目内用户明确允许整理的其他目录"],
+        steps=[
+            "只读扫描目录，识别基础骨架、用户文件、临时文件、重复项和旧结构。",
+            "提出保留、移动、新建、合并、归档和不处理清单，说明每项影响。",
+            "检查引用关系、命名风格、章节顺序和 Git 修改状态。",
+            "重大移动、合并或潜在删除先请求确认；执行时使用可回退的小批次操作。",
+            "整理后复查目录树、引用、项目打开与 Agent 资产路径。",
+        ],
+        output_template="""# 项目目录整理方案\n\n## 当前问题\n\n## 保留不动\n\n## 建议新建\n- 路径 / 用途\n\n## 建议移动或重命名\n- 原路径 → 新路径 / 理由 / 影响\n\n## 重复与归档候选\n\n## 需要确认的高风险操作\n\n## 执行后验证清单\n""",
+        checks=["基础骨架与用户自定义目录均得到保护。", "不存在未经确认的删除或覆盖。", "移动后引用、配置和命名仍然有效。", "整理方案适用于当前项目，不强迫所有小说使用同一额外目录。"],
+        boundaries=["`.storydex/temp/` 与 `.storydex/.agent/temp/` 职责不同，不得混用。"],
+    ),
+    "故事生成后更新.md": _build_default_skill_document(
+        title="故事生成后更新",
+        purpose="在正文新增或修改后，按依赖顺序增量同步角色、变量、物品、事实、关系、WIKI 与必要索引。",
+        triggers=["Agent 完成故事生成、续写或用户保存重要剧情修改。", "用户要求把最新剧情同步到项目资产。"],
+        inputs=["本次新增/修改的正文范围和生成前状态。", "相关角色、变量、WIKI、知识图谱、世界书与未解决冲突。"],
+        asset_targets=[".storydex/characters/", ".storydex/memory/", ".storydex/wiki/", ".storydex/worldbook/（仅新增明确设定）"],
+        steps=[
+            "读取本次正文增量，列出明确新增事实、状态变化和候选推断。",
+            "先执行变量思考，确定时间、地点、角色、关系、物品和事件变化。",
+            "同步角色档案与长期记忆；重大或冲突变化进入待确认。",
+            "在变量和角色更新后增量整理 WIKI/知识图谱，避免使用旧状态。",
+            "输出完整变更摘要、证据、写入路径和未处理事项，并检查正文未被二次改写。",
+        ],
+        output_template="""# 故事生成后更新报告\n\n## 本次正文范围\n\n## 变量变化\n\n## 角色更新\n\n## 物品、地点与事件\n\n## WIKI / 知识图谱更新\n\n## 已写入文件\n- 路径 / 修改摘要 / 证据\n\n## 待确认或未处理\n\n## 连续性风险\n""",
+        checks=["更新范围只覆盖本次正文实际产生的变化。", "角色、变量和 WIKI 的更新顺序正确。", "不存在无证据的长期记忆写入。", "正文没有被更新流程再次覆盖或重写。"],
+        boundaries=["自动更新耗时较高时应分批处理，避免一次吞入过多章节。"],
+    ),
+}
+
 _DEFAULT_AGENT_SKILL_REGISTRY: Dict[str, Any] = {
-    "version": 1,
+    "version": 2,
     "registryType": "storydex_agent_skill_registry",
     "policy": {
         "coomiRole": "general_agent_runtime",
         "storydexRole": "fiction_orchestration",
         "skillSource": ".storydex/.agent/skills/",
         "fileBacked": True,
+        "templateFormat": "storydex_universal_skill_v2",
+        "universalForAnyNovelProject": True,
     },
     "skills": [
         {
@@ -256,6 +462,7 @@ _DEFAULT_AGENT_SKILL_REGISTRY: Dict[str, Any] = {
             "file": "设计角色.md",
             "intent": "character_work",
             "assetTargets": [".storydex/characters/"],
+            "description": "创建与当前项目设定、剧情功能和关系网络兼容的新角色。",
         },
         {
             "id": "character_update",
@@ -263,6 +470,7 @@ _DEFAULT_AGENT_SKILL_REGISTRY: Dict[str, Any] = {
             "file": "角色更新.md",
             "intent": "character_work",
             "assetTargets": [".storydex/characters/"],
+            "description": "依据正文证据增量更新角色状态、关系和知识边界。",
         },
         {
             "id": "worldbook_design",
@@ -270,6 +478,7 @@ _DEFAULT_AGENT_SKILL_REGISTRY: Dict[str, Any] = {
             "file": "设计世界书条目.md",
             "intent": "worldbook_work",
             "assetTargets": [".storydex/worldbook/"],
+            "description": "设计具有规则、成本、限制和剧情功能的世界设定条目。",
         },
         {
             "id": "script_design",
@@ -277,6 +486,7 @@ _DEFAULT_AGENT_SKILL_REGISTRY: Dict[str, Any] = {
             "file": "设计剧本.md",
             "intent": "script_work",
             "assetTargets": [".storydex/scripts/"],
+            "description": "规划卷纲、章节路线、关键场景、人物弧线和伏笔。",
         },
         {
             "id": "variable_thinking",
@@ -285,6 +495,7 @@ _DEFAULT_AGENT_SKILL_REGISTRY: Dict[str, Any] = {
             "intent": "story_generation",
             "assetTargets": [".storydex/memory/chapters/"],
             "outputPolicy": "markdown_first_optional_machine_ops",
+            "description": "分析剧情后的明确变量变化，并生成可读增量记录。",
         },
         {
             "id": "wiki_organization",
@@ -292,6 +503,7 @@ _DEFAULT_AGENT_SKILL_REGISTRY: Dict[str, Any] = {
             "file": "WIKI整理.md",
             "intent": "wiki_work",
             "assetTargets": [".storydex/wiki/"],
+            "description": "以证据为基础整理 WIKI、实体、关系与知识图谱。",
         },
         {
             "id": "project_organization",
@@ -299,6 +511,7 @@ _DEFAULT_AGENT_SKILL_REGISTRY: Dict[str, Any] = {
             "file": "项目目录整理.md",
             "intent": "project_organization",
             "assetTargets": [".storydex/", "chapters/"],
+            "description": "在保护用户文件的前提下整理项目目录、命名与结构。",
         },
         {
             "id": "post_story_increment_update",
@@ -310,13 +523,16 @@ _DEFAULT_AGENT_SKILL_REGISTRY: Dict[str, Any] = {
                 ".storydex/memory/",
                 ".storydex/wiki/",
             ],
+            "description": "正文变更后按顺序同步角色、变量、记忆和 WIKI。",
         },
     ],
 }
 
 _LEGACY_DEFAULT_AGENT_SKILLS: Dict[str, Set[str]] = {
-    "变量思考.md": {
-        """# 变量思考
+    file_name: {content.strip()} for file_name, content in _LEGACY_AGENT_SKILLS_V1.items()
+}
+_LEGACY_DEFAULT_AGENT_SKILLS["变量思考.md"].add(
+    """# 变量思考
 
 用途：分析剧情后的变量变化。
 
@@ -325,8 +541,7 @@ _LEGACY_DEFAULT_AGENT_SKILLS: Dict[str, Set[str]] = {
 - 当前总状态写入 `.storydex/memory/current-state/全部变量.json`。
 - 片段快照写入 `.storydex/memory/chapters/`。
 """.strip()
-    }
-}
+)
 
 _DEFAULT_CHARACTER_TEMPLATE_ID = "default_character_template"
 _DEFAULT_CHARACTER_TEMPLATE_JSON = "default-character-template.json"
@@ -482,6 +697,7 @@ class StoryProjectService:
                 path.write_text(content, encoding="utf-8")
         (storydex_root / "memory" / "checkpoints").mkdir(parents=True, exist_ok=True)
         self._ensure_default_agent_skills(root)
+        self._refresh_project_preset_skill(root)
         self.migrate_legacy_snapshots(root)
 
     def default_project_settings(self) -> Dict[str, Any]:
@@ -516,8 +732,12 @@ class StoryProjectService:
     def _ensure_default_agent_skills(self, workspace_root: Path) -> None:
         skills_root = self.agent_root(workspace_root) / "skills"
         skills_root.mkdir(parents=True, exist_ok=True)
-        for file_name, content in _DEFAULT_AGENT_SKILLS.items():
+        for file_name, content in self._read_builtin_skill_templates().items():
             path = skills_root / file_name
+            if file_name == "story_preset_constraints.md":
+                # This file is generated from the packaged template plus the
+                # currently active project preset immediately after copying.
+                continue
             if path.exists():
                 legacy_contents = _LEGACY_DEFAULT_AGENT_SKILLS.get(file_name, set())
                 try:
@@ -533,6 +753,35 @@ class StoryProjectService:
                 json.dumps(_DEFAULT_AGENT_SKILL_REGISTRY, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
+
+    def _resolve_builtin_skills_root(self) -> Path | None:
+        configured_raw = os.environ.get("STORYDEX_BUILTIN_SKILLS_ROOT", "").strip()
+        configured = Path(configured_raw).expanduser() if configured_raw else None
+        if configured is not None and configured.exists() and configured.is_dir():
+            return configured.resolve()
+
+        current = Path(__file__).resolve()
+        for parent in current.parents:
+            candidate = parent / "docs" / "skills"
+            if candidate.exists() and candidate.is_dir():
+                return candidate.resolve()
+        return None
+
+    def _read_builtin_skill_templates(self) -> Dict[str, str]:
+        root = self._resolve_builtin_skills_root()
+        if root is None:
+            raise StoryProjectServiceError(
+                "Storydex built-in skill templates are missing. Expected docs/skills or STORYDEX_BUILTIN_SKILLS_ROOT."
+            )
+
+        templates: Dict[str, str] = {}
+        for path in sorted(root.glob("*.md"), key=lambda item: item.name.lower()):
+            if not path.is_file() or path.name.lower() == "readme.md":
+                continue
+            templates[path.name] = path.read_text(encoding="utf-8").strip() + "\n"
+        if not templates:
+            raise StoryProjectServiceError(f"No built-in skill templates found in {root.as_posix()}")
+        return templates
 
     def read_agent_skill_registry(self, workspace_root: Path) -> Dict[str, Any]:
         registry_path = self.agent_root(workspace_root) / "skills" / "registry.json"
@@ -5059,35 +5308,21 @@ class StoryProjectService:
 
     def _build_project_preset_skill(self, workspace_root: Path) -> str:
         entries = self._collect_preset_entries(workspace_root, max_files=8, max_chars_per_file=900)
-        lines = [
-            "# Project Preset Constraints",
-            "",
-            "Runtime model:",
-            "1. System prompts keep only Storydex hard runtime constraints.",
-            "2. Project presets provide creative style, dialogue, POV, format, continuity, and anti-cliche rules.",
-            "3. Active presets and compiled preset sidecars may affect generation.",
-            "4. Imported external presets are preserved; active sidecar modules are compiled at runtime.",
-            "",
-            "Activation policy:",
-            "1. `.storydex/presets/active/` is the runtime directory.",
-            "2. The active directory is treated as a single main preset; if multiple files exist, only the first sorted file is loaded.",
-            "3. `.storydex/presets/library/`, `imported/`, and `blocked/` are never injected directly.",
-            "4. Raw preset export JSON and regex/display scripts stay as source metadata unless a dedicated compatibility layer applies them.",
-        ]
+        templates = self._read_builtin_skill_templates()
+        base = str(templates.get("story_preset_constraints.md") or "").strip()
+        if not base:
+            raise StoryProjectServiceError("Missing docs/skills/story_preset_constraints.md")
+        inactive_message = (
+            "当前没有启用项目预设。将一个经过审阅的 `.md`、`.txt` 或已编译预设 sidecar 放入 "
+            "`.storydex/presets/active/` 后，才会影响故事生成。"
+        )
         if not entries:
-            lines.extend(
-                [
-                    "",
-                    "No active project preset is enabled.",
-                    "Put one reviewed `.md`, `.txt`, or compiled preset sidecar under `.storydex/presets/active/` to affect story generation.",
-                ]
-            )
-            return "\n".join(lines).rstrip() + "\n"
+            return base + "\n"
 
-        lines.extend(["", "Active runtime preset:"])
-        for relative_path, content in entries:
-            lines.extend(["", f"## {relative_path}", content])
-        return "\n".join(lines).rstrip() + "\n"
+        active_content = "\n\n".join(f"### {relative_path}\n\n{content}" for relative_path, content in entries)
+        if inactive_message in base:
+            return base.replace(inactive_message, active_content).rstrip() + "\n"
+        return f"{base}\n\n## 当前激活预设\n\n{active_content}\n"
 
     def _build_preset_context(
         self,

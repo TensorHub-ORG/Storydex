@@ -6,7 +6,9 @@ const repoRoot = path.resolve(desktopRoot, "..", "..");
 const appRoot = path.join(desktopRoot, "app");
 const frontendDistSource = path.resolve(desktopRoot, "..", "frontend", "dist");
 const backendSource = path.resolve(desktopRoot, "..", "backend");
-const helpGuideSource = path.resolve(desktopRoot, "..", "..", "docs", "使用指南");
+const helpGuideSource = path.resolve(desktopRoot, "..", "..", "docs", "guide");
+const promptRepositorySource = path.resolve(desktopRoot, "..", "..", "docs", "prompts");
+const builtinSkillsSource = path.resolve(desktopRoot, "..", "..", "docs", "skills");
 const minGitSource =
   process.env.STORYDEX_MINGIT_SOURCE || path.resolve(desktopRoot, "vendor", "mingit");
 const embeddedPythonSource =
@@ -21,7 +23,9 @@ const desktopIconSource = path.resolve(
 );
 const frontendDistTarget = path.join(appRoot, "frontend-dist");
 const backendTarget = path.join(appRoot, "backend");
-const helpGuideTarget = path.join(appRoot, "docs", "使用指南");
+const helpGuideTarget = path.join(appRoot, "docs", "guide");
+const promptRepositoryTarget = path.join(appRoot, "docs", "prompts");
+const builtinSkillsTarget = path.join(appRoot, "docs", "skills");
 const minGitTarget = path.join(appRoot, "mingit");
 const embeddedPythonTarget = path.join(appRoot, "python-env");
 const desktopIconTarget = path.join(appRoot, "assets", "Storydex_icon", "storydex_icon_01.png");
@@ -110,6 +114,18 @@ function copyHelpGuide() {
   ensureSource(helpGuideSource, "help guide");
   resetDirectory(helpGuideTarget);
   copyDirectoryContents(helpGuideSource, helpGuideTarget);
+}
+
+function copyPromptRepository() {
+  ensureSource(promptRepositorySource, "prompt repository");
+  resetDirectory(promptRepositoryTarget);
+  copyDirectoryContents(promptRepositorySource, promptRepositoryTarget);
+}
+
+function copyBuiltinSkills() {
+  ensureSource(builtinSkillsSource, "built-in skills");
+  resetDirectory(builtinSkillsTarget);
+  copyDirectoryContents(builtinSkillsSource, builtinSkillsTarget);
 }
 
 function shouldCopyMinGit(sourcePath) {
@@ -261,6 +277,8 @@ function run() {
   copyBackendSource();
   copyRuntimeDependencyManifests();
   copyHelpGuide();
+  copyPromptRepository();
+  copyBuiltinSkills();
   copyMinGit();
   copyEmbeddedPythonEnv();
   copyDesktopIcon();

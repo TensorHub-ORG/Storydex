@@ -50,6 +50,7 @@ import AgentPanel from "@/components/AgentPanel.vue";
 import EditorPane from "@/components/EditorPane.vue";
 import ExplorerSidebar from "@/components/ExplorerSidebar.vue";
 import PresetManagementSidebar from "@/components/PresetManagementSidebar.vue";
+import PromptRepositorySidebar from "@/components/PromptRepositorySidebar.vue";
 import SourceControlSidebar from "@/components/SourceControlSidebar.vue";
 import StatusBar from "@/components/StatusBar.vue";
 import StoryStatePanel from "@/components/StoryStatePanel.vue";
@@ -81,6 +82,9 @@ const sidebarComponent = computed(() => {
   }
   if (uiStore.activeActivity === "presets") {
     return PresetManagementSidebar;
+  }
+  if (uiStore.activeActivity === "prompts") {
+    return PromptRepositorySidebar;
   }
   return ExplorerSidebar;
 });
@@ -196,7 +200,8 @@ function clamp(value: number, min: number, max: number): number {
 
 .storydex-sidebar-shell :deep(.explorer-panel),
 .storydex-sidebar-shell :deep(.source-control-panel),
-.storydex-sidebar-shell :deep(.preset-panel) {
+.storydex-sidebar-shell :deep(.preset-panel),
+.storydex-sidebar-shell :deep(.prompt-repository-panel) {
   flex: 1 1 auto;
   height: auto;
   min-height: 0;

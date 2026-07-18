@@ -7,7 +7,7 @@ from typing import Any, Dict, List
 
 
 class HelpGuideService:
-    GUIDE_DIRECTORY_NAME = "使用指南"
+    GUIDE_DIRECTORY_NAME = "guide"
 
     def read_guide(self) -> Dict[str, Any]:
         root = self._resolve_guide_root()

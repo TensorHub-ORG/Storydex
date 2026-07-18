@@ -24,6 +24,18 @@ test("release configuration is offline-capable and updater-aware", () => {
   assert.match(pkg.build.extraMetadata.storydexUpdateFeedUrl, /^https:\/\//);
 });
 
+test("desktop packages the guide and prompt repository and exposes their roots to the backend", () => {
+  const mainSource = fs.readFileSync(path.join(root, "electron", "main.cjs"), "utf8");
+  const syncSource = fs.readFileSync(path.join(root, "scripts", "sync-app-assets.cjs"), "utf8");
+  assert.match(mainSource, /STORYDEX_HELP_GUIDE_ROOT:\s*helpGuideRoot/);
+  assert.match(mainSource, /STORYDEX_PROMPT_REPOSITORY_ROOT:\s*promptRepositoryRoot/);
+  assert.match(mainSource, /STORYDEX_BUILTIN_SKILLS_ROOT:\s*builtinSkillsRoot/);
+  assert.match(syncSource, /docs",\s*"guide"/);
+  assert.match(syncSource, /docs",\s*"prompts"/);
+  assert.match(syncSource, /docs",\s*"skills"/);
+  assert.doesNotMatch(syncSource, /docs",\s*"使用指南"/);
+});
+
 test("desktop source declares process cleanup and a strict IPC whitelist", () => {
   const source = fs.readFileSync(path.join(root, "electron", "main.cjs"), "utf8");
   assert.match(source, /app\.on\("before-quit"[\s\S]*stopBackendKernel\(\)/);
