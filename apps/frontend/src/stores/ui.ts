@@ -24,7 +24,7 @@ const DEFAULT_SIDEBAR_WIDTH = 320;
 const DEFAULT_AGENT_WIDTH = 560;
 const DEFAULT_FILE_FONT_SIZE = 16;
 const DEFAULT_PLAYER_FONT_SIZE = 14;
-const VALID_ACTIVITY_IDS = new Set(["resources", "search", "source-control", "presets", "relationships", "export"]);
+const VALID_ACTIVITY_IDS = new Set(["resources", "search", "source-control", "presets", "relationships", "prompts", "export"]);
 let persistTimer: number | null = null;
 
 export const useUiStore = defineStore("ui", {

@@ -30,6 +30,35 @@ function walk(directory) {
 function sha256(filePath) {
   return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex").toUpperCase();
 }
+function requireDirectoryMatchesSource(label, sourceDirectory, packagedDirectory) {
+  requireDirectory(label, packagedDirectory);
+  if (!fs.existsSync(sourceDirectory) || !fs.statSync(sourceDirectory).isDirectory()) {
+    failures.push(`${label} source missing: ${sourceDirectory}`);
+    return;
+  }
+
+  const sourceFiles = walk(sourceDirectory)
+    .map((file) => path.relative(sourceDirectory, file).replace(/\\/g, "/"))
+    .sort();
+  const packagedFiles = walk(packagedDirectory)
+    .map((file) => path.relative(packagedDirectory, file).replace(/\\/g, "/"))
+    .sort();
+
+  if (JSON.stringify(sourceFiles) !== JSON.stringify(packagedFiles)) {
+    failures.push(
+      `${label} file list mismatch: source=[${sourceFiles.join(", ")}] packaged=[${packagedFiles.join(", ")}]`
+    );
+    return;
+  }
+
+  for (const relative of sourceFiles) {
+    const sourceFile = path.join(sourceDirectory, ...relative.split("/"));
+    const packagedFile = path.join(packagedDirectory, ...relative.split("/"));
+    if (sha256(sourceFile) !== sha256(packagedFile)) {
+      failures.push(`${label} content mismatch: ${relative}`);
+    }
+  }
+}
 function readExpectedCoomiVersion() {
   const content = fs.readFileSync(path.join(repoRoot, "requirements.txt"), "utf8");
   const matches = [...content.matchAll(/^\s*coomi-agent\s*==\s*([A-Za-z0-9_.+!-]+)\s*(?:#.*)?$/gim)];
@@ -60,6 +89,17 @@ requireDirectory("MinGit", path.join(appRoot, "mingit"));
 requireFile("updater config", path.join(resources, "app-update.yml"));
 requireFile("electron-updater entrypoint", path.join(resources, "app", "node_modules", "electron-updater", "out", "main.js"));
 requireFile("persistent update helper", path.join(resources, "app", "electron", "update-helper.ps1"));
+for (const [label, directoryName] of [
+  ["help guide", "guide"],
+  ["prompt repository", "prompts"],
+  ["built-in skills", "skills"]
+]) {
+  requireDirectoryMatchesSource(
+    label,
+    path.join(repoRoot, "docs", directoryName),
+    path.join(appRoot, "docs", directoryName)
+  );
+}
 for (const [sourceName, packagedName] of [
   ["requirements.txt", "requirements-runtime.txt"],
   ["requirements.lock", "requirements-runtime.lock"]

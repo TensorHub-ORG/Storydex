@@ -204,7 +204,17 @@ STORYDEX_MANIFEST: List[DirSpec] = [
         "role": "skills",
         "create_on_init": True,
         "description": "Agent skills",
-        "readme": "# Agent 技能\n\n存放默认技能和项目自定义技能；Agent 使用技能时从这里加载。\n",
+        "readme": """# Agent 技能
+
+本目录保存当前小说项目可直接使用的 Agent 技能文档。默认技能采用统一模板，适用于任意 Storydex 小说项目；用户也可以新增项目专用技能。
+
+## 通用约定
+
+- 每个技能文档必须写明用途、触发条件、输入、允许落点、执行步骤、输出模板、自检和安全边界。
+- 技能执行时必须以当前项目文件为证据，不得把推测写成既定事实。
+- 用户自定义过的技能不会被默认模板静默覆盖；仍保持旧默认内容的技能可由 Storydex 自动升级。
+- `registry.json` 保存技能 ID、文件名、意图和资产落点，不替代 Markdown 技能正文。
+""",
     },
     {
         "path": ".storydex/.agent/sessions",
