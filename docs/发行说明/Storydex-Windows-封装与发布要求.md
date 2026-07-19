@@ -1,6 +1,6 @@
 # Storydex Windows 封装与发布要求
 
-本文规定 Storydex Windows 正式版本的版本管理、质量门禁、封装产物、GitHub Release 发布和更新源同步要求。适用于 `v1.0.0` 及后续正式版本。
+本文规定 Storydex Windows 正式版本的版本管理、质量门禁、封装产物、GitHub Release 发布和更新源同步要求。适用于所有后续发行版本。
 
 ## 1. 版本与分支要求
 
@@ -11,7 +11,7 @@
 5. 必须存在 `apps/desktop/build/release-notes-v<版本>.md`。
 6. 正式标签只能指向已经推送到远程 `main` 的发布提交；不得从未提交、未推送或测试失败的工作区创建标签。
 
-版本一致性检查：
+版本一致性检查（例如）：
 
 ```powershell
 node scripts/validate_version_consistency.cjs --expected=1.0.0
@@ -34,7 +34,7 @@ node scripts/validate_version_consistency.cjs --expected=1.0.0
 .\scripts\run_full_test_suite.ps1 -Mode Release
 ```
 
-如果仅重新验证封装流程，也必须至少执行：
+如果仅重新验证封装流程，也必须至少执行（例如）：
 
 ```powershell
 npm --prefix apps/desktop run check:encoding
@@ -59,16 +59,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare_release_bund
 
 每个 Windows 正式版本必须包含：
 
-| 文件 | 要求 |
-| --- | --- |
-| `StorydexSetup-x64-<版本>.exe` | Windows x64 NSIS 安装包 |
-| `StorydexSetup-x64-<版本>.exe.blockmap` | 与安装包同版本的差分更新文件 |
-| `Storydex-win-unpacked.zip` | 包含 `Storydex.exe` 的便携包 |
-| `latest.yml` | `version`、`path`、`size`、SHA-512 必须与安装包一致 |
-| `SHA256SUMS.txt` | 覆盖发布目录内全部正式文件 |
-| `RELEASE_NOTES.md` | 与版本对应的用户可读发行说明 |
-| `BUILD_MANIFEST.json` | 包含 Git 提交、构建时间、运行时版本和产物摘要 |
-| `DEPENDENCIES.json` | 包含前端、桌面端和 Python 依赖清单 |
+| 文件                                      | 要求                                                      |
+| ----------------------------------------- | --------------------------------------------------------- |
+| `StorydexSetup-x64-<版本>.exe`          | Windows x64 NSIS 安装包                                   |
+| `StorydexSetup-x64-<版本>.exe.blockmap` | 与安装包同版本的差分更新文件                              |
+| `Storydex-win-unpacked.zip`             | 包含`Storydex.exe` 的便携包                             |
+| `latest.yml`                            | `version`、`path`、`size`、SHA-512 必须与安装包一致 |
+| `SHA256SUMS.txt`                        | 覆盖发布目录内全部正式文件                                |
+| `RELEASE_NOTES.md`                      | 与版本对应的用户可读发行说明                              |
+| `BUILD_MANIFEST.json`                   | 包含 Git 提交、构建时间、运行时版本和产物摘要             |
+| `DEPENDENCIES.json`                     | 包含前端、桌面端和 Python 依赖清单                        |
 
 安装包和便携包都必须包含可启动的桌面应用、前端生产资源、后端服务、内置 Python 运行时、固定依赖和 MinGit。便携 ZIP 解压后必须能找到 `Storydex.exe`。
 
@@ -89,7 +89,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare_release_bund
 5. GitHub Release 标题统一为 `Storydex v<版本>`，不得设置为草稿或预发布版本，除非发布计划明确要求。
 6. GitHub Release 中的资产数量、文件名、大小与校验值必须和本地封装结果一致。
 
-推荐命令：
+推荐命令（例如）：
 
 ```powershell
 git push origin main
@@ -125,7 +125,7 @@ https://updates.septemc.com/storydex/windows/
 - `StorydexSetup-x64-<版本>.exe.blockmap`
 - `latest.yml`
 
-同步后必须验证：
+同步后必须验证（例如）：
 
 ```powershell
 $base = 'https://updates.septemc.com/storydex/windows'
@@ -134,7 +134,7 @@ Invoke-WebRequest -UseBasicParsing -Method Head "$base/StorydexSetup-x64-1.0.0.e
 Invoke-WebRequest -UseBasicParsing -Method Head "$base/StorydexSetup-x64-1.0.0.exe.blockmap"
 ```
 
-`latest.yml` 中的 `version` 必须为 `1.0.0`，`path` 必须为 `StorydexSetup-x64-1.0.0.exe`。
+`latest.yml` 中的 `version` 必须为正确版本号，例如， `1.0.0`，`path` 必须为 `StorydexSetup-x64-1.0.0.exe`（例如）。
 
 ## 7. 发布后验收
 
@@ -153,7 +153,7 @@ Invoke-WebRequest -UseBasicParsing -Method Head "$base/StorydexSetup-x64-1.0.0.e
 - 新版本存在阻断问题：将 `latest.yml` 原子恢复到上一稳定版本，并在 GitHub Release 中明确状态；后续使用新的修订版本发布，不覆盖已经发布的二进制。
 - 私钥、令牌和服务器凭据只能存放在 GitHub Environment/Secrets 中，禁止写入仓库、日志、发行包或说明文档。
 
-## 9. v1.0.0 本次发布基线
+## 9. 发布基线
 
 - 版本：`1.0.0`
 - 标签：`v1.0.0`

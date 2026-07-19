@@ -2,20 +2,25 @@
 
 <table align="center">
   <tr>
-    <td align="center" width="33%">
+    <td align="center" width="25%">
       <img src="assets/storydex.png" alt="Storydex 项目 LOGO" width="96" />
       <br />
       <sub><strong>Storydex</strong><br />项目 LOGO</sub>
     </td>
-    <td align="center" width="33%">
+    <td align="center" width="25%">
       <img src="assets/coomi.png" alt="Coomi Agent 吉祥物" width="96" />
       <br />
       <sub><strong>Coomi</strong><br />Agent 吉祥物</sub>
     </td>
-    <td align="center" width="33%">
+    <td align="center" width="25%">
       <img src="assets/tensorhub.png" alt="TensorHub 组织 LOGO" width="96" />
       <br />
       <sub><strong>TensorHub</strong><br />组织 LOGO</sub>
+    </td>
+    <td align="center" width="25%">
+      <img src="assets/qq_group_qr.png" alt="QQ 交流群二维码" width="96" />
+      <br />
+      <sub><strong>QQ 交流群</strong><br />扫码加入</sub>
     </td>
   </tr>
 </table>
