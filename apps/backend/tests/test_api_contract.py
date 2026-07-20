@@ -41,6 +41,11 @@ class _GlobalConfig:
             "playerFontSize": 14,
             "updatedAt": "2026-01-01T00:00:00Z",
         }
+        self.agent_settings = {
+            "coomiMemoryEnabled": True,
+            "wikiContextEnabled": True,
+            "updatedAt": "2026-01-01T00:00:00Z",
+        }
 
     def read_ui_preferences(self):
         return dict(self.preferences)
@@ -51,6 +56,13 @@ class _GlobalConfig:
 
     def read_workspace_state(self):
         return {"lastProjectPath": "", "recentProjects": [], "updatedAt": ""}
+
+    def read_agent_settings(self):
+        return dict(self.agent_settings)
+
+    def write_agent_settings(self, payload):
+        self.agent_settings.update(payload)
+        return dict(self.agent_settings)
 
 
 class _Help:
@@ -152,6 +164,15 @@ def test_system_envelopes_and_preferences_round_trip(client):
     updated = assert_success(client.put("/api/v1/sys/ui-preferences", json={"theme": "dark", "sidebarWidth": 420}))
     assert updated["data"]["theme"] == "dark"
     assert updated["data"]["sidebarWidth"] == 420
+    agent_settings = assert_success(client.get("/api/v1/sys/agent-settings"))
+    assert agent_settings["data"]["coomiMemoryEnabled"] is True
+    updated_agent = assert_success(
+        client.put(
+            "/api/v1/sys/agent-settings",
+            json={"coomiMemoryEnabled": False, "wikiContextEnabled": True},
+        )
+    )
+    assert updated_agent["data"]["coomiMemoryEnabled"] is False
     assert_success(client.get("/api/v1/sys/workspace-state"))
 
 

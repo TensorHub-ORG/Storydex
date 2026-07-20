@@ -173,6 +173,42 @@
                 </section>
               </div>
 
+              <div v-else-if="section.id === 'agent'" class="system-settings-card-body">
+                <section class="system-settings-block">
+                  <div class="system-settings-block-title">Agent 上下文来源</div>
+
+                  <label class="system-settings-switch-card">
+                    <span class="system-settings-switch-copy">
+                      <span class="system-settings-switch-title">Coomi 通用 Memory</span>
+                      <span class="system-settings-switch-description">
+                        在下一轮执行中启用 Coomi persistent memory 注入与 MemoryRecall
+                      </span>
+                    </span>
+                    <span class="system-settings-switch">
+                      <input v-model="coomiMemoryEnabled" type="checkbox" :disabled="saving" />
+                      <span class="system-settings-switch-track" aria-hidden="true"></span>
+                    </span>
+                  </label>
+
+                  <label class="system-settings-switch-card">
+                    <span class="system-settings-switch-copy">
+                      <span class="system-settings-switch-title">WIKI 参考上下文</span>
+                      <span class="system-settings-switch-description">
+                        在下一轮执行中注入匹配实体的 WIKI 参考块；不影响主动 WIKI 查询工具
+                      </span>
+                    </span>
+                    <span class="system-settings-switch">
+                      <input v-model="wikiContextEnabled" type="checkbox" :disabled="saving" />
+                      <span class="system-settings-switch-track" aria-hidden="true"></span>
+                    </span>
+                  </label>
+
+                  <div class="system-settings-inline-note">默认均开启；修改只影响保存后的新执行。</div>
+                  <div v-if="errorMessage" class="system-settings-feedback is-error">{{ errorMessage }}</div>
+                  <div v-else-if="successMessage" class="system-settings-feedback is-success">{{ successMessage }}</div>
+                </section>
+              </div>
+
               <div v-else-if="section.id === 'about'" class="system-settings-card-body">
                 <section class="system-settings-block">
                   <div class="system-settings-block-title">软件更新</div>
@@ -319,12 +355,13 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { themeOptions } from "@/constants/themes";
+import { fetchAgentSettings, updateAgentSettings } from "@/api/system";
 import type { ThemeCode } from "@/constants/themes";
 import { useUiStore } from "@/stores/ui";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type { StorySegmentExtension } from "@/types/workspace";
 
-type SettingsSectionId = "appearance" | "layout" | "project" | "about";
+type SettingsSectionId = "appearance" | "layout" | "agent" | "project" | "about";
 
 interface SettingsSection {
   id: SettingsSectionId;
@@ -348,6 +385,13 @@ const sections: SettingsSection[] = [
     icon: "view_sidebar",
     description: "",
     keywords: "布局 宽度 侧栏 agent 栏"
+  },
+  {
+    id: "agent",
+    label: "Agent 上下文",
+    icon: "memory",
+    description: "",
+    keywords: "agent 上下文 memory coomi wiki 记忆 开关 注入 recall"
   },
   {
     id: "project",
@@ -389,6 +433,10 @@ const segmentExtension = ref<StorySegmentExtension>(".md");
 const maxSegmentsPerChapter = ref(3);
 const autoNameChapterDirectories = ref(false);
 const agentCommitPromptEnabled = ref(true);
+const coomiMemoryEnabled = ref(true);
+const wikiContextEnabled = ref(true);
+const savedCoomiMemoryEnabled = ref(true);
+const savedWikiContextEnabled = ref(true);
 
 const updaterState = ref<StorydexDesktopUpdaterState>({
   supported: false,
@@ -509,6 +557,12 @@ const storySettingsDirty = computed(() => {
   );
 });
 
+const agentSettingsDirty = computed(
+  () =>
+    coomiMemoryEnabled.value !== savedCoomiMemoryEnabled.value
+    || wikiContextEnabled.value !== savedWikiContextEnabled.value
+);
+
 watch(
   matchedSections,
   (nextSections) => {
@@ -614,6 +668,7 @@ async function initializeWindow(): Promise<void> {
   successMessage.value = "";
 
   try {
+    await loadAgentSettings();
     if (projectSettingsAvailable.value) {
       await workspaceStore.refreshStorySettings();
     }
@@ -630,6 +685,19 @@ async function reloadProjectSettings(): Promise<void> {
 }
 
 async function reloadSection(sectionId: SettingsSectionId): Promise<void> {
+  if (sectionId === "agent") {
+    loading.value = true;
+    errorMessage.value = "";
+    successMessage.value = "";
+    try {
+      await loadAgentSettings();
+    } catch (error: unknown) {
+      errorMessage.value = error instanceof Error ? error.message : "加载 Agent 设置失败。";
+    } finally {
+      loading.value = false;
+    }
+    return;
+  }
   if (sectionId === "project") {
     await reloadProjectSettings();
     return;
@@ -639,13 +707,17 @@ async function reloadSection(sectionId: SettingsSectionId): Promise<void> {
 }
 
 function isSectionReloading(sectionId: SettingsSectionId): boolean {
-  if (sectionId === "project") {
+  if (sectionId === "project" || sectionId === "agent") {
     return loading.value || saving.value;
   }
   return loading.value;
 }
 
 async function saveSection(sectionId: SettingsSectionId): Promise<void> {
+  if (sectionId === "agent") {
+    await handleSaveAgentSettings();
+    return;
+  }
   if (sectionId === "project") {
     await handleSaveProjectSettings();
     return;
@@ -662,10 +734,42 @@ async function saveSection(sectionId: SettingsSectionId): Promise<void> {
 }
 
 function isSectionSaving(sectionId: SettingsSectionId): boolean {
+  if (sectionId === "agent") {
+    return saving.value || !agentSettingsDirty.value;
+  }
   if (sectionId === "project") {
     return saving.value || !storySettingsDirty.value || !projectSettingsAvailable.value;
   }
   return loading.value;
+}
+
+async function loadAgentSettings(): Promise<void> {
+  const result = await fetchAgentSettings();
+  coomiMemoryEnabled.value = Boolean(result.data.coomiMemoryEnabled);
+  wikiContextEnabled.value = Boolean(result.data.wikiContextEnabled);
+  savedCoomiMemoryEnabled.value = coomiMemoryEnabled.value;
+  savedWikiContextEnabled.value = wikiContextEnabled.value;
+}
+
+async function handleSaveAgentSettings(): Promise<void> {
+  saving.value = true;
+  errorMessage.value = "";
+  successMessage.value = "";
+  try {
+    const result = await updateAgentSettings({
+      coomiMemoryEnabled: coomiMemoryEnabled.value,
+      wikiContextEnabled: wikiContextEnabled.value
+    });
+    coomiMemoryEnabled.value = Boolean(result.data.coomiMemoryEnabled);
+    wikiContextEnabled.value = Boolean(result.data.wikiContextEnabled);
+    savedCoomiMemoryEnabled.value = coomiMemoryEnabled.value;
+    savedWikiContextEnabled.value = wikiContextEnabled.value;
+    successMessage.value = "Agent 上下文设置已保存，将从下一轮执行生效。";
+  } catch (error: unknown) {
+    errorMessage.value = error instanceof Error ? error.message : "保存 Agent 设置失败。";
+  } finally {
+    saving.value = false;
+  }
 }
 
 async function handleSaveProjectSettings(): Promise<void> {

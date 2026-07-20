@@ -3,20 +3,23 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import hashlib
+import importlib.metadata
 import json
 import os
 import re
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, AsyncIterator, Iterator
+from typing import Any, AsyncIterator, Callable, Iterator
 
 
 _MODE_ENV = "STORYDEX_LLM_MODE"
 _FIXTURE_DIR_ENV = "STORYDEX_LLM_FIXTURE_DIR"
 _FIXTURE_FILE = "calls.jsonl"
+_EXTERNAL_TOOL_FIXTURE_FILE = "external-tools.jsonl"
 _SENSITIVE_KEYS = {
     "api_key",
     "apikey",
@@ -34,9 +37,25 @@ _COUNTERS_LOCK = threading.Lock()
 _COUNTERS: dict[str, dict[str, Any]] = {}
 _FIXTURE_LOCK = threading.Lock()
 _FIXTURE_STATES: dict[tuple[str, str], dict[str, Any]] = {}
+_EXTERNAL_TOOL_FIXTURE_LOCK = threading.Lock()
+_EXTERNAL_TOOL_FIXTURE_STATES: dict[tuple[str, str], dict[str, Any]] = {}
 _KNOWN_PURPOSES = {"intent", "plan", "commit", "memory_recall", "chat", "loop"}
+_OPENAI_SDK_USER_AGENT_RE = re.compile(r"^(?:Async)?OpenAI/Python(?:\s|/|$)", re.IGNORECASE)
 _COOMI_SESSION_PATH_RE = re.compile(
     r"(?i)([\\/]\.coomi[\\/]sessions[\\/])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+)
+_STORYDEX_RUNTIME_LOG_PATH_RE = re.compile(
+    r"(?i)((?:[\\/]|(?<![A-Za-z0-9_.-]))\.storydex[\\/]logs[\\/])"
+    r"\d{4}-\d{4}-\d{2}-\d{2}-\d{2}\.jsonl"
+)
+_STORYDEX_AGENT_SESSION_PATH_RE = re.compile(
+    r"(?i)([\\/]\.storydex[\\/]\.agent[\\/]sessions[\\/][^\\/\r\n:]+[\\/])"
+    r"\d{8}T\d{6}Z_[^\\/\r\n:]+\.json"
+)
+# Coomi derives these IDs from UUIDs; normalize values while preserving references.
+_TEXT_FALLBACK_CALL_ID_RE = re.compile(r"(?i)\btext_call_[0-9a-f]{12}\b")
+_WINDOWS_FIND_DIAGNOSTIC_RE = re.compile(
+    r"(?im)^FIND: Parameter format not correct\r?\n?"
 )
 _VOLATILE_TIMESTAMP_FIELD_RE = re.compile(
     r'("(?:createdAt|updatedAt|generatedAt|lastAnalyzedAt|mtime|timestamp)"\s*:\s*")([^"]*)(")'
@@ -96,11 +115,205 @@ def reset_llm_fixture_state(fixture_dir: str | Path | None = None) -> None:
     with _FIXTURE_LOCK:
         if fixture_dir is None:
             _FIXTURE_STATES.clear()
-            return
-        fixture_path = (Path(fixture_dir) / _FIXTURE_FILE).resolve()
-        fixture_key = str(fixture_path)
-        for key in [key for key in _FIXTURE_STATES if key[1] == fixture_key]:
-            _FIXTURE_STATES.pop(key, None)
+        else:
+            fixture_path = (Path(fixture_dir) / _FIXTURE_FILE).resolve()
+            fixture_key = str(fixture_path)
+            for key in [key for key in _FIXTURE_STATES if key[1] == fixture_key]:
+                _FIXTURE_STATES.pop(key, None)
+    with _EXTERNAL_TOOL_FIXTURE_LOCK:
+        if fixture_dir is None:
+            _EXTERNAL_TOOL_FIXTURE_STATES.clear()
+        else:
+            fixture_path = (Path(fixture_dir) / _EXTERNAL_TOOL_FIXTURE_FILE).resolve()
+            fixture_key = str(fixture_path)
+            for key in [key for key in _EXTERNAL_TOOL_FIXTURE_STATES if key[1] == fixture_key]:
+                _EXTERNAL_TOOL_FIXTURE_STATES.pop(key, None)
+
+
+def replayable_external_tool_call(
+    tool_name: str,
+    arguments: dict[str, Any],
+    live_call: Callable[[], Any],
+) -> Any:
+    mode = str(os.getenv(_MODE_ENV, "off") or "off").strip().lower()
+    if mode == "off":
+        return live_call()
+    if mode not in {"record", "replay"}:
+        raise ReplayError(f"Unsupported {_MODE_ENV} value: {mode!r}")
+    fixture_dir = str(os.getenv(_FIXTURE_DIR_ENV, "") or "").strip()
+    if not fixture_dir:
+        raise ReplayError(f"{_FIXTURE_DIR_ENV} is required when {_MODE_ENV}={mode}")
+    fixture_path = Path(fixture_dir) / _EXTERNAL_TOOL_FIXTURE_FILE
+    state = _get_external_tool_fixture_state(mode, fixture_path)
+    request = {
+        "tool": str(tool_name or ""),
+        "arguments": _sanitize(arguments),
+    }
+    if mode == "replay":
+        record = _next_external_tool_record(state, request)
+        return _decode_external_tool_result(record.get("result"))
+
+    with _EXTERNAL_TOOL_FIXTURE_LOCK:
+        sequence = int(state.get("nextSeq", 0)) + 1
+        state["nextSeq"] = sequence
+    result = live_call()
+    record = {
+        "seq": sequence,
+        "request": request,
+        "request_hash": _external_tool_request_hash(request),
+        "result": _encode_external_tool_result(result),
+    }
+    fixture_path.parent.mkdir(parents=True, exist_ok=True)
+    with _EXTERNAL_TOOL_FIXTURE_LOCK:
+        with fixture_path.open("a", encoding="utf-8", newline="\n") as stream:
+            stream.write(_stable_json(record) + "\n")
+    return result
+
+
+def truncate_external_tool_fixture(fixture_dir: str | Path, expected_rows: int) -> None:
+    path = Path(fixture_dir) / _EXTERNAL_TOOL_FIXTURE_FILE
+    expected = max(0, int(expected_rows))
+    if not path.is_file():
+        if expected:
+            raise ReplayError(
+                f"External tool fixture is missing {expected} completed record(s): {path}"
+            )
+        reset_llm_fixture_state(fixture_dir)
+        return
+    records = _load_external_tool_records(path)
+    if len(records) < expected:
+        raise ReplayError(
+            f"External tool fixture is shorter than its atomic checkpoint: "
+            f"rows={len(records)}, expected={expected}"
+        )
+    retained = records[:expected]
+    if retained:
+        with path.open("w", encoding="utf-8", newline="\n") as stream:
+            stream.write("".join(_stable_json(record) + "\n" for record in retained))
+    else:
+        path.unlink(missing_ok=True)
+    reset_llm_fixture_state(fixture_dir)
+
+
+def _get_external_tool_fixture_state(mode: str, path: Path) -> dict[str, Any]:
+    resolved_path = str(path.resolve())
+    key = (mode, resolved_path)
+    with _EXTERNAL_TOOL_FIXTURE_LOCK:
+        state = _EXTERNAL_TOOL_FIXTURE_STATES.get(key)
+        if state is not None:
+            return state
+        if mode == "replay":
+            state = {"records": _load_external_tool_records(path), "consumed": set()}
+        else:
+            records = _load_external_tool_records(path) if path.is_file() else []
+            state = {"nextSeq": max((int(record.get("seq") or 0) for record in records), default=0)}
+        _EXTERNAL_TOOL_FIXTURE_STATES[key] = state
+        return state
+
+
+def _load_external_tool_records(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        raise ReplayError(f"External tool replay fixture is missing: {path}")
+    records: list[dict[str, Any]] = []
+    for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ReplayError(
+                f"Invalid external tool replay JSONL at line {line_no}: {exc}"
+            ) from exc
+        if not isinstance(value, dict):
+            raise ReplayError(f"External tool replay record at line {line_no} must be an object")
+        records.append(value)
+    return sorted(records, key=lambda record: int(record.get("seq") or 0))
+
+
+def _next_external_tool_record(
+    state: dict[str, Any],
+    request: dict[str, Any],
+) -> dict[str, Any]:
+    with _EXTERNAL_TOOL_FIXTURE_LOCK:
+        records = state.get("records") if isinstance(state.get("records"), list) else []
+        consumed = state.get("consumed") if isinstance(state.get("consumed"), set) else set()
+        request_hash = _external_tool_request_hash(request)
+        matching_index = next(
+            (
+                index
+                for index, record in enumerate(records)
+                if index not in consumed
+                and _external_tool_request_hash(
+                    record.get("request") if isinstance(record.get("request"), dict) else {}
+                )
+                == request_hash
+            ),
+            None,
+        )
+        if matching_index is None:
+            remaining = [
+                record.get("request") if isinstance(record.get("request"), dict) else {}
+                for index, record in enumerate(records)
+                if index not in consumed
+            ]
+            if not remaining:
+                raise ReplayMismatch(
+                    f"External tool replay fixture exhausted before call #{len(consumed) + 1}: "
+                    f"{request.get('tool')}"
+                )
+            expected = remaining[0]
+            diff = _diff_values(_sanitize(expected), _sanitize(request))
+            raise ReplayMismatch(
+                f"External tool replay call #{len(consumed) + 1} mismatch:\n"
+                + "\n".join(diff[:30])
+            )
+        record = records[matching_index]
+        consumed.add(matching_index)
+        state["consumed"] = consumed
+        return record
+
+
+def _external_tool_request_hash(request: dict[str, Any]) -> str:
+    return hashlib.sha256(_stable_json(_sanitize(request)).encode("utf-8")).hexdigest()
+
+
+def _encode_external_tool_result(result: Any) -> dict[str, Any]:
+    return {
+        "success": bool(getattr(result, "success", False)),
+        "output": str(getattr(result, "output", "") or ""),
+        "error": (
+            None
+            if getattr(result, "error", None) is None
+            else str(getattr(result, "error", ""))
+        ),
+    }
+
+
+def _decode_external_tool_result(value: Any) -> Any:
+    if not isinstance(value, dict):
+        raise ReplayError("External tool replay result must be an object")
+    from coomi.tools.base import ToolResult
+
+    error = value.get("error")
+    return ToolResult(
+        success=bool(value.get("success")),
+        output=str(value.get("output") or ""),
+        error=None if error is None else str(error),
+    )
+
+
+def _assert_external_tool_replay_complete(fixture_dir: Path) -> None:
+    path = fixture_dir / _EXTERNAL_TOOL_FIXTURE_FILE
+    if not path.is_file():
+        return
+    state = _get_external_tool_fixture_state("replay", path)
+    records = state.get("records") if isinstance(state.get("records"), list) else []
+    consumed = state.get("consumed") if isinstance(state.get("consumed"), set) else set()
+    if len(consumed) != len(records):
+        raise ReplayMismatch(
+            f"External tool replay has {len(records) - len(consumed)} unused record(s): "
+            f"consumed={len(consumed)}, total={len(records)}"
+        )
 
 
 def get_llm_metrics(trace_id: str | None = None) -> dict[str, Any]:
@@ -141,7 +354,32 @@ def get_replayable_llm_provider(provider: Any = None) -> Any:
         from coomi.services import get_llm_provider
 
         provider = get_llm_provider()
+    provider = _apply_storydex_openai_user_agent(provider)
     return ReplayableLLMProvider(provider)
+
+
+def _apply_storydex_openai_user_agent(provider: Any) -> Any:
+    client = getattr(provider, "client", None)
+    try:
+        from openai import AsyncOpenAI
+    except ImportError:
+        return provider
+    if not isinstance(client, AsyncOpenAI):
+        return provider
+
+    headers = getattr(client, "default_headers", {})
+    user_agent = str(headers.get("User-Agent") or headers.get("user-agent") or "")
+    if not _OPENAI_SDK_USER_AGENT_RE.match(user_agent):
+        return provider
+
+    try:
+        coomi_version = importlib.metadata.version("coomi-agent")
+    except importlib.metadata.PackageNotFoundError:
+        coomi_version = "unknown"
+    provider.client = client.with_options(
+        default_headers={"User-Agent": f"Storydex-Coomi/{coomi_version}"}
+    )
+    return provider
 
 
 class ReplayableLLMProvider:
@@ -187,9 +425,17 @@ class ReplayableLLMProvider:
                 ),
             )
         else:
-            response = await _call_with_model_catalog_retry(
-                lambda: self._provider.chat(messages, tools, **kwargs)
-            )
+            try:
+                response = await _call_with_model_catalog_retry(
+                    lambda: self._provider.chat(messages, tools, **kwargs),
+                    recorder=lambda **details: self._record_provider_attempt(call_ref, **details),
+                )
+            except Exception:
+                self._count_usage(
+                    call_ref,
+                    _missing_usage(requested_model=str(request.get("model") or "")),
+                )
+                raise
             normalized_usage = self._count_usage(
                 call_ref,
                 _usage_from_chat_response(
@@ -217,12 +463,20 @@ class ReplayableLLMProvider:
             return
 
         chunks: list[str] = []
-        async for chunk in _iterate_with_model_catalog_retry(
-            lambda: self._provider.chat_stream(messages, **kwargs)
-        ):
-            value = str(chunk)
-            chunks.append(value)
-            yield value
+        try:
+            async for chunk in _iterate_with_model_catalog_retry(
+                lambda: self._provider.chat_stream(messages, **kwargs),
+                recorder=lambda **details: self._record_provider_attempt(call_ref, **details),
+            ):
+                value = str(chunk)
+                chunks.append(value)
+                yield value
+        except Exception:
+            self._count_usage(
+                call_ref,
+                _missing_usage(requested_model=str(request.get("model") or "")),
+            )
+            raise
         self._count_usage(
             call_ref,
             _missing_usage(requested_model=str(request.get("model") or "")),
@@ -261,17 +515,25 @@ class ReplayableLLMProvider:
         chunks: list[dict[str, Any]] = []
         latest_usage: dict[str, Any] | None = None
         usage_snapshot_count = 0
-        async for chunk in _iterate_with_model_catalog_retry(
-            lambda: self._provider.chat_stream_with_tools(messages, tools, **kwargs)
-        ):
-            value = _sanitize(chunk)
-            usage = _usage_from_stream_chunk(value)
-            if usage is not None:
-                latest_usage = _prefer_usage_snapshot(latest_usage, usage)
-                usage_snapshot_count += _usage_snapshot_increment(usage)
-                continue
-            chunks.append(value)
-            yield chunk
+        try:
+            async for chunk in _iterate_with_model_catalog_retry(
+                lambda: self._provider.chat_stream_with_tools(messages, tools, **kwargs),
+                recorder=lambda **details: self._record_provider_attempt(call_ref, **details),
+            ):
+                value = _sanitize(chunk)
+                usage = _usage_from_stream_chunk(value)
+                if usage is not None:
+                    latest_usage = _prefer_usage_snapshot(latest_usage, usage)
+                    usage_snapshot_count += _usage_snapshot_increment(usage)
+                    continue
+                chunks.append(value)
+                yield chunk
+        except Exception:
+            failed_usage = latest_usage or _missing_usage(
+                requested_model=str(request.get("model") or "")
+            )
+            self._count_usage(call_ref, failed_usage)
+            raise
         if latest_usage is None:
             latest_usage = _missing_usage(requested_model=str(request.get("model") or ""))
         else:
@@ -292,6 +554,8 @@ class ReplayableLLMProvider:
                 f"Replay has {len(self._records) - consumed} unused record(s): "
                 f"consumed={consumed}, total={len(self._records)}"
             )
+        if self._mode == "replay" and self._fixture_path is not None:
+            _assert_external_tool_replay_complete(self._fixture_path.parent)
     def _request(
         self,
         method: str,
@@ -322,7 +586,7 @@ class ReplayableLLMProvider:
         if path is None or not path.is_file():
             raise ReplayError(f"Replay fixture is missing: {path}")
         records: list[dict[str, Any]] = []
-        for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        for line_no, line in enumerate(path.read_text(encoding="utf-8").split("\n"), start=1):
             if not line.strip():
                 continue
             try:
@@ -349,7 +613,7 @@ class ReplayableLLMProvider:
             else:
                 existing_count = 0
                 if path.is_file():
-                    existing_count = sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
+                    existing_count = sum(1 for line in path.read_text(encoding="utf-8").split("\n") if line.strip())
                 state = {"nextSeq": existing_count}
             _FIXTURE_STATES[key] = state
             return state
@@ -406,25 +670,47 @@ class ReplayableLLMProvider:
         group_key = f"{purpose}\x00{method}"
         with _COUNTERS_LOCK:
             counter = _COUNTERS.setdefault(trace_id, {"calls": 0, "byMethod": {}, "callGroups": {}})
-            counter["calls"] = int(counter.get("calls", 0)) + 1
-            by_method = counter.setdefault("byMethod", {})
-            by_method[method] = int(by_method.get(method, 0)) + 1
-            call_groups = counter.setdefault("callGroups", {})
-            group = call_groups.setdefault(
-                group_key,
-                {
-                    "purpose": purpose,
-                    "method": method,
-                    "count": 0,
-                    "inputTokens": 0,
-                    "outputTokens": 0,
-                    "usageCalls": 0,
-                },
-            )
-            group["count"] = int(group.get("count", 0)) + 1
             provider_requests = counter.setdefault("providerRequests", [])
-            request_index = len(provider_requests)
-            provider_requests.append({"index": request_index})
+            previous = provider_requests[-1] if provider_requests and isinstance(provider_requests[-1], dict) else None
+            previous_attempts = (
+                previous.get("providerAttempts")
+                if isinstance(previous, dict) and isinstance(previous.get("providerAttempts"), list)
+                else []
+            )
+            is_provider_retry = bool(
+                isinstance(previous, dict)
+                and str(previous.get("requestHash") or "") == request_hash
+                and str(previous.get("purpose") or "") == purpose
+                and str(previous.get("method") or "") == method
+                and str(previous.get("usageSource") or "") == "missing"
+                and previous_attempts
+                and str(previous_attempts[-1].get("outcome") or "") == "error"
+            )
+            if is_provider_retry:
+                request_index = len(provider_requests) - 1
+                previous["providerRetryObserved"] = True
+            else:
+                counter["calls"] = int(counter.get("calls", 0)) + 1
+                by_method = counter.setdefault("byMethod", {})
+                by_method[method] = int(by_method.get(method, 0)) + 1
+                call_groups = counter.setdefault("callGroups", {})
+                group = call_groups.setdefault(
+                    group_key,
+                    {
+                        "purpose": purpose,
+                        "method": method,
+                        "count": 0,
+                        "inputTokens": 0,
+                        "outputTokens": 0,
+                        "usageCalls": 0,
+                    },
+                )
+                group["count"] = int(group.get("count", 0)) + 1
+                request_index = len(provider_requests)
+                provider_requests.append({"index": request_index})
+
+        if is_provider_retry:
+            return trace_id, group_key, request_index
 
         from services.context_trace_service import capture_provider_request
 
@@ -560,27 +846,108 @@ class ReplayableLLMProvider:
                 )
         return normalized_usage
 
+    @staticmethod
+    def _record_provider_attempt(
+        call_ref: tuple[str, str, int],
+        *,
+        attempt: int,
+        outcome: str,
+        elapsed_ms: float,
+        error: Exception | None = None,
+        retry_scheduled: bool = False,
+        emitted_output: bool = False,
+    ) -> None:
+        trace_id, _group_key, request_index = call_ref
+        with _COUNTERS_LOCK:
+            counter = _COUNTERS.get(trace_id, {})
+            provider_requests = (
+                counter.get("providerRequests")
+                if isinstance(counter.get("providerRequests"), list)
+                else []
+            )
+            if request_index >= len(provider_requests) or not isinstance(provider_requests[request_index], dict):
+                return
+            request = provider_requests[request_index]
+            attempts = request.setdefault("providerAttempts", [])
+            if not isinstance(attempts, list):
+                attempts = []
+                request["providerAttempts"] = attempts
+            message = str(error or "")
+            attempt_number = len(attempts) + 1
+            attempts.append(
+                {
+                    "attempt": attempt_number,
+                    "outcome": str(outcome or "error"),
+                    "elapsedMs": round(max(0.0, float(elapsed_ms or 0.0)), 3),
+                    "errorType": type(error).__name__ if error is not None else "",
+                    "errorMessageHash": hashlib.sha256(message.encode("utf-8")).hexdigest() if message else "",
+                    "modelCatalogMismatch": bool(error is not None and _is_model_catalog_mismatch(error)),
+                    "retryScheduled": bool(retry_scheduled),
+                    "emittedOutput": bool(emitted_output),
+                }
+            )
+            request["providerAttemptCount"] = len(attempts)
+            request["providerRetryCount"] = max(0, len(attempts) - 1)
 
-async def _call_with_model_catalog_retry(factory: Any) -> Any:
-    try:
-        return await factory()
-    except Exception as exc:
-        if not _is_model_catalog_mismatch(exc):
-            raise
-        await asyncio.sleep(0.65)
-        return await factory()
+
+async def _call_with_model_catalog_retry(factory: Any, *, recorder: Any = None) -> Any:
+    for attempt in range(1, 3):
+        started = time.perf_counter()
+        try:
+            response = await factory()
+        except Exception as exc:
+            retry_scheduled = attempt == 1 and _is_model_catalog_mismatch(exc)
+            if callable(recorder):
+                recorder(
+                    attempt=attempt,
+                    outcome="error",
+                    elapsed_ms=(time.perf_counter() - started) * 1000,
+                    error=exc,
+                    retry_scheduled=retry_scheduled,
+                    emitted_output=False,
+                )
+            if not retry_scheduled:
+                raise
+            await asyncio.sleep(0.65)
+            continue
+        if callable(recorder):
+            recorder(
+                attempt=attempt,
+                outcome="success",
+                elapsed_ms=(time.perf_counter() - started) * 1000,
+            )
+        return response
+    raise RuntimeError("model catalog retry exhausted")
 
 
-async def _iterate_with_model_catalog_retry(factory: Any) -> AsyncIterator[Any]:
-    for attempt in range(2):
+async def _iterate_with_model_catalog_retry(factory: Any, *, recorder: Any = None) -> AsyncIterator[Any]:
+    for attempt in range(1, 3):
+        started = time.perf_counter()
         emitted = False
         try:
             async for item in factory():
                 emitted = True
                 yield item
+            if callable(recorder):
+                recorder(
+                    attempt=attempt,
+                    outcome="success",
+                    elapsed_ms=(time.perf_counter() - started) * 1000,
+                    emitted_output=emitted,
+                )
             return
         except Exception as exc:
-            if attempt > 0 or emitted or not _is_model_catalog_mismatch(exc):
+            retry_scheduled = attempt == 1 and not emitted and _is_model_catalog_mismatch(exc)
+            if callable(recorder):
+                recorder(
+                    attempt=attempt,
+                    outcome="error",
+                    elapsed_ms=(time.perf_counter() - started) * 1000,
+                    error=exc,
+                    retry_scheduled=retry_scheduled,
+                    emitted_output=emitted,
+                )
+            if not retry_scheduled:
                 raise
             await asyncio.sleep(0.65)
 
@@ -600,9 +967,20 @@ def _stable_json(value: Any) -> str:
 
 def normalize_replay_tool_content(value: str, *, tool_name: str = "") -> str:
     normalized = _COOMI_SESSION_PATH_RE.sub(r"\1<session-id>", str(value or ""))
+    normalized = _STORYDEX_RUNTIME_LOG_PATH_RE.sub(
+        r"\1<runtime-log>.jsonl",
+        normalized,
+    )
+    normalized = _STORYDEX_AGENT_SESSION_PATH_RE.sub(
+        r"\1<runtime-trace>.json",
+        normalized,
+    )
     normalized = _VOLATILE_TIMESTAMP_FIELD_RE.sub(r"\1<timestamp>\3", normalized)
     normalized = _normalize_chapter_progress_manifest_hash(normalized)
-    if str(tool_name or "").strip().lower() == "glob":
+    normalized_tool_name = str(tool_name or "").strip().lower()
+    if normalized_tool_name == "bash":
+        normalized = _WINDOWS_FIND_DIAGNOSTIC_RE.sub("", normalized)
+    if normalized_tool_name == "glob":
         normalized = _normalize_glob_path_result(normalized)
     return normalized
 
@@ -680,6 +1058,26 @@ def _normalize_glob_path_result(value: str) -> str:
     return "\n".join(sorted(lines, key=lambda line: line.replace("\\", "/").casefold()))
 
 
+def _normalize_text_fallback_call_ids(value: Any, replacements: dict[str, str]) -> Any:
+    if isinstance(value, str):
+        def replace(match: re.Match[str]) -> str:
+            raw_id = match.group(0).casefold()
+            return replacements.setdefault(
+                raw_id,
+                f"text_call_<volatile-{len(replacements) + 1}>",
+            )
+
+        return _TEXT_FALLBACK_CALL_ID_RE.sub(replace, value)
+    if isinstance(value, dict):
+        return {
+            key: _normalize_text_fallback_call_ids(item, replacements)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_normalize_text_fallback_call_ids(item, replacements) for item in value]
+    return value
+
+
 def _sanitize_messages(messages: Any) -> list[Any]:
     rows = list(messages) if isinstance(messages, (list, tuple)) else []
     tool_names: dict[str, str] = {}
@@ -697,19 +1095,25 @@ def _sanitize_messages(messages: Any) -> list[Any]:
                 tool_names[call_id] = str(function.get("name") or "")
 
     normalized: list[Any] = []
+    fallback_id_replacements: dict[str, str] = {}
     for raw_message in rows:
         message = _sanitize(raw_message)
         if not isinstance(raw_message, dict) or not isinstance(message, dict):
-            normalized.append(message)
+            normalized.append(
+                _normalize_text_fallback_call_ids(message, fallback_id_replacements)
+            )
             continue
-        if str(raw_message.get("role") or "").strip().lower() != "tool":
-            normalized.append(message)
-            continue
-        content = raw_message.get("content")
-        if isinstance(content, str):
-            call_id = str(raw_message.get("tool_call_id") or "")
-            message["content"] = normalize_replay_tool_content(content, tool_name=tool_names.get(call_id, ""))
-        normalized.append(message)
+        if str(raw_message.get("role") or "").strip().lower() == "tool":
+            content = raw_message.get("content")
+            if isinstance(content, str):
+                call_id = str(raw_message.get("tool_call_id") or "")
+                message["content"] = normalize_replay_tool_content(
+                    content,
+                    tool_name=tool_names.get(call_id, ""),
+                )
+        normalized.append(
+            _normalize_text_fallback_call_ids(message, fallback_id_replacements)
+        )
     return normalized
 
 

@@ -21,8 +21,10 @@ from services.llm_replay import (
     llm_purpose,
     llm_trace,
     normalize_replay_tool_content,
+    replayable_external_tool_call,
     reset_llm_fixture_state,
     reset_llm_metrics,
+    truncate_external_tool_fixture,
 )
 
 
@@ -175,6 +177,42 @@ class TransientModelCatalogProvider(FakeProvider):
         yield {"type": "content", "content": "recovered"}
 
 
+class ScriptedStreamProvider(FakeProvider):
+    def __init__(self, outcomes: list[str]) -> None:
+        super().__init__()
+        self.outcomes = list(outcomes)
+        self.stream_calls = 0
+
+    async def chat_stream_with_tools(self, messages, tools=None, **kwargs):
+        outcome = self.outcomes[self.stream_calls]
+        self.stream_calls += 1
+        if outcome == "error":
+            raise RuntimeError("Internal Server Error")
+        if outcome == "usage_then_error":
+            yield {
+                "type": "usage",
+                "data": {
+                    "source": "provider_response",
+                    "protocol": "openai_chat",
+                    "prompt_tokens": 11,
+                    "completion_tokens": 2,
+                    "total_tokens": 13,
+                },
+            }
+            raise RuntimeError("stream closed after usage")
+        yield {"type": "content", "content": "recovered"}
+        yield {
+            "type": "usage",
+            "data": {
+                "source": "provider_response",
+                "protocol": "openai_chat",
+                "prompt_tokens": 7,
+                "completion_tokens": 3,
+                "total_tokens": 10,
+            },
+        }
+
+
 def test_off_mode_proxies_attributes_and_behavior(monkeypatch):
     monkeypatch.delenv("STORYDEX_LLM_MODE", raising=False)
     provider = FakeProvider()
@@ -190,6 +228,7 @@ def test_off_mode_proxies_attributes_and_behavior(monkeypatch):
 
 def test_model_catalog_mismatch_retries_once_before_failing(monkeypatch):
     monkeypatch.delenv("STORYDEX_LLM_MODE", raising=False)
+    reset_llm_metrics("retry-observation")
 
     async def no_delay(_seconds):
         return None
@@ -198,16 +237,133 @@ def test_model_catalog_mismatch_retries_once_before_failing(monkeypatch):
     provider = TransientModelCatalogProvider()
     replayable = get_replayable_llm_provider(provider)
 
-    response = asyncio.run(replayable.chat([{"role": "user", "content": "hello"}]))
+    with llm_trace("retry-observation"):
+        response = asyncio.run(replayable.chat([{"role": "user", "content": "hello"}]))
     assert response.content == "recovered"
     assert provider.calls == 2
 
     async def collect_stream():
         return [item async for item in replayable.chat_stream_with_tools([{"role": "user", "content": "hello"}])]
 
-    chunks = asyncio.run(collect_stream())
+    with llm_trace("retry-observation"):
+        chunks = asyncio.run(collect_stream())
     assert provider.stream_calls == 2
     assert chunks[0] == {"type": "content", "content": "recovered"}
+    requests = get_llm_metrics("retry-observation")["providerRequests"]
+    assert [request["providerAttemptCount"] for request in requests] == [2, 2]
+    assert [request["providerRetryCount"] for request in requests] == [1, 1]
+    assert [[attempt["outcome"] for attempt in request["providerAttempts"]] for request in requests] == [
+        ["error", "success"],
+        ["error", "success"],
+    ]
+    assert all(request["providerAttempts"][0]["modelCatalogMismatch"] for request in requests)
+
+
+def test_outer_retry_of_same_failed_request_is_one_logical_request(monkeypatch):
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "off")
+    monkeypatch.delenv("STORYDEX_LLM_FIXTURE_DIR", raising=False)
+    trace_id = "outer-provider-retry"
+    reset_llm_metrics(trace_id)
+    provider = get_replayable_llm_provider(ScriptedStreamProvider(["error", "success"]))
+    messages = [{"role": "user", "content": "retry exactly this request"}]
+
+    async def collect_once():
+        return [chunk async for chunk in provider.chat_stream_with_tools(messages)]
+
+    with llm_trace(trace_id), llm_purpose("loop"):
+        with pytest.raises(RuntimeError, match="Internal Server Error"):
+            asyncio.run(collect_once())
+        chunks = asyncio.run(collect_once())
+
+    assert [chunk["type"] for chunk in chunks] == ["content", "usage"]
+    metrics = get_llm_metrics(trace_id)
+    assert metrics["calls"] == 1
+    assert metrics["byMethod"] == {"chat_stream_with_tools": 1}
+    assert metrics["usageCalls"] == 1
+    assert metrics["totalTokens"] == 10
+    assert len(metrics["providerRequests"]) == 1
+    request = metrics["providerRequests"][0]
+    assert request["providerRetryObserved"] is True
+    assert request["providerAttemptCount"] == 2
+    assert request["providerRetryCount"] == 1
+    assert [attempt["attempt"] for attempt in request["providerAttempts"]] == [1, 2]
+    assert [attempt["outcome"] for attempt in request["providerAttempts"]] == [
+        "error",
+        "success",
+    ]
+    assert request["usageSource"] == "provider_response"
+    assert request["providerReportedTotalTokens"] == 10
+
+
+def test_repeated_failures_keep_missing_usage_on_one_logical_request(monkeypatch):
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "off")
+    monkeypatch.delenv("STORYDEX_LLM_FIXTURE_DIR", raising=False)
+    trace_id = "repeated-provider-failure"
+    reset_llm_metrics(trace_id)
+    provider = get_replayable_llm_provider(
+        ScriptedStreamProvider(["error", "error", "error"])
+    )
+    messages = [{"role": "user", "content": "retry exactly this failed request"}]
+
+    async def collect_once():
+        return [chunk async for chunk in provider.chat_stream_with_tools(messages)]
+
+    with llm_trace(trace_id), llm_purpose("loop"):
+        for _attempt in range(3):
+            with pytest.raises(RuntimeError, match="Internal Server Error"):
+                asyncio.run(collect_once())
+
+    metrics = get_llm_metrics(trace_id)
+    assert metrics["calls"] == 1
+    assert metrics["usageCalls"] == 0
+    assert metrics["totalTokens"] == 0
+    assert len(metrics["providerRequests"]) == 1
+    request = metrics["providerRequests"][0]
+    assert request["providerAttemptCount"] == 3
+    assert request["providerRetryCount"] == 2
+    assert [attempt["attempt"] for attempt in request["providerAttempts"]] == [1, 2, 3]
+    assert [attempt["outcome"] for attempt in request["providerAttempts"]] == [
+        "error",
+        "error",
+        "error",
+    ]
+    assert request["usageSource"] == "missing"
+    assert request["providerReportedInputTokens"] is None
+    assert request["providerReportedOutputTokens"] is None
+    assert request["providerReportedTotalTokens"] is None
+
+
+def test_stream_error_after_reported_usage_preserves_reported_usage(monkeypatch):
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "off")
+    monkeypatch.delenv("STORYDEX_LLM_FIXTURE_DIR", raising=False)
+    trace_id = "stream-usage-before-error"
+    reset_llm_metrics(trace_id)
+    provider = get_replayable_llm_provider(ScriptedStreamProvider(["usage_then_error"]))
+
+    async def collect_once():
+        return [
+            chunk
+            async for chunk in provider.chat_stream_with_tools(
+                [{"role": "user", "content": "preserve provider usage"}]
+            )
+        ]
+
+    with llm_trace(trace_id), llm_purpose("loop"):
+        with pytest.raises(RuntimeError, match="stream closed after usage"):
+            asyncio.run(collect_once())
+
+    metrics = get_llm_metrics(trace_id)
+    assert metrics["calls"] == 1
+    assert metrics["usageCalls"] == 1
+    assert metrics["totalTokens"] == 13
+    request = metrics["providerRequests"][0]
+    assert request["providerAttemptCount"] == 1
+    assert request["providerAttempts"][0]["outcome"] == "error"
+    assert request["providerAttempts"][0]["emittedOutput"] is True
+    assert request["usageSource"] == "provider_response"
+    assert request["providerReportedInputTokens"] == 11
+    assert request["providerReportedOutputTokens"] == 2
+    assert request["providerReportedTotalTokens"] == 13
 
 
 def test_record_then_replay_two_calls(monkeypatch, tmp_path):
@@ -226,6 +382,154 @@ def test_record_then_replay_two_calls(monkeypatch, tmp_path):
     replay.assert_replay_complete()
     assert (replayed_first.content, replayed_second.content) == ("response-1", "response-2")
     assert offline.calls == 0
+
+
+def test_record_replay_preserves_unicode_line_separator_inside_jsonl(monkeypatch, tmp_path):
+    class UnicodeSeparatorProvider(FakeProvider):
+        async def chat(self, messages, tools=None, **kwargs):
+            self.calls += 1
+            return FakeResponse(
+                content="left\u2028right",
+                usage={
+                    "source": "provider_response",
+                    "protocol": "openai_chat",
+                    "prompt_tokens": 1,
+                    "completion_tokens": 2,
+                    "total_tokens": 3,
+                },
+            )
+
+    monkeypatch.setenv("STORYDEX_LLM_FIXTURE_DIR", str(tmp_path))
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "record")
+    recorded = asyncio.run(
+        get_replayable_llm_provider(UnicodeSeparatorProvider()).chat(
+            [{"role": "user", "content": "prompt"}]
+        )
+    )
+    assert recorded.content == "left\u2028right"
+
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "replay")
+    replay = get_replayable_llm_provider(FakeProvider())
+    response = asyncio.run(replay.chat([{"role": "user", "content": "prompt"}]))
+    replay.assert_replay_complete()
+    assert response.content == "left\u2028right"
+
+
+def test_external_tool_record_replay_freezes_result_without_live_delegate(monkeypatch, tmp_path):
+    from coomi.tools.base import ToolResult
+
+    monkeypatch.setenv("STORYDEX_LLM_FIXTURE_DIR", str(tmp_path))
+    calls = []
+
+    def live_result():
+        calls.append("live")
+        return ToolResult(success=True, output="search-result-v1")
+
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "record")
+    recorded = replayable_external_tool_call("WebSearch", {"query": "江南制造局"}, live_result)
+    assert recorded.output == "search-result-v1"
+    assert calls == ["live"]
+
+    reset_llm_fixture_state(tmp_path)
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "replay")
+    replayed = replayable_external_tool_call(
+        "WebSearch",
+        {"query": "江南制造局"},
+        lambda: (_ for _ in ()).throw(AssertionError("replay must not call WebSearch")),
+    )
+    assert replayed == ToolResult(success=True, output="search-result-v1")
+
+
+def test_external_tool_replay_rejects_changed_arguments(monkeypatch, tmp_path):
+    from coomi.tools.base import ToolResult
+
+    monkeypatch.setenv("STORYDEX_LLM_FIXTURE_DIR", str(tmp_path))
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "record")
+    replayable_external_tool_call(
+        "WebSearch",
+        {"query": "江南制造局"},
+        lambda: ToolResult(success=True, output="same"),
+    )
+
+    reset_llm_fixture_state(tmp_path)
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "replay")
+    with pytest.raises(ReplayMismatch, match=r"request\.arguments\.query"):
+        replayable_external_tool_call(
+            "WebSearch",
+            {"query": "保民船"},
+            lambda: ToolResult(success=True, output="must-not-run"),
+        )
+
+
+def test_external_tool_replay_matches_parallel_calls_by_arguments(monkeypatch, tmp_path):
+    from coomi.tools.base import ToolResult
+
+    monkeypatch.setenv("STORYDEX_LLM_FIXTURE_DIR", str(tmp_path))
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "record")
+    replayable_external_tool_call(
+        "WebSearch",
+        {"query": "first"},
+        lambda: ToolResult(success=True, output="first-result"),
+    )
+    replayable_external_tool_call(
+        "WebSearch",
+        {"query": "second"},
+        lambda: ToolResult(success=True, output="second-result"),
+    )
+
+    reset_llm_fixture_state(tmp_path)
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "replay")
+    second = replayable_external_tool_call(
+        "WebSearch",
+        {"query": "second"},
+        lambda: (_ for _ in ()).throw(AssertionError("must not run")),
+    )
+    first = replayable_external_tool_call(
+        "WebSearch",
+        {"query": "first"},
+        lambda: (_ for _ in ()).throw(AssertionError("must not run")),
+    )
+    assert second.output == "second-result"
+    assert first.output == "first-result"
+
+
+def test_external_tool_fixture_truncates_failed_prompt_tail(monkeypatch, tmp_path):
+    from coomi.tools.base import ToolResult
+
+    monkeypatch.setenv("STORYDEX_LLM_FIXTURE_DIR", str(tmp_path))
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "record")
+    for query in ("completed", "failed-tail"):
+        replayable_external_tool_call(
+            "WebSearch",
+            {"query": query},
+            lambda query=query: ToolResult(success=True, output=f"result-{query}"),
+        )
+
+    truncate_external_tool_fixture(tmp_path, 1)
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "external-tools.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["request"]["arguments"]["query"] for row in rows] == ["completed"]
+
+
+def test_external_tool_replay_complete_rejects_unused_records(monkeypatch, tmp_path):
+    from coomi.tools.base import ToolResult
+
+    monkeypatch.setenv("STORYDEX_LLM_FIXTURE_DIR", str(tmp_path))
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "record")
+    replayable_external_tool_call(
+        "WebSearch",
+        {"query": "unused"},
+        lambda: ToolResult(success=True, output="unused-result"),
+    )
+    (tmp_path / "calls.jsonl").write_text("", encoding="utf-8")
+
+    reset_llm_fixture_state(tmp_path)
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "replay")
+    replay = get_replayable_llm_provider(FakeProvider())
+    with pytest.raises(ReplayMismatch, match="External tool replay has 1 unused record"):
+        replay.assert_replay_complete()
 
 
 def test_record_and_replay_sequence_is_shared_across_provider_wrappers(monkeypatch, tmp_path):
@@ -260,6 +564,65 @@ def test_replay_mismatch_points_to_changed_message(monkeypatch, tmp_path):
     replay = get_replayable_llm_provider(FakeProvider())
     with pytest.raises(ReplayMismatch, match=r"request\.messages\[0\]\.content"):
         asyncio.run(replay.chat([{"role": "user", "content": "changed"}]))
+
+
+def test_replay_normalizes_volatile_text_fallback_call_ids(monkeypatch, tmp_path):
+    monkeypatch.setenv("STORYDEX_LLM_FIXTURE_DIR", str(tmp_path))
+    recorded_id = "text_call_814fa786f7a0"
+    replayed_id = "text_call_5cdbc8c1f015"
+    recorded_messages = [
+        {
+            "role": "assistant",
+            "content": f"Tool call id: {recorded_id}\nArguments: {{}}",
+        },
+        {
+            "role": "tool",
+            "tool_call_id": recorded_id,
+            "content": f"Text fallback tool result:\nTool call id: {recorded_id}",
+        },
+    ]
+    replayed_messages = [
+        {
+            "role": "assistant",
+            "content": f"Tool call id: {replayed_id}\nArguments: {{}}",
+        },
+        {
+            "role": "tool",
+            "tool_call_id": replayed_id,
+            "content": f"Text fallback tool result:\nTool call id: {replayed_id}",
+        },
+    ]
+
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "record")
+    recorder = get_replayable_llm_provider(FakeProvider())
+    asyncio.run(recorder.chat(recorded_messages))
+
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "replay")
+    replay = get_replayable_llm_provider(FakeProvider())
+    response = asyncio.run(replay.chat(replayed_messages))
+    replay.assert_replay_complete()
+    assert response.content == "response-1"
+
+
+def test_replay_keeps_distinct_text_fallback_call_id_relationships(monkeypatch, tmp_path):
+    monkeypatch.setenv("STORYDEX_LLM_FIXTURE_DIR", str(tmp_path))
+    recorded_messages = [
+        {"role": "assistant", "content": "first text_call_aaaaaaaaaaaa then text_call_bbbbbbbbbbbb"},
+        {"role": "tool", "tool_call_id": "text_call_aaaaaaaaaaaa", "content": "first"},
+    ]
+    changed_relationship = [
+        {"role": "assistant", "content": "first text_call_cccccccccccc then text_call_cccccccccccc"},
+        {"role": "tool", "tool_call_id": "text_call_cccccccccccc", "content": "first"},
+    ]
+
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "record")
+    recorder = get_replayable_llm_provider(FakeProvider())
+    asyncio.run(recorder.chat(recorded_messages))
+
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "replay")
+    replay = get_replayable_llm_provider(FakeProvider())
+    with pytest.raises(ReplayMismatch):
+        asyncio.run(replay.chat(changed_relationship))
 
 
 def test_replay_normalizes_semantically_equal_tool_argument_json(monkeypatch, tmp_path):
@@ -346,6 +709,229 @@ def test_replay_normalizes_only_volatile_tool_result_metadata(monkeypatch, tmp_p
     monkeypatch.setenv("STORYDEX_LLM_MODE", "replay")
     replay = get_replayable_llm_provider(FakeProvider())
     response = asyncio.run(replay.chat([{"role": "tool", "tool_call_id": "call-1", "content": second}]))
+    replay.assert_replay_complete()
+    assert response.content == "response-1"
+
+
+def test_replay_normalizes_nondeterministic_windows_find_diagnostic(monkeypatch, tmp_path):
+    assistant = {
+        "role": "assistant",
+        "tool_calls": [
+            {
+                "id": "call-bash",
+                "type": "function",
+                "function": {
+                    "name": "Bash",
+                    "arguments": '{"command":"find . -type d | head -40"}',
+                },
+            }
+        ],
+    }
+    stable_error = (
+        "'head' is not recognized as an internal or external command,\n"
+        "operable program or batch file.\n\n"
+        "Error: Command exited with code 255\n"
+        "  Command: find . -type d | head -40"
+    )
+    recorded = "\n[stderr]\nFIND: Parameter format not correct\n" + stable_error
+    replayed = "\n[stderr]\n" + stable_error
+
+    monkeypatch.setenv("STORYDEX_LLM_FIXTURE_DIR", str(tmp_path))
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "record")
+    recorder = get_replayable_llm_provider(FakeProvider())
+    asyncio.run(
+        recorder.chat(
+            [assistant, {"role": "tool", "tool_call_id": "call-bash", "content": recorded}]
+        )
+    )
+
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "replay")
+    replay = get_replayable_llm_provider(FakeProvider())
+    response = asyncio.run(
+        replay.chat(
+            [assistant, {"role": "tool", "tool_call_id": "call-bash", "content": replayed}]
+        )
+    )
+    replay.assert_replay_complete()
+    assert response.content == "response-1"
+
+
+def test_replay_normalizes_storydex_runtime_log_filenames(monkeypatch, tmp_path):
+    recorded = (
+        "C:/book/.storydex/logs/2026-0717-04-00-16.jsonl\n"
+        "C:/book/.storydex/logs/2026-0717-04-01-17.jsonl\n"
+        "C:/book/.storydex/wiki/WIKI.md"
+    )
+    replayed = (
+        "C:/book/.storydex/logs/2026-0717-04-13-24.jsonl\n"
+        "C:/book/.storydex/logs/2026-0717-04-13-27.jsonl\n"
+        "C:/book/.storydex/wiki/WIKI.md"
+    )
+    block_content = "stable assembled context"
+
+    assert normalize_replay_tool_content(
+        recorded,
+        tool_name="Glob",
+    ) == normalize_replay_tool_content(replayed, tool_name="Glob")
+
+    recorded_messages = [
+        {"role": "system", "content": f"prefix\n{block_content}\nsuffix"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call-glob",
+                    "type": "function",
+                    "function": {"name": "Glob", "arguments": '{"pattern":".storydex/**/*"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call-glob", "content": recorded},
+    ]
+    replayed_messages = [
+        dict(recorded_messages[0]),
+        dict(recorded_messages[1]),
+        {"role": "tool", "tool_call_id": "call-glob", "content": replayed},
+    ]
+    record_source = create_context_source("related_passages", ["chapters/001.md"])
+    finalize_context_source(record_source, content=block_content, included=True)
+    record_assembly = {
+        "promptBlocks": [{"id": "related_passages", "content": block_content}],
+        "contextTrace": build_context_trace(
+            [record_source],
+            [{"id": "related_passages", "content": block_content}],
+            assemble_ms=0,
+        ),
+    }
+    monkeypatch.setenv("STORYDEX_LLM_FIXTURE_DIR", str(tmp_path))
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "record")
+    reset_llm_metrics("runtime-log-record")
+    with (
+        llm_trace("runtime-log-record"),
+        llm_purpose("chat"),
+        llm_context_assembly(record_assembly),
+    ):
+        asyncio.run(get_replayable_llm_provider(FakeProvider()).chat(recorded_messages))
+
+    replay_source = create_context_source("related_passages", ["chapters/001.md"])
+    finalize_context_source(replay_source, content=block_content, included=True)
+    replay_assembly = {
+        "promptBlocks": [{"id": "related_passages", "content": block_content}],
+        "contextTrace": build_context_trace(
+            [replay_source],
+            [{"id": "related_passages", "content": block_content}],
+            assemble_ms=0,
+        ),
+    }
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "replay")
+    reset_llm_metrics("runtime-log-replay")
+    replay = get_replayable_llm_provider(FakeProvider())
+    with (
+        llm_trace("runtime-log-replay"),
+        llm_purpose("chat"),
+        llm_context_assembly(replay_assembly),
+    ):
+        asyncio.run(replay.chat(replayed_messages))
+    replay.assert_replay_complete()
+
+    record_hash = get_llm_metrics("runtime-log-record")["providerRequests"][0]["requestHash"]
+    replay_hash = get_llm_metrics("runtime-log-replay")["providerRequests"][0]["requestHash"]
+    assert record_hash == replay_hash
+    assert (
+        record_assembly["contextTrace"]["totals"]["contextRequestHash"]
+        == replay_assembly["contextTrace"]["totals"]["contextRequestHash"]
+        == record_hash
+    )
+
+
+def test_replay_normalizes_relative_storydex_runtime_log_paths(monkeypatch, tmp_path):
+    recorded = (
+        '{"sourcePaths":[".storydex/logs/2026-0717-12-58-59.jsonl",'
+        '".storydex/logs/2026-0717-12-59-47.jsonl"],"fact":"same"}'
+    )
+    replayed = (
+        '{"sourcePaths":[".storydex/logs/2026-0717-13-11-12.jsonl",'
+        '".storydex/logs/2026-0717-13-11-15.jsonl"],"fact":"same"}'
+    )
+    assistant = {
+        "role": "assistant",
+        "tool_calls": [
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "Read", "arguments": '{"file_path":".storydex/wiki/index.json"}'},
+            }
+        ],
+    }
+
+    monkeypatch.setenv("STORYDEX_LLM_FIXTURE_DIR", str(tmp_path))
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "record")
+    recorder = get_replayable_llm_provider(FakeProvider())
+    asyncio.run(
+        recorder.chat(
+            [assistant, {"role": "tool", "tool_call_id": "call-1", "content": recorded}]
+        )
+    )
+
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "replay")
+    replay = get_replayable_llm_provider(FakeProvider())
+    response = asyncio.run(
+        replay.chat(
+            [assistant, {"role": "tool", "tool_call_id": "call-1", "content": replayed}]
+        )
+    )
+    replay.assert_replay_complete()
+    assert response.content == "response-1"
+
+
+def test_replay_normalizes_storydex_agent_session_filenames_in_grep_preview(monkeypatch, tmp_path):
+    recorded = (
+        "[Large tool result stored]\n"
+        "Output too large (90537 characters). Full output saved to: "
+        "C:\\book\\.coomi\\sessions\\11111111-1111-1111-1111-111111111111\\tool_results\\call-1.txt\n\n"
+        "Preview:\n"
+        "C:/book/.storydex\\.agent\\sessions\\story-session\\"
+        "20260717T031229Z_t2-52225b88f0f64d13.json:3:   \"prompt\": \"same\",\n"
+        "C:/book/.storydex\\.agent\\sessions\\story-session\\"
+        "20260717T031229Z_t2-52225b88f0f64d13.json:10:  \"reply\": \"same\""
+    )
+    replayed = (
+        "[Large tool result stored]\n"
+        "Output too large (90537 characters). Full output saved to: "
+        "C:\\book\\.coomi\\sessions\\22222222-2222-2222-2222-222222222222\\tool_results\\call-1.txt\n\n"
+        "Preview:\n"
+        "C:/book/.storydex\\.agent\\sessions\\story-session\\"
+        "20260717T032207Z_t2-fa3419342d42310e.json:3:   \"prompt\": \"same\",\n"
+        "C:/book/.storydex\\.agent\\sessions\\story-session\\"
+        "20260717T032207Z_t2-fa3419342d42310e.json:10:  \"reply\": \"same\""
+    )
+    assistant = {
+        "role": "assistant",
+        "tool_calls": [
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "Grep", "arguments": '{"pattern":"same"}'},
+            }
+        ],
+    }
+
+    monkeypatch.setenv("STORYDEX_LLM_FIXTURE_DIR", str(tmp_path))
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "record")
+    recorder = get_replayable_llm_provider(FakeProvider())
+    asyncio.run(
+        recorder.chat(
+            [assistant, {"role": "tool", "tool_call_id": "call-1", "content": recorded}]
+        )
+    )
+
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "replay")
+    replay = get_replayable_llm_provider(FakeProvider())
+    response = asyncio.run(
+        replay.chat(
+            [assistant, {"role": "tool", "tool_call_id": "call-1", "content": replayed}]
+        )
+    )
     replay.assert_replay_complete()
     assert response.content == "response-1"
 

@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
+from services.context_policy import ContextPolicy
+from services.global_config_service import GlobalConfigService, get_global_config_service
 from services.storydex_context_assembler_service import StorydexContextAssemblerService, get_storydex_context_assembler_service
 from services.storydex_intent_service import heuristic_intent_frame, is_valid_intent_frame
 from services.story_project_service import StoryProjectService, get_story_project_service
@@ -17,6 +19,7 @@ DEFAULT_CHAPTER_TEMPLATE_ID = "default_chapter_directory"
 class StorydexOrchestrationService:
     story_project_service: StoryProjectService
     context_assembler: StorydexContextAssemblerService | None = None
+    global_config_service: GlobalConfigService | None = None
 
     def build_turn_contract(
         self,
@@ -26,8 +29,10 @@ class StorydexOrchestrationService:
         active_file: str = "",
         story_generation: Dict[str, Any] | None = None,
         intent_frame: Dict[str, Any] | None = None,
+        context_policy: ContextPolicy | None = None,
     ) -> Dict[str, Any]:
         root = Path(workspace_root).resolve()
+        effective_context_policy = self._context_policy(context_policy)
         self.story_project_service.ensure_project_structure(root)
         story_generation = story_generation if isinstance(story_generation, dict) else {}
         settings = self.story_project_service.read_project_settings(root)
@@ -87,6 +92,7 @@ class StorydexOrchestrationService:
             prompt=prompt,
             active_file=active_file,
             turn_plan=turn_plan,
+            policy=effective_context_policy,
         )
         skill_registry = self._skill_registry(root)
 
@@ -120,9 +126,11 @@ class StorydexOrchestrationService:
                 "avoidFullMemoryDump": True,
                 "variableThinkingFormat": "markdown_first",
                 "machineVariableOperations": "optional",
+                "sources": effective_context_policy.to_dict(),
+                "fingerprint": effective_context_policy.fingerprint,
             },
             "skillRegistry": skill_registry,
-            "toolRegistry": self._tool_registry(),
+            "toolRegistry": self._tool_registry(effective_context_policy),
             "contextAssembly": context_assembly,
             "updatePolicy": {
                 "autoUpdateVariables": bool(settings.get("autoUpdateVariables", False)),
@@ -136,6 +144,14 @@ class StorydexOrchestrationService:
             ),
             "createdAt": datetime.now(timezone.utc).isoformat(),
         }
+
+    def _context_policy(self, override: ContextPolicy | None) -> ContextPolicy:
+        if override is not None:
+            if not isinstance(override, ContextPolicy):
+                raise TypeError("context_policy must be a ContextPolicy")
+            return override
+        global_config = self.global_config_service or get_global_config_service()
+        return ContextPolicy.from_agent_settings(global_config.read_agent_settings())
 
     def _intent_frame(
         self,
@@ -250,7 +266,7 @@ class StorydexOrchestrationService:
         }
 
     @staticmethod
-    def _tool_registry() -> Dict[str, Any]:
+    def _tool_registry(policy: ContextPolicy) -> Dict[str, Any]:
         tools = [
             {
                 "name": "StorydexRuntimePresetStatus",
@@ -288,6 +304,12 @@ class StorydexOrchestrationService:
                 "purpose": "apply story fragments and post-generation increments",
             },
         ]
+        if not policy.active_retrieval_tools:
+            tools = [
+                tool
+                for tool in tools
+                if tool["name"] not in {"StorydexProjectSearch", "StorydexWikiQuery"}
+            ]
         return {
             "runtime": "coomi",
             "scope": "storydex_domain_tools",

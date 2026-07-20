@@ -63,6 +63,21 @@ class WorkspaceStateResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class AgentSettingsResponse(BaseModel):
+    coomi_memory_enabled: bool = Field(alias="coomiMemoryEnabled", default=True)
+    wiki_context_enabled: bool = Field(alias="wikiContextEnabled", default=True)
+    updated_at: str = Field(alias="updatedAt", default="")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AgentSettingsUpdateRequest(BaseModel):
+    coomi_memory_enabled: bool = Field(alias="coomiMemoryEnabled")
+    wiki_context_enabled: bool = Field(alias="wikiContextEnabled")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class SystemBootstrapResponse(BaseModel):
     global_root: str = Field(alias="globalRoot")
     ui_preferences: UIPreferencesResponse = Field(alias="uiPreferences")
@@ -187,6 +202,28 @@ def update_ui_preferences(payload: UIPreferencesUpdateRequest) -> ApiEnvelope:
     updated = get_global_config_service().write_ui_preferences(payload.model_dump(by_alias=True))
     data = UIPreferencesResponse(**updated)
     audit = [{"action": "update_ui_preferences"}]
+    trace = ApiTrace(traceId=trace_id, durationMs=int((perf_counter() - started) * 1000))
+    return success_response(data=data.model_dump(by_alias=True), trace=trace, audit=audit)
+
+
+@router.get("/sys/agent-settings", response_model=ApiEnvelope)
+def read_agent_settings() -> ApiEnvelope:
+    started = perf_counter()
+    trace_id = str(uuid4())
+    payload = get_global_config_service().read_agent_settings()
+    data = AgentSettingsResponse(**payload)
+    audit = [{"action": "read_agent_settings"}]
+    trace = ApiTrace(traceId=trace_id, durationMs=int((perf_counter() - started) * 1000))
+    return success_response(data=data.model_dump(by_alias=True), trace=trace, audit=audit)
+
+
+@router.put("/sys/agent-settings", response_model=ApiEnvelope)
+def update_agent_settings(payload: AgentSettingsUpdateRequest) -> ApiEnvelope:
+    started = perf_counter()
+    trace_id = str(uuid4())
+    updated = get_global_config_service().write_agent_settings(payload.model_dump(by_alias=True))
+    data = AgentSettingsResponse(**updated)
+    audit = [{"action": "update_agent_settings"}]
     trace = ApiTrace(traceId=trace_id, durationMs=int((perf_counter() - started) * 1000))
     return success_response(data=data.model_dump(by_alias=True), trace=trace, audit=audit)
 

@@ -65,6 +65,10 @@ class GlobalConfigService:
         self.ensure_structure()
         return self.root / "state" / "workspace.json"
 
+    def agent_settings_path(self) -> Path:
+        self.ensure_structure()
+        return self.root / "config" / "agent.json"
+
     def global_memory_path(self) -> Path:
         self.ensure_structure()
         return self.root / "memories" / "GLOBAL_MEMORY.md"
@@ -151,6 +155,16 @@ class GlobalConfigService:
     def write_workspace_state(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         normalized = self._normalize_workspace_state(payload if isinstance(payload, dict) else {})
         self._write_json(self.workspace_state_path(), normalized)
+        return normalized
+
+    def read_agent_settings(self) -> Dict[str, Any]:
+        payload = self._read_json(self.agent_settings_path())
+        return self._normalize_agent_settings(payload if isinstance(payload, dict) else {})
+
+    def write_agent_settings(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        normalized = self._normalize_agent_settings(payload if isinstance(payload, dict) else {})
+        normalized["updatedAt"] = datetime.now(timezone.utc).isoformat()
+        self._write_json(self.agent_settings_path(), normalized)
         return normalized
 
     def record_recent_project(self, *, project_name: str, workspace_root: str, opened_at: str = "") -> Dict[str, Any]:
@@ -246,6 +260,22 @@ class GlobalConfigService:
         }
 
     @staticmethod
+    def _normalize_agent_settings(payload: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            # T2 only introduces switches; changing either default is a separate
+            # ADR-gated product decision.
+            "coomiMemoryEnabled": GlobalConfigService._strict_bool(
+                payload.get("coomiMemoryEnabled"),
+                True,
+            ),
+            "wikiContextEnabled": GlobalConfigService._strict_bool(
+                payload.get("wikiContextEnabled"),
+                True,
+            ),
+            "updatedAt": str(payload.get("updatedAt") or ""),
+        }
+
+    @staticmethod
     def _clamp_int(value: Any, fallback: int, *, minimum: int, maximum: int) -> int:
         try:
             parsed = int(value)
@@ -257,6 +287,10 @@ class GlobalConfigService:
     def _normalize_choice(value: Any, *, fallback: str, allowed: set[str]) -> str:
         normalized = str(value or "").strip().lower()
         return normalized if normalized in allowed else fallback
+
+    @staticmethod
+    def _strict_bool(value: Any, fallback: bool) -> bool:
+        return value if isinstance(value, bool) else fallback
 
     @staticmethod
     def _read_json(path: Path) -> Dict[str, Any]:

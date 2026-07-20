@@ -22,6 +22,7 @@ from api.response import ApiEnvelope, ApiTrace, success_response
 from core.exceptions import GitServiceError, StorydexError
 from services.agent_git_autocommit_service import AgentGitSnapshot, get_agent_git_autocommit_service
 from services.coomi_agent_service import get_storydex_coomi_agent_service
+from services.context_policy import ContextPolicy
 from services.context_trace_service import merge_llm_metrics, summarize_context_trace
 from services.execution_log_service import ExecutionLogSession, create_execution_log_session
 from services.git_service import get_git_service
@@ -2266,6 +2267,7 @@ async def _stream_agent_chat_request_sse(
     trace_id: str,
     session_id: str,
     cancellation_token: _CancellationToken,
+    context_policy_override: ContextPolicy | None = None,
 ) -> AsyncIterator[str]:
     reset_llm_metrics(trace_id)
     request_started = time.perf_counter()
@@ -2376,6 +2378,7 @@ async def _stream_agent_chat_request_sse(
                 active_file=payload.active_file,
                 story_generation=story_generation,
                 intent_frame=intent_frame,
+                context_policy=context_policy_override,
             )
         )
         while not contract_task.done():

@@ -93,14 +93,16 @@ def build_context_trace(
     blocks: Sequence[Dict[str, Any]],
     *,
     assemble_ms: float,
+    context_policy: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     source_records = [source for source in sources if isinstance(source, dict)]
     context_chars = sum(int(source.get("chars") or 0) for source in source_records)
     context_tokens = sum(int(source.get("estTokens") or 0) for source in source_records)
     return {
         "_type": "ContextTrace",
-        "_version": 3,
+        "_version": 4,
         "tokenEstimator": f"tiktoken:{_TOKEN_ENCODING}",
+        "contextPolicy": dict(context_policy or {}),
         "usageContract": {
             "_type": "LLMUsage",
             "_version": 1,
@@ -147,8 +149,57 @@ def build_context_trace(
             "missingUsageRequestCount": 0,
             "legacyUnknownUsageRequestCount": 0,
             "reportedUsageCoveragePct": None,
+            "providerAttemptCount": 0,
+            "providerRetryCount": 0,
+            "providerFailedAttemptCount": 0,
         },
     }
+
+
+def capture_coomi_memory_source(
+    context_assembly: Dict[str, Any] | None,
+    *,
+    system_prompt: str,
+    enabled: bool,
+) -> None:
+    """Attach Coomi persistent-memory measurements without storing its text."""
+
+    assembly = context_assembly if isinstance(context_assembly, dict) else {}
+    trace = assembly.get("contextTrace") if isinstance(assembly.get("contextTrace"), dict) else None
+    if trace is None:
+        return
+    sources = trace.get("sources") if isinstance(trace.get("sources"), list) else []
+    sources = [
+        source
+        for source in sources
+        if not (isinstance(source, dict) and str(source.get("kind") or "") == "coomi_memory")
+    ]
+    content = _coomi_memory_block(system_prompt) if enabled else ""
+    source = create_context_source(
+        "coomi_memory",
+        ["coomi://persistent-memory"] if content else [],
+        candidate=content,
+        count=1 if content else 0,
+        policy="execution_context_policy",
+    )
+    finalize_context_source(
+        source,
+        content=content,
+        included=bool(content),
+        drop_reason="" if content else "empty" if enabled else "disabled_by_policy",
+    )
+    sources.append(source)
+    trace["sources"] = sources
+    totals = trace.get("totals") if isinstance(trace.get("totals"), dict) else {}
+    totals.update(
+        {
+            "contextChars": sum(int(item.get("chars") or 0) for item in sources if isinstance(item, dict)),
+            "estContextTokens": sum(
+                int(item.get("estTokens") or 0) for item in sources if isinstance(item, dict)
+            ),
+        }
+    )
+    trace["totals"] = totals
 
 
 def capture_provider_request(
@@ -176,6 +227,14 @@ def capture_provider_request(
         "kwargs": dict(kwargs or {}),
     }
     request_text = _stable_json(normalized_request)
+    system_prompt = next(
+        (
+            _message_content_text(message)
+            for message in messages
+            if isinstance(message, dict) and str(message.get("role") or "") == "system"
+        ),
+        "",
+    )
     request_record = {
         "index": max(0, int(request_index or 0)),
         "purpose": str(purpose or "unknown"),
@@ -183,6 +242,13 @@ def capture_provider_request(
         "requestChars": len(request_text),
         "requestEstTokens": estimate_tokens(request_text),
         "requestHash": str(request_hash or ""),
+        "systemPromptChars": len(system_prompt),
+        "systemPromptEstTokens": estimate_tokens(system_prompt),
+        "toolNames": _tool_names(tools or []),
+        "toolsDigest": hashlib.sha256(_stable_json(list(tools or [])).encode("utf-8")).hexdigest(),
+        "providerAttempts": [],
+        "providerAttemptCount": 0,
+        "providerRetryCount": 0,
         "usage": None,
         "usageSource": "",
         "protocol": "unknown",
@@ -248,6 +314,31 @@ def capture_provider_request(
             found += 1
             break
 
+    memory_source = source_by_kind.get("coomi_memory")
+    if isinstance(memory_source, dict) and bool(memory_source.get("included")):
+        expected_chars = int(memory_source.get("chars") or 0)
+        expected_hash = str(memory_source.get("contentHash") or "")
+        for message_index, message_text in enumerate(message_texts):
+            for marker in ("## Persistent Memories", "## Memory Index"):
+                char_index = message_text.find(marker)
+                if char_index < 0 or expected_chars <= 0:
+                    continue
+                candidate = message_text[char_index : char_index + expected_chars]
+                if normalized_content_hash(candidate) != expected_hash:
+                    continue
+                start_token = estimate_tokens(message_text[:char_index])
+                memory_source.update(
+                    {
+                        "messageIndex": message_index,
+                        "startEstToken": start_token,
+                        "endEstToken": start_token + estimate_tokens(candidate),
+                    }
+                )
+                found += 1
+                break
+            if int(memory_source.get("messageIndex", -1)) >= 0:
+                break
+
     included_count = sum(1 for source in source_by_kind.values() if bool(source.get("included")))
     if included_count and found == 0:
         return request_record
@@ -293,6 +384,20 @@ def merge_llm_metrics(context_trace: Dict[str, Any] | None, metrics: Dict[str, A
         for request in provider_requests
         if str(request.get("usageSource") or "") == "legacy_unknown"
     ]
+    provider_attempt_count = sum(
+        int(request.get("providerAttemptCount") or 0) for request in provider_requests
+    )
+    provider_retry_count = sum(
+        int(request.get("providerRetryCount") or 0) for request in provider_requests
+    )
+    provider_failed_attempt_count = sum(
+        sum(
+            1
+            for attempt in request.get("providerAttempts", [])
+            if isinstance(attempt, dict) and str(attempt.get("outcome") or "") == "error"
+        )
+        for request in provider_requests
+    )
     input_reported_requests = [
         request
         for request in reported_requests
@@ -360,6 +465,9 @@ def merge_llm_metrics(context_trace: Dict[str, Any] | None, metrics: Dict[str, A
             "missingUsageRequestCount": len(missing_requests),
             "legacyUnknownUsageRequestCount": len(legacy_requests),
             "reportedUsageCoveragePct": coverage_pct,
+            "providerAttemptCount": provider_attempt_count,
+            "providerRetryCount": provider_retry_count,
+            "providerFailedAttemptCount": provider_failed_attempt_count,
         }
     )
     trace["totals"] = totals
@@ -396,7 +504,31 @@ def summarize_context_trace(context_trace: Dict[str, Any] | None) -> Dict[str, A
             totals.get("legacyUnknownUsageRequestCount") or 0
         ),
         "reportedUsageCoveragePct": totals.get("reportedUsageCoveragePct"),
+        "providerAttemptCount": int(totals.get("providerAttemptCount") or 0),
+        "providerRetryCount": int(totals.get("providerRetryCount") or 0),
+        "providerFailedAttemptCount": int(totals.get("providerFailedAttemptCount") or 0),
     }
+
+
+def _coomi_memory_block(system_prompt: str) -> str:
+    text = str(system_prompt or "")
+    starts = [index for marker in ("## Persistent Memories", "## Memory Index") if (index := text.find(marker)) >= 0]
+    if not starts:
+        return ""
+    start = min(starts)
+    end = text.find("\n## ", start + 4)
+    return text[start : end if end >= 0 else len(text)].strip()
+
+
+def _tool_names(tools: Sequence[Dict[str, Any]]) -> list[str]:
+    names: list[str] = []
+    for raw_tool in tools:
+        tool = raw_tool if isinstance(raw_tool, dict) else {}
+        function = tool.get("function") if isinstance(tool.get("function"), dict) else {}
+        name = str(tool.get("name") or function.get("name") or "").strip()
+        if name and name not in names:
+            names.append(name)
+    return names
 
 
 def _sum_optional(requests: Sequence[Dict[str, Any]], key: str) -> int | None:

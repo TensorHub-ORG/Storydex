@@ -17,6 +17,7 @@ re-registers on top of ``create_default_registry()``.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List
@@ -26,6 +27,7 @@ from coomi.tools.file_ops import EditTool, ReadTool, WriteTool
 from coomi.tools.search import GlobTool, GrepTool
 from coomi.tools.shell import BashTool, PowerShellTool
 from coomi.tools.shell.bash import EXIT_CODE_HINTS, _truncate_output
+from coomi.tools.web import WebFetchTool, WebSearchTool
 
 
 class _WorkspaceBoundMixin:
@@ -93,15 +95,18 @@ class StorydexBashTool(_WorkspaceBoundMixin, BashTool):
 
     def run(self, arguments: Dict[str, Any]) -> ToolResult:
         command = arguments["command"]
+        shell_command = f"chcp 65001>nul & {command}" if os.name == "nt" else command
         timeout = arguments.get("timeout", 120000) / 1000
         cwd = self.workspace_root.as_posix()
 
         try:
             result = subprocess.run(
-                command,
+                shell_command,
                 shell=True,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="strict",
                 timeout=timeout,
                 cwd=str(self.workspace_root),
             )
@@ -213,6 +218,26 @@ class StorydexPowerShellTool(_WorkspaceBoundMixin, PowerShellTool):
             )
 
 
+class _ReplayableExternalToolMixin:
+    def run(self, arguments: Dict[str, Any]) -> ToolResult:
+        from services.llm_replay import replayable_external_tool_call
+
+        live_run = super().run
+        return replayable_external_tool_call(
+            self.name,
+            arguments,
+            lambda: live_run(arguments),
+        )
+
+
+class StorydexWebSearchTool(_ReplayableExternalToolMixin, WebSearchTool):
+    pass
+
+
+class StorydexWebFetchTool(_ReplayableExternalToolMixin, WebFetchTool):
+    pass
+
+
 def create_workspace_bound_tool_overrides(workspace_root: Path) -> List[Any]:
     root = Path(workspace_root).resolve()
     return [
@@ -224,3 +249,7 @@ def create_workspace_bound_tool_overrides(workspace_root: Path) -> List[Any]:
         StorydexBashTool(workspace_root=root),
         StorydexPowerShellTool(workspace_root=root),
     ]
+
+
+def create_replayable_external_tool_overrides() -> List[Any]:
+    return [StorydexWebSearchTool(), StorydexWebFetchTool()]
