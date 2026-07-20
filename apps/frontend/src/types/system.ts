@@ -47,6 +47,17 @@ export interface WorkspaceStateResponse {
   updatedAt: string;
 }
 
+export interface AgentSettingsResponse {
+  coomiMemoryEnabled: boolean;
+  wikiContextEnabled: boolean;
+  updatedAt: string;
+}
+
+export interface AgentSettingsUpdateRequest {
+  coomiMemoryEnabled: boolean;
+  wikiContextEnabled: boolean;
+}
+
 export interface SystemBootstrapResponse {
   globalRoot: string;
   uiPreferences: UIPreferencesResponse;

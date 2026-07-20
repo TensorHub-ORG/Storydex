@@ -2,6 +2,8 @@ import axios from "axios";
 import { ApiResponseError, apiClient, describeTransportError, unwrapEnvelope } from "@/api/client";
 import type { ApiEnvelope, ApiResult } from "@/types/api";
 import type {
+  AgentSettingsResponse,
+  AgentSettingsUpdateRequest,
   SystemBootstrapResponse,
   SystemHealthResponse,
   UIPreferencesResponse,
@@ -71,4 +73,23 @@ export async function updateUiPreferences(
   }
 }
 
+export async function fetchAgentSettings(): Promise<ApiResult<AgentSettingsResponse>> {
+  try {
+    const response = await apiClient.get<ApiEnvelope<AgentSettingsResponse>>("/sys/agent-settings");
+    return unwrapEnvelope(response.data, "Agent settings request failed.");
+  } catch (error: unknown) {
+    rethrowSystemError(error, "Agent settings request failed.");
+  }
+}
+
+export async function updateAgentSettings(
+  payload: AgentSettingsUpdateRequest
+): Promise<ApiResult<AgentSettingsResponse>> {
+  try {
+    const response = await apiClient.put<ApiEnvelope<AgentSettingsResponse>>("/sys/agent-settings", payload);
+    return unwrapEnvelope(response.data, "Agent settings update failed.");
+  } catch (error: unknown) {
+    rethrowSystemError(error, "Agent settings update failed.");
+  }
+}
 

@@ -641,6 +641,28 @@ def test_workspace_bound_bash_tool_runs_in_workspace(tmp_path):
     assert str(tmp_path.resolve()).lower() in result.output.strip().lower()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows cmd code-page contract")
+def test_workspace_bound_bash_tool_forces_utf8_on_windows(monkeypatch, tmp_path):
+    import services.storydex_coomi_runtime_tools as runtime_tools
+
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(runtime_tools.subprocess, "run", fake_run)
+    tool = runtime_tools.StorydexBashTool(workspace_root=tmp_path)
+
+    result = tool.run({"command": "find . -type d | head -40"})
+
+    assert result.success
+    assert captured["command"] == "chcp 65001>nul & find . -type d | head -40"
+    assert captured["kwargs"]["encoding"] == "utf-8"
+    assert captured["kwargs"]["errors"] == "strict"
+
+
 def test_registry_overrides_replace_default_tools(tmp_path):
     pytest.importorskip("coomi")
     from services.coomi_agent_service import _create_storydex_tool_registry
@@ -649,6 +671,34 @@ def test_registry_overrides_replace_default_tools(tmp_path):
     registry = _create_storydex_tool_registry(tmp_path)
     assert isinstance(registry.get("Bash"), StorydexBashTool)
     assert isinstance(registry.get("Write"), StorydexWriteTool)
+
+
+def test_registry_web_search_replay_uses_recorded_result_without_live_network(monkeypatch, tmp_path):
+    pytest.importorskip("coomi")
+    from coomi.tools.base import ToolResult
+    from coomi.tools.web import WebSearchTool
+    from services.coomi_agent_service import _create_storydex_tool_registry
+    from services.llm_replay import reset_llm_fixture_state
+
+    monkeypatch.setenv("STORYDEX_LLM_FIXTURE_DIR", str(tmp_path))
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "record")
+    monkeypatch.setattr(
+        WebSearchTool,
+        "run",
+        lambda self, arguments: ToolResult(success=True, output="frozen-search-result"),
+    )
+    recorded = _create_storydex_tool_registry(tmp_path).get("WebSearch").run({"query": "江南制造局"})
+    assert recorded.output == "frozen-search-result"
+
+    reset_llm_fixture_state(tmp_path)
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "replay")
+
+    def fail_if_live(self, arguments):
+        raise AssertionError("replay must not call the live WebSearch tool")
+
+    monkeypatch.setattr(WebSearchTool, "run", fail_if_live)
+    replayed = _create_storydex_tool_registry(tmp_path).get("WebSearch").run({"query": "江南制造局"})
+    assert replayed == recorded
 
 
 # ─────────────────── 6. Agent 主动检索工具 ───────────────────

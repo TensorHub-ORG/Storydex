@@ -585,7 +585,7 @@ def test_runtime_creation_new_cached_and_restored(monkeypatch, tmp_path):
     service = coomi.StorydexCoomiAgentService()
     monkeypatch.setattr(coomi, "_build_coomi_system_prompt", lambda **kwargs: asyncio.sleep(0, result="system"))
     monkeypatch.setattr(coomi, "_resolve_context_window", lambda: 4096)
-    monkeypatch.setattr(coomi, "_create_storydex_tool_registry", lambda root: "registry")
+    monkeypatch.setattr(coomi, "_create_storydex_tool_registry", lambda root, policy=None: "registry")
     monkeypatch.setattr(coomi, "_write_coomi_session_binding", lambda **kwargs: None)
     monkeypatch.setattr(coomi, "_sync_coomi_runtime_workspace", lambda **kwargs: setattr(kwargs["session"], "synced", True))
 
@@ -656,7 +656,7 @@ def test_runtime_creation_new_cached_and_restored(monkeypatch, tmp_path):
 def test_nonempty_loop_success_cancel_and_error(monkeypatch, tmp_path):
     service = coomi.StorydexCoomiAgentService()
     monkeypatch.setattr(service, "get_status", lambda **kwargs: {})
-    monkeypatch.setattr(coomi, "_create_storydex_tool_registry", lambda root: "registry")
+    monkeypatch.setattr(coomi, "_create_storydex_tool_registry", lambda root, policy=None: "registry")
     monkeypatch.setattr(coomi, "_resolve_context_window", lambda: 100)
     monkeypatch.setattr(coomi, "_resolve_loop_spec", lambda root, body: (None, "spec"))
     monkeypatch.setattr(service, "_create_permission_system", lambda *args: types.SimpleNamespace())
@@ -801,7 +801,11 @@ def test_status_context_config_parsing_and_sync_chat(monkeypatch, tmp_path):
     config_module = types.ModuleType("coomi.services.llm.config")
     config_module.ConfigManager = lambda: types.SimpleNamespace(get_active=lambda: active)
     monkeypatch.setitem(sys.modules, "coomi.services.llm.config", config_module)
-    monkeypatch.setattr(coomi, "_create_storydex_tool_registry", lambda root: types.SimpleNamespace(list_tools=lambda: [1, 2]))
+    monkeypatch.setattr(
+        coomi,
+        "_create_storydex_tool_registry",
+        lambda root, policy=None: types.SimpleNamespace(list_tools=lambda: [1, 2]),
+    )
     monkeypatch.setattr(coomi, "_resolve_context_window", lambda: 1000)
     service = coomi.StorydexCoomiAgentService()
     status = service.get_status(workspace_root=tmp_path)
@@ -940,7 +944,7 @@ def test_cross_workspace_session_isolation_and_clear(monkeypatch, tmp_path):
     service = coomi.StorydexCoomiAgentService()
     monkeypatch.setattr(coomi, "_build_coomi_system_prompt", lambda **kwargs: asyncio.sleep(0, result="system"))
     monkeypatch.setattr(coomi, "_resolve_context_window", lambda: 4096)
-    monkeypatch.setattr(coomi, "_create_storydex_tool_registry", lambda root: "registry")
+    monkeypatch.setattr(coomi, "_create_storydex_tool_registry", lambda root, policy=None: "registry")
     monkeypatch.setattr(coomi, "_write_coomi_session_binding", lambda **kwargs: None)
     monkeypatch.setattr(coomi, "_sync_coomi_runtime_workspace", lambda **kwargs: setattr(kwargs["session"], "synced", True))
     monkeypatch.setattr(coomi, "_restore_bound_coomi_session", lambda **kwargs: None)

@@ -16,6 +16,8 @@ from typing import Any, AsyncIterator, Callable, Dict, Iterator
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
+from services.context_policy import ContextPolicy, context_policy_from_turn_contract
+
 
 STORYDEX_COOMI_HOME = Path.home() / ".storydex"
 STORYDEX_COOMI_SESSIONS = STORYDEX_COOMI_HOME / ".coomi" / "sessions"
@@ -258,6 +260,7 @@ class StorydexCoomiAgentService:
                     trace_id=trace_id,
                     session_id=session_id,
                     workspace_root=workspace,
+                    turn_contract=turn_contract,
                 ):
                     yield item
                 return
@@ -270,6 +273,7 @@ class StorydexCoomiAgentService:
                     workspace_root=workspace,
                     cancellation_token=cancellation_token,
                     started=started,
+                    turn_contract=turn_contract,
                 ):
                     yield item
                 return
@@ -412,6 +416,7 @@ class StorydexCoomiAgentService:
         turn_contract: Dict[str, Any] | None = None,
         app_context: Any = None,
     ) -> tuple[Any, Any]:
+        context_policy = context_policy_from_turn_contract(turn_contract)
         async with self._runtime_lock():
             runtime_key = self._runtime_key(session_id=session_id, workspace_root=workspace_root)
             session = self._sessions.get(runtime_key)
@@ -426,6 +431,10 @@ class StorydexCoomiAgentService:
                 )
                 # providers.json 的 context_window 可能在会话中途被修改，保持跟随。
                 setattr(agent, "context_window_size", _resolve_context_window())
+                _replace_runtime_tool_registry(
+                    agent,
+                    _create_storydex_tool_registry(workspace_root, context_policy),
+                )
                 _sync_coomi_runtime_workspace(
                     agent=agent,
                     session=session,
@@ -440,7 +449,7 @@ class StorydexCoomiAgentService:
             from services.llm_replay import get_replayable_llm_provider
 
             provider = get_replayable_llm_provider()
-            registry = _create_storydex_tool_registry(workspace_root)
+            registry = _create_storydex_tool_registry(workspace_root, context_policy)
             permissions = self._permissions.get(runtime_key)
             if permissions is None:
                 permissions = self._create_permission_system(
@@ -505,6 +514,7 @@ class StorydexCoomiAgentService:
         trace_id: str,
         session_id: str,
         workspace_root: Path,
+        turn_contract: Dict[str, Any] | None = None,
     ) -> AsyncIterator[tuple[str, Dict[str, Any]]]:
         started = time.perf_counter()
         from services.llm_replay import llm_trace
@@ -514,6 +524,7 @@ class StorydexCoomiAgentService:
                 session_id=session_id,
                 workspace_root=workspace_root,
                 prompt=prompt,
+                turn_contract=turn_contract,
             )
         plan_mode = command == "plan"
         setter = getattr(agent, "set_plan_mode", None)
@@ -524,6 +535,7 @@ class StorydexCoomiAgentService:
                 workspace_root=workspace_root,
                 prompt=prompt,
                 plan_mode=plan_mode,
+                turn_contract=turn_contract,
             )
         _sync_coomi_runtime_workspace(
             agent=agent,
@@ -560,6 +572,7 @@ class StorydexCoomiAgentService:
         workspace_root: Path,
         cancellation_token: Any,
         started: float,
+        turn_contract: Dict[str, Any] | None = None,
     ) -> AsyncIterator[tuple[str, Dict[str, Any]]]:
         status = self.get_status(workspace_root=workspace_root)
         yield _agent_started(session_id=session_id, prompt=prompt, status=status, mode="coomi-loop")
@@ -578,10 +591,10 @@ class StorydexCoomiAgentService:
 
         from coomi.engine.loop_runner import LoopRunner
         from services.llm_replay import get_replayable_llm_provider, llm_purpose, llm_trace
-        from coomi.services.memory import MemoryManager, MemoryRecall
 
         provider = get_replayable_llm_provider()
-        registry = _create_storydex_tool_registry(workspace_root)
+        context_policy = context_policy_from_turn_contract(turn_contract)
+        registry = _create_storydex_tool_registry(workspace_root, context_policy)
         permissions = self._permissions.get(session_id)
         if permissions is None:
             from coomi.security import PermissionLevel, PermissionMode, PermissionSystem
@@ -609,8 +622,11 @@ class StorydexCoomiAgentService:
             app_context=app_context,
             permission_system=permissions,
         )
-        memory_manager = MemoryManager(project_path=workspace_root.as_posix())
-        memory_recall = MemoryRecall(provider, memory_manager)
+        memory_manager, memory_recall = _build_coomi_memory(
+            workspace_root,
+            context_policy,
+            provider=provider,
+        )
         spec_path, spec = _resolve_loop_spec(workspace_root, command_body)
         translator = _CoomiEventTranslator(session_id=session_id)
 
@@ -1464,7 +1480,10 @@ def _sync_coomi_runtime_workspace(
             )
 
 
-def _create_storydex_tool_registry(workspace_root: Path) -> Any:
+def _create_storydex_tool_registry(
+    workspace_root: Path,
+    policy: ContextPolicy | None = None,
+) -> Any:
     from coomi.tools.registry import create_default_registry
     from services.storydex_agent_tools import (
         StorydexApplyStoryIncrementTool,
@@ -1475,22 +1494,40 @@ def _create_storydex_tool_registry(workspace_root: Path) -> Any:
         StorydexVersionStatusTool,
         StorydexWikiQueryTool,
     )
-    from services.storydex_coomi_runtime_tools import create_workspace_bound_tool_overrides
+    import importlib
+
+    runtime_tools = importlib.import_module("services.storydex_coomi_runtime_tools")
 
     root = Path(workspace_root).resolve()
+    effective_policy = policy if isinstance(policy, ContextPolicy) else ContextPolicy()
     registry = create_default_registry()
     # 同名覆盖默认工具：文件/Shell 工具全部显式绑定工作区，
     # 使 Agent 轮次不再依赖进程级 os.chdir。
-    for tool in create_workspace_bound_tool_overrides(root):
+    for tool in runtime_tools.create_workspace_bound_tool_overrides(root):
+        registry.register(tool)
+    external_tool_overrides = getattr(
+        runtime_tools,
+        "create_replayable_external_tool_overrides",
+        lambda: (),
+    )
+    for tool in external_tool_overrides():
         registry.register(tool)
     registry.register(StorydexRuntimePresetStatusTool(workspace_root=root))
     registry.register(StorydexVersionStatusTool(workspace_root=root))
     registry.register(StorydexHelpGuideSearchTool(workspace_root=root))
-    registry.register(StorydexProjectSearchTool(workspace_root=root))
-    registry.register(StorydexWikiQueryTool(workspace_root=root))
+    if effective_policy.active_retrieval_tools:
+        registry.register(StorydexProjectSearchTool(workspace_root=root))
+        registry.register(StorydexWikiQueryTool(workspace_root=root))
     registry.register(StorydexSyncWikiTool(workspace_root=root))
     registry.register(StorydexApplyStoryIncrementTool(workspace_root=root))
     return registry
+
+
+def _replace_runtime_tool_registry(agent: Any, registry: Any) -> None:
+    setattr(agent, "tool_registry", registry)
+    tool_executor = getattr(agent, "tool_executor", None)
+    if tool_executor is not None:
+        setattr(tool_executor, "tool_registry", registry)
 
 
 def _sync_storydex_tools_workspace(registry: Any, workspace_root: Path) -> None:
@@ -1505,6 +1542,23 @@ def _sync_storydex_tools_workspace(registry: Any, workspace_root: Path) -> None:
             setter(resolved_root)
 
 
+def _build_coomi_memory(
+    workspace_root: Path,
+    policy: ContextPolicy,
+    *,
+    provider: Any = None,
+) -> tuple[Any | None, Any | None]:
+    effective_policy = policy if isinstance(policy, ContextPolicy) else ContextPolicy()
+    if not effective_policy.coomi_memory:
+        return None, None
+    from coomi.services.memory import MemoryManager, MemoryRecall
+    from services.llm_replay import get_replayable_llm_provider
+
+    memory_provider = provider if provider is not None else get_replayable_llm_provider()
+    manager = MemoryManager(project_path=Path(workspace_root).resolve().as_posix())
+    return manager, MemoryRecall(memory_provider, manager)
+
+
 async def _build_coomi_system_prompt(
     *,
     workspace_root: Path,
@@ -1515,11 +1569,15 @@ async def _build_coomi_system_prompt(
 ) -> str:
     from coomi.engine.session import build_system_prompt
     from services.llm_replay import get_replayable_llm_provider, llm_purpose
-    from coomi.services.memory import MemoryManager, MemoryRecall
+    from services.context_trace_service import capture_coomi_memory_source
 
     provider = get_replayable_llm_provider()
-    memory_manager = MemoryManager(project_path=workspace_root.as_posix())
-    memory_recall = MemoryRecall(provider, memory_manager)
+    context_policy = context_policy_from_turn_contract(turn_contract)
+    memory_manager, memory_recall = _build_coomi_memory(
+        workspace_root,
+        context_policy,
+        provider=provider,
+    )
     with llm_purpose("memory_recall"):
         system_prompt = await build_system_prompt(
             memory_manager=memory_manager,
@@ -1528,9 +1586,34 @@ async def _build_coomi_system_prompt(
             cwd=workspace_root.as_posix(),
             model_display=_model_display(provider),
         )
+    context_assembly = _dict_value(_dict_value(turn_contract).get("contextAssembly"))
+    capture_coomi_memory_source(
+        context_assembly,
+        system_prompt=system_prompt,
+        enabled=context_policy.coomi_memory,
+    )
     skills_dir = (workspace_root / ".storydex" / ".agent" / "skills").as_posix()
     story_options = _render_story_generation_options(story_generation)
     contract_options = _render_turn_contract(turn_contract)
+    retrieval_tools_prompt = (
+        "Storydex registers domain tools outside Coomi: `StorydexRuntimePresetStatus`, "
+        "`StorydexVersionStatus`, `StorydexHelpGuideSearch`, `StorydexProjectSearch`, "
+        "`StorydexWikiQuery`, `StorydexSyncWiki`, and `StorydexApplyStoryIncrement`. "
+        "When the user asks how to use Storydex, where a feature is, or how a menu/settings/WIKI/version workflow works, "
+        "call `StorydexHelpGuideSearch` before answering and ground the answer in the guide.\n"
+        "Retrieval policy for story continuity: before referencing earlier plot details, foreshadowing, "
+        "items, or settings that are NOT already present in the assembled context blocks, verify them first — "
+        "use `StorydexProjectSearch` (relevance-ranked full-text search over chapters and project assets) to find "
+        "the original passages, or `StorydexWikiQuery` to check entity facts and relationships with evidence. "
+        "Never invent past plot facts; if retrieval finds nothing, treat the detail as unestablished and either "
+        "avoid it or establish it explicitly as new canon. WIKI query results may contain model inference — "
+        "when confidence is low or needsReview is true, confirm against chapters, character files, or variable memory.\n"
+        if context_policy.active_retrieval_tools
+        else
+        "Storydex registers domain tools outside Coomi, but active story retrieval is disabled for this execution: "
+        "`StorydexProjectSearch` and `StorydexWikiQuery` are not available. Other Storydex tools remain available. "
+        "Do not claim to have called either disabled tool; rely only on the assembled context and ordinary workspace reads.\n"
+    )
     storydex_runtime_prompt = (
         "\n\n## Storydex Project Runtime\n\n"
         + f"Storydex project skills live under `{skills_dir}`. "
@@ -1538,18 +1621,7 @@ async def _build_coomi_system_prompt(
         + "Do not treat hardcoded prompt text as the skill source of truth.\n"
         + "Authorized Storydex project file edits are direct writes. Do not create preview/pending-write approval artifacts. "
         + "At the end of the turn, Storydex records project file changes with a local Git commit automatically; never push to a remote.\n"
-        + "Storydex registers domain tools outside Coomi: `StorydexRuntimePresetStatus`, "
-        + "`StorydexVersionStatus`, `StorydexHelpGuideSearch`, `StorydexProjectSearch`, "
-        + "`StorydexWikiQuery`, `StorydexSyncWiki`, and `StorydexApplyStoryIncrement`. "
-        + "When the user asks how to use Storydex, where a feature is, or how a menu/settings/WIKI/version workflow works, "
-        + "call `StorydexHelpGuideSearch` before answering and ground the answer in the guide.\n"
-        + "Retrieval policy for story continuity: before referencing earlier plot details, foreshadowing, "
-        + "items, or settings that are NOT already present in the assembled context blocks, verify them first — "
-        + "use `StorydexProjectSearch` (relevance-ranked full-text search over chapters and project assets) to find "
-        + "the original passages, or `StorydexWikiQuery` to check entity facts and relationships with evidence. "
-        + "Never invent past plot facts; if retrieval finds nothing, treat the detail as unestablished and either "
-        + "avoid it or establish it explicitly as new canon. WIKI query results may contain model inference — "
-        + "when confidence is low or needsReview is true, confirm against chapters, character files, or variable memory.\n"
+        + retrieval_tools_prompt
         + "Storydex memory governance: `.storydex/memory/` is only for durable story memory and variables. Never write chat history, "
         + "session transcripts, execution logs, plans, tool output, or temporary drafts there; sessions belong under `.storydex/.agent/sessions/`. "
         + "Before reading or writing memory, follow `.storydex/memory/README.md` and its adaptive module catalog. Reuse an existing module when possible, "
