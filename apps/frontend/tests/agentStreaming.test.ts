@@ -72,8 +72,17 @@ describe("Coomi streaming API contract", () => {
 
   it("defers AgentError until done and maps abort errors", async () => {
     const onMessage = vi.fn();
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(streamResponse([sse({ type: "AgentError", message: "tool failed", error_type: "tool" }) + sse({ type: "done" })]));
-    await expect(streamAgentPrompt({ prompt: "x" }, onMessage)).rejects.toMatchObject({ message: "tool failed", code: "tool" });
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(streamResponse([sse({
+      type: "AgentError",
+      message: "tool failed",
+      error_type: "tool",
+      details: { retry: false }
+    }) + sse({ type: "done" })]));
+    await expect(streamAgentPrompt({ prompt: "x" }, onMessage)).rejects.toMatchObject({
+      message: "tool failed",
+      code: "tool",
+      details: { retry: false }
+    });
     expect(onMessage).toHaveBeenCalled();
 
     vi.mocked(fetch).mockRejectedValueOnce(new DOMException("aborted", "AbortError"));

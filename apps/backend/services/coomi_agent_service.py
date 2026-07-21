@@ -150,6 +150,8 @@ class StorydexCoomiAgentService:
         self._approval_waiters: dict[str, asyncio.Future[Dict[str, Any]]] = {}
         self._permission_mode = "full_access"
         self._lock: asyncio.Lock | None = None
+        self._execution_cancel_lock = threading.Lock()
+        self._execution_cancellers: dict[str, list[Callable[[], Any]]] = {}
 
     def _runtime_lock(self) -> asyncio.Lock:
         running_loop = asyncio.get_running_loop()
@@ -164,6 +166,42 @@ class StorydexCoomiAgentService:
         workspace = str(Path(workspace_root).resolve())
         normalized_session = str(session_id or "default").strip() or "default"
         return f"{workspace}::{normalized_session}"
+
+    def _register_execution_canceller(
+        self,
+        *,
+        session_id: str,
+        workspace_root: Path,
+        callback: Callable[[], Any],
+    ) -> str:
+        key = self._runtime_key(session_id=session_id, workspace_root=workspace_root)
+        with self._execution_cancel_lock:
+            self._execution_cancellers.setdefault(key, []).append(callback)
+        return key
+
+    def _unregister_execution_canceller(self, key: str, callback: Callable[[], Any]) -> None:
+        with self._execution_cancel_lock:
+            callbacks = self._execution_cancellers.get(key)
+            if not callbacks:
+                return
+            self._execution_cancellers[key] = [item for item in callbacks if item is not callback]
+            if not self._execution_cancellers[key]:
+                self._execution_cancellers.pop(key, None)
+
+    def cancel_execution(self, *, session_id: str, workspace_root: Path, reason: str = "cancelled") -> bool:
+        """Cancel the currently running Coomi/Loop producer for one workspace."""
+        del reason
+        key = self._runtime_key(session_id=session_id, workspace_root=workspace_root)
+        with self._execution_cancel_lock:
+            callbacks = list(self._execution_cancellers.get(key, []))
+        cancelled = False
+        for callback in callbacks:
+            try:
+                callback()
+                cancelled = True
+            except Exception as exc:
+                _LOGGER.warning("Coomi execution cancellation failed for %s: %s", key, exc)
+        return cancelled
 
     async def create_task_plan(
         self,
@@ -297,6 +335,12 @@ class StorydexCoomiAgentService:
                     turn_contract=turn_contract,
                     app_context=app_context,
                 )
+            cancel_callback = agent.cancel_token.cancel
+            cancel_key = self._register_execution_canceller(
+                session_id=session_id,
+                workspace_root=workspace,
+                callback=cancel_callback,
+            )
             status = self.get_status(workspace_root=workspace)
             yield _agent_started(session_id=session_id, prompt=prompt, status=status, mode="coomi")
 
@@ -367,6 +411,7 @@ class StorydexCoomiAgentService:
                 if not producer.done():
                     producer.cancel()
                 app_context.cancel_pending()
+                self._unregister_execution_canceller(cancel_key, cancel_callback)
 
     def resolve_approval(self, approval_id: str, decision: str, *, response: Dict[str, Any] | None = None) -> Dict[str, Any]:
         normalized_id = str(approval_id or "").strip()
@@ -622,6 +667,12 @@ class StorydexCoomiAgentService:
             app_context=app_context,
             permission_system=permissions,
         )
+        cancel_callback = runner.cancel_token.cancel
+        cancel_key = self._register_execution_canceller(
+            session_id=session_id,
+            workspace_root=workspace_root,
+            callback=cancel_callback,
+        )
         memory_manager, memory_recall = _build_coomi_memory(
             workspace_root,
             context_policy,
@@ -698,6 +749,7 @@ class StorydexCoomiAgentService:
             if not producer.done():
                 producer.cancel()
             app_context.cancel_pending()
+            self._unregister_execution_canceller(cancel_key, cancel_callback)
 
     @staticmethod
     def _ensure_coomi_installed() -> None:

@@ -1,4 +1,5 @@
 from uuid import uuid4
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -20,6 +21,7 @@ from core.exceptions import StorydexError
 from core.logger import get_logger, with_trace
 from services.project_service import get_project_service
 from services.coomi_version_service import check_coomi_version
+from services.execution_coordinator import get_execution_coordinator
 
 settings = get_settings()
 app_logger = get_logger(__name__)
@@ -57,6 +59,9 @@ app.include_router(presets_router, prefix="/api/v1")
 def bootstrap_workspace() -> None:
     project = get_project_service().current_project()
     app_logger.info("Workspace bootstrap completed at %s", project["workspaceRoot"])
+    reconciled = get_execution_coordinator().reconcile_workspace(Path(project["workspaceRoot"]))
+    if reconciled:
+        app_logger.warning("Marked %s interrupted execution(s) as unfinished", len(reconciled))
     coomi_status = check_coomi_version()
     if coomi_status["ok"]:
         app_logger.info("Coomi version check passed: %s", coomi_status["expected"])

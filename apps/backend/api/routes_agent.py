@@ -1,16 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import copy
-from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
 import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from threading import Lock
 from typing import Any, AsyncIterator, Dict, List, Optional
 from uuid import uuid4
 
@@ -25,6 +22,13 @@ from services.coomi_agent_service import get_storydex_coomi_agent_service
 from services.context_policy import ContextPolicy
 from services.context_trace_service import merge_llm_metrics, summarize_context_trace
 from services.execution_log_service import ExecutionLogSession, create_execution_log_session
+from services.execution_coordinator import (
+    ExecutionFinalizationContext,
+    ExecutionHandle,
+    ExecutionObservation,
+    SnapshotConfirmationRequired,
+    get_execution_coordinator,
+)
 from services.git_service import get_git_service
 from services.llm_replay import get_llm_metrics, llm_trace, reset_llm_metrics
 from services.project_service import get_project_service
@@ -43,12 +47,28 @@ storydex_orchestration_service = get_storydex_orchestration_service()
 storydex_intent_service = get_storydex_intent_service()
 git_service = get_git_service()
 story_project_service = get_story_project_service()
+execution_coordinator = get_execution_coordinator()
 
-_AGENT_GENERATION_LOCK = Lock()
-_INTENT_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="storydex-intent")
 _PHASE_HEARTBEAT_SECONDS = 0.6
 _COMMIT_MESSAGE_TIMEOUT_SECONDS = 2.0
 _LOGGER = logging.getLogger(__name__)
+_BACKGROUND_EXECUTION_TASKS: set[asyncio.Task[Any]] = set()
+
+
+def _retain_background_execution_task(task: asyncio.Task[Any]) -> asyncio.Task[Any]:
+    _BACKGROUND_EXECUTION_TASKS.add(task)
+
+    def release(completed: asyncio.Task[Any]) -> None:
+        _BACKGROUND_EXECUTION_TASKS.discard(completed)
+        if completed.cancelled():
+            return
+        try:
+            completed.result()
+        except Exception:
+            _LOGGER.exception("Background execution task failed: %s", completed.get_name())
+
+    task.add_done_callback(release)
+    return task
 
 
 class _CancellationToken:
@@ -63,21 +83,7 @@ class _CancellationToken:
 
 
 async def _classify_intent_without_blocking_event_loop(**kwargs: Any) -> Dict[str, Any]:
-    """Run intent classification on a worker loop.
-
-    Coomi/OpenAI provider construction performs synchronous imports and client
-    initialization before its first await.  Keeping that work on the request
-    loop can suppress phase heartbeats for several seconds on a cold start.
-    Intent classification is read-only, so isolating it in a worker preserves
-    cancellation of the response stream while keeping progress events timely.
-    """
-
-    def classify() -> Dict[str, Any]:
-        return asyncio.run(storydex_intent_service.classify_intent(**kwargs))
-
-    loop = asyncio.get_running_loop()
-    context = contextvars.copy_context()
-    return await loop.run_in_executor(_INTENT_EXECUTOR, context.run, classify)
+    return await execution_coordinator.classify_intent(storydex_intent_service, **kwargs)
 
 
 class AgentChatRequest(BaseModel):
@@ -85,6 +91,7 @@ class AgentChatRequest(BaseModel):
     active_file: str = Field(default="", alias="activeFile")
     workspace_root: str = Field(default="", alias="workspaceRoot")
     story_generation: Dict[str, Any] = Field(default_factory=dict, alias="storyGeneration")
+    confirm_no_snapshot: bool = Field(default=False, alias="confirmNoSnapshot")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -300,14 +307,11 @@ def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int
 
 
 def _try_acquire_agent_generation_slot() -> bool:
-    return _AGENT_GENERATION_LOCK.acquire(blocking=False)
+    return execution_coordinator.try_reserve()
 
 
 def _release_agent_generation_slot() -> None:
-    try:
-        _AGENT_GENERATION_LOCK.release()
-    except RuntimeError:
-        pass
+    execution_coordinator.release_reservation()
 
 
 def _agent_commit_prompt_enabled(workspace_root: Path) -> bool:
@@ -728,6 +732,17 @@ def _build_history_record(
     }
 
 
+def _persist_execution_trace(workspace_root: Path, record: Dict[str, Any], session_id: str) -> Dict[str, Any]:
+    """Persist a final trace against the execution workspace, atomically when available."""
+    writer = getattr(trace_history_service, "upsert_record_atomic_at_storydex_root", None)
+    if callable(writer):
+        return writer(workspace_root / ".storydex", record, session_id)
+    atomic_writer = getattr(trace_history_service, "upsert_record_atomic", None)
+    if callable(atomic_writer):
+        return atomic_writer(record, session_id)
+    return trace_history_service.upsert_record(record, session_id)
+
+
 def _extract_task_plan(events: List[Dict[str, Any]], trace_id: str) -> List[Dict[str, Any]]:
     tasks: List[Dict[str, Any]] = []
     for item in events:
@@ -1108,7 +1123,7 @@ async def _collect_coomi_run(
     return "".join(reply_chunks), events, completed, error_message
 
 
-async def _stream_coomi_sse(
+async def _stream_coomi_sse_worker(
     *,
     prompt: str,
     trace_id: str,
@@ -1118,8 +1133,8 @@ async def _stream_coomi_sse(
     story_generation: Dict[str, Any],
     turn_contract: Dict[str, Any],
     git_snapshot: AgentGitSnapshot,
-    request: Request,
     cancellation_token: _CancellationToken,
+    execution_handle: ExecutionHandle,
     execution_log_session: ExecutionLogSession | None = None,
 ) -> AsyncIterator[str]:
     started = time.perf_counter()
@@ -1130,6 +1145,8 @@ async def _stream_coomi_sse(
     tracker: _TaskRunTracker | None = None
     git_finished = False
     runtime_tasks_finalized = False
+    terminal_event: tuple[str, Dict[str, Any]] | None = None
+    finalization_packets: List[str] = []
 
     def finish_git_turn() -> Dict[str, Any]:
         nonlocal git_finished
@@ -1157,24 +1174,22 @@ async def _stream_coomi_sse(
                 ),
             )
             planning_task = asyncio.create_task(
-                _create_agent_task_plan(
-                    prompt=prompt,
-                    trace_id=trace_id,
-                    session_id=session_id,
-                    workspace_root=workspace_root,
-                    active_file=active_file,
-                    story_generation=story_generation,
-                    turn_contract=turn_contract,
+                execution_coordinator.run_serialized_preparation(
+                    lambda: _create_agent_task_plan(
+                        prompt=prompt,
+                        trace_id=trace_id,
+                        session_id=session_id,
+                        workspace_root=workspace_root,
+                        active_file=active_file,
+                        story_generation=story_generation,
+                        turn_contract=turn_contract,
+                    )
                 )
             )
             while not planning_task.done():
                 done, _ = await asyncio.wait({planning_task}, timeout=_PHASE_HEARTBEAT_SECONDS)
                 if done:
                     break
-                if await request.is_disconnected():
-                    cancellation_token.cancel()
-                    planning_task.cancel()
-                    return
                 yield _encode_sse(
                     "TurnPhase",
                     _turn_phase_packet(
@@ -1221,13 +1236,12 @@ async def _stream_coomi_sse(
                         yield _encode_sse(task_event_name, task_payload)
                     runtime_tasks_finalized = True
                     packet = _turn_contract_waiting_packet(turn_contract)
-                    events.append(_event_to_trace_event("AgentCompleted", packet, len(events) + 1))
                     completed = True
                     reply_chunks.append(str(packet.get("message") or ""))
-                    yield _encode_sse("AgentCompleted", packet)
+                    terminal_event = ("AgentCompleted", packet)
                     should_run_coomi = False
 
-            if should_run_coomi:
+            if should_run_coomi and not execution_handle.is_cancelled:
                 for task_event_name, task_payload in tracker.start_next():
                     events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
                     yield _encode_sse(task_event_name, task_payload)
@@ -1260,10 +1274,6 @@ async def _stream_coomi_sse(
                         done, _ = await asyncio.wait({next_event}, timeout=_PHASE_HEARTBEAT_SECONDS)
                         if done:
                             break
-                        if await request.is_disconnected():
-                            cancellation_token.cancel()
-                            next_event.cancel()
-                            return
                         yield _encode_sse(
                             "TurnPhase",
                             _turn_phase_packet(
@@ -1279,9 +1289,6 @@ async def _stream_coomi_sse(
                     try:
                         event_name, payload = await next_event
                     except StopAsyncIteration:
-                        break
-                    if await request.is_disconnected():
-                        cancellation_token.cancel()
                         break
                     if not model_output_started and event_name not in {"AgentStarted", "UsageUpdate"}:
                         model_output_started = True
@@ -1301,13 +1308,19 @@ async def _stream_coomi_sse(
                         packet["content"] = _strip_visible_tool_text(str(packet.get("content") or ""))
                         if not packet["content"]:
                             continue
-                    events.append(_event_to_trace_event(event_name, packet, len(events) + 1))
                     if event_name == "TextChunk":
                         reply_chunks.append(str(packet.get("content") or ""))
                     elif event_name == "AgentCompleted":
                         completed = True
+                        terminal_event = (event_name, packet)
+                        continue
+                    elif event_name == "AgentCancelled":
+                        execution_handle.cancel(str(packet.get("reason") or "coomi_cancelled"))
+                        terminal_event = (event_name, packet)
+                        continue
                     elif event_name == "AgentError":
                         error_message = str(packet.get("message") or "Coomi Agent error")
+                    events.append(_event_to_trace_event(event_name, packet, len(events) + 1))
                     yield _encode_sse(event_name, packet)
                     for task_event_name, task_payload in tracker.advance_after_runtime_event(event_name):
                         events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
@@ -1347,44 +1360,222 @@ async def _stream_coomi_sse(
             for task_event_name, task_payload in tracker.start_version_task():
                 events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
                 yield _encode_sse(task_event_name, task_payload)
-        git_payload = finish_git_turn()
-        git_payload["traceId"] = trace_id
-        git_payload["sessionId"] = session_id
-        git_event_name = _git_event_name(git_payload)
-        events.append(_event_to_trace_event(git_event_name, git_payload, len(events) + 1))
-        yield _encode_sse(git_event_name, git_payload)
-        git_failed = str(git_payload.get("status") or "") == "error"
-        if tracker is not None:
-            for task_event_name, task_payload in tracker.finish_version_task(
-                failed=git_failed,
-                message=str(git_payload.get("message") or ""),
-            ):
-                events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
-                yield _encode_sse(task_event_name, task_payload)
-        if git_failed and not error_message:
-            error_message = str(git_payload.get("message") or "Local Git auto commit failed.")
-        status = "failed" if git_failed else "completed" if completed and not error_message else "cancelled" if cancellation_token.is_cancelled() else "failed"
-        payload_data = _build_chat_payload(
-            trace_id=trace_id,
-            prompt=prompt,
-            reply="".join(reply_chunks),
-            events=events,
-            started=started,
-            workspace_root=workspace_root,
-            session_id=session_id,
-            execution_log_session=execution_log_session,
-            status=status,
+
+        def on_git_payload(git_payload: Dict[str, Any]) -> None:
+            git_payload["traceId"] = trace_id
+            git_payload["sessionId"] = session_id
+            git_event_name = _git_event_name(git_payload)
+            events.append(_event_to_trace_event(git_event_name, git_payload, len(events) + 1))
+            finalization_packets.append(_encode_sse(git_event_name, git_payload))
+            if tracker is not None:
+                for task_event_name, task_payload in tracker.finish_version_task(
+                    failed=str(git_payload.get("status") or "") == "error",
+                    message=str(git_payload.get("message") or ""),
+                ):
+                    events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
+                    finalization_packets.append(_encode_sse(task_event_name, task_payload))
+
+        def on_terminal(status: str, terminal_error: str) -> None:
+            nonlocal terminal_event
+            if status == "completed":
+                event_name, packet = terminal_event or (
+                    "AgentCompleted",
+                    {
+                        "_type": "AgentCompleted",
+                        "_version": 1,
+                        "session_id": session_id,
+                        "route": "coomi",
+                    },
+                )
+            elif status == "cancelled":
+                event_name, packet = terminal_event or (
+                    "AgentCancelled",
+                    {
+                        "_type": "AgentCancelled",
+                        "_version": 1,
+                        "session_id": session_id,
+                        "reason": execution_handle.cancel_reason or "cancelled",
+                    },
+                )
+            else:
+                existing_error = next(
+                    (item for item in reversed(events) if item.get("event") == "AgentError"),
+                    None,
+                )
+                if existing_error is not None:
+                    return
+                event_name = "AgentError"
+                packet = {
+                    "_type": "AgentError",
+                    "_version": 1,
+                    "error_type": "ExecutionFailed",
+                    "message": terminal_error or "Coomi execution failed.",
+                    "details": {"runtime": "coomi"},
+                }
+            events.append(_event_to_trace_event(event_name, packet, len(events) + 1))
+            finalization_packets.append(_encode_sse(event_name, packet))
+
+        def build_payload(
+            status: str,
+            terminal_error: str,
+            no_restore_point: bool,
+            _timings: Dict[str, float],
+        ) -> Dict[str, Any]:
+            payload_data = _build_chat_payload(
+                trace_id=trace_id,
+                prompt=prompt,
+                reply="".join(reply_chunks),
+                events=events,
+                started=started,
+                workspace_root=workspace_root,
+                session_id=session_id,
+                execution_log_session=execution_log_session,
+                status=status,
+                error_message=terminal_error,
+            )
+            record = payload_data.get("record")
+            if isinstance(record, dict):
+                record["noRestorePoint"] = no_restore_point
+            return payload_data
+
+        def write_timing(payload: Dict[str, Any]) -> None:
+            if execution_log_session is not None:
+                execution_log_session.write(
+                    "execution_coordinator_timing",
+                    payload,
+                    category="observability",
+                )
+
+        observation = ExecutionObservation(
+            completed=completed,
             error_message=error_message,
+            error_code="coomi_agent_error" if error_message else "",
+            cancelled=execution_handle.is_cancelled or cancellation_token.is_cancelled(),
         )
-        trace_history_service.upsert_record(payload_data["record"], session_id)
+        context = ExecutionFinalizationContext(
+            finish_git=finish_git_turn,
+            on_git_payload=on_git_payload,
+            on_terminal=on_terminal,
+            build_payload=build_payload,
+            persist_trace=lambda record: _persist_execution_trace(
+                workspace_root,
+                record,
+                session_id,
+            ),
+            write_timing=write_timing,
+        )
+        await execution_handle.finalize(observation, context)
+        reset_llm_metrics(trace_id)
+        for packet in finalization_packets:
+            yield packet
         yield _encode_sse("done", {"type": "done"})
-    finally:
-        if not git_finished:
+    except Exception as exc:
+        reset_llm_metrics(trace_id)
+        packet = {
+            "_type": "AgentError",
+            "_version": 1,
+            "error_type": type(exc).__name__,
+            "message": str(exc),
+            "details": {"runtime": "execution_coordinator"},
+        }
+        yield _encode_sse("AgentError", packet)
+        yield _encode_sse("done", {"type": "done"})
+
+
+async def _stream_coomi_sse(
+    *,
+    prompt: str,
+    trace_id: str,
+    session_id: str,
+    active_file: str,
+    workspace_root: Path,
+    story_generation: Dict[str, Any],
+    turn_contract: Dict[str, Any],
+    git_snapshot: AgentGitSnapshot,
+    request: Request,
+    cancellation_token: _CancellationToken,
+    execution_handle: ExecutionHandle | None = None,
+    execution_log_session: ExecutionLogSession | None = None,
+) -> AsyncIterator[str]:
+    """Transport-only wrapper around the independent execution worker."""
+    handle = execution_handle or execution_coordinator.adopt_reservation_or_begin(
+        workspace_root,
+        session_id,
+        trace_id,
+    )
+    if execution_handle is None:
+        handle.register_snapshot(git_snapshot, confirm_no_snapshot=True)
+    handle.bind_cancellation(lambda _reason: cancellation_token.cancel())
+    coomi_service = get_storydex_coomi_agent_service()
+    cancel_execution = getattr(coomi_service, "cancel_execution", None)
+    if callable(cancel_execution):
+        handle.bind_cancellation(
+            lambda reason: cancel_execution(
+                session_id=session_id,
+                workspace_root=workspace_root,
+                reason=reason,
+            )
+        )
+
+    queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+    async def pump() -> None:
+        try:
+            async for chunk in _stream_coomi_sse_worker(
+                prompt=prompt,
+                trace_id=trace_id,
+                session_id=session_id,
+                active_file=active_file,
+                workspace_root=workspace_root,
+                story_generation=story_generation,
+                turn_contract=turn_contract,
+                git_snapshot=git_snapshot,
+                cancellation_token=cancellation_token,
+                execution_handle=handle,
+                execution_log_session=execution_log_session,
+            ):
+                await queue.put(chunk)
+        except asyncio.CancelledError:
+            handle.abandon("worker_cancelled")
+            raise
+        except Exception as exc:
+            await queue.put(
+                _encode_sse(
+                    "AgentError",
+                    {
+                        "_type": "AgentError",
+                        "_version": 1,
+                        "error_type": type(exc).__name__,
+                        "message": str(exc),
+                    },
+                )
+            )
+            await queue.put(_encode_sse("done", {"type": "done"}))
+        finally:
+            queue.put_nowait(None)
+
+    worker = _retain_background_execution_task(
+        asyncio.create_task(pump(), name=f"storydex-execution-{trace_id}")
+    )
+    try:
+        while True:
             try:
-                finish_git_turn()
-            except Exception:
-                pass
-        _release_agent_generation_slot()
+                chunk = await asyncio.wait_for(queue.get(), timeout=_PHASE_HEARTBEAT_SECONDS)
+            except asyncio.TimeoutError:
+                if await request.is_disconnected():
+                    handle.cancel("client_disconnected")
+                    return
+                continue
+            if chunk is None:
+                break
+            yield chunk
+            if await request.is_disconnected():
+                handle.cancel("client_disconnected")
+                return
+        await asyncio.shield(worker)
+    finally:
+        if not worker.done():
+            handle.cancel("client_disconnected")
 
 
 @router.get("/agent/sessions", response_model=ApiEnvelope)
@@ -2123,140 +2314,180 @@ async def agent_chat(
     session_id = str(session_id_query or "").strip() or _resolve_agent_session_id(request)
     if not _try_acquire_agent_generation_slot():
         raise _agent_busy_error(trace_id=trace_id, session_id=session_id)
-    reset_llm_metrics(trace_id)
-    started = time.perf_counter()
-    cancellation_token = _CancellationToken()
-    workspace_root = _resolve_agent_workspace_root(payload)
-    execution_log_session = _create_agent_execution_log_session(
-        trace_id=trace_id,
-        session_id=session_id,
-    )
-    git_snapshot = agent_git_autocommit_service.begin_turn(workspace_root)
-    git_finished = False
+    execution_handle: ExecutionHandle | None = None
     try:
-        story_generation = _normalize_story_generation_options(payload.story_generation)
-        with llm_trace(trace_id):
-            intent_frame = await storydex_intent_service.classify_intent(
-                prompt=payload.prompt,
-                active_file=payload.active_file,
-                workspace_root=workspace_root,
-                session_id=session_id,
-            )
-        turn_contract = storydex_orchestration_service.build_turn_contract(
+        workspace_root = _resolve_agent_workspace_root(payload)
+        execution_handle = execution_coordinator.adopt_reservation_or_begin(
             workspace_root,
-            prompt=payload.prompt,
-            active_file=payload.active_file,
-            story_generation=story_generation,
-            intent_frame=intent_frame,
+            session_id,
+            trace_id,
         )
-        story_generation = _apply_turn_contract_story_generation_defaults(story_generation, turn_contract)
-        task_plan = await _create_agent_task_plan(
-            prompt=payload.prompt,
+        cancellation_token = _CancellationToken()
+        async for _chunk in _stream_agent_chat_request_sse(
+            payload=payload,
+            request=request,
             trace_id=trace_id,
             session_id=session_id,
-            workspace_root=workspace_root,
-            active_file=payload.active_file,
-            story_generation=story_generation,
-            turn_contract=turn_contract,
-        )
-        tracker = _TaskRunTracker(task_plan, trace_id=trace_id, session_id=session_id)
-        events: List[Dict[str, Any]] = [
-            _event_to_trace_event("TaskPlanCreated", tracker.plan_created_payload(), 1)
-        ]
-        _append_task_events(events, tracker.start_next())
-        if turn_contract:
-            events.append(_event_to_trace_event("TurnContract", turn_contract, len(events) + 1))
-            _append_task_events(events, tracker.complete_current())
-            if _turn_contract_needs_user_input(turn_contract):
-                _append_task_events(events, tracker.skip_remaining_execution(reason="needs_user_input"))
-                packet = _turn_contract_waiting_packet(turn_contract)
-                events.append(_event_to_trace_event("AgentCompleted", packet, len(events) + 1))
-                reply = _turn_contract_user_input_message(turn_contract)
-                completed = True
-                error_message = ""
-            else:
-                _append_task_events(events, tracker.start_next())
-                reply, coomi_events, completed, error_message = await _collect_coomi_run(
-                    prompt=payload.prompt,
-                    trace_id=trace_id,
-                    session_id=session_id,
-                    active_file=payload.active_file,
-                    workspace_root=workspace_root,
-                    story_generation=story_generation,
-                    turn_contract=turn_contract,
-                    cancellation_token=cancellation_token,
-                )
-                for event in coomi_events:
-                    events.append({**event, "index": len(events) + 1})
-                    if event.get("event") in {"ToolDone", "StageOutput"}:
-                        _append_task_events(events, tracker.advance_after_runtime_event(str(event.get("event") or "")))
-                if error_message:
-                    _append_task_events(events, tracker.fail_current(error_message))
-                    _append_task_events(events, tracker.skip_remaining_execution(reason="execution_failed"))
-                elif completed:
-                    _append_task_events(events, tracker.complete_through_execution())
-        else:
-            _append_task_events(events, tracker.complete_current())
-            _append_task_events(events, tracker.start_next())
-            reply, coomi_events, completed, error_message = await _collect_coomi_run(
-                prompt=payload.prompt,
-                trace_id=trace_id,
-                session_id=session_id,
-                active_file=payload.active_file,
-                workspace_root=workspace_root,
-                story_generation=story_generation,
-                turn_contract=turn_contract,
-                cancellation_token=cancellation_token,
+            cancellation_token=cancellation_token,
+            execution_handle=execution_handle,
+            resolved_workspace_root=workspace_root,
+            raise_preflight_errors=True,
+        ):
+            pass
+        result = await execution_handle.wait_finalized()
+        if result is None:
+            raise StorydexError(
+                "Agent execution ended before finalization completed.",
+                code="execution_unfinished",
+                status_code=500,
+                details={"traceId": trace_id, "sessionId": session_id},
             )
-            for event in coomi_events:
-                events.append({**event, "index": len(events) + 1})
-                if event.get("event") in {"ToolDone", "StageOutput"}:
-                    _append_task_events(events, tracker.advance_after_runtime_event(str(event.get("event") or "")))
-            if error_message:
-                _append_task_events(events, tracker.fail_current(error_message))
-                _append_task_events(events, tracker.skip_remaining_execution(reason="execution_failed"))
-            elif completed:
-                _append_task_events(events, tracker.complete_through_execution())
-        _append_task_events(events, tracker.start_version_task())
-        git_payload = agent_git_autocommit_service.finish_turn(
-            git_snapshot,
-            prompt=payload.prompt,
-            commit_prompt_enabled=_agent_commit_prompt_enabled(workspace_root),
-        )
-        git_payload["traceId"] = trace_id
-        git_payload["sessionId"] = session_id
-        git_finished = True
-        events.append(_event_to_trace_event(_git_event_name(git_payload), git_payload, len(events) + 1))
-        git_failed = str(git_payload.get("status") or "") == "error"
-        _append_task_events(events, tracker.finish_version_task(failed=git_failed, message=str(git_payload.get("message") or "")))
-        if git_failed and not error_message:
-            error_message = str(git_payload.get("message") or "Local Git auto commit failed.")
-        payload_data = _build_chat_payload(
-            trace_id=trace_id,
-            prompt=payload.prompt,
-            reply=reply,
-            events=events,
-            started=started,
-            workspace_root=workspace_root,
-            session_id=session_id,
-            execution_log_session=execution_log_session,
-            status="failed" if git_failed else "completed" if completed and not error_message else "failed",
-            error_message=error_message,
-        )
-        trace_history_service.upsert_record(payload_data["record"], session_id)
+        payload_data = result.payload_data
         return success_response(
             data=payload_data["data"],
             trace=ApiTrace(**payload_data["trace"]),
             audit=payload_data["audit"],
         )
     finally:
-        if not git_finished:
-            agent_git_autocommit_service.finish_turn(
-                git_snapshot,
+        if execution_handle is None:
+            _release_agent_generation_slot()
+
+
+async def _finalize_cancelled_preflight_execution(
+    *,
+    payload: AgentChatRequest,
+    trace_id: str,
+    session_id: str,
+    workspace_root: Path,
+    request_started: float,
+    accepted: Dict[str, Any],
+    execution_handle: ExecutionHandle,
+    execution_log_session: ExecutionLogSession | None,
+    git_snapshot: AgentGitSnapshot | None,
+    git_task: asyncio.Task[AgentGitSnapshot] | None,
+    intent_task: asyncio.Task[Dict[str, Any]] | None,
+    contract_task: asyncio.Task[Dict[str, Any]] | None,
+) -> None:
+    """Finish an accepted preflight cancellation independently of the SSE transport."""
+
+    try:
+        for task in (intent_task, contract_task):
+            if task is None:
+                continue
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if not task.cancelled():
+                    raise
+            except Exception:
+                # Preparation failures do not override an already accepted cancellation.
+                pass
+
+        snapshot = git_snapshot
+        snapshot_error = ""
+        if snapshot is None and git_task is not None:
+            try:
+                candidate = await asyncio.shield(git_task)
+                if isinstance(candidate, AgentGitSnapshot):
+                    snapshot = candidate
+            except asyncio.CancelledError:
+                if not git_task.cancelled():
+                    raise
+                snapshot_error = "Git snapshot preparation was cancelled."
+            except Exception as exc:
+                snapshot_error = str(exc)
+        if snapshot is None:
+            snapshot = AgentGitSnapshot(
+                workspace_root=workspace_root,
+                available=False,
+                error_message=snapshot_error or "Git snapshot preparation did not complete.",
+            )
+
+        execution_handle.register_snapshot(snapshot, confirm_no_snapshot=True)
+        events: List[Dict[str, Any]] = [
+            _event_to_trace_event("RunAccepted", dict(accepted), 1)
+        ]
+
+        def finish_git_turn() -> Dict[str, Any]:
+            return agent_git_autocommit_service.finish_turn(
+                snapshot,
                 prompt=payload.prompt,
                 commit_prompt_enabled=_agent_commit_prompt_enabled(workspace_root),
             )
-        _release_agent_generation_slot()
+
+        def on_git_payload(git_payload: Dict[str, Any]) -> None:
+            git_payload["traceId"] = trace_id
+            git_payload["sessionId"] = session_id
+            event_name = _git_event_name(git_payload)
+            events.append(_event_to_trace_event(event_name, git_payload, len(events) + 1))
+
+        def on_terminal(status: str, _terminal_error: str) -> None:
+            packet = {
+                "_type": "AgentCancelled",
+                "_version": 1,
+                "traceId": trace_id,
+                "sessionId": session_id,
+                "session_id": session_id,
+                "reason": execution_handle.cancel_reason or "client_disconnected",
+            }
+            events.append(_event_to_trace_event("AgentCancelled", packet, len(events) + 1))
+
+        def build_payload(
+            status: str,
+            terminal_error: str,
+            no_restore_point: bool,
+            _timings: Dict[str, float],
+        ) -> Dict[str, Any]:
+            payload_data = _build_chat_payload(
+                trace_id=trace_id,
+                prompt=payload.prompt,
+                reply="",
+                events=events,
+                started=request_started,
+                workspace_root=workspace_root,
+                session_id=session_id,
+                execution_log_session=execution_log_session,
+                status=status,
+                error_message=terminal_error,
+            )
+            record = payload_data.get("record")
+            if isinstance(record, dict):
+                record["noRestorePoint"] = no_restore_point
+            return payload_data
+
+        def write_timing(timing_payload: Dict[str, Any]) -> None:
+            if execution_log_session is not None:
+                execution_log_session.write(
+                    "execution_coordinator_timing",
+                    timing_payload,
+                    category="observability",
+                )
+
+        await execution_handle.finalize(
+            ExecutionObservation(
+                cancelled=True,
+                error_code="client_disconnected",
+            ),
+            ExecutionFinalizationContext(
+                finish_git=finish_git_turn,
+                on_git_payload=on_git_payload,
+                on_terminal=on_terminal,
+                build_payload=build_payload,
+                persist_trace=lambda record: _persist_execution_trace(
+                    workspace_root,
+                    record,
+                    session_id,
+                ),
+                write_timing=write_timing,
+            ),
+        )
+    except asyncio.CancelledError:
+        execution_handle.abandon("preflight_finalizer_cancelled")
+        raise
+    except Exception:
+        _LOGGER.exception("Preflight cancellation finalization failed for %s", trace_id)
+        execution_handle.abandon("preflight_finalization_failed")
+    finally:
         reset_llm_metrics(trace_id)
 
 
@@ -2268,9 +2499,20 @@ async def _stream_agent_chat_request_sse(
     session_id: str,
     cancellation_token: _CancellationToken,
     context_policy_override: ContextPolicy | None = None,
+    execution_handle: ExecutionHandle | None = None,
+    resolved_workspace_root: Path | None = None,
+    raise_preflight_errors: bool = False,
 ) -> AsyncIterator[str]:
     reset_llm_metrics(trace_id)
     request_started = time.perf_counter()
+    workspace_root = resolved_workspace_root or _resolve_agent_workspace_root(payload)
+    if execution_handle is None:
+        execution_handle = execution_coordinator.adopt_reservation_or_begin(
+            workspace_root,
+            session_id,
+            trace_id,
+        )
+    execution_handle.bind_cancellation(lambda _reason: cancellation_token.cancel())
     accepted = {
         "_type": "RunAccepted",
         "_version": 1,
@@ -2282,23 +2524,27 @@ async def _stream_agent_chat_request_sse(
         "status": "running",
         "startedAt": datetime.now(timezone.utc).isoformat(),
         "elapsedMs": 0,
+        "noRestorePoint": bool(payload.confirm_no_snapshot),
     }
-    yield _encode_sse("RunAccepted", accepted)
 
-    workspace_root: Path | None = None
     git_snapshot: AgentGitSnapshot | None = None
     delegated = False
+    preflight_rejected = False
     git_task: asyncio.Task[AgentGitSnapshot] | None = None
     intent_task: asyncio.Task[Dict[str, Any]] | None = None
+    contract_task: asyncio.Task[Dict[str, Any]] | None = None
     execution_log_session: ExecutionLogSession | None = None
     try:
-        workspace_root = _resolve_agent_workspace_root(payload)
+        git_task = asyncio.create_task(
+            asyncio.to_thread(agent_git_autocommit_service.begin_turn, workspace_root)
+        )
+        yield _encode_sse("RunAccepted", accepted)
+
         execution_log_session = _create_agent_execution_log_session(
             trace_id=trace_id,
             session_id=session_id,
         )
         story_generation = _normalize_story_generation_options(payload.story_generation)
-        git_task = asyncio.create_task(asyncio.to_thread(agent_git_autocommit_service.begin_turn, workspace_root))
 
         intent_started = time.perf_counter()
         yield _encode_sse(
@@ -2326,8 +2572,7 @@ async def _stream_agent_chat_request_sse(
             if done:
                 break
             if await request.is_disconnected():
-                cancellation_token.cancel()
-                intent_task.cancel()
+                execution_handle.cancel("client_disconnected")
                 return
             yield _encode_sse(
                 "TurnPhase",
@@ -2386,8 +2631,7 @@ async def _stream_agent_chat_request_sse(
             if done:
                 break
             if await request.is_disconnected():
-                cancellation_token.cancel()
-                contract_task.cancel()
+                execution_handle.cancel("client_disconnected")
                 return
             yield _encode_sse(
                 "TurnPhase",
@@ -2424,8 +2668,7 @@ async def _stream_agent_chat_request_sse(
             if done:
                 break
             if await request.is_disconnected():
-                cancellation_token.cancel()
-                git_task.cancel()
+                execution_handle.cancel("client_disconnected")
                 return
             yield _encode_sse(
                 "TurnPhase",
@@ -2442,6 +2685,28 @@ async def _stream_agent_chat_request_sse(
         if git_task is None:
             raise RuntimeError("Git snapshot task was not initialized.")
         git_snapshot = await git_task
+        execution_handle.register_snapshot(
+            git_snapshot,
+            confirm_no_snapshot=payload.confirm_no_snapshot,
+        )
+        yield _encode_sse(
+            "TurnPhase",
+            {
+                **_turn_phase_packet(
+                    trace_id=trace_id,
+                    session_id=session_id,
+                    phase="workspace_snapshot",
+                    label=(
+                        "将在无恢复点状态下继续"
+                        if execution_handle.no_restore_point
+                        else "项目恢复点已就绪"
+                    ),
+                    status="warning" if execution_handle.no_restore_point else "success",
+                    phase_started=snapshot_started,
+                ),
+                "noRestorePoint": execution_handle.no_restore_point,
+            },
+        )
 
         delegated = True
         async for chunk in _stream_coomi_sse(
@@ -2455,10 +2720,42 @@ async def _stream_agent_chat_request_sse(
             git_snapshot=git_snapshot,
             request=request,
             cancellation_token=cancellation_token,
+            execution_handle=execution_handle,
             execution_log_session=execution_log_session,
         ):
             yield chunk
+    except SnapshotConfirmationRequired as exc:
+        preflight_rejected = True
+        execution_handle.reject_preflight(exc.code, str(exc))
+        details = {
+            **exc.details,
+            "confirmNoSnapshotRequired": True,
+        }
+        if raise_preflight_errors:
+            raise StorydexError(
+                str(exc),
+                code=exc.code,
+                status_code=409,
+                details=details,
+            ) from exc
+        packet = {
+            "_type": "AgentError",
+            "_version": 1,
+            "traceId": trace_id,
+            "sessionId": session_id,
+            "error_type": exc.code,
+            "code": exc.code,
+            "message": str(exc),
+            "details": details,
+            "duration_ms": int((time.perf_counter() - request_started) * 1000),
+        }
+        yield _encode_sse("AgentError", packet)
+        yield _encode_sse("done", {"type": "done"})
     except Exception as exc:
+        preflight_rejected = True
+        execution_handle.reject_preflight(type(exc).__name__, str(exc))
+        if raise_preflight_errors:
+            raise
         packet = {
             "_type": "AgentError",
             "_version": 1,
@@ -2472,20 +2769,41 @@ async def _stream_agent_chat_request_sse(
         yield _encode_sse("done", {"type": "done"})
     finally:
         if not delegated:
-            for task in (intent_task, git_task):
-                if task is not None and not task.done():
-                    task.cancel()
-            if git_snapshot is not None and workspace_root is not None:
-                try:
-                    agent_git_autocommit_service.finish_turn(
-                        git_snapshot,
-                        prompt=payload.prompt,
-                        commit_prompt_enabled=_agent_commit_prompt_enabled(workspace_root),
+            if preflight_rejected:
+                for task in (intent_task, contract_task, git_task):
+                    if task is not None and not task.done():
+                        task.cancel()
+                if git_snapshot is not None:
+                    try:
+                        agent_git_autocommit_service.finish_turn(
+                            git_snapshot,
+                            prompt=payload.prompt,
+                            commit_prompt_enabled=_agent_commit_prompt_enabled(workspace_root),
+                        )
+                    except Exception:
+                        pass
+                reset_llm_metrics(trace_id)
+            else:
+                execution_handle.cancel("client_disconnected")
+                _retain_background_execution_task(
+                    asyncio.create_task(
+                        _finalize_cancelled_preflight_execution(
+                            payload=payload,
+                            trace_id=trace_id,
+                            session_id=session_id,
+                            workspace_root=workspace_root,
+                            request_started=request_started,
+                            accepted=accepted,
+                            execution_handle=execution_handle,
+                            execution_log_session=execution_log_session,
+                            git_snapshot=git_snapshot,
+                            git_task=git_task,
+                            intent_task=intent_task,
+                            contract_task=contract_task,
+                        ),
+                        name=f"storydex-preflight-finalize-{trace_id}",
                     )
-                except Exception:
-                    pass
-            _release_agent_generation_slot()
-        reset_llm_metrics(trace_id)
+                )
 
 
 @router.post("/agent/chat/stream")

@@ -60,6 +60,7 @@ _WINDOWS_FIND_DIAGNOSTIC_RE = re.compile(
 _VOLATILE_TIMESTAMP_FIELD_RE = re.compile(
     r'("(?:createdAt|updatedAt|generatedAt|lastAnalyzedAt|mtime|timestamp)"\s*:\s*")([^"]*)(")'
 )
+_COOMI_SYSTEM_DATE_LINE_RE = re.compile(r"(?m)^- Date: \d{4}-\d{2}-\d{2}$")
 _CHAPTER_PROGRESS_MANIFEST_ENTRY_RE = re.compile(
     r'(?i)"\.storydex[\\/]memory[\\/]chapter-progress\.json"\s*:\s*\{'
 )
@@ -1111,6 +1112,10 @@ def _sanitize_messages(messages: Any) -> list[Any]:
                     content,
                     tool_name=tool_names.get(call_id, ""),
                 )
+        elif str(raw_message.get("role") or "").strip().lower() == "system":
+            content = message.get("content")
+            if isinstance(content, str):
+                message["content"] = _COOMI_SYSTEM_DATE_LINE_RE.sub("- Date: <date>", content)
         normalized.append(
             _normalize_text_fallback_call_ids(message, fallback_id_replacements)
         )

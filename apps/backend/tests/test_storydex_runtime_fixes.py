@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -771,3 +772,205 @@ def test_registry_includes_retrieval_tools(tmp_path):
     registry = _create_storydex_tool_registry(tmp_path)
     assert isinstance(registry.get("StorydexProjectSearch"), StorydexProjectSearchTool)
     assert isinstance(registry.get("StorydexWikiQuery"), StorydexWikiQueryTool)
+
+
+# -------------------- 7. Cross-workspace runtime isolation --------------------
+
+
+def test_coomi_runtime_permissions_and_cancellation_are_workspace_isolated(monkeypatch, tmp_path):
+    pytest.importorskip("coomi")
+    import coomi.engine.loop as coomi_loop
+    import coomi.engine.session as coomi_session
+    import services.llm_replay as llm_replay
+
+    service = coomi_agent_service.StorydexCoomiAgentService()
+    workspace_a = (tmp_path / "workspace-a").resolve()
+    workspace_b = (tmp_path / "workspace-b").resolve()
+    workspace_a.mkdir()
+    workspace_b.mkdir()
+    shared_session_id = "shared-session"
+
+    async def build_system_prompt(**_kwargs):
+        return "system"
+
+    class FakeRegistry:
+        def __init__(self, workspace_root: Path) -> None:
+            self.workspace_root = Path(workspace_root).resolve()
+
+        @staticmethod
+        def list_tools():
+            return []
+
+    session_counter = 0
+
+    class FakeSessionManager:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def create_session(self, **kwargs):
+            nonlocal session_counter
+            session_counter += 1
+            return SimpleNamespace(id=f"coomi-{session_counter}", **kwargs)
+
+    class FakeAgentLoop:
+        def __init__(self, provider, registry, **kwargs) -> None:
+            self.provider = provider
+            self.tool_registry = registry
+            self.plan_mode = False
+            self.cancel_token = SimpleNamespace(cancel=lambda: None)
+            self.tool_executor = SimpleNamespace(
+                tool_registry=registry,
+                permission_system=kwargs["permission_system"],
+            )
+
+    created_permissions: list[SimpleNamespace] = []
+
+    def create_permissions(_levels, _modes, _cls, workspace_root):
+        permission = SimpleNamespace(
+            _storydex_workspace_root=Path(workspace_root).resolve(),
+            _storydex_mode="full_access",
+            _storydex_plan_mode=False,
+        )
+        created_permissions.append(permission)
+        return permission
+
+    binding_writes: list[tuple[Path, str, str]] = []
+
+    monkeypatch.setattr(coomi_agent_service, "_build_coomi_system_prompt", build_system_prompt)
+    monkeypatch.setattr(coomi_agent_service, "_resolve_context_window", lambda: 4096)
+    monkeypatch.setattr(
+        coomi_agent_service,
+        "_create_storydex_tool_registry",
+        lambda workspace_root, _policy=None: FakeRegistry(workspace_root),
+    )
+    monkeypatch.setattr(coomi_agent_service, "_restore_bound_coomi_session", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        coomi_agent_service,
+        "_write_coomi_session_binding",
+        lambda **kwargs: binding_writes.append(
+            (
+                Path(kwargs["workspace_root"]).resolve(),
+                str(kwargs["storydex_session_id"]),
+                str(kwargs["session"].id),
+            )
+        ),
+    )
+    monkeypatch.setattr(service, "_create_permission_system", create_permissions)
+    monkeypatch.setattr(llm_replay, "get_replayable_llm_provider", lambda: SimpleNamespace(model="fake"))
+    monkeypatch.setattr(coomi_session, "SessionManager", FakeSessionManager)
+    monkeypatch.setattr(coomi_loop, "AgentLoop", FakeAgentLoop)
+
+    async def create_runtime(workspace_root: Path):
+        return await service._get_or_create_runtime(  # noqa: SLF001
+            session_id=shared_session_id,
+            workspace_root=workspace_root,
+            prompt="inspect",
+            app_context=SimpleNamespace(workspace_root=workspace_root),
+        )
+
+    async def alternate_workspaces():
+        first_a = await create_runtime(workspace_a)
+        first_b = await create_runtime(workspace_b)
+        second_a = await create_runtime(workspace_a)
+        second_b = await create_runtime(workspace_b)
+        return first_a, first_b, second_a, second_b
+
+    first_a, first_b, second_a, second_b = asyncio.run(alternate_workspaces())
+    agent_a, session_a = first_a
+    agent_b, session_b = first_b
+    assert second_a == first_a
+    assert second_b == first_b
+    assert agent_a is not agent_b
+    assert session_a is not session_b
+    assert session_a.id != session_b.id
+
+    key_a = service._runtime_key(session_id=shared_session_id, workspace_root=workspace_a)  # noqa: SLF001
+    key_b = service._runtime_key(session_id=shared_session_id, workspace_root=workspace_b)  # noqa: SLF001
+    assert key_a != key_b
+    assert service._sessions[key_a] is session_a  # noqa: SLF001
+    assert service._sessions[key_b] is session_b  # noqa: SLF001
+    assert service._permissions[key_a] is created_permissions[0]  # noqa: SLF001
+    assert service._permissions[key_b] is created_permissions[1]  # noqa: SLF001
+    assert created_permissions[0] is not created_permissions[1]
+    assert created_permissions[0]._storydex_workspace_root == workspace_a
+    assert created_permissions[1]._storydex_workspace_root == workspace_b
+    assert Path(session_a.cwd) == workspace_a
+    assert Path(session_b.cwd) == workspace_b
+    assert Path(agent_a.project_path) == workspace_a
+    assert Path(agent_b.project_path) == workspace_b
+    assert agent_a.tool_registry.workspace_root == workspace_a
+    assert agent_b.tool_registry.workspace_root == workspace_b
+    assert binding_writes == [
+        (workspace_a, shared_session_id, session_a.id),
+        (workspace_b, shared_session_id, session_b.id),
+    ]
+
+    cancellation_hits: list[str] = []
+    callback_a = lambda: cancellation_hits.append("a")
+    callback_b = lambda: cancellation_hits.append("b")
+    cancel_key_a = service._register_execution_canceller(  # noqa: SLF001
+        session_id=shared_session_id,
+        workspace_root=workspace_a,
+        callback=callback_a,
+    )
+    cancel_key_b = service._register_execution_canceller(  # noqa: SLF001
+        session_id=shared_session_id,
+        workspace_root=workspace_b,
+        callback=callback_b,
+    )
+    assert service.cancel_execution(session_id=shared_session_id, workspace_root=workspace_a)
+    assert cancellation_hits == ["a"]
+    assert service.cancel_execution(session_id=shared_session_id, workspace_root=workspace_b)
+    assert cancellation_hits == ["a", "b"]
+    assert not service.cancel_execution(
+        session_id=shared_session_id,
+        workspace_root=tmp_path / "workspace-missing",
+    )
+    service._unregister_execution_canceller(cancel_key_a, callback_a)  # noqa: SLF001
+    service._unregister_execution_canceller(cancel_key_b, callback_b)  # noqa: SLF001
+
+
+def test_execution_trace_is_persisted_to_its_workspace(monkeypatch, tmp_path):
+    import api.routes_agent as routes_agent
+    from services.trace_history_service import TraceHistoryService
+
+    trace_history = TraceHistoryService()
+    monkeypatch.setattr(routes_agent, "trace_history_service", trace_history)
+    workspace_a = (tmp_path / "workspace-a").resolve()
+    workspace_b = (tmp_path / "workspace-b").resolve()
+    shared_session_id = "shared-session"
+
+    for workspace_root, trace_id in (
+        (workspace_a, "trace-a-1"),
+        (workspace_b, "trace-b-1"),
+        (workspace_a, "trace-a-2"),
+    ):
+        routes_agent._persist_execution_trace(  # noqa: SLF001
+            workspace_root,
+            {
+                "traceId": trace_id,
+                "workspaceRoot": workspace_root.as_posix(),
+                "status": "completed",
+            },
+            shared_session_id,
+        )
+
+    def read_workspace_records(workspace_root: Path) -> dict[str, dict]:
+        session_root = trace_history.get_session_root_for_storydex_root(
+            workspace_root / ".storydex",
+            shared_session_id,
+        )
+        records = {}
+        for path in session_root.glob("*.json"):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            trace_id = str(payload.get("traceId") or "")
+            if trace_id:
+                records[trace_id] = payload
+        return records
+
+    records_a = read_workspace_records(workspace_a)
+    records_b = read_workspace_records(workspace_b)
+    assert set(records_a) == {"trace-a-1", "trace-a-2"}
+    assert set(records_b) == {"trace-b-1"}
+    assert all(record["workspaceRoot"] == workspace_a.as_posix() for record in records_a.values())
+    assert all(record["workspaceRoot"] == workspace_b.as_posix() for record in records_b.values())

@@ -22,7 +22,16 @@ const workspace = vi.hoisted(() => ({
 }));
 
 vi.mock("@/api/agent", () => ({
-  AgentApiError: class AgentApiError extends Error { code: string | null = null; },
+  AgentApiError: class AgentApiError extends Error {
+    code: string | null;
+    details?: Record<string, unknown>;
+
+    constructor(message: string, code: string | null = null, details?: Record<string, unknown>) {
+      super(message);
+      this.code = code;
+      this.details = details;
+    }
+  },
   ...api
 }));
 vi.mock("@/stores/git", () => ({ useGitStore: () => git }));
@@ -31,6 +40,7 @@ vi.mock("@/api/workspace", () => ({ fetchStoryChapterTemplates: vi.fn().mockReso
 vi.mock("@/api/client", () => ({ describeTransportError: (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback }));
 
 import { useAgentStore } from "@/stores/agent";
+import { AgentApiError } from "@/api/agent";
 
 function sessions(items: unknown[] = []) {
   return { data: { items }, trace: null, audit: [] };
@@ -88,6 +98,65 @@ describe("agent store streaming", () => {
     store.promptInput = "hello";
     store.isRunning = true;
     await store.runPrompt();
+    expect(api.streamAgentPrompt).not.toHaveBeenCalled();
+  });
+
+  it("asks before retrying without a restore point and persists the run risk flag", async () => {
+    let firstTraceId = "";
+    api.streamAgentPrompt
+      .mockImplementationOnce(async (_request: unknown, onPacket: (packet: unknown) => void, traceId: string) => {
+        firstTraceId = traceId;
+        onPacket({
+          _type: "AgentError",
+          error_type: "SNAPSHOT_FAILED",
+          message: "snapshot failed",
+          details: { reason: "git unavailable", confirmNoSnapshotRequired: true }
+        });
+        throw new AgentApiError(
+          "snapshot failed",
+          "SNAPSHOT_FAILED",
+          { reason: "git unavailable", confirmNoSnapshotRequired: true }
+        );
+      })
+      .mockImplementationOnce(async (request: any, onPacket: (packet: unknown) => void, traceId: string) => {
+        expect(traceId).not.toBe(firstTraceId);
+        expect(request.confirmNoSnapshot).toBe(true);
+        onPacket({ _type: "RunAccepted", noRestorePoint: true });
+        onPacket({ _type: "TurnPhase", phase: "workspace_snapshot", noRestorePoint: true, status: "warning" });
+        onPacket({ _type: "AgentCompleted" });
+      });
+
+    const store = useAgentStore();
+    store.currentSessionId = "session-a";
+    store.promptInput = "继续写作";
+    await store.runPrompt();
+
+    expect(store.pendingSnapshotConfirmation?.request).toMatchObject({
+      prompt: "继续写作",
+      workspaceRoot: "C:/isolated/story"
+    });
+    expect(store.pendingSnapshotConfirmation?.details.reason).toBe("git unavailable");
+    expect(store.executionHistory).toHaveLength(0);
+
+    await store.confirmNoSnapshot();
+
+    expect(api.streamAgentPrompt).toHaveBeenCalledTimes(2);
+    expect(store.pendingSnapshotConfirmation).toBeNull();
+    expect(store.executionHistory[0].status).toBe("completed");
+    expect(store.executionHistory[0].noRestorePoint).toBe(true);
+  });
+
+  it("cancels a pending no-restore-point retry without starting another request", () => {
+    const store = useAgentStore();
+    store.pendingSnapshotConfirmation = {
+      request: { prompt: "do not retry" },
+      traceId: "trace-rejected",
+      sessionId: "session-a",
+      message: "snapshot failed",
+      details: {}
+    };
+    store.cancelNoSnapshot();
+    expect(store.pendingSnapshotConfirmation).toBeNull();
     expect(api.streamAgentPrompt).not.toHaveBeenCalled();
   });
 });

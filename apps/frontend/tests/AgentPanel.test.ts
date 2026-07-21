@@ -51,6 +51,37 @@ beforeEach(() => {
 });
 
 describe("AgentPanel", () => {
+  it("shows snapshot confirmation controls and a persistent no-restore-point marker", async () => {
+    const store = useAgentStore();
+    store.pendingSnapshotConfirmation = {
+      request: { prompt: "continue" },
+      traceId: "trace-rejected",
+      sessionId: "session-1",
+      message: "snapshot failed",
+      details: {}
+    };
+    store.executionHistory = [{
+      traceId: "trace-risk", sessionId: "session-1", prompt: "continue", route: "coomi", agentMode: "coomi", llmModel: "", llmProvider: "",
+      status: "completed", noRestorePoint: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastAction: "chat", reply: "", trace: null,
+      audit: [], events: [], tasks: [], changeLedger: { traceId: "trace-risk", sessionId: "session-1", changedFiles: [], changedFileCount: 0, added: 0, removed: 0, commitHash: "", shortHash: "", diffSource: "", updatedAt: "" },
+      items: [], errorMessage: "", errorCode: null
+    }];
+    const confirm = vi.spyOn(store, "confirmNoSnapshot").mockResolvedValue(undefined);
+    const cancel = vi.spyOn(store, "cancelNoSnapshot");
+    const wrapper = shallowMount(AgentPanel);
+    await nextTick();
+
+    expect(wrapper.find('[role="dialog"]').text()).toContain("无法创建恢复点");
+    expect(wrapper.find(".coomi-no-restore-point").text()).toContain("无恢复点");
+    const buttons = wrapper.findAll(".coomi-snapshot-modal-button");
+    expect(buttons).toHaveLength(2);
+    await buttons[1].trigger("click");
+    expect(confirm).toHaveBeenCalledTimes(1);
+    await buttons[0].trigger("click");
+    expect(cancel).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
   it("renders phase timing without exposing hidden reasoning text", async () => {
     const store = useAgentStore();
     store.executionHistory = [{

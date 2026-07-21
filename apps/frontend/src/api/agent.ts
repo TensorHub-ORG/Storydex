@@ -127,7 +127,10 @@ export async function streamAgentPrompt(
           onMessage(packet);
           deferredAgentError = new AgentApiError(
             String(packet.message || "Coomi execution failed."),
-            String(packet.error_type || "coomi_error")
+            String(packet.error_type || packet.code || "coomi_error"),
+            packet.details,
+            normalizeTrace(packet.trace),
+            normalizeAudit(packet.audit)
           );
           continue;
         }

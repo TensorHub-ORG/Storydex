@@ -66,6 +66,15 @@
           <div class="coomi-run-head">
             <span>Coomi</span>
             <span :class="['coomi-run-status', run.status]">{{ formatStatus(run.status, run.errorMessage) }}</span>
+            <span
+              v-if="run.noRestorePoint"
+              class="coomi-no-restore-point"
+              title="本轮没有可用恢复点"
+              aria-label="本轮没有可用恢复点"
+            >
+              <span class="material-symbols-rounded">warning_amber</span>
+              无恢复点
+            </span>
             <span>{{ formatDate(run.updatedAt) }}</span>
           </div>
 
@@ -513,6 +522,33 @@
         </button>
       </div>
     </footer>
+
+    <div
+      v-if="agentStore.pendingSnapshotConfirmation"
+      class="coomi-snapshot-modal-mask"
+      role="presentation"
+      @click.self="handleNoSnapshotCancel"
+    >
+      <section class="coomi-snapshot-modal" role="dialog" aria-modal="true" aria-labelledby="snapshot-modal-title">
+        <div class="coomi-snapshot-modal-title-row">
+          <span class="material-symbols-rounded coomi-snapshot-modal-icon">warning_amber</span>
+          <h2 id="snapshot-modal-title">无法创建恢复点</h2>
+        </div>
+        <p class="coomi-snapshot-modal-copy">
+          当前项目未能创建本轮恢复点。继续执行后，自动恢复能力不可用，但仍会保留执行记录。
+        </p>
+        <div class="coomi-snapshot-modal-actions">
+          <button type="button" class="coomi-snapshot-modal-button" @click="handleNoSnapshotCancel">
+            <span class="material-symbols-rounded">close</span>
+            取消
+          </button>
+          <button type="button" class="coomi-snapshot-modal-button primary" @click="handleNoSnapshotConfirm">
+            <span class="material-symbols-rounded">play_arrow</span>
+            继续执行
+          </button>
+        </div>
+      </section>
+    </div>
   </aside>
 </template>
 
@@ -991,6 +1027,14 @@ async function handleSubmitOrStop(): Promise<void> {
   await agentStore.runPrompt();
   await nextTick();
   resizeComposer();
+}
+
+async function handleNoSnapshotConfirm(): Promise<void> {
+  await agentStore.confirmNoSnapshot();
+}
+
+function handleNoSnapshotCancel(): void {
+  agentStore.cancelNoSnapshot();
 }
 
 function handleComposerKeydown(event: KeyboardEvent): void {
@@ -1727,6 +1771,8 @@ defineExpose({
     handleApproveOperation,
     handleRejectOperation,
     handleSubmitOrStop,
+    handleNoSnapshotConfirm,
+    handleNoSnapshotCancel,
     handleComposerKeydown,
     handleCyclePermission,
     togglePermissionMenu,
@@ -2016,6 +2062,99 @@ defineExpose({
 
 .coomi-run-status.failed {
   color: var(--danger);
+}
+
+.coomi-no-restore-point {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--warning);
+  font-weight: 650;
+}
+
+.coomi-no-restore-point .material-symbols-rounded,
+.coomi-snapshot-modal-icon {
+  font-size: 16px;
+}
+
+.coomi-snapshot-modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  overflow-y: auto;
+  background: color-mix(in srgb, var(--bg-agent) 58%, rgba(9, 14, 22, 0.42));
+  backdrop-filter: blur(4px);
+}
+
+.coomi-snapshot-modal {
+  width: min(420px, 100%);
+  max-height: calc(100dvh - 32px);
+  padding: 18px;
+  overflow-y: auto;
+  border: 1px solid color-mix(in srgb, var(--warning) 42%, var(--border-subtle));
+  border-radius: 6px;
+  background: var(--bg-card);
+  box-shadow: var(--shadow-md);
+}
+
+.coomi-snapshot-modal-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--warning);
+}
+
+.coomi-snapshot-modal-title-row h2 {
+  margin: 0;
+  color: var(--text-main);
+  font-size: 16px;
+  line-height: 1.35;
+}
+
+.coomi-snapshot-modal-copy {
+  margin: 12px 0 0;
+  color: var(--text-soft);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.coomi-snapshot-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.coomi-snapshot-modal-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 11px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  background: var(--bg-card-muted);
+  color: var(--text-main);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.coomi-snapshot-modal-button:hover {
+  border-color: color-mix(in srgb, var(--warning) 52%, var(--border-subtle));
+}
+
+.coomi-snapshot-modal-button.primary {
+  border-color: color-mix(in srgb, var(--warning) 55%, var(--border-subtle));
+  background: color-mix(in srgb, var(--warning) 14%, var(--bg-card));
+  color: var(--warning);
+}
+
+.coomi-snapshot-modal-button .material-symbols-rounded {
+  font-size: 16px;
 }
 
 .coomi-event {

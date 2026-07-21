@@ -566,6 +566,35 @@ def test_replay_mismatch_points_to_changed_message(monkeypatch, tmp_path):
         asyncio.run(replay.chat([{"role": "user", "content": "changed"}]))
 
 
+def test_replay_normalizes_coomi_system_prompt_date(monkeypatch, tmp_path):
+    monkeypatch.setenv("STORYDEX_LLM_FIXTURE_DIR", str(tmp_path))
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "record")
+    recorder = get_replayable_llm_provider(FakeProvider())
+    asyncio.run(
+        recorder.chat(
+            [
+                {"role": "system", "content": "## Environment\n- Date: 2026-07-20\n- Model: fake"},
+                {"role": "user", "content": "same request"},
+            ]
+        )
+    )
+
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "replay")
+    offline = FakeProvider()
+    replay = get_replayable_llm_provider(offline)
+    response = asyncio.run(
+        replay.chat(
+            [
+                {"role": "system", "content": "## Environment\n- Date: 2026-07-21\n- Model: fake"},
+                {"role": "user", "content": "same request"},
+            ]
+        )
+    )
+    replay.assert_replay_complete()
+    assert response.content == "response-1"
+    assert offline.calls == 0
+
+
 def test_replay_normalizes_volatile_text_fallback_call_ids(monkeypatch, tmp_path):
     monkeypatch.setenv("STORYDEX_LLM_FIXTURE_DIR", str(tmp_path))
     recorded_id = "text_call_814fa786f7a0"

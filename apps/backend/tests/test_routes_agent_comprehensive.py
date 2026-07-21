@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import types
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import pytest
 from api import routes_agent as routes
 from core.exceptions import GitServiceError
 from services.agent_git_autocommit_service import AgentGitSnapshot
+from services.execution_coordinator import ExecutionCoordinator
 
 
 class FakeRequest:
@@ -348,6 +350,347 @@ def test_stream_coomi_sse_success_needs_input_and_runtime_error(monkeypatch, tmp
     assert any(name == "AgentError" for name, _ in failed)
 
 
+def test_stream_disconnect_finishes_cancelled_execution_in_background(monkeypatch, tmp_path):
+    trace_records = []
+    git_calls = []
+    model_calls = []
+    coordinator = ExecutionCoordinator()
+    monkeypatch.setattr(routes, "execution_coordinator", coordinator)
+    monkeypatch.setattr(routes, "_create_agent_task_plan", lambda **kwargs: asyncio.sleep(0, result=[]))
+    monkeypatch.setattr(
+        routes,
+        "_build_chat_payload",
+        lambda **kwargs: {"record": {"traceId": kwargs["trace_id"], "events": kwargs["events"]}},
+    )
+    monkeypatch.setattr(
+        routes,
+        "_persist_execution_trace",
+        lambda workspace, record, session: trace_records.append((workspace, dict(record), session)) or record,
+    )
+
+    class Git:
+        def finish_turn(self, snapshot, **kwargs):
+            git_calls.append(kwargs)
+            return {"_type": "GitAutoCommit", "status": "info", "created": False}
+
+    monkeypatch.setattr(routes, "agent_git_autocommit_service", Git())
+
+    class Coomi:
+        def cancel_execution(self, **kwargs):
+            return False
+
+        async def stream_events(self, **kwargs):
+            model_calls.append(kwargs)
+            yield "AgentCompleted", {"total_tokens": 0}
+
+    monkeypatch.setattr(routes, "get_storydex_coomi_agent_service", lambda: Coomi())
+
+    class DisconnectingRequest:
+        checks = 0
+
+        async def is_disconnected(self):
+            self.checks += 1
+            return self.checks >= 1
+
+    request = DisconnectingRequest()
+    snapshot = AgentGitSnapshot(workspace_root=tmp_path, available=True)
+
+    async def collect_and_wait():
+        packets = [
+            _decode_sse(item)
+            async for item in routes._stream_coomi_sse(
+                prompt="cancel me",
+                trace_id="trace-disconnect",
+                session_id="session-disconnect",
+                active_file="",
+                workspace_root=tmp_path,
+                story_generation={},
+                turn_contract={},
+                git_snapshot=snapshot,
+                request=request,
+                cancellation_token=routes._CancellationToken(),
+            )
+        ]
+        for _ in range(100):
+            if trace_records and not list((tmp_path / ".storydex" / ".agent" / "execution-intents").glob("*.json")):
+                break
+            await asyncio.sleep(0.01)
+        return packets
+
+    packets = asyncio.run(collect_and_wait())
+    assert packets and packets[0][0] == "TurnPhase"
+    assert len(git_calls) == 1
+    assert model_calls == []
+    assert trace_records and trace_records[0][1]["status"] == "cancelled"
+    intent_root = tmp_path / ".storydex" / ".agent" / "execution-intents"
+    assert not list(intent_root.glob("*.json"))
+    assert coordinator.try_reserve() is True
+    coordinator.release_reservation()
+
+
+def test_preflight_disconnect_finishes_cancelled_execution_in_background(monkeypatch, tmp_path):
+    trace_records = []
+    git_calls = []
+    model_calls = []
+    intent_started = threading.Event()
+    release_intent = threading.Event()
+    coordinator = ExecutionCoordinator()
+    monkeypatch.setattr(routes, "execution_coordinator", coordinator)
+    monkeypatch.setattr(routes, "_PHASE_HEARTBEAT_SECONDS", 0.01)
+    monkeypatch.setattr(routes, "_create_agent_execution_log_session", lambda **kwargs: None)
+    monkeypatch.setattr(
+        routes,
+        "_build_chat_payload",
+        lambda **kwargs: {
+            "data": {"route": "coomi", "reply": "", "events": kwargs["events"], "assistant": {}},
+            "trace": {"traceId": kwargs["trace_id"], "durationMs": 1, "toolCalls": 0},
+            "audit": [],
+            "record": {"traceId": kwargs["trace_id"], "events": kwargs["events"]},
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "_persist_execution_trace",
+        lambda workspace, record, session: trace_records.append(dict(record)) or record,
+    )
+
+    class Git:
+        def begin_turn(self, root):
+            git_calls.append(("begin", root))
+            return AgentGitSnapshot(workspace_root=root, available=True)
+
+        def finish_turn(self, snapshot, **kwargs):
+            git_calls.append(("finish", snapshot))
+            return {"_type": "GitAutoCommit", "status": "info", "created": False}
+
+    monkeypatch.setattr(routes, "agent_git_autocommit_service", Git())
+
+    class Intent:
+        async def classify_intent(self, **kwargs):
+            intent_started.set()
+            while not release_intent.is_set():
+                await asyncio.sleep(0.001)
+            return {"primary": "general"}
+
+    monkeypatch.setattr(routes, "storydex_intent_service", Intent())
+
+    class Coomi:
+        def stream_events(self, **kwargs):
+            model_calls.append(kwargs)
+            raise AssertionError("runtime must not start after preflight disconnect")
+
+        def get_status(self, **kwargs):
+            return {"model": "test", "providerId": "test"}
+
+    monkeypatch.setattr(routes, "get_storydex_coomi_agent_service", lambda: Coomi())
+
+    class DisconnectingRequest:
+        checks = 0
+
+        async def is_disconnected(self):
+            self.checks += 1
+            return self.checks >= 1
+
+    payload = routes.AgentChatRequest(prompt="disconnect during intent", workspaceRoot=str(tmp_path))
+
+    async def run():
+        stream = routes._stream_agent_chat_request_sse(
+            payload=payload,
+            request=DisconnectingRequest(),
+            trace_id="trace-preflight-disconnect",
+            session_id="session-preflight-disconnect",
+            cancellation_token=routes._CancellationToken(),
+        )
+        first = await stream.__anext__()
+        await stream.__anext__()
+        disconnect = asyncio.create_task(stream.__anext__())
+        for _ in range(100):
+            if intent_started.is_set():
+                break
+            await asyncio.sleep(0.001)
+        await asyncio.sleep(0.03)
+        release_intent.set()
+        try:
+            await disconnect
+        except StopAsyncIteration:
+            pass
+        await stream.aclose()
+        for _ in range(200):
+            if trace_records and not list((tmp_path / ".storydex" / ".agent" / "execution-intents").glob("*.json")):
+                break
+            await asyncio.sleep(0.01)
+        return first
+
+    first = asyncio.run(run())
+    assert _decode_sse(first)[0] == "RunAccepted"
+    assert model_calls == []
+    assert [name for name, _ in git_calls] == ["begin", "finish"]
+    assert len(trace_records) == 1
+    assert trace_records[0]["status"] == "cancelled"
+    terminal_events = [event for event in trace_records[0]["events"] if event.get("event") == "AgentCancelled"]
+    assert len(terminal_events) == 1
+    assert not list((tmp_path / ".storydex" / ".agent" / "execution-intents").glob("*.json"))
+    assert coordinator.try_reserve() is True
+    coordinator.release_reservation()
+
+
+def test_run_accepted_close_finishes_cancelled_execution_without_leaks(monkeypatch, tmp_path):
+    trace_records = []
+    git_calls = []
+    coordinator = ExecutionCoordinator()
+    monkeypatch.setattr(routes, "execution_coordinator", coordinator)
+    monkeypatch.setattr(routes, "_create_agent_execution_log_session", lambda **kwargs: None)
+    monkeypatch.setattr(
+        routes,
+        "_build_chat_payload",
+        lambda **kwargs: {
+            "data": {"route": "coomi", "reply": "", "events": kwargs["events"], "assistant": {}},
+            "trace": {"traceId": kwargs["trace_id"], "durationMs": 1, "toolCalls": 0},
+            "audit": [],
+            "record": {"traceId": kwargs["trace_id"], "events": kwargs["events"]},
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "_persist_execution_trace",
+        lambda workspace, record, session: trace_records.append(dict(record)) or record,
+    )
+
+    class Git:
+        def begin_turn(self, root):
+            git_calls.append(("begin", root))
+            return AgentGitSnapshot(workspace_root=root, available=True)
+
+        def finish_turn(self, snapshot, **kwargs):
+            git_calls.append(("finish", snapshot))
+            return {"_type": "GitAutoCommit", "status": "info", "created": False}
+
+    monkeypatch.setattr(routes, "agent_git_autocommit_service", Git())
+    monkeypatch.setattr(
+        routes,
+        "storydex_intent_service",
+        types.SimpleNamespace(classify_intent=lambda **kwargs: asyncio.sleep(0, result={"primary": "general"})),
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_storydex_coomi_agent_service",
+        lambda: types.SimpleNamespace(get_status=lambda **kwargs: {"model": "test", "providerId": "test"}),
+    )
+    payload = routes.AgentChatRequest(prompt="close after accepted", workspaceRoot=str(tmp_path))
+
+    async def run():
+        stream = routes._stream_agent_chat_request_sse(
+            payload=payload,
+            request=FakeRequest(),
+            trace_id="trace-accepted-close",
+            session_id="session-accepted-close",
+            cancellation_token=routes._CancellationToken(),
+        )
+        first = await stream.__anext__()
+        await stream.aclose()
+        for _ in range(200):
+            if trace_records and not list((tmp_path / ".storydex" / ".agent" / "execution-intents").glob("*.json")):
+                break
+            await asyncio.sleep(0.01)
+        return first
+
+    first = asyncio.run(run())
+    assert _decode_sse(first)[0] == "RunAccepted"
+    assert [name for name, _ in git_calls] == ["begin", "finish"]
+    assert len(trace_records) == 1
+    assert trace_records[0]["status"] == "cancelled"
+    assert sum(event.get("event") == "AgentCancelled" for event in trace_records[0]["events"]) == 1
+    assert not list((tmp_path / ".storydex" / ".agent" / "execution-intents").glob("*.json"))
+    assert coordinator.try_reserve() is True
+    coordinator.release_reservation()
+
+
+def test_snapshot_failure_requires_confirmation_before_execution(monkeypatch, tmp_path):
+    coordinator = ExecutionCoordinator()
+    trace_records = []
+    git_calls = []
+    model_calls = []
+    monkeypatch.setattr(routes, "execution_coordinator", coordinator)
+    monkeypatch.setattr(routes, "_resolve_agent_workspace_root", lambda payload: tmp_path)
+    monkeypatch.setattr(routes, "_create_agent_execution_log_session", lambda **kwargs: None)
+    monkeypatch.setattr(routes, "_create_agent_task_plan", lambda **kwargs: asyncio.sleep(0, result=[]))
+    monkeypatch.setattr(
+        routes,
+        "storydex_intent_service",
+        types.SimpleNamespace(classify_intent=lambda **kwargs: asyncio.sleep(0, result={"primary": "general"})),
+    )
+    monkeypatch.setattr(
+        routes,
+        "storydex_orchestration_service",
+        types.SimpleNamespace(build_turn_contract=lambda *args, **kwargs: {"status": "ready", "turnPlan": {}}),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_build_chat_payload",
+        lambda **kwargs: {
+            "data": {"route": "coomi", "reply": "done", "events": [], "assistant": {}},
+            "trace": {"traceId": kwargs["trace_id"], "durationMs": 1, "toolCalls": 0},
+            "audit": [],
+            "record": {"traceId": kwargs["trace_id"], "status": kwargs["status"]},
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "_persist_execution_trace",
+        lambda workspace, record, session: trace_records.append(dict(record)) or record,
+    )
+
+    class Git:
+        def begin_turn(self, root):
+            return AgentGitSnapshot(workspace_root=root, available=False, error_message="git unavailable")
+
+        def finish_turn(self, snapshot, **kwargs):
+            git_calls.append(kwargs)
+            return {"_type": "GitAutoCommit", "status": "warning", "created": False}
+
+    monkeypatch.setattr(routes, "agent_git_autocommit_service", Git())
+
+    class Coomi:
+        def cancel_execution(self, **kwargs):
+            return False
+
+        async def stream_events(self, **kwargs):
+            model_calls.append(kwargs)
+            yield "AgentCompleted", {"total_tokens": 0}
+
+    monkeypatch.setattr(routes, "get_storydex_coomi_agent_service", lambda: Coomi())
+
+    payload = routes.AgentChatRequest(prompt="run", workspaceRoot=str(tmp_path))
+
+    async def collect(request_payload):
+        return [
+            _decode_sse(item)
+            async for item in routes._stream_agent_chat_request_sse(
+                payload=request_payload,
+                request=FakeRequest(),
+                trace_id="trace-snapshot" if not request_payload.confirm_no_snapshot else "trace-confirmed",
+                session_id="session-snapshot",
+                cancellation_token=routes._CancellationToken(),
+            )
+        ]
+
+    first = asyncio.run(collect(payload))
+    error_packets = [data for name, data in first if name == "AgentError"]
+    assert error_packets and error_packets[0]["code"] == "SNAPSHOT_FAILED"
+    assert error_packets[0]["details"]["confirmNoSnapshotRequired"] is True
+    assert model_calls == []
+    assert coordinator.try_reserve() is True
+    coordinator.release_reservation()
+
+    confirmed = asyncio.run(collect(routes.AgentChatRequest(prompt="run", workspaceRoot=str(tmp_path), confirmNoSnapshot=True)))
+    assert any(name == "TurnPhase" and data.get("noRestorePoint") is True for name, data in confirmed)
+    assert any(name == "AgentCompleted" for name, _ in confirmed)
+    assert trace_records and trace_records[-1]["noRestorePoint"] is True
+    assert len(model_calls) == 1
+    assert coordinator.try_reserve() is True
+    coordinator.release_reservation()
+
+
 def test_changed_file_diff_record_helpers(monkeypatch, tmp_path):
     inside = tmp_path / "inside.md"
     inside.write_text("text", encoding="utf-8")
@@ -596,9 +939,13 @@ def test_agent_clear_conversation_and_chat_paths(monkeypatch, tmp_path):
     assert len({item[1] for item in reset_calls}) == 1
 
     orchestration.build_turn_contract = lambda *args, **kwargs: {"status": "ready", "turnPlan": {}}
-    monkeypatch.setattr(routes, "_collect_coomi_run", lambda **kwargs: asyncio.sleep(0, result=("reply", [
-        routes._event_to_trace_event("ToolDone", {"tool_name": "Read"}, 1)
-    ], True, "")))
+
+    async def stream_events(**kwargs):
+        yield "TextChunk", {"content": "reply"}
+        yield "ToolDone", {"tool_name": "Read"}
+        yield "AgentCompleted", {"total_tokens": 1}
+
+    service.stream_events = stream_events
     reset_calls.clear()
     response = asyncio.run(routes.agent_chat(routes.AgentChatRequest(prompt="p"), FakeRequest(), session_id_query="s"))
     assert response.data["reply"] == "reply"
@@ -612,7 +959,8 @@ def test_agent_clear_conversation_and_chat_paths(monkeypatch, tmp_path):
         asyncio.run(routes.agent_chat(routes.AgentChatRequest(prompt="p"), FakeRequest(), session_id_query="s"))
     assert [item[0] for item in reset_calls] == ["reset", "reset"]
     assert len({item[1] for item in reset_calls}) == 1
-    assert any(item[0] == "released" for item in calls)
+    assert routes.execution_coordinator.try_reserve() is True
+    routes.execution_coordinator.release_reservation()
 
 
 def test_stream_request_wrapper_success_error_and_chat_stream(monkeypatch, tmp_path):
@@ -633,6 +981,8 @@ def test_stream_request_wrapper_success_error_and_chat_stream(monkeypatch, tmp_p
     async def delegated(**kwargs):
         yield routes._encode_sse("TextChunk", {"content": "hello"})
         yield routes._encode_sse("done", {"type": "done"})
+        kwargs["execution_handle"].reject_preflight("test_delegate_complete")
+        routes.reset_llm_metrics(kwargs["trace_id"])
 
     monkeypatch.setattr(routes, "_stream_coomi_sse", delegated)
     token = routes._CancellationToken()
