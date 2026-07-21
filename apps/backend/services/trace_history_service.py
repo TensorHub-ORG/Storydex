@@ -84,6 +84,30 @@ class TraceHistoryService:
                 return None
             return self._read_json(path)
 
+    def delete_record(self, trace_id: str, session_id: str = "default") -> Dict[str, Any]:
+        normalized_trace_id = str(trace_id or "").strip()
+        normalized_session_id = self._normalize_session_id(session_id)
+        result = {
+            "deleted": False,
+            "traceId": normalized_trace_id,
+            "sessionId": normalized_session_id,
+        }
+        if not normalized_trace_id:
+            return result
+
+        with self._lock:
+            self._migrate_legacy_traces_locked()
+            path = self._find_trace_file(normalized_trace_id, normalized_session_id)
+            if path is None:
+                return result
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                return result
+
+        result["deleted"] = True
+        return result
+
     def clear_records(self, session_id: str = "default") -> int:
         normalized = self._normalize_session_id(session_id)
         removed = 0

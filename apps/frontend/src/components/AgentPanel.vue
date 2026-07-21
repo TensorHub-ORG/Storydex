@@ -1,5 +1,5 @@
 <template>
-  <aside class="coomi-dock">
+  <aside ref="dockRef" class="coomi-dock">
     <header class="coomi-header">
       <div class="coomi-title">
         <span>Coomi</span>
@@ -76,6 +76,28 @@
               无恢复点
             </span>
             <span>{{ formatDate(run.updatedAt) }}</span>
+            <div v-if="canRollbackRun(run)" class="coomi-run-actions">
+              <button
+                class="coomi-run-action"
+                type="button"
+                title="撤回并重新编辑"
+                aria-label="撤回并重新编辑"
+                :disabled="agentStore.isRollingBack"
+                @click="handleRollbackEdit(run)"
+              >
+                <span class="material-symbols-rounded">edit</span>
+              </button>
+              <button
+                class="coomi-run-action danger"
+                type="button"
+                title="删除本轮"
+                aria-label="删除本轮"
+                :disabled="agentStore.isRollingBack"
+                @click="handleRollbackDelete(run)"
+              >
+                <span class="material-symbols-rounded">delete</span>
+              </button>
+            </div>
           </div>
 
           <div class="coomi-waterfall">
@@ -184,6 +206,18 @@
     </div>
 
     <footer ref="composerRef" class="coomi-composer">
+      <div
+        class="coomi-composer-resizer"
+        :class="{ dragging: composerResizeActive }"
+        role="separator"
+        aria-orientation="horizontal"
+        :aria-valuemin="COMPOSER_MIN_HEIGHT"
+        :aria-valuemax="composerHeightCeiling"
+        :aria-valuenow="effectiveComposerMaxHeight"
+        aria-label="拖动调整输入框高度"
+        title="拖动调整输入框高度"
+        @pointerdown="startComposerResize"
+      ></div>
       <div v-if="composerError" class="coomi-error">{{ composerError }}</div>
       <div v-if="collapsedHandlesVisible" class="coomi-collapsed-handles">
         <button
@@ -503,6 +537,7 @@
           ref="inputRef"
           v-model="agentStore.promptInput"
           class="coomi-input"
+          :style="{ maxHeight: `${effectiveComposerMaxHeight}px` }"
           :disabled="agentStore.isRunning || Boolean(agentStore.pendingCommitPrompt)"
           placeholder="输入信息（Enter发送，Shift+Enter换行，输入“/”查看可用指令）"
           rows="1"
@@ -606,6 +641,7 @@ const gitStore = useGitStore();
 const workspaceStore = useWorkspaceStore();
 const configPanelOpen = ref(false);
 const sessionMenuOpen = ref(false);
+const dockRef = ref<HTMLElement | null>(null);
 const streamRef = ref<HTMLElement | null>(null);
 const composerRef = ref<HTMLElement | null>(null);
 const inputRef = ref<HTMLTextAreaElement | null>(null);
@@ -629,6 +665,15 @@ const showScrollToLatest = ref(false);
 const runtimeNow = ref(Date.now());
 let runtimeTimer: number | null = null;
 const SCROLL_BOTTOM_THRESHOLD = 48;
+const COMPOSER_MIN_HEIGHT = 34;
+const DEFAULT_COMPOSER_MAX_HEIGHT = 180;
+const COMPOSER_MAX_HEIGHT_STORAGE_KEY = "storydex.composerMaxHeight";
+const composerMaxHeight = ref(DEFAULT_COMPOSER_MAX_HEIGHT);
+const composerResizeActive = ref(false);
+const composerHeightCeiling = ref(Number.POSITIVE_INFINITY);
+let composerResizePointerId: number | null = null;
+let composerResizeStartY = 0;
+let composerResizeStartHeight = DEFAULT_COMPOSER_MAX_HEIGHT;
 const executionFloatSignature = computed(() => {
   if (workspaceStore.launchScreenVisible) {
     return "";
@@ -735,6 +780,10 @@ const conversationRuns = computed(() => {
     const rightTime = Date.parse(right.createdAt || right.updatedAt);
     return leftTime - rightTime || Date.parse(left.updatedAt) - Date.parse(right.updatedAt);
   });
+});
+const latestConversationTraceId = computed(() => {
+  const runs = conversationRuns.value;
+  return runs.length > 0 ? runs[runs.length - 1].traceId : "";
 });
 const sessionSummaries = computed(() => (workspaceStore.launchScreenVisible ? [] : agentStore.availableSessions));
 const modelLabel = computed(() => agentStore.coomiStatus?.display || agentStore.coomiStatus?.model || "未配置");
@@ -872,9 +921,22 @@ const collapsedHandlesVisible = computed(
     (executionFloatVisible.value && executionFloatCollapsed.value) ||
     (promptDockActive.value && promptDockCollapsed.value)
 );
+function updateComposerHeightCeiling(): void {
+  const panelHeight = dockRef.value?.clientHeight || 0;
+  composerHeightCeiling.value = panelHeight > 0
+    ? Math.max(COMPOSER_MIN_HEIGHT, Math.floor(panelHeight * 0.6))
+    : Number.POSITIVE_INFINITY;
+}
+const effectiveComposerMaxHeight = computed(() =>
+  clamp(composerMaxHeight.value, COMPOSER_MIN_HEIGHT, composerHeightCeiling.value)
+);
 
 onMounted(async () => {
   window.addEventListener("pointerdown", handleDocumentPointerDown);
+  window.addEventListener("resize", handleComposerPanelResize);
+  restoreComposerMaxHeight();
+  await nextTick();
+  resizeComposer();
   await agentStore.refreshCoomiStatus();
   syncStoryGenerationOptionsFromProjectSettings();
   await agentStore.loadSessions();
@@ -885,6 +947,8 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener("pointerdown", handleDocumentPointerDown);
+  window.removeEventListener("resize", handleComposerPanelResize);
+  finishComposerResize();
   stopRuntimeTimer();
 });
 
@@ -1236,6 +1300,41 @@ async function handleSessionDelete(sessionId: string): Promise<void> {
   await agentStore.deleteSession(sessionId);
 }
 
+function canRollbackRun(run: AgentExecutionRun): boolean {
+  return Boolean(
+    run.traceId
+    && run.traceId === latestConversationTraceId.value
+    && run.status !== "running"
+    && !agentStore.isRunning
+    && !agentStore.isRollingBack
+  );
+}
+
+async function handleRollbackEdit(run: AgentExecutionRun): Promise<void> {
+  if (!canRollbackRun(run)) {
+    return;
+  }
+  const rolledBack = await agentStore.rollbackLatestRun({ refillComposer: true });
+  if (!rolledBack) {
+    return;
+  }
+  await nextTick();
+  inputRef.value?.focus();
+  const cursor = inputRef.value?.value.length || 0;
+  inputRef.value?.setSelectionRange(cursor, cursor);
+  resizeComposer();
+}
+
+async function handleRollbackDelete(run: AgentExecutionRun): Promise<void> {
+  if (!canRollbackRun(run)) {
+    return;
+  }
+  if (!window.confirm("删除本轮对话记录？此操作不会回滚已产生的文件变更。")) {
+    return;
+  }
+  await agentStore.rollbackLatestRun({ refillComposer: false });
+}
+
 async function handleConfigSaved(): Promise<void> {
   await agentStore.refreshCoomiStatus();
 }
@@ -1270,7 +1369,74 @@ function resizeComposer(): void {
     return;
   }
   input.style.height = "auto";
-  input.style.height = `${Math.min(180, Math.max(34, input.scrollHeight))}px`;
+  input.style.height = `${Math.min(effectiveComposerMaxHeight.value, Math.max(COMPOSER_MIN_HEIGHT, input.scrollHeight))}px`;
+}
+
+function restoreComposerMaxHeight(): void {
+  updateComposerHeightCeiling();
+  try {
+    const storedHeight = Number(window.localStorage.getItem(COMPOSER_MAX_HEIGHT_STORAGE_KEY));
+    if (Number.isFinite(storedHeight) && storedHeight > 0) {
+      composerMaxHeight.value = clamp(storedHeight, COMPOSER_MIN_HEIGHT, composerHeightCeiling.value);
+    }
+  } catch {
+    // localStorage may be unavailable in restricted browser contexts.
+  }
+}
+
+function persistComposerMaxHeight(): void {
+  try {
+    window.localStorage.setItem(COMPOSER_MAX_HEIGHT_STORAGE_KEY, String(composerMaxHeight.value));
+  } catch {
+    // Keep the current-session adjustment when persistence is unavailable.
+  }
+}
+
+function startComposerResize(event: PointerEvent): void {
+  if (event.button !== 0) {
+    return;
+  }
+  event.preventDefault();
+  updateComposerHeightCeiling();
+  composerResizePointerId = event.pointerId;
+  composerResizeStartY = event.clientY;
+  composerResizeStartHeight = effectiveComposerMaxHeight.value;
+  composerResizeActive.value = true;
+  (event.currentTarget as HTMLElement | null)?.setPointerCapture?.(event.pointerId);
+  document.body.classList.add("is-resizing-composer");
+  window.addEventListener("pointermove", handleComposerResize);
+  window.addEventListener("pointerup", finishComposerResize);
+  window.addEventListener("pointercancel", finishComposerResize);
+}
+
+function handleComposerResize(event: PointerEvent): void {
+  if (composerResizePointerId === null || event.pointerId !== composerResizePointerId) {
+    return;
+  }
+  composerMaxHeight.value = clamp(
+    composerResizeStartHeight + composerResizeStartY - event.clientY,
+    COMPOSER_MIN_HEIGHT,
+    composerHeightCeiling.value
+  );
+  persistComposerMaxHeight();
+  resizeComposer();
+}
+
+function finishComposerResize(event?: PointerEvent): void {
+  if (event && composerResizePointerId !== null && event.pointerId !== composerResizePointerId) {
+    return;
+  }
+  composerResizePointerId = null;
+  composerResizeActive.value = false;
+  document.body.classList.remove("is-resizing-composer");
+  window.removeEventListener("pointermove", handleComposerResize);
+  window.removeEventListener("pointerup", finishComposerResize);
+  window.removeEventListener("pointercancel", finishComposerResize);
+}
+
+function handleComposerPanelResize(): void {
+  updateComposerHeightCeiling();
+  resizeComposer();
 }
 
 function isApprovalDraftComplete(approval: AgentPendingApproval, draft: ApprovalDraft | undefined): boolean {
@@ -1721,9 +1887,14 @@ function formatTokenCount(value: number): string {
   return String(Math.round(value));
 }
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
 defineExpose({
   __testUtils: import.meta.env.MODE === "test" ? {
     conversationRuns,
+    latestConversationTraceId,
     sessionSummaries,
     modelLabel,
     permissionControlLabel,
@@ -1764,6 +1935,10 @@ defineExpose({
     commitMessage,
     executionFloatCollapsed,
     promptDockCollapsed,
+    composerMaxHeight,
+    composerHeightCeiling,
+    effectiveComposerMaxHeight,
+    composerResizeActive,
     buildPendingTargetPathOperationItems,
     buildLiveOperationItemsForPending,
     attachPendingWriteContext,
@@ -1792,11 +1967,18 @@ defineExpose({
     handleNewSession,
     handleSessionSelect,
     handleSessionDelete,
+    canRollbackRun,
+    handleRollbackEdit,
+    handleRollbackDelete,
     handleConfigSaved,
     insertCommand,
     selectCommand,
     handleComposerInput,
     resizeComposer,
+    restoreComposerMaxHeight,
+    startComposerResize,
+    handleComposerResize,
+    finishComposerResize,
     isApprovalDraftComplete,
     goToApproval,
     selectApprovalOption,
@@ -2062,6 +2244,58 @@ defineExpose({
 
 .coomi-run-status.failed {
   color: var(--danger);
+}
+
+.coomi-run-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.14s ease;
+}
+
+.coomi-run:hover .coomi-run-actions,
+.coomi-run:focus-within .coomi-run-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.coomi-run-action {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.coomi-run-action:hover:not(:disabled),
+.coomi-run-action:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+  background: color-mix(in srgb, var(--accent-soft) 20%, transparent);
+  color: var(--accent);
+  outline: none;
+}
+
+.coomi-run-action.danger:hover:not(:disabled),
+.coomi-run-action.danger:focus-visible {
+  border-color: color-mix(in srgb, var(--danger) 28%, transparent);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger);
+}
+
+.coomi-run-action:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.coomi-run-action .material-symbols-rounded {
+  font-size: 16px;
 }
 
 .coomi-no-restore-point {
@@ -2480,6 +2714,46 @@ defineExpose({
   padding: 0 12px 12px;
   background: var(--bg-header);
   border-top: 1px solid var(--border-subtle);
+}
+
+.coomi-composer-resizer {
+  position: absolute;
+  z-index: 7;
+  top: -5px;
+  left: 12px;
+  right: 12px;
+  height: 10px;
+  cursor: ns-resize;
+  touch-action: none;
+}
+
+.coomi-composer-resizer::before {
+  content: "";
+  position: absolute;
+  top: 4px;
+  left: 50%;
+  width: 42px;
+  height: 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--border-strong) 78%, transparent);
+  opacity: 0;
+  transform: translateX(-50%);
+  transition:
+    opacity 0.16s ease,
+    background-color 0.16s ease,
+    width 0.16s ease;
+}
+
+.coomi-composer-resizer:hover::before,
+.coomi-composer-resizer:focus-visible::before,
+.coomi-composer-resizer.dragging::before {
+  width: 54px;
+  background: color-mix(in srgb, var(--accent-strong) 72%, var(--border-strong));
+  opacity: 1;
+}
+
+.coomi-composer-resizer:focus-visible {
+  outline: none;
 }
 
 .coomi-error {
@@ -3218,7 +3492,6 @@ defineExpose({
   flex: 1 1 auto;
   min-width: 0;
   min-height: 34px;
-  max-height: 180px;
   resize: none;
   border: 0;
   outline: none;
@@ -3317,6 +3590,13 @@ defineExpose({
   .coomi-send.stop:hover:not(:disabled),
   .coomi-send.stop:active:not(:disabled) {
     transform: none;
+  }
+}
+
+@media (hover: none) {
+  .coomi-run-actions {
+    opacity: 1;
+    pointer-events: auto;
   }
 }
 </style>

@@ -3,7 +3,7 @@ import { createPinia, setActivePinia } from "pinia";
 
 const api = vi.hoisted(() => ({
   streamAgentPrompt: vi.fn(), fetchAgentSessions: vi.fn(), fetchAgentHistory: vi.fn(),
-  fetchAgentCoomiStatus: vi.fn(), submitAgentRunCommitDecision: vi.fn(), clearConversation: vi.fn(),
+  fetchAgentCoomiStatus: vi.fn(), submitAgentRunCommitDecision: vi.fn(), rollbackLatestExecution: vi.fn(), clearConversation: vi.fn(),
   deleteAgentSession: vi.fn(), cycleAgentCoomiPermission: vi.fn(), setAgentCoomiPermission: vi.fn(),
   resolveAgentCoomiApproval: vi.fn()
 }));
@@ -55,6 +55,7 @@ beforeEach(() => {
   api.clearConversation.mockResolvedValue(envelope({ cleared: true }));
   api.deleteAgentSession.mockResolvedValue(envelope({ deleted: true }));
   api.submitAgentRunCommitDecision.mockResolvedValue(envelope({ created: false, reason: "skipped", changedFiles: [] }));
+  api.rollbackLatestExecution.mockResolvedValue(envelope({ rolledBack: false, sessionId: "default", removedTraceId: "", prompt: "" }));
   chapterApi.fetchStoryChapterTemplates.mockResolvedValue(envelope({ items: [] }));
   git.refreshSummary.mockResolvedValue(undefined);
 });

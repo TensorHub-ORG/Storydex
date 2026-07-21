@@ -798,6 +798,16 @@ interface StoryWikiAgentWorkflowResponse {
   review?: Record<string, unknown>;
 }
 
+interface StoryWikiAgentJobResponse {
+  jobId: string;
+  workflow: string;
+  status: "running" | "completed" | "failed";
+  createdAt: string;
+  updatedAt: string;
+  result?: StoryWikiAgentWorkflowResponse | null;
+  errorMessage?: string;
+}
+
 interface WikiGraphNode {
   id: string;
   label: string;
@@ -848,6 +858,7 @@ const wikiRebuilding = ref(false);
 const wikiAgentRunning = ref(false);
 const wikiAgentStatus = ref("");
 const wikiAgentTone = ref<"idle" | "success" | "warning" | "error">("idle");
+const wikiAgentJobId = ref("");
 const wikiErrorMessage = ref("");
 const wikiData = ref<StoryWikiData | null>(null);
 const wikiGraphQueryData = ref<StoryWikiGraphQueryResponse | null>(null);
@@ -1816,6 +1827,7 @@ async function rebuildWiki(): Promise<void> {
 }
 
 async function runWikiAgentWorkflow(workflow: "generate" | "update" | "review"): Promise<void> {
+  stopWikiAgentPolling();
   wikiAgentRunning.value = true;
   wikiAgentTone.value = "idle";
   wikiAgentStatus.value = workflow === "generate"
@@ -1825,31 +1837,93 @@ async function runWikiAgentWorkflow(workflow: "generate" | "update" | "review"):
       : "Agent 正在审阅 WIKI...";
   wikiErrorMessage.value = "";
   try {
-    const response = await apiClient.post<ApiEnvelope<StoryWikiAgentWorkflowResponse>>(WIKI_AGENT_ENDPOINTS[workflow]);
-    const data = unwrapEnvelope(response.data, "Story wiki agent workflow failed.");
-    const payload = data.data;
-    if (payload?.wiki) {
-      wikiData.value = payload.wiki;
-      ensureWikiSelection();
-      await loadWikiGraph(currentWikiGraphQueryParams());
-    }
-    if (payload?.fallbackUsed) {
-      wikiAgentTone.value = "warning";
-      wikiAgentStatus.value = `${payload.summary} 已使用本地 fallback。`;
-    } else {
-      wikiAgentTone.value = "success";
-      wikiAgentStatus.value = payload?.summary || "Agent WIKI 流程完成。";
-    }
-    if (payload?.errorMessage) {
-      wikiAgentStatus.value += ` ${payload.errorMessage}`;
-    }
+    const response = await apiClient.post<ApiEnvelope<StoryWikiAgentJobResponse>>(WIKI_AGENT_ENDPOINTS[workflow]);
+    const data = unwrapEnvelope(response.data, "Story wiki agent job submission failed.");
+    wikiAgentJobId.value = data.data.jobId;
+    await pollWikiAgentJob(data.data.jobId);
   } catch (error: unknown) {
     wikiAgentTone.value = "error";
-    wikiAgentStatus.value = describeTransportError(error, "Agent WIKI 流程失败。");
+    wikiAgentStatus.value = describeWikiAgentError(error, "Agent WIKI 流程失败。");
     wikiErrorMessage.value = wikiAgentStatus.value;
   } finally {
+    stopWikiAgentPolling();
     wikiAgentRunning.value = false;
   }
+}
+
+async function pollWikiAgentJob(jobId: string): Promise<void> {
+  while (wikiAgentJobId.value === jobId) {
+    const response = await apiClient.get<ApiEnvelope<StoryWikiAgentJobResponse>>(
+      `/story/wiki/agent/jobs/${encodeURIComponent(jobId)}`
+    );
+    const data = unwrapEnvelope(response.data, "Story wiki agent job status failed.");
+    const job = data.data;
+    if (job.status === "running") {
+      await waitForWikiAgentPoll();
+      continue;
+    }
+    if (job.status === "failed") {
+      throw new Error(job.errorMessage || "Agent WIKI 后台任务失败。");
+    }
+    if (!job.result) {
+      throw new Error("Agent WIKI 后台任务未返回结果。");
+    }
+    await applyWikiAgentWorkflowResult(job.result);
+    stopWikiAgentPolling();
+    wikiAgentRunning.value = false;
+    return;
+  }
+}
+
+async function applyWikiAgentWorkflowResult(payload: StoryWikiAgentWorkflowResponse): Promise<void> {
+  if (payload.wiki) {
+    wikiData.value = payload.wiki;
+    ensureWikiSelection();
+    await loadWikiGraph(currentWikiGraphQueryParams());
+  }
+  if (payload.fallbackUsed) {
+    wikiAgentTone.value = "warning";
+    wikiAgentStatus.value = `${payload.summary} 已使用本地 fallback。`;
+  } else {
+    wikiAgentTone.value = "success";
+    wikiAgentStatus.value = payload.summary || "Agent WIKI 流程完成。";
+  }
+  if (payload.errorMessage) {
+    wikiAgentStatus.value += ` ${payload.errorMessage}`;
+  }
+}
+
+let wikiAgentPollTimer: ReturnType<typeof setTimeout> | null = null;
+let resolveWikiAgentPoll: (() => void) | null = null;
+
+function waitForWikiAgentPoll(): Promise<void> {
+  return new Promise((resolve) => {
+    resolveWikiAgentPoll = resolve;
+    wikiAgentPollTimer = setTimeout(() => {
+      wikiAgentPollTimer = null;
+      resolveWikiAgentPoll = null;
+      resolve();
+    }, 3000);
+  });
+}
+
+function stopWikiAgentPolling(): void {
+  wikiAgentJobId.value = "";
+  if (wikiAgentPollTimer) {
+    clearTimeout(wikiAgentPollTimer);
+    wikiAgentPollTimer = null;
+  }
+  const resolvePending = resolveWikiAgentPoll;
+  resolveWikiAgentPoll = null;
+  resolvePending?.();
+}
+
+function describeWikiAgentError(error: unknown, fallback: string): string {
+  const response = error && typeof error === "object"
+    ? (error as { response?: { data?: ApiEnvelope<unknown> } }).response
+    : undefined;
+  const serverMessage = response?.data?.error?.message;
+  return serverMessage || describeTransportError(error, fallback);
 }
 
 function refreshPanel(): void {
@@ -2383,6 +2457,7 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  stopWikiAgentPolling();
   if (wikiSyncTimer) {
     clearTimeout(wikiSyncTimer);
     wikiSyncTimer = null;
@@ -2453,6 +2528,10 @@ defineExpose({
     wikiWorkflowLabel,
     snapshot,
     wikiData,
+    wikiAgentRunning,
+    wikiAgentStatus,
+    wikiAgentTone,
+    wikiAgentJobId,
     wikiGraphQueryData,
     wikiGraphSearchInput,
     wikiGraphSearchQuery,
@@ -2498,6 +2577,8 @@ defineExpose({
     selectRelationshipNode,
     clampNumber,
     currentWikiGraphQueryParams,
+    runWikiAgentWorkflow,
+    pollWikiAgentJob,
     refreshPanel,
     ensureWikiSelection,
     ensureWikiGraphSelection,

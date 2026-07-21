@@ -7,6 +7,7 @@ import {
   fetchAgentCoomiStatus,
   fetchAgentHistory,
   fetchAgentSessions,
+  rollbackLatestExecution,
   resolveAgentCoomiApproval,
   setAgentCoomiPermission,
   streamAgentPrompt,
@@ -52,6 +53,7 @@ interface AgentState {
   availableSessions: AgentSessionSummary[];
   executionHistory: AgentExecutionRun[];
   isRunning: boolean;
+  isRollingBack: boolean;
   lastError: string;
   lastErrorCode: string | null;
   lastSuccess: string;
@@ -101,6 +103,7 @@ export const useAgentStore = defineStore("agent", {
     availableSessions: [],
     executionHistory: [],
     isRunning: false,
+    isRollingBack: false,
     lastError: "",
     lastErrorCode: null,
     lastSuccess: "",
@@ -185,6 +188,7 @@ export const useAgentStore = defineStore("agent", {
       this.selectedTraceId = "";
       this.executionHistory = [];
       this.isRunning = false;
+      this.isRollingBack = false;
       this.lastError = "";
       this.lastErrorCode = null;
       this.lastSuccess = "";
@@ -520,6 +524,55 @@ export const useAgentStore = defineStore("agent", {
         await this.loadSessions();
       } catch (error: unknown) {
         this.lastError = describeTransportError(error, "Failed to clear Coomi conversation.");
+      }
+    },
+
+    async rollbackLatestRun(options: { refillComposer: boolean }): Promise<boolean> {
+      if (this.isRunning || this.isRollingBack) {
+        return false;
+      }
+
+      const sessionId = this.currentSessionId || "default";
+      this.isRollingBack = true;
+      this.lastError = "";
+      this.lastErrorCode = null;
+      this.lastSuccess = "";
+      try {
+        const result = await rollbackLatestExecution(sessionId);
+        if (!result.data.rolledBack) {
+          return false;
+        }
+
+        const removedTraceId = result.data.removedTraceId || this.executionHistory[0]?.traceId || "";
+        this.executionHistory = this.executionHistory.filter((run) => run.traceId !== removedTraceId);
+        const activeRun = this.executionHistory[0] ?? null;
+        this.currentTraceId = activeRun?.traceId || "";
+        this.selectedTraceId = "";
+        this.lastPrompt = activeRun?.prompt || "";
+        this.lastReply = activeRun?.reply || "";
+        this.lastRoute = activeRun?.route || "";
+        this.lastTrace = activeRun?.trace || null;
+        this.lastAudit = activeRun?.audit || [];
+        this.lastEvents = activeRun?.events || [];
+        if (this.pendingCommitPrompt?.traceId === removedTraceId) {
+          this.pendingCommitPrompt = null;
+        }
+        if (this.liveChangeLedger?.traceId === removedTraceId) {
+          this.liveChangeLedger = null;
+        }
+        if (options.refillComposer) {
+          this.promptInput = result.data.prompt;
+        }
+
+        await this.loadHistory();
+        this.lastSuccess = options.refillComposer ? "已撤回，可重新编辑。" : "已删除本轮对话记录。";
+        return true;
+      } catch (error: unknown) {
+        this.lastError = describeTransportError(error, "Failed to roll back the latest Coomi execution.");
+        this.lastErrorCode = error instanceof AgentApiError ? error.code ?? null : null;
+        return false;
+      } finally {
+        this.isRollingBack = false;
       }
     },
 

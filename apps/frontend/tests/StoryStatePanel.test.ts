@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
-import { shallowMount } from "@vue/test-utils";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { flushPromises, shallowMount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { nextTick, unref } from "vue";
 
@@ -20,7 +20,88 @@ function mountPanel(props: Record<string, unknown> = {}) {
   return shallowMount(StoryStatePanel, { props: { relationshipOnly: false, initialTab: "changes", ...props }, global: { plugins: [pinia] } });
 }
 
+function envelope(data: unknown) {
+  return { data: { ok: true, data, trace: null, audit: [] } };
+}
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.clearAllMocks();
+});
+
 describe("StoryStatePanel deterministic graph and inspector behavior", () => {
+  it("polls a submitted WIKI Agent job and applies its completed result", async () => {
+    vi.useFakeTimers();
+    const wrapper = mountPanel();
+    const u = (wrapper.vm as any).__testUtils;
+    await flushPromises();
+    transport.get.mockReset();
+    transport.post.mockReset();
+
+    const wiki = {
+      projectName: "Demo",
+      generatedAt: "2026-07-21T00:00:00Z",
+      generator: "agent-wiki",
+      summary: "Demo wiki",
+      entries: [],
+      graph: { nodes: [], edges: [] }
+    };
+    transport.post.mockResolvedValueOnce(envelope({ jobId: "job-1", workflow: "generate_wiki", status: "running" }));
+    transport.get
+      .mockResolvedValueOnce(envelope({ jobId: "job-1", workflow: "generate_wiki", status: "running" }))
+      .mockResolvedValueOnce(envelope({
+        jobId: "job-1",
+        workflow: "generate_wiki",
+        status: "completed",
+        result: { summary: "WIKI 生成完成", fallbackUsed: false, wiki }
+      }))
+      .mockResolvedValueOnce(envelope({ graph: wiki.graph, entries: [] }));
+
+    const running = u.runWikiAgentWorkflow("generate");
+    await flushPromises();
+    expect(u.wikiAgentRunning.value).toBe(true);
+    expect(u.wikiAgentJobId.value).toBe("job-1");
+    expect(transport.post).toHaveBeenCalledWith("/story/wiki/agent/generate");
+
+    await vi.advanceTimersByTimeAsync(3000);
+    await flushPromises();
+    await running;
+
+    expect(u.wikiData.value).toEqual(wiki);
+    expect(u.wikiAgentTone.value).toBe("success");
+    expect(u.wikiAgentStatus.value).toBe("WIKI 生成完成");
+    expect(u.wikiAgentRunning.value).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("shows failed jobs and server-side Agent busy errors as readable messages", async () => {
+    const wrapper = mountPanel();
+    const u = (wrapper.vm as any).__testUtils;
+    await flushPromises();
+    transport.get.mockReset();
+    transport.post.mockReset();
+
+    transport.post.mockResolvedValueOnce(envelope({ jobId: "job-failed", workflow: "review_wiki", status: "running" }));
+    transport.get.mockResolvedValueOnce(envelope({
+      jobId: "job-failed",
+      workflow: "review_wiki",
+      status: "failed",
+      errorMessage: "persist failed"
+    }));
+    await u.runWikiAgentWorkflow("review");
+    expect(u.wikiAgentTone.value).toBe("error");
+    expect(u.wikiAgentStatus.value).toBe("persist failed");
+    expect(u.wikiAgentRunning.value).toBe(false);
+
+    const busy = Object.assign(new Error("Request failed with status code 409"), {
+      response: { data: { ok: false, error: { code: "agent_busy", message: "Agent 正忙，请等待当前执行完成。" } } }
+    });
+    transport.post.mockRejectedValueOnce(busy);
+    await u.runWikiAgentWorkflow("generate");
+    expect(u.wikiAgentStatus.value).toBe("Agent 正忙，请等待当前执行完成。");
+    wrapper.unmount();
+  });
+
   it("covers scalar labels, geometry, selection and formatting helpers", async () => {
     const wrapper = mountPanel(); const u = (wrapper.vm as any).__testUtils;
     for (const degree of [0, 1, 5, 20]) expect(u.wikiNodeRadius({}, degree)).toBeGreaterThan(0);

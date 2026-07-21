@@ -44,7 +44,13 @@ class ProjectService:
 
     def create_project(self, project_path: str) -> Dict[str, Any]:
         target = self._normalize_path(project_path, must_exist=False)
-        target.mkdir(parents=True, exist_ok=True)
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ProjectPathInvalidError(
+                "Unable to create project directory.",
+                details={"projectPath": target.as_posix(), "reason": str(exc)},
+            ) from exc
         self.ensure_project_structure(target)
         self._set_current_workspace_root(target)
         return self.current_project()
@@ -185,12 +191,6 @@ class ProjectService:
             )
 
         if not must_exist:
-            parent = path.parent
-            if not parent.exists():
-                raise ProjectPathNotFoundError(
-                    "Parent path does not exist.",
-                    details={"projectPath": raw_path, "parentPath": parent.as_posix()},
-                )
             if path.exists() and not path.is_dir():
                 raise ProjectPathInvalidError(
                     "Project path must be a directory.",

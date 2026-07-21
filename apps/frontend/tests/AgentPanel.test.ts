@@ -5,7 +5,7 @@ import { nextTick, unref } from "vue";
 
 const api = vi.hoisted(() => ({
   fetchAgentCoomiStatus: vi.fn(), fetchAgentSessions: vi.fn(), fetchAgentHistory: vi.fn(),
-  submitAgentRunCommitDecision: vi.fn(), streamAgentPrompt: vi.fn(), clearConversation: vi.fn(),
+  submitAgentRunCommitDecision: vi.fn(), rollbackLatestExecution: vi.fn(), streamAgentPrompt: vi.fn(), clearConversation: vi.fn(),
   deleteAgentSession: vi.fn(), cycleAgentCoomiPermission: vi.fn(), setAgentCoomiPermission: vi.fn(),
   resolveAgentCoomiApproval: vi.fn()
 }));
@@ -40,6 +40,7 @@ function deferred<T>() {
 beforeEach(() => {
   setActivePinia(createPinia());
   vi.clearAllMocks();
+  window.localStorage.clear();
   api.fetchAgentCoomiStatus.mockResolvedValue({ data: { runtime: "coomi", installed: true, model: "fake", permissionMode: "full_access" } });
   api.fetchAgentSessions.mockResolvedValue({ data: { items: [] } });
   api.fetchAgentHistory.mockResolvedValue({ data: { items: [] } });
@@ -48,9 +49,84 @@ beforeEach(() => {
   api.resolveAgentCoomiApproval.mockResolvedValue({ data: { resolved: true } });
   api.clearConversation.mockResolvedValue({ data: { cleared: true } });
   api.deleteAgentSession.mockResolvedValue({ data: { deleted: true } });
+  api.rollbackLatestExecution.mockResolvedValue({ data: { rolledBack: false, sessionId: "default", removedTraceId: "", prompt: "" } });
 });
 
 describe("AgentPanel", () => {
+  it("shows rollback actions only for the latest finished run and hides them while running", async () => {
+    const store = useAgentStore();
+    const previous = {
+      traceId: "trace-previous", sessionId: "session-a", prompt: "previous", route: "coomi", agentMode: "coomi",
+      llmModel: "", llmProvider: "", status: "completed", noRestorePoint: false, createdAt: "2026-07-21T10:00:00Z",
+      updatedAt: "2026-07-21T10:00:00Z", lastAction: "chat", reply: "previous reply", trace: null, audit: [], events: [],
+      tasks: [], changeLedger: { traceId: "trace-previous", sessionId: "session-a", changedFiles: [], changedFileCount: 0, added: 0, removed: 0, commitHash: "", shortHash: "", diffSource: "", updatedAt: "" },
+      items: [], errorMessage: "", errorCode: null
+    } as const;
+    const latest = {
+      ...previous,
+      traceId: "trace-latest",
+      prompt: "latest",
+      createdAt: "2026-07-21T11:00:00Z",
+      updatedAt: "2026-07-21T11:00:00Z"
+    };
+    store.executionHistory = [latest as any, previous as any];
+    const rollback = vi.spyOn(store, "rollbackLatestRun").mockResolvedValue(true);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const wrapper = shallowMount(AgentPanel, { attachTo: document.body });
+    await nextTick();
+
+    expect(wrapper.findAll(".coomi-run-actions")).toHaveLength(1);
+    const buttons = wrapper.findAll(".coomi-run-action");
+    expect(buttons).toHaveLength(2);
+    expect(buttons[0].attributes("aria-label")).toBe("撤回并重新编辑");
+    expect(buttons[1].attributes("aria-label")).toBe("删除本轮");
+
+    await buttons[0].trigger("click");
+    expect(rollback).toHaveBeenCalledWith({ refillComposer: true });
+    expect(document.activeElement).toBe(wrapper.find("textarea.coomi-input").element);
+
+    await buttons[1].trigger("click");
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("不会回滚已产生的文件变更"));
+    expect(rollback).toHaveBeenCalledWith({ refillComposer: false });
+
+    store.isRunning = true;
+    await nextTick();
+    expect(wrapper.find(".coomi-run-actions").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("resizes the composer by pointer drag and persists the user height", async () => {
+    const wrapper = shallowMount(AgentPanel, { attachTo: document.body });
+    const utils = (wrapper.vm as any).__testUtils;
+    const dock = wrapper.find(".coomi-dock").element;
+    const input = wrapper.find("textarea.coomi-input").element as HTMLTextAreaElement;
+    const resizer = wrapper.find(".coomi-composer-resizer").element as HTMLElement;
+    Object.defineProperty(dock, "clientHeight", { configurable: true, value: 500 });
+    Object.defineProperty(input, "scrollHeight", { configurable: true, value: 600 });
+    Object.defineProperty(resizer, "setPointerCapture", { configurable: true, value: vi.fn() });
+
+    expect(input.style.maxHeight).toBe("180px");
+    utils.startComposerResize({
+      button: 0,
+      pointerId: 7,
+      clientY: 300,
+      currentTarget: resizer,
+      preventDefault: vi.fn()
+    } as any);
+    utils.handleComposerResize({ pointerId: 7, clientY: 200 } as any);
+    await nextTick();
+
+    expect(utils.composerMaxHeight.value).toBe(280);
+    expect(input.style.maxHeight).toBe("280px");
+    expect(input.style.height).toBe("280px");
+    expect(window.localStorage.getItem("storydex.composerMaxHeight")).toBe("280");
+    expect(document.body.classList.contains("is-resizing-composer")).toBe(true);
+
+    utils.finishComposerResize({ pointerId: 7 } as any);
+    expect(document.body.classList.contains("is-resizing-composer")).toBe(false);
+    wrapper.unmount();
+  });
+
   it("shows snapshot confirmation controls and a persistent no-restore-point marker", async () => {
     const store = useAgentStore();
     store.pendingSnapshotConfirmation = {

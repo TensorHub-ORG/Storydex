@@ -46,6 +46,13 @@ export interface AgentHistoryResponse {
   items: Record<string, unknown>[];
 }
 
+export interface AgentExecutionRollbackResponse {
+  rolledBack: boolean;
+  sessionId: string;
+  removedTraceId: string;
+  prompt: string;
+}
+
 export interface AgentSessionSummary {
   sessionId: string;
   firstPrompt: string;
