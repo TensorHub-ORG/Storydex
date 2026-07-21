@@ -8,6 +8,7 @@ import type {
   AgentCoomiModelListResponse,
   AgentCoomiConfigUpdateRequest,
   AgentCoomiStatusResponse,
+  AgentExecutionRollbackResponse,
   AgentHistoryResponse,
   AgentSessionsResponse,
   AgentStreamPacket
@@ -164,6 +165,24 @@ export async function fetchAgentHistory(limit = 40, sessionId?: string): Promise
 
   try {
     return unwrapEnvelope(response.data, "Coomi history request failed.");
+  } catch (error: unknown) {
+    if (error instanceof ApiResponseError) {
+      throw new AgentApiError(error.message, error.code, error.details, error.trace, error.audit);
+    }
+    throw error;
+  }
+}
+
+export async function rollbackLatestExecution(
+  sessionId: string
+): Promise<ApiResult<AgentExecutionRollbackResponse>> {
+  const response = await apiClient.post<ApiEnvelope<AgentExecutionRollbackResponse>>(
+    "/agent/executions/rollback-latest",
+    { sessionId }
+  );
+
+  try {
+    return unwrapEnvelope(response.data, "Coomi execution rollback failed.");
   } catch (error: unknown) {
     if (error instanceof ApiResponseError) {
       throw new AgentApiError(error.message, error.code, error.details, error.trace, error.audit);

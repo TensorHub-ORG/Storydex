@@ -234,6 +234,11 @@ body.is-resizing-panels {
   user-select: none;
 }
 
+body.is-resizing-composer {
+  cursor: ns-resize;
+  user-select: none;
+}
+
 .material-symbols-rounded {
   font-family: "Material Symbols Rounded", sans-serif;
   font-weight: normal;

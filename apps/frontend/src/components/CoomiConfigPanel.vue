@@ -54,17 +54,6 @@
               <span>编辑提供方</span>
               <small>{{ selectedProviderId }}</small>
             </div>
-            <div class="coomi-editor-actions">
-              <button
-                class="coomi-config-action"
-                type="button"
-                :disabled="loading || saving || selectedProviderId === activeProviderId"
-                @click="setActiveProvider"
-              >
-                <span class="material-symbols-rounded">check_circle</span>
-                <span>设为当前</span>
-              </button>
-            </div>
           </div>
 
           <div class="coomi-provider-form">
@@ -147,30 +136,34 @@
 
             <label class="coomi-config-field full">
               <span>标准模型</span>
-              <select
+              <input
                 v-model="form.model"
+                class="coomi-model-input"
                 :disabled="loading || saving"
-                @change="syncProviderFields"
-              >
-                <option value="">选择标准模型</option>
-                <option v-for="model in standardModelOptions" :key="model" :value="model">
-                  {{ model }}
-                </option>
-              </select>
+                list="coomi-standard-model-options"
+                spellcheck="false"
+                placeholder="输入模型名，或从已获取列表中选择"
+                @input="syncProviderFields"
+              />
+              <datalist id="coomi-standard-model-options">
+                <option v-for="model in modelOptions" :key="model" :value="model"></option>
+              </datalist>
             </label>
 
             <label class="coomi-config-field full">
               <span>快速模型</span>
-              <select
+              <input
                 v-model="form.fastModel"
+                class="coomi-fast-model-input"
                 :disabled="loading || saving"
-                @change="syncProviderFields"
-              >
-                <option value="">跟随标准模型</option>
-                <option v-for="model in fastModelOptions" :key="model" :value="model">
-                  {{ model }}
-                </option>
-              </select>
+                list="coomi-fast-model-options"
+                spellcheck="false"
+                placeholder="留空跟随标准模型，或输入模型名"
+                @input="syncProviderFields"
+              />
+              <datalist id="coomi-fast-model-options">
+                <option v-for="model in modelOptions" :key="model" :value="model"></option>
+              </datalist>
             </label>
 
             <label class="coomi-config-field full">
@@ -205,11 +198,23 @@
       <div class="coomi-config-footer-row">
         <span class="coomi-config-meta">{{ updatedLabel }}</span>
         <div class="coomi-config-actions">
-          <button class="coomi-config-action" type="button" :disabled="loading || saving" @click="() => saveConfig()">
+          <button
+            class="coomi-config-action"
+            type="button"
+            title="只写入配置文件，不切换当前使用的提供方"
+            :disabled="loading || saving"
+            @click="() => saveConfig()"
+          >
             <span class="material-symbols-rounded">save</span>
             <span>保存</span>
           </button>
-          <button class="coomi-config-action primary" type="button" :disabled="loading || saving" @click="applyConfig">
+          <button
+            class="coomi-config-action primary"
+            type="button"
+            title="保存配置，并切换为当前正在编辑的提供方"
+            :disabled="loading || saving"
+            @click="applyConfig"
+          >
             <span class="material-symbols-rounded">task_alt</span>
             <span>应用</span>
           </button>
@@ -261,7 +266,6 @@ const updatedAt = ref("");
 const errorMessage = ref("");
 const modelFetchMessage = ref("");
 const modelOptions = ref<string[]>([]);
-const modelsLoaded = ref(false);
 const configData = ref<Record<string, unknown>>(emptyConfig());
 const selectedProviderId = ref("");
 const formProviderId = ref("");
@@ -290,9 +294,6 @@ const hasProviders = computed(() => providerOptions.value.length > 0);
 const modelFetchDisabled = computed(
   () => loading.value || saving.value || fetchingModels.value || !form.baseUrl.trim() || !form.apiKey.trim()
 );
-
-const standardModelOptions = computed(() => optionsWithCurrentModel(form.model));
-const fastModelOptions = computed(() => optionsWithCurrentModel(form.fastModel));
 
 const updatedLabel = computed(() => {
   if (saving.value) return "正在保存";
@@ -333,9 +334,12 @@ async function loadConfig(): Promise<void> {
 
 async function saveConfig(options: { apply?: boolean } = {}): Promise<void> {
   errorMessage.value = "";
-  const selectedBeforeSave = selectedProviderId.value;
   if (!commitFormToConfig()) {
     return;
+  }
+  const savedProviderId = selectedProviderId.value;
+  if (options.apply) {
+    configData.value.active = savedProviderId;
   }
 
   saving.value = true;
@@ -347,7 +351,7 @@ async function saveConfig(options: { apply?: boolean } = {}): Promise<void> {
     configData.value = normalizeConfig(result.data.content || content);
     const providers = getProviders();
     selectedProviderId.value =
-      (selectedBeforeSave && Object.prototype.hasOwnProperty.call(providers, selectedBeforeSave) && selectedBeforeSave) ||
+      (savedProviderId && Object.prototype.hasOwnProperty.call(providers, savedProviderId) && savedProviderId) ||
       activeProviderId.value ||
       Object.keys(providers)[0] ||
       "";
@@ -381,15 +385,6 @@ function handleProviderSelect(event: Event): void {
   if (providerId) {
     selectProvider(providerId);
   }
-}
-
-function setActiveProvider(): void {
-  if (!selectedProviderId.value) {
-    return;
-  }
-  commitProviderFields(formProviderId.value);
-  configData.value.active = selectedProviderId.value;
-  dirty.value = true;
 }
 
 function createProvider(): void {
@@ -458,47 +453,16 @@ async function fetchModels(): Promise<void> {
   try {
     const result = await fetchAgentCoomiModels({ baseUrl, apiKey });
     modelOptions.value = normalizeModelOptions(result.data.models);
-    modelsLoaded.value = true;
     if (!modelOptions.value.length) {
       modelFetchMessage.value = "未获取到模型列表，可继续保留当前模型。";
       return;
     }
-    const previousModel = form.model.trim();
-    const previousFastModel = form.fastModel.trim();
-    const modelChanged = !previousModel || !modelOptions.value.includes(previousModel);
-    const fastModelChanged = Boolean(previousFastModel) && !modelOptions.value.includes(previousFastModel);
-    if (modelChanged) {
-      form.model = modelOptions.value[0];
-    }
-    if (fastModelChanged) {
-      form.fastModel = form.model || modelOptions.value[0];
-    }
-    if (modelChanged || fastModelChanged) {
-      syncProviderFields();
-    }
-    const adjustments = [
-      modelChanged && previousModel ? `标准模型已从 ${previousModel} 切换为 ${form.model}` : "",
-      fastModelChanged ? `快速模型已从 ${previousFastModel} 切换为 ${form.fastModel}` : ""
-    ].filter(Boolean);
-    modelFetchMessage.value = adjustments.length
-      ? `已获取 ${modelOptions.value.length} 个模型；${adjustments.join("；")}。请保存或应用配置。`
-      : `已获取 ${modelOptions.value.length} 个模型。`;
+    modelFetchMessage.value = `已获取 ${modelOptions.value.length} 个模型，可从输入建议中选择。`;
   } catch (error: unknown) {
     modelFetchMessage.value = error instanceof Error ? error.message : "获取模型失败。";
   } finally {
     fetchingModels.value = false;
   }
-}
-
-function optionsWithCurrentModel(currentModel: string): string[] {
-  const current = currentModel.trim();
-  if (modelsLoaded.value && modelOptions.value.length > 0) {
-    return modelOptions.value;
-  }
-  if (!current || modelOptions.value.includes(current)) {
-    return modelOptions.value;
-  }
-  return [current, ...modelOptions.value];
 }
 
 function normalizeModelOptions(values: string[]): string[] {
@@ -517,7 +481,6 @@ function normalizeModelOptions(values: string[]): string[] {
 
 function resetModelOptions(): void {
   modelOptions.value = [];
-  modelsLoaded.value = false;
   modelFetchMessage.value = "";
 }
 

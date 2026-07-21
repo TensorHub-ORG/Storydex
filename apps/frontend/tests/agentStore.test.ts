@@ -7,6 +7,7 @@ const api = vi.hoisted(() => ({
   fetchAgentHistory: vi.fn(),
   fetchAgentCoomiStatus: vi.fn(),
   submitAgentRunCommitDecision: vi.fn(),
+  rollbackLatestExecution: vi.fn(),
   clearConversation: vi.fn(),
   deleteAgentSession: vi.fn(),
   cycleAgentCoomiPermission: vi.fn(),
@@ -54,6 +55,9 @@ beforeEach(() => {
     data: { runtime: "coomi", installed: true, model: "fake", permissionMode: "full_access" }
   });
   git.refreshSummary.mockResolvedValue(undefined);
+  api.rollbackLatestExecution.mockResolvedValue({
+    data: { rolledBack: false, sessionId: "default", removedTraceId: "", prompt: "" }
+  });
 });
 
 describe("agent store streaming", () => {
@@ -162,6 +166,65 @@ describe("agent store streaming", () => {
 });
 
 describe("agent store sessions and Git decision UX", () => {
+  it("rolls back the latest run, reloads history, and optionally refills the composer", async () => {
+    api.rollbackLatestExecution.mockResolvedValue({
+      data: {
+        rolledBack: true,
+        sessionId: "session-a",
+        removedTraceId: "trace-latest",
+        prompt: "rewrite this prompt"
+      }
+    });
+    api.fetchAgentHistory.mockResolvedValue({
+      data: {
+        items: [{
+          traceId: "trace-previous",
+          sessionId: "session-a",
+          prompt: "previous",
+          reply: "previous reply",
+          status: "completed",
+          events: []
+        }]
+      }
+    });
+    const store = useAgentStore();
+    store.currentSessionId = "session-a";
+    store.currentTraceId = "trace-latest";
+    store.executionHistory = [
+      {
+        traceId: "trace-latest", sessionId: "session-a", prompt: "rewrite this prompt", route: "coomi", agentMode: "coomi",
+        llmModel: "", llmProvider: "", status: "completed", noRestorePoint: false, createdAt: "2026-07-21T11:00:00Z",
+        updatedAt: "2026-07-21T11:00:00Z", lastAction: "chat", reply: "latest reply", trace: null, audit: [], events: [],
+        tasks: [], changeLedger: { traceId: "trace-latest", sessionId: "session-a", changedFiles: [], changedFileCount: 0, added: 0, removed: 0, commitHash: "", shortHash: "", diffSource: "", updatedAt: "" },
+        items: [], errorMessage: "", errorCode: null
+      },
+      {
+        traceId: "trace-previous", sessionId: "session-a", prompt: "previous", route: "coomi", agentMode: "coomi",
+        llmModel: "", llmProvider: "", status: "completed", noRestorePoint: false, createdAt: "2026-07-21T10:00:00Z",
+        updatedAt: "2026-07-21T10:00:00Z", lastAction: "chat", reply: "previous reply", trace: null, audit: [], events: [],
+        tasks: [], changeLedger: { traceId: "trace-previous", sessionId: "session-a", changedFiles: [], changedFileCount: 0, added: 0, removed: 0, commitHash: "", shortHash: "", diffSource: "", updatedAt: "" },
+        items: [], errorMessage: "", errorCode: null
+      }
+    ];
+
+    await expect(store.rollbackLatestRun({ refillComposer: true })).resolves.toBe(true);
+
+    expect(api.rollbackLatestExecution).toHaveBeenCalledWith("session-a");
+    expect(store.executionHistory.map((run) => run.traceId)).toEqual(["trace-previous"]);
+    expect(store.currentTraceId).toBe("trace-previous");
+    expect(store.lastPrompt).toBe("previous");
+    expect(store.lastReply).toBe("previous reply");
+    expect(store.promptInput).toBe("rewrite this prompt");
+    expect(store.isRollingBack).toBe(false);
+  });
+
+  it("does not call rollback while an execution is running", async () => {
+    const store = useAgentStore();
+    store.isRunning = true;
+    await expect(store.rollbackLatestRun({ refillComposer: false })).resolves.toBe(false);
+    expect(api.rollbackLatestExecution).not.toHaveBeenCalled();
+  });
+
   it("loads and selects persisted session history", async () => {
     api.fetchAgentSessions.mockResolvedValue(sessions([{ sessionId: "session-a", firstPrompt: "old", traceCount: 1 }]));
     api.fetchAgentHistory.mockResolvedValue({

@@ -891,6 +891,64 @@ class StorydexCoomiAgentService:
             for key in [item for item in cache if item.endswith(suffix)]:
                 cache.pop(key, None)
 
+    def rollback_last_turn(self, session_id: str, *, workspace_root: Path) -> Dict[str, Any]:
+        normalized_session_id = str(session_id or "default").strip() or "default"
+        resolved_workspace = Path(workspace_root).resolve()
+        result = {"rolledBack": False, "sessionId": normalized_session_id}
+        binding = _read_coomi_session_binding(
+            workspace_root=resolved_workspace,
+            storydex_session_id=normalized_session_id,
+        )
+        raw_history_path = str(binding.get("historyPath") or "").strip()
+        if not raw_history_path:
+            return result
+
+        history_path = Path(raw_history_path).expanduser().resolve()
+        sessions_root = STORYDEX_COOMI_SESSIONS.resolve()
+        try:
+            history_path.relative_to(sessions_root)
+        except ValueError as exc:
+            raise ValueError("Coomi session history path is outside the Storydex sessions directory.") from exc
+        if not history_path.is_file():
+            return result
+
+        lines = history_path.read_bytes().splitlines(keepends=True)
+        last_user_index: int | None = None
+        for index, line in enumerate(lines):
+            try:
+                entry = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(entry, dict) or entry.get("type") != "message":
+                continue
+            message = entry.get("message")
+            if isinstance(message, dict) and message.get("role") == "user":
+                last_user_index = index
+
+        if last_user_index is None:
+            return result
+
+        temporary = history_path.with_name(f".{history_path.name}.{uuid4().hex}.tmp")
+        try:
+            with temporary.open("wb") as stream:
+                stream.writelines(lines[:last_user_index])
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, history_path)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+        self.clear_session(
+            normalized_session_id,
+            workspace_root=resolved_workspace,
+            delete_history=False,
+        )
+        result["rolledBack"] = True
+        return result
+
     def set_permission_mode(self, mode: str) -> Dict[str, Any]:
         normalized = _normalize_permission_mode(mode)
         with _storydex_coomi_home():

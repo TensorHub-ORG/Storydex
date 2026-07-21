@@ -199,6 +199,12 @@ class AgentSessionDeleteRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class AgentExecutionRollbackRequest(BaseModel):
+    session_id: str = Field(alias="sessionId")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class AgentApprovalRequest(BaseModel):
     approval_id: str = Field(alias="approvalId")
     decision: str
@@ -1881,6 +1887,68 @@ def agent_history(
         trace=ApiTrace(traceId=trace_id, durationMs=int((time.perf_counter() - started) * 1000), toolCalls=1),
         audit=[{"action": "read_agent_history", "runtime": "coomi", "count": len(items)}],
     )
+
+
+@router.post("/agent/executions/rollback-latest", response_model=ApiEnvelope)
+def agent_rollback_latest_execution(
+    payload: AgentExecutionRollbackRequest,
+    request: Request,
+) -> ApiEnvelope:
+    del request
+    started = time.perf_counter()
+    api_trace_id = str(uuid4())
+    session_id = str(payload.session_id or "default").strip() or "default"
+    if not _try_acquire_agent_generation_slot():
+        raise _agent_busy_error(trace_id=api_trace_id, session_id=session_id)
+
+    removed_trace_id = ""
+    prompt = ""
+    rolled_back = False
+    try:
+        records = trace_history_service.list_records(session_id=session_id, limit=1)
+        latest = records[0] if records else None
+        if isinstance(latest, dict):
+            trace_id = str(latest.get("traceId") or "").strip()
+            prompt = str(latest.get("prompt") or "")
+            if trace_id:
+                rollback = get_storydex_coomi_agent_service().rollback_last_turn(
+                    session_id,
+                    workspace_root=project_service.workspace_root,
+                )
+                rolled_back = bool(rollback.get("rolledBack"))
+                if rolled_back:
+                    trace_history_service.delete_record(trace_id, session_id)
+                    storydex_intent_service.clear_session(
+                        session_id=session_id,
+                        workspace_root=project_service.workspace_root,
+                    )
+                    removed_trace_id = trace_id
+
+        data = {
+            "rolledBack": rolled_back,
+            "sessionId": session_id,
+            "removedTraceId": removed_trace_id,
+            "prompt": prompt,
+        }
+        return success_response(
+            data=data,
+            trace=ApiTrace(
+                traceId=api_trace_id,
+                durationMs=int((time.perf_counter() - started) * 1000),
+                toolCalls=2 if rolled_back else 1,
+            ),
+            audit=[
+                {
+                    "action": "rollback_latest_execution",
+                    "runtime": "coomi",
+                    "sessionId": session_id,
+                    "removedTraceId": removed_trace_id,
+                    "rolledBack": rolled_back,
+                }
+            ],
+        )
+    finally:
+        _release_agent_generation_slot()
 
 
 @router.get("/agent/runs/{trace_id}/diff", response_model=ApiEnvelope)
