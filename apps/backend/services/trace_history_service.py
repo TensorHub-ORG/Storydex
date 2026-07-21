@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
 from services.project_service import get_project_service
 
@@ -176,7 +178,42 @@ class TraceHistoryService:
 
         return self._upsert_record_sync(record=record, session_id=session_id, trace_id=trace_id)
 
-    def _upsert_record_sync(self, *, record: Dict[str, Any], session_id: str, trace_id: str) -> Dict[str, Any]:
+    def upsert_record_atomic(self, record: Dict[str, Any], session_id: str = "default") -> Dict[str, Any]:
+        trace_id = str(record.get("traceId") or "").strip()
+        if not trace_id:
+            return {}
+        return self._upsert_record_sync(
+            record=record,
+            session_id=session_id,
+            trace_id=trace_id,
+            atomic=True,
+        )
+
+    def upsert_record_atomic_at_storydex_root(
+        self,
+        storydex_root: Path,
+        record: Dict[str, Any],
+        session_id: str = "default",
+    ) -> Dict[str, Any]:
+        trace_id = str(record.get("traceId") or "").strip()
+        if not trace_id:
+            return {}
+        return self._upsert_record_sync_at_storydex_root(
+            storydex_root=Path(storydex_root).resolve(),
+            record=record,
+            session_id=session_id,
+            trace_id=trace_id,
+            atomic=True,
+        )
+
+    def _upsert_record_sync(
+        self,
+        *,
+        record: Dict[str, Any],
+        session_id: str,
+        trace_id: str,
+        atomic: bool = False,
+    ) -> Dict[str, Any]:
         now_iso = datetime.now(timezone.utc).isoformat()
         normalized_session_id = self._normalize_session_id(session_id)
         with self._lock:
@@ -196,10 +233,13 @@ class TraceHistoryService:
                 created_at=str(merged["createdAt"]),
                 session_id=session_id,
             )
-            target_path.write_text(
-                json.dumps(merged, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
+            if atomic:
+                self._write_json_atomic(target_path, merged)
+            else:
+                target_path.write_text(
+                    json.dumps(merged, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
             return merged
 
     def _upsert_record_sync_at_storydex_root(
@@ -209,6 +249,7 @@ class TraceHistoryService:
         record: Dict[str, Any],
         session_id: str,
         trace_id: str,
+        atomic: bool = False,
     ) -> Dict[str, Any]:
         now_iso = datetime.now(timezone.utc).isoformat()
         normalized_session_id = self._normalize_session_id(session_id)
@@ -235,10 +276,13 @@ class TraceHistoryService:
                 created_at=str(merged["createdAt"]),
                 session_id=session_id,
             )
-            target_path.write_text(
-                json.dumps(merged, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
+            if atomic:
+                self._write_json_atomic(target_path, merged)
+            else:
+                target_path.write_text(
+                    json.dumps(merged, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
             return merged
 
     def _upsert_record_async(self, *, record: Dict[str, Any], session_id: str, trace_id: str) -> Dict[str, Any]:
@@ -582,6 +626,23 @@ class TraceHistoryService:
         except Exception:
             return {}
         return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+                json.dump(payload, stream, ensure_ascii=False, indent=2)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
     @classmethod
     def _record_session_id(cls, payload: Dict[str, Any]) -> str:

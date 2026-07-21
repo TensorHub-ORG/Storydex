@@ -5,6 +5,15 @@ export interface AgentChatRequest {
   activeFile?: string;
   workspaceRoot?: string;
   storyGeneration?: AgentStoryGenerationOptions;
+  confirmNoSnapshot?: boolean;
+}
+
+export interface AgentPendingSnapshotConfirmation {
+  request: AgentChatRequest;
+  traceId: string;
+  sessionId: string;
+  message: string;
+  details: Record<string, unknown>;
 }
 
 export interface AgentStoryGenerationOptions {
@@ -207,8 +216,10 @@ export interface AgentStreamPacket {
   mode?: string;
   query?: string;
   error_type?: string;
+  code?: string;
   message?: string;
   details?: Record<string, unknown>;
+  noRestorePoint?: boolean;
   created?: boolean;
   target?: string;
   targetLabel?: string;
@@ -354,6 +365,7 @@ export interface AgentExecutionRun {
   llmModel: string;
   llmProvider: string;
   status: AgentRunStatus;
+  noRestorePoint: boolean;
   createdAt: string;
   updatedAt: string;
   lastAction: "chat";

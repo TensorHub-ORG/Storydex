@@ -19,8 +19,10 @@ import { useWorkspaceStore } from "@/stores/workspace";
 import type { ApiAuditRecord, ApiTrace } from "@/types/api";
 import type {
   AgentCoomiStatusResponse,
+  AgentChatRequest,
   AgentCommitDecisionMode,
   AgentExecutionRun,
+  AgentPendingSnapshotConfirmation,
   AgentPendingApproval,
   AgentPendingCommitPrompt,
   AgentRunChangeLedger,
@@ -63,6 +65,7 @@ interface AgentState {
   compressionStatus: string;
   compressionSummary: string;
   pendingApprovals: AgentPendingApproval[];
+  pendingSnapshotConfirmation: AgentPendingSnapshotConfirmation | null;
   pendingCommitPrompt: AgentPendingCommitPrompt | null;
   liveChangeLedger: AgentRunChangeLedger | null;
   runStartedAt: number | null;
@@ -111,6 +114,7 @@ export const useAgentStore = defineStore("agent", {
     compressionStatus: "idle",
     compressionSummary: "",
     pendingApprovals: [],
+    pendingSnapshotConfirmation: null,
     pendingCommitPrompt: null,
     liveChangeLedger: null,
     runStartedAt: null,
@@ -185,6 +189,7 @@ export const useAgentStore = defineStore("agent", {
       this.lastErrorCode = null;
       this.lastSuccess = "";
       this.pendingApprovals = [];
+      this.pendingSnapshotConfirmation = null;
       this.pendingCommitPrompt = null;
       this.liveChangeLedger = null;
       this.runStartedAt = null;
@@ -541,16 +546,55 @@ export const useAgentStore = defineStore("agent", {
 
     async runPrompt(): Promise<void> {
       const prompt = this.promptInput.trim();
+      if (!prompt || this.isRunning || this.pendingSnapshotConfirmation) {
+        return;
+      }
+      const workspaceStore = useWorkspaceStore();
+      const request: AgentChatRequest = {
+        prompt,
+        activeFile: workspaceStore.activeFileBindingOrPath || workspaceStore.activeFile || "",
+        workspaceRoot: workspaceStore.currentProject?.workspaceRoot || workspaceStore.health?.workspaceRoot || "",
+        storyGeneration: {
+          fragmentCount: this.storyFragmentCount,
+          fragmentWordCount: this.storyFragmentWordCount,
+          chapterTemplateId: this.storyChapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID
+        }
+      };
+      await this.executePromptRequest(request);
+    },
+
+    async confirmNoSnapshot(): Promise<void> {
+      const pending = this.pendingSnapshotConfirmation;
+      if (!pending || this.isRunning) {
+        return;
+      }
+      this.pendingSnapshotConfirmation = null;
+      await this.executePromptRequest(
+        { ...pending.request, confirmNoSnapshot: true },
+        { sessionId: pending.sessionId }
+      );
+    },
+
+    cancelNoSnapshot(): void {
+      if (this.isRunning) {
+        return;
+      }
+      this.pendingSnapshotConfirmation = null;
+      this.lastError = "";
+      this.lastErrorCode = null;
+    },
+
+    async executePromptRequest(
+      request: AgentChatRequest,
+      options?: { sessionId?: string }
+    ): Promise<void> {
+      const prompt = String(request.prompt || "").trim();
       if (!prompt || this.isRunning) {
         return;
       }
-
-      const sessionId = this.currentSessionId || "default";
+      const sessionId = options?.sessionId || this.currentSessionId || "default";
       const traceId = createTraceId();
       const now = new Date().toISOString();
-      const workspaceStore = useWorkspaceStore();
-      const activeFile = workspaceStore.activeFileBindingOrPath || workspaceStore.activeFile || "";
-      const workspaceRoot = workspaceStore.currentProject?.workspaceRoot || workspaceStore.health?.workspaceRoot || "";
       const run: AgentExecutionRun = {
         traceId,
         sessionId,
@@ -560,6 +604,7 @@ export const useAgentStore = defineStore("agent", {
         llmModel: this.coomiStatus?.model || "",
         llmProvider: this.coomiStatus?.providerId || "",
         status: "running",
+        noRestorePoint: Boolean(request.confirmNoSnapshot),
         createdAt: now,
         updatedAt: now,
         lastAction: "chat",
@@ -583,6 +628,7 @@ export const useAgentStore = defineStore("agent", {
         errorCode: null
       };
 
+      this.pendingSnapshotConfirmation = null;
       this.currentSessionId = sessionId;
       this.currentTraceId = traceId;
       this.selectedTraceId = "";
@@ -605,16 +651,7 @@ export const useAgentStore = defineStore("agent", {
       activeStreamAbortController = new AbortController();
       try {
         await streamAgentPrompt(
-          {
-            prompt,
-            activeFile,
-            workspaceRoot,
-            storyGeneration: {
-              fragmentCount: this.storyFragmentCount,
-              fragmentWordCount: this.storyFragmentWordCount,
-              chapterTemplateId: this.storyChapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID
-            }
-          },
+          request,
           (packet) => this.applyStreamPacket(traceId, packet),
           traceId,
           sessionId,
@@ -629,10 +666,31 @@ export const useAgentStore = defineStore("agent", {
         await this.loadSessions();
       } catch (error: unknown) {
         const normalized = normalizeAgentError(error);
-        const status: AgentRunStatus = normalized.code === "request_aborted" ? "stopped" : "failed";
-        this.lastError = normalized.message;
-        this.lastErrorCode = normalized.code;
-        this.finishRun(traceId, status, normalized.message, normalized.code);
+        if (normalized.code === "SNAPSHOT_FAILED") {
+          const retryRequest: AgentChatRequest = { ...request };
+          delete retryRequest.confirmNoSnapshot;
+          this.executionHistory = this.executionHistory.filter((item) => item.traceId !== traceId);
+          this.currentTraceId = "";
+          this.selectedTraceId = "";
+          this.lastReply = "";
+          this.lastTrace = null;
+          this.lastAudit = [];
+          this.lastEvents = [];
+          this.pendingSnapshotConfirmation = {
+            request: retryRequest,
+            traceId,
+            sessionId,
+            message: normalized.message,
+            details: normalized.details || {}
+          };
+          this.lastError = "";
+          this.lastErrorCode = null;
+        } else {
+          const status: AgentRunStatus = normalized.code === "request_aborted" ? "stopped" : "failed";
+          this.lastError = normalized.message;
+          this.lastErrorCode = normalized.code;
+          this.finishRun(traceId, status, normalized.message, normalized.code);
+        }
       } finally {
         this.isRunning = false;
         this.runStartedAt = null;
@@ -665,6 +723,10 @@ export const useAgentStore = defineStore("agent", {
         events: [...current.events, event],
         updatedAt: new Date().toISOString()
       };
+
+      if (typeof visiblePacket.noRestorePoint === "boolean") {
+        nextRun.noRestorePoint = visiblePacket.noRestorePoint;
+      }
 
       if (visiblePacket.coomiStatus) {
         this.coomiStatus = normalizeCoomiStatus(visiblePacket.coomiStatus);
@@ -1324,6 +1386,10 @@ function normalizeHistoryRun(value: unknown, fallbackSessionId: string): AgentEx
     llmModel: asString(record.llmModel) || "",
     llmProvider: asString(record.llmProvider) || "",
     status,
+    noRestorePoint:
+      asBoolean(record.noRestorePoint) ??
+      asBoolean(toRecord(record.execution)?.noRestorePoint) ??
+      false,
     createdAt,
     updatedAt,
     lastAction: "chat",
@@ -2057,11 +2123,15 @@ function normalizeRunStatus(value: unknown, errorMessage: string): AgentRunStatu
   return "completed";
 }
 
-function normalizeAgentError(error: unknown): { message: string; code: string | null } {
+function normalizeAgentError(error: unknown): {
+  message: string;
+  code: string | null;
+  details?: Record<string, unknown>;
+} {
   if (error instanceof AgentApiError) {
-    return { message: error.message, code: error.code ?? null };
+    return { message: error.message, code: error.code ?? null, details: error.details };
   }
-  return { message: describeTransportError(error, "Coomi execution failed."), code: null };
+  return { message: describeTransportError(error, "Coomi execution failed."), code: null, details: undefined };
 }
 
 function normalizePendingApproval(packet: AgentStreamPacket): AgentPendingApproval | null {
