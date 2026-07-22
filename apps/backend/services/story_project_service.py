@@ -434,13 +434,16 @@ _DEFAULT_AGENT_SKILLS: Dict[str, str] = {
         steps=[
             "读取本次正文增量，列出明确新增事实、状态变化和候选推断。",
             "先执行变量思考，确定时间、地点、角色、关系、物品和事件变化。",
-            "同步角色档案与长期记忆；重大或冲突变化进入待确认。",
+            "在同一次正文增量中直接同步有证据且可安全合并的角色、变量、物品、事实和关系；重大或冲突变化进入待确认。",
             "在变量和角色更新后增量整理 WIKI/知识图谱，避免使用旧状态。",
             "输出完整变更摘要、证据、写入路径和未处理事项，并检查正文未被二次改写。",
         ],
         output_template="""# 故事生成后更新报告\n\n## 本次正文范围\n\n## 变量变化\n\n## 角色更新\n\n## 物品、地点与事件\n\n## WIKI / 知识图谱更新\n\n## 已写入文件\n- 路径 / 修改摘要 / 证据\n\n## 待确认或未处理\n\n## 连续性风险\n""",
         checks=["更新范围只覆盖本次正文实际产生的变化。", "角色、变量和 WIKI 的更新顺序正确。", "不存在无证据的长期记忆写入。", "正文没有被更新流程再次覆盖或重写。"],
-        boundaries=["自动更新耗时较高时应分批处理，避免一次吞入过多章节。"],
+        boundaries=[
+            "自动更新耗时较高时应分批处理，避免一次吞入过多章节。",
+            "用户显式要求延期时不应用记忆增量；需复核的删除、冲突和重大关系变化始终保留待确认。",
+        ],
     ),
 }
 
@@ -542,6 +545,17 @@ _LEGACY_DEFAULT_AGENT_SKILLS["变量思考.md"].add(
 - 片段快照写入 `.storydex/memory/chapters/`。
 """.strip()
 )
+
+# Match only known generated-template text so existing projects receive policy
+# fixes without treating genuinely customized skills as upgrade candidates.
+_LEGACY_DEFAULT_AGENT_SKILL_MARKERS: Dict[str, Tuple[Tuple[str, ...], ...]] = {
+    "故事生成后更新.md": (
+        (
+            "模板版本：2｜适用范围：任意 Storydex 小说项目",
+            "3. 同步角色档案和长期记忆，重大变化进入待确认。",
+        ),
+    ),
+}
 
 _DEFAULT_CHARACTER_TEMPLATE_ID = "default_character_template"
 _DEFAULT_CHARACTER_TEMPLATE_JSON = "default-character-template.json"
@@ -744,7 +758,12 @@ class StoryProjectService:
                     existing = path.read_text(encoding="utf-8").strip()
                 except OSError:
                     existing = ""
-                if existing not in legacy_contents:
+                legacy_marker_groups = _LEGACY_DEFAULT_AGENT_SKILL_MARKERS.get(file_name, ())
+                matches_legacy_template = existing in legacy_contents or any(
+                    all(marker in existing for marker in markers)
+                    for markers in legacy_marker_groups
+                )
+                if not matches_legacy_template:
                     continue
             path.write_text(content.strip() + "\n", encoding="utf-8")
         registry_path = skills_root / "registry.json"
@@ -1508,7 +1527,6 @@ class StoryProjectService:
                 ]
             else:
                 chapter_segments = []
-            missing_count = 0
             stale_count = 0
             for file_path in chapter_segments:
                 relative = file_path.relative_to(root).as_posix()
@@ -1516,6 +1534,7 @@ class StoryProjectService:
                 thought_relative = self.variable_thought_relative_path(root, relative)
                 snapshot_path = root / snapshot_relative
                 thought_path = root / thought_relative
+                # Fragment memory is optional; only an existing record can be stale.
                 memory_paths = [path for path in (thought_path, snapshot_path) if path.exists()]
                 if memory_paths:
                     snapshot_mtime = max(path.stat().st_mtime for path in memory_paths)
@@ -1535,30 +1554,6 @@ class StoryProjectService:
                         }
                     )
                     continue
-                missing_count += 1
-                diagnostics.setdefault(relative, []).append(
-                    {
-                        "code": "story_snapshot_missing",
-                        "source": "story.memory",
-                        "severity": "warning",
-                        "relativePath": relative,
-                        "line": 0,
-                        "column": 0,
-                        "message": "该剧情片段缺少对应的变量思考记录。",
-                    }
-                )
-            if missing_count > 0:
-                diagnostics.setdefault(chapter.relative_path, []).append(
-                    {
-                        "code": "story_snapshot_missing_in_chapter",
-                        "source": "story.memory",
-                        "severity": "warning",
-                        "relativePath": chapter.relative_path,
-                        "line": 0,
-                        "column": 0,
-                        "message": f"本章节有 {missing_count} 个剧情片段缺少变量思考记录。",
-                    }
-                )
             if stale_count > 0:
                 diagnostics.setdefault(chapter.relative_path, []).append(
                     {
@@ -2062,20 +2057,37 @@ class StoryProjectService:
         settings = self.read_project_settings(root)
         active_file = self._normalize_relative_path(str(payload.get("activeFile") or payload.get("active_file") or ""))
         prompt = str(payload.get("prompt") or "").strip()
+        fragments = self._normalize_story_increment_fragments(payload)
+        if not fragments:
+            fragments = [{}]
+
+        top_level_increment = self._normalize_story_increment_payload(payload)
+        has_explicit_apply_variables = any(
+            key in payload and payload.get(key) not in (None, "")
+            for key in ("applyVariables", "apply_variables")
+        )
+        has_generated_text = bool(self._story_increment_fragment_text(payload)) or any(
+            self._story_increment_fragment_text(fragment) for fragment in fragments
+        )
+        has_generated_memory_payload = self._story_increment_has_variable_payload(top_level_increment) or any(
+            self._story_increment_has_variable_payload(self._normalize_story_increment_payload(fragment))
+            for fragment in fragments
+        )
+        # A generated fragment carries the model's governed memory delta. Apply that
+        # delta immediately unless the caller explicitly chose to defer variables;
+        # the project-wide switch remains the default for non-generation updates.
+        auto_apply_generated_memory = (
+            not has_explicit_apply_variables and has_generated_text and has_generated_memory_payload
+        )
         apply_variables = self._normalize_bool(
             payload.get("applyVariables", payload.get("apply_variables")),
-            default=bool(settings.get("autoUpdateVariables", False)),
+            default=bool(settings.get("autoUpdateVariables", False)) or auto_apply_generated_memory,
         )
         apply_wiki = self._normalize_bool(
             payload.get("applyWiki", payload.get("apply_wiki")),
             default=bool(settings.get("autoUpdateWiki", False)) and apply_variables,
         )
         chapter_summary = str(payload.get("chapterSummary") or payload.get("chapter_summary") or "").strip()
-        fragments = self._normalize_story_increment_fragments(payload)
-        if not fragments:
-            fragments = [{}]
-
-        top_level_increment = self._normalize_story_increment_payload(payload)
         written_paths: List[str] = []
         fragment_results: List[Dict[str, Any]] = []
         applied_facts: List[Dict[str, Any]] = []
@@ -2085,6 +2097,7 @@ class StoryProjectService:
         knowledge_review_items: List[Dict[str, Any]] = []
         applied_knowledge_command_count = 0
         applied_non_command_snapshot_updates = False
+        chapter_path_mapping: Dict[str, str] = {}
         has_variable_payload = self._story_increment_has_variable_payload(top_level_increment)
         now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -2097,12 +2110,30 @@ class StoryProjectService:
                 prompt=prompt,
                 settings=settings,
             )
+            # Existing chapter aliases may have been normalized while resolving the
+            # path. Keep the increment anchored to the final directory name before
+            # writing any derived memory paths.
+            chapter_path_mapping.update(self._normalize_chapter_directories(root))
+            segment_relative_path = self._rewrite_segment_path_for_chapter_mapping(
+                segment_relative_path,
+                chapter_path_mapping,
+            )
             segment_text = self._story_increment_fragment_text(fragment)
             if segment_text:
                 segment_path = root / segment_relative_path
                 segment_path.parent.mkdir(parents=True, exist_ok=True)
                 segment_path.write_text(segment_text.rstrip() + "\n", encoding="utf-8")
-                written_paths.append(segment_path.relative_to(root).as_posix())
+
+            # A newly-created non-canonical directory is only visible to the
+            # normalizer after the segment has been written. Apply the rename mapping
+            # now, before computing snapshot/thought paths or reading prior state.
+            chapter_path_mapping.update(self._normalize_chapter_directories(root))
+            segment_relative_path = self._rewrite_segment_path_for_chapter_mapping(
+                segment_relative_path,
+                chapter_path_mapping,
+            )
+            if segment_text:
+                written_paths.append(segment_relative_path)
 
             fragment_increment = self._normalize_story_increment_payload(fragment)
             stage2_output = self._merge_story_increment_payloads(
@@ -3962,11 +3993,11 @@ class StoryProjectService:
         normalized = re.sub(r"\s+", " ", normalized).strip(" ._-")
         return normalized or "未命名"
 
-    def _normalize_chapter_directories(self, workspace_root: Path) -> None:
+    def _normalize_chapter_directories(self, workspace_root: Path) -> Dict[str, str]:
         root = Path(workspace_root).resolve()
         chapters_root = root / "chapters"
         if not chapters_root.exists():
-            return
+            return {}
 
         with self._lock:
             self._prune_duplicate_empty_chapter_dirs(root)
@@ -3988,7 +4019,7 @@ class StoryProjectService:
                 reserved_targets.add(canonical_name)
 
             if not pending_renames:
-                return
+                return {}
 
             chapter_mapping: Dict[str, str] = {}
             snapshot_root = self.storydex_root(root) / "memory" / "chapters"
@@ -4002,7 +4033,28 @@ class StoryProjectService:
             if chapter_mapping:
                 self._rewrite_chapter_progress_after_rename(root, chapter_mapping)
                 self._rewrite_story_state_after_chapter_rename(root, chapter_mapping)
-                pass
+            return chapter_mapping
+
+    @staticmethod
+    def _rewrite_segment_path_for_chapter_mapping(
+        segment_relative_path: str,
+        chapter_mapping: Dict[str, str],
+    ) -> str:
+        """Rewrite a segment path when its chapter directory was renamed."""
+        normalized = str(segment_relative_path or "").replace("\\", "/").strip("/")
+        if not normalized or not chapter_mapping:
+            return normalized
+        path = Path(normalized)
+        if len(path.parts) < 3 or path.parts[0] != "chapters":
+            return normalized
+        chapter_relative = Path(*path.parts[:2]).as_posix()
+        visited: Set[str] = set()
+        while chapter_relative in chapter_mapping and chapter_relative not in visited:
+            visited.add(chapter_relative)
+            chapter_relative = str(chapter_mapping[chapter_relative])
+        if chapter_relative == Path(*path.parts[:2]).as_posix():
+            return normalized
+        return (Path(chapter_relative) / Path(*path.parts[2:])).as_posix()
 
     @staticmethod
     def _move_snapshot_chapter_dir(source_dir: Path, target_dir: Path) -> None:
@@ -4212,30 +4264,35 @@ class StoryProjectService:
         return self._canonicalize_segment_chapter_dir(root, candidate.relative_to(root).as_posix())
 
     def _canonicalize_segment_chapter_dir(self, workspace_root: Path, segment_relative_path: str) -> str:
-        """同号章节目录归一：目标章节目录不存在但已有同章号目录时，重定向到现有目录。
+        """章节目录别名归一：目标不存在但有同章号或唯一同标题目录时，重定向到现有目录。
 
-        防止「第一章/第1章」这类异体命名（LLM 自选路径或归一重命名后的旧路径）
-        在磁盘上分裂出第二个章节目录。
+        防止「第一章/第1章」或「Prologue/第1章 Prologue」这类异体命名
+        （LLM 自选路径或归一重命名后的旧路径）在磁盘上分裂出第二个章节目录。
         """
         path = Path(segment_relative_path)
         if len(path.parts) < 3 or path.parts[0] != "chapters":
             return segment_relative_path
         root = Path(workspace_root).resolve()
         chapter_number = self._extract_chapter_number(path.parts[1])
-        if chapter_number <= 0:
-            return segment_relative_path
         # 先列章节状态：内部会归一目录命名并清掉同章号的空目录，
         # 之后再判断目标目录是否存在，避免对着即将被清理的空壳落盘。
         states = self.list_chapter_states(root)
         chapter_dir = root / path.parts[0] / path.parts[1]
         if chapter_dir.exists():
             return segment_relative_path
-        for state in states:
-            if state.chapter_number != chapter_number:
-                continue
-            existing_dir = root / state.relative_path
+        if chapter_number > 0:
+            candidates = [state for state in states if state.chapter_number == chapter_number]
+        else:
+            requested_title = self._sanitize_static_chapter_title(path.parts[1])
+            candidates = [
+                state
+                for state in states
+                if self._sanitize_static_chapter_title(Path(state.relative_path).name) == requested_title
+            ]
+        if len(candidates) == 1:
+            existing_dir = root / candidates[0].relative_path
             if existing_dir.is_dir():
-                return (Path(state.relative_path) / Path(*path.parts[2:])).as_posix()
+                return (Path(candidates[0].relative_path) / Path(*path.parts[2:])).as_posix()
         return segment_relative_path
 
     def _prune_duplicate_empty_chapter_dirs(self, workspace_root: Path) -> List[str]:

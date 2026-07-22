@@ -1,66 +1,99 @@
 <template>
   <section
     v-if="visible"
-    class="coomi-config-shell"
+    class="llm-cfg"
     @keydown.ctrl.s.prevent="() => saveConfig()"
     @keydown.meta.s.prevent="() => saveConfig()"
   >
-    <header class="coomi-config-header">
-      <div class="coomi-config-title">LLM配置</div>
-      <button class="coomi-config-close" type="button" title="退出" @click="$emit('close')">
+    <header class="llm-cfg__topbar">
+      <div class="llm-cfg__heading">
+        <span class="material-symbols-rounded llm-cfg__heading-icon">tune</span>
+        <span class="llm-cfg__title">模型配置</span>
+      </div>
+      <button class="llm-cfg__close" type="button" title="退出" @click="$emit('close')">
         <span class="material-symbols-rounded">close</span>
-        <span>退出</span>
       </button>
     </header>
 
-    <div v-if="errorMessage" class="coomi-config-error">{{ errorMessage }}</div>
+    <div v-if="errorMessage" class="llm-cfg__error">
+      <span class="material-symbols-rounded">error</span>
+      <span>{{ errorMessage }}</span>
+    </div>
 
-    <main class="coomi-config-body">
-      <section v-if="hasProviders" class="coomi-provider-manager">
-        <div class="coomi-provider-picker-row">
-          <label class="coomi-config-field coomi-provider-picker">
-            <span>提供方</span>
-            <select :value="selectedProviderId" :disabled="loading || saving" @change="handleProviderSelect">
+    <main class="llm-cfg__body">
+      <template v-if="hasProviders">
+        <!-- 提供方选择 -->
+        <div class="llm-picker">
+          <div class="llm-select-wrap llm-picker__select">
+            <select
+              class="llm-input"
+              :value="selectedProviderId"
+              :disabled="loading || saving"
+              @change="handleProviderSelect"
+            >
               <option v-for="provider in providerOptions" :key="provider.id" :value="provider.id">
                 {{ provider.id }} · {{ provider.display }}{{ provider.isActive ? "（当前）" : "" }}
               </option>
             </select>
-          </label>
-          <div class="coomi-toolbar-actions">
-            <button
-              class="coomi-config-icon-action"
-              type="button"
-              title="新建提供方"
-              :disabled="loading || saving"
-              @click="createProvider"
-            >
-              <span class="material-symbols-rounded">add</span>
-            </button>
-            <button
-              class="coomi-config-icon-action danger"
-              type="button"
-              title="删除提供方"
-              :disabled="loading || saving || providerOptions.length <= 1"
-              @click="deleteProvider"
-            >
-              <span class="material-symbols-rounded">delete</span>
-            </button>
+            <span class="material-symbols-rounded llm-select-caret">expand_more</span>
           </div>
+          <button
+            class="llm-icon-btn"
+            type="button"
+            title="新建提供方"
+            :disabled="loading || saving"
+            @click="createProvider"
+          >
+            <span class="material-symbols-rounded">add</span>
+          </button>
+          <button
+            class="llm-icon-btn llm-icon-btn--danger"
+            type="button"
+            title="删除提供方"
+            :disabled="loading || saving || providerOptions.length <= 1"
+            @click="deleteProvider"
+          >
+            <span class="material-symbols-rounded">delete</span>
+          </button>
         </div>
 
-        <section class="coomi-provider-editor">
-          <div class="coomi-editor-head">
-            <div class="coomi-section-title">
-              <span>编辑提供方</span>
-              <small>{{ selectedProviderId }}</small>
-            </div>
-          </div>
+        <!-- 基础信息 -->
+        <section class="llm-section">
+          <h3 class="llm-section__title">基础信息</h3>
+          <div class="llm-fields">
+            <div class="llm-row">
+              <label class="llm-field">
+                <span class="llm-field__label">类型</span>
+                <div class="llm-select-wrap">
+                  <select class="llm-input" v-model="form.type" :disabled="loading || saving" @change="syncProviderFields">
+                    <option value="generic">generic</option>
+                    <option value="openai">openai</option>
+                    <option value="anthropic">anthropic</option>
+                  </select>
+                  <span class="material-symbols-rounded llm-select-caret">expand_more</span>
+                </div>
+              </label>
 
-          <div class="coomi-provider-form">
-            <label class="coomi-config-field full">
-              <span>提供方 ID</span>
+              <label class="llm-field">
+                <span class="llm-field__label">工具协议</span>
+                <div class="llm-select-wrap">
+                  <select class="llm-input" v-model="form.toolProtocol" :disabled="loading || saving" @change="syncProviderFields">
+                    <option value="auto">auto</option>
+                    <option value="native">native</option>
+                    <option value="structured">structured</option>
+                    <option value="mimo">mimo</option>
+                    <option value="disabled">disabled</option>
+                  </select>
+                  <span class="material-symbols-rounded llm-select-caret">expand_more</span>
+                </div>
+              </label>
+            </div>
+
+            <label class="llm-field">
+              <span class="llm-field__label">提供方 ID</span>
               <input
                 v-model="form.id"
+                class="llm-input"
                 :disabled="loading || saving"
                 spellcheck="false"
                 placeholder="deepseek"
@@ -68,41 +101,29 @@
               />
             </label>
 
-            <label class="coomi-config-field">
-              <span>类型</span>
-              <select v-model="form.type" :disabled="loading || saving" @change="syncProviderFields">
-                <option value="generic">generic</option>
-                <option value="openai">openai</option>
-                <option value="anthropic">anthropic</option>
-              </select>
-            </label>
-
-            <label class="coomi-config-field">
-              <span>工具协议</span>
-              <select v-model="form.toolProtocol" :disabled="loading || saving" @change="syncProviderFields">
-                <option value="auto">auto</option>
-                <option value="native">native</option>
-                <option value="structured">structured</option>
-                <option value="mimo">mimo</option>
-                <option value="disabled">disabled</option>
-              </select>
-            </label>
-
-            <label class="coomi-config-field full">
-              <span>显示名称</span>
+            <label class="llm-field">
+              <span class="llm-field__label">显示名称</span>
               <input
                 v-model="form.display"
+                class="llm-input"
                 :disabled="loading || saving"
                 spellcheck="false"
                 placeholder="DeepSeek V4"
                 @input="syncProviderFields"
               />
             </label>
+          </div>
+        </section>
 
-            <label class="coomi-config-field full">
-              <span>接口地址</span>
+        <!-- 连接 -->
+        <section class="llm-section">
+          <h3 class="llm-section__title">连接</h3>
+          <div class="llm-fields">
+            <label class="llm-field">
+              <span class="llm-field__label">接口地址</span>
               <input
                 v-model="form.baseUrl"
+                class="llm-input"
                 :disabled="loading || saving"
                 spellcheck="false"
                 placeholder="https://api.example.com/v1"
@@ -110,35 +131,46 @@
               />
             </label>
 
-            <label class="coomi-config-field full">
-              <span>API 密钥</span>
+            <label class="llm-field">
+              <span class="llm-field__label">API 密钥</span>
               <input
                 v-model="form.apiKey"
+                class="llm-input"
+                type="password"
                 :disabled="loading || saving"
                 spellcheck="false"
+                autocomplete="off"
                 placeholder="sk-..."
                 @input="handleProviderConnectionInput"
               />
             </label>
 
-            <div class="coomi-model-fetch-row">
+            <div class="llm-fetch">
               <button
-                class="coomi-config-action"
+                class="llm-btn llm-btn--ghost"
                 type="button"
                 :disabled="modelFetchDisabled"
                 @click="fetchModels"
               >
-                <span class="material-symbols-rounded">cloud_download</span>
+                <span class="material-symbols-rounded" :class="{ 'is-spin': fetchingModels }">
+                  {{ fetchingModels ? "progress_activity" : "cloud_download" }}
+                </span>
                 <span>{{ fetchingModels ? "获取中" : "获取模型" }}</span>
               </button>
-              <span v-if="modelFetchMessage" class="coomi-model-fetch-message">{{ modelFetchMessage }}</span>
+              <span v-if="modelFetchMessage" class="llm-fetch__msg">{{ modelFetchMessage }}</span>
             </div>
+          </div>
+        </section>
 
-            <label class="coomi-config-field full">
-              <span>标准模型</span>
+        <!-- 模型 -->
+        <section class="llm-section">
+          <h3 class="llm-section__title">模型</h3>
+          <div class="llm-fields">
+            <label class="llm-field">
+              <span class="llm-field__label">标准模型</span>
               <input
                 v-model="form.model"
-                class="coomi-model-input"
+                class="llm-input"
                 :disabled="loading || saving"
                 list="coomi-standard-model-options"
                 spellcheck="false"
@@ -150,56 +182,63 @@
               </datalist>
             </label>
 
-            <label class="coomi-config-field full">
-              <span>快速模型</span>
+            <label class="llm-field">
+              <span class="llm-field__label">快速模型</span>
               <input
                 v-model="form.fastModel"
-                class="coomi-fast-model-input"
+                class="llm-input"
                 :disabled="loading || saving"
                 list="coomi-fast-model-options"
                 spellcheck="false"
-                placeholder="留空跟随标准模型，或输入模型名"
+                placeholder="留空跟随标准模型"
                 @input="syncProviderFields"
               />
               <datalist id="coomi-fast-model-options">
                 <option v-for="model in modelOptions" :key="model" :value="model"></option>
               </datalist>
+              <span class="llm-field__hint">用于摘要、命名等轻量任务，留空则复用标准模型。</span>
             </label>
 
-            <label class="coomi-config-field full">
-              <span>上下文窗口（tokens）</span>
+            <label class="llm-field">
+              <span class="llm-field__label">上下文窗口（tokens）</span>
               <input
                 v-model="form.contextWindow"
+                class="llm-input"
                 :disabled="loading || saving"
                 spellcheck="false"
                 inputmode="numeric"
-                placeholder="留空使用默认 256000；按模型实际窗口填写，压缩阈值随之生效"
+                placeholder="留空使用默认 256000"
                 @input="syncProviderFields"
               />
+              <span class="llm-field__hint">按模型实际窗口填写，压缩阈值随之生效。</span>
             </label>
           </div>
         </section>
-      </section>
+      </template>
 
-      <section v-else class="coomi-config-empty">
-        <span>providers.json 里还没有提供方。</span>
-        <button class="coomi-config-action primary" type="button" :disabled="loading || saving" @click="createProvider">
+      <section v-else class="llm-cfg__empty">
+        <span class="material-symbols-rounded llm-cfg__empty-icon">cloud_off</span>
+        <p class="llm-cfg__empty-copy">providers.json 里还没有提供方。</p>
+        <button class="llm-btn llm-btn--primary" type="button" :disabled="loading || saving" @click="createProvider">
           <span class="material-symbols-rounded">add</span>
           <span>新建提供方</span>
         </button>
       </section>
     </main>
 
-    <footer class="coomi-config-footer">
-      <div class="coomi-config-path">
-        <span>配置文件</span>
+    <footer class="llm-cfg__footer">
+      <div class="llm-cfg__path" :title="configPath">
+        <span class="material-symbols-rounded">description</span>
         <code>{{ configPath }}</code>
       </div>
-      <div class="coomi-config-footer-row">
-        <span class="coomi-config-meta">{{ updatedLabel }}</span>
-        <div class="coomi-config-actions">
+      <div class="llm-cfg__footer-row">
+        <span class="llm-cfg__status" :class="{ 'is-dirty': dirty, 'is-busy': loading || saving }">
+          <span class="llm-cfg__status-dot"></span>
+          {{ updatedLabel }}
+        </span>
+        <div class="llm-cfg__actions">
           <button
-            class="coomi-config-action"
+            class="llm-btn llm-btn--ghost"
             type="button"
             title="只写入配置文件，不切换当前使用的提供方"
             :disabled="loading || saving"
@@ -209,7 +248,7 @@
             <span>保存</span>
           </button>
           <button
-            class="coomi-config-action primary"
+            class="llm-btn llm-btn--primary"
             type="button"
             title="保存配置，并切换为当前正在编辑的提供方"
             :disabled="loading || saving"
@@ -690,7 +729,10 @@ function formatDate(value: string): string {
 </script>
 
 <style scoped>
-.coomi-config-shell {
+.llm-cfg {
+  --llm-pad-x: 16px;
+  --llm-field-h: 32px;
+
   position: relative;
   width: 100%;
   min-height: 100%;
@@ -698,281 +740,380 @@ function formatDate(value: string): string {
   grid-template-rows: auto auto minmax(0, 1fr) auto;
   overflow: hidden;
   background: transparent;
+  color: var(--text-main);
 }
 
-.coomi-config-header {
-  min-height: 42px;
+/* ── 顶栏 ─────────────────────────────── */
+.llm-cfg__topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 0 14px 0 20px;
+  height: 40px;
+  padding: 0 8px 0 var(--llm-pad-x);
   border-bottom: 1px solid var(--border-subtle);
 }
 
-.coomi-config-title {
-  color: var(--text-main);
-  font-size: 14px;
-  font-weight: 700;
+.llm-cfg__heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 
-.coomi-config-close {
+.llm-cfg__heading-icon {
+  font-size: 17px;
+  color: var(--text-muted);
+}
+
+.llm-cfg__title {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.llm-cfg__close {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 4px;
-  height: 30px;
-  padding: 0 8px;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
-  font: inherit;
-  font-size: 12px;
   cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
 }
 
-.coomi-config-close:hover,
-.coomi-config-action:hover,
-.coomi-config-icon-action:hover {
+.llm-cfg__close:hover {
   background: var(--bg-hover);
+  color: var(--text-main);
 }
 
-.coomi-config-error {
-  padding: 10px 20px;
-  border-bottom: 1px solid var(--border-subtle);
-  background: rgb(127 29 29 / 0.14);
-  color: #fca5a5;
+.llm-cfg__close .material-symbols-rounded {
+  font-size: 18px;
+}
+
+/* ── 错误提示 ─────────────────────────── */
+.llm-cfg__error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 10px var(--llm-pad-x) 0;
+  padding: 8px 10px;
+  border-left: 2px solid var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger);
   font-size: 12px;
+  line-height: 1.5;
 }
 
-.coomi-config-body {
+.llm-cfg__error .material-symbols-rounded {
+  font-size: 15px;
+  margin-top: 1px;
+  flex-shrink: 0;
+}
+
+/* ── 主体 ─────────────────────────────── */
+.llm-cfg__body {
   min-height: 0;
   overflow: auto;
-  padding: 12px 20px 16px;
+  padding: 4px 0 16px;
 }
 
-.coomi-config-toolbar,
-.coomi-provider-picker-row,
-.coomi-editor-head,
-.coomi-config-footer-row {
+/* ── 提供方选择 ───────────────────────── */
+.llm-picker {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 6px;
+  padding: 12px var(--llm-pad-x);
+}
+
+.llm-picker__select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* ── 扁平分区 ─────────────────────────── */
+.llm-section {
+  padding: 14px var(--llm-pad-x);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.llm-section__title {
+  margin: 0 0 12px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.llm-fields {
+  display: flex;
+  flex-direction: column;
   gap: 12px;
 }
 
-.coomi-config-toolbar {
-  margin-bottom: 12px;
-}
-
-.coomi-toolbar-actions {
-  display: inline-flex;
-  gap: 8px;
-}
-
-.coomi-section-title {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-}
-
-.coomi-section-title span {
-  color: var(--text-main);
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.coomi-section-title small {
-  overflow: hidden;
-  color: var(--text-muted);
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.coomi-provider-manager {
-  display: grid;
-  gap: 16px;
-}
-
-.coomi-provider-picker-row {
-  align-items: end;
-}
-
-.coomi-provider-picker {
-  flex: 1 1 auto;
-}
-
-.coomi-provider-picker-row .coomi-toolbar-actions {
-  flex: 0 0 auto;
-  padding-bottom: 1px;
-}
-
-.coomi-provider-editor {
-  min-width: 0;
-}
-
-.coomi-editor-head {
-  margin-bottom: 14px;
-}
-
-.coomi-editor-actions,
-.coomi-config-actions {
-  display: inline-flex;
-  gap: 8px;
-}
-
-.coomi-provider-form {
+.llm-row {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  column-gap: 10px;
-  row-gap: 12px;
-}
-
-.coomi-model-fetch-row {
-  grid-column: 1 / -1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
   gap: 10px;
 }
 
-.coomi-model-fetch-message {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text-muted);
-  font-size: 12px;
-  line-height: 1.4;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.coomi-config-field {
+/* ── 字段 ─────────────────────────────── */
+.llm-field {
   display: grid;
-  gap: 6px;
+  gap: 5px;
   min-width: 0;
-  color: var(--text-muted);
+}
+
+.llm-field__label {
+  color: var(--text-soft);
   font-size: 12px;
+  line-height: 1.3;
 }
 
-.coomi-config-field.full {
-  grid-column: 1 / -1;
+.llm-field__hint {
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.5;
 }
 
-.coomi-config-field input,
-.coomi-config-field select {
+.llm-input {
   width: 100%;
   min-width: 0;
-  height: 40px;
+  height: var(--llm-field-h);
   border: 1px solid var(--border-subtle);
-  border-radius: 4px;
-  padding: 0 11px;
+  border-radius: var(--radius-sm);
+  padding: 0 10px;
   background: var(--bg-input);
   color: var(--text-main);
   font-family: inherit;
   font-size: 13px;
   line-height: 1.2;
   outline: none;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
 }
 
-.coomi-config-field input:focus,
-.coomi-config-field select:focus {
+.llm-input::placeholder {
+  color: var(--text-faint);
+}
+
+.llm-input:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.llm-input:focus {
   border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
 }
 
-.coomi-config-field input:disabled,
-.coomi-config-field select:disabled {
-  opacity: 0.62;
+.llm-input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
-.coomi-config-action {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  height: 38px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-main);
+/* select 自定义箭头 */
+.llm-select-wrap {
+  position: relative;
+  display: block;
+}
+
+.llm-select-wrap select.llm-input {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 30px;
   cursor: pointer;
 }
 
-.coomi-config-action {
-  gap: 6px;
-  padding: 0 10px;
-  white-space: nowrap;
+.llm-select-caret {
+  position: absolute;
+  top: 50%;
+  right: 7px;
+  transform: translateY(-50%);
+  pointer-events: none;
+  font-size: 18px;
+  color: var(--text-muted);
+}
+
+/* ── 获取模型行 ───────────────────────── */
+.llm-fetch {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.llm-fetch__msg {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-muted);
   font-size: 12px;
+  line-height: 1.4;
 }
 
-.coomi-config-icon-action {
-  width: 38px;
-  height: 38px;
+/* ── 按钮 ─────────────────────────────── */
+.llm-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 6px;
+  height: var(--llm-field-h);
+  padding: 0 12px;
   border: 1px solid var(--border-subtle);
-  border-radius: 4px;
-  background: transparent;
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
   color: var(--text-main);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
   cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
 }
 
-.coomi-config-action.danger {
-  color: var(--danger);
+.llm-btn .material-symbols-rounded {
+  font-size: 16px;
 }
 
-.coomi-config-icon-action.danger {
-  color: var(--danger);
+.llm-btn--ghost:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
 }
 
-.coomi-config-action.primary {
+.llm-btn--primary {
   border-color: transparent;
   background: var(--accent);
   color: var(--accent-contrast);
 }
 
-.coomi-config-action:disabled,
-.coomi-config-icon-action:disabled {
-  cursor: default;
-  opacity: 0.55;
+.llm-btn--primary:hover:not(:disabled) {
+  background: var(--accent-strong);
 }
 
-.coomi-config-empty {
-  min-height: 180px;
-  display: grid;
-  place-items: center;
-  gap: 14px;
+.llm-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* 图标按钮 */
+.llm-icon-btn {
+  flex-shrink: 0;
+  width: var(--llm-field-h);
+  height: var(--llm-field-h);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--text-soft);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.llm-icon-btn .material-symbols-rounded {
+  font-size: 18px;
+}
+
+.llm-icon-btn:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.llm-icon-btn--danger:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+}
+
+.llm-icon-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.is-spin {
+  animation: llm-spin 0.9s linear infinite;
+}
+
+@keyframes llm-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ── 空状态 ───────────────────────────── */
+.llm-cfg__empty {
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
   color: var(--text-muted);
+  text-align: center;
+}
+
+.llm-cfg__empty-icon {
+  font-size: 38px;
+  color: var(--text-faint);
+}
+
+.llm-cfg__empty-copy {
+  margin: 0;
   font-size: 13px;
 }
 
-.coomi-config-footer {
+/* ── 底栏 ─────────────────────────────── */
+.llm-cfg__footer {
   display: grid;
   gap: 10px;
-  padding: 10px 20px 12px;
+  padding: 10px var(--llm-pad-x) 12px;
   border-top: 1px solid var(--border-subtle);
 }
 
-.coomi-config-path {
-  display: grid;
-  gap: 4px;
+.llm-cfg__path {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
   color: var(--text-muted);
   font-size: 11px;
 }
 
-.coomi-config-path code {
+.llm-cfg__path .material-symbols-rounded {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.llm-cfg__path code {
   min-width: 0;
   overflow: hidden;
   color: var(--text-soft);
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
+  direction: rtl;
+  text-align: left;
 }
 
-.coomi-config-meta {
+.llm-cfg__footer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.llm-cfg__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
   overflow: hidden;
   color: var(--text-muted);
@@ -981,15 +1122,55 @@ function formatDate(value: string): string {
   white-space: nowrap;
 }
 
-@media (max-width: 620px) {
-  .coomi-provider-picker-row {
-    align-items: stretch;
-    flex-direction: column;
+.llm-cfg__status-dot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--success);
+}
+
+.llm-cfg__status.is-dirty {
+  color: var(--warning);
+}
+
+.llm-cfg__status.is-dirty .llm-cfg__status-dot {
+  background: var(--warning);
+}
+
+.llm-cfg__status.is-busy .llm-cfg__status-dot {
+  background: var(--info);
+  animation: llm-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes llm-pulse {
+  0%, 100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.llm-cfg__actions {
+  display: inline-flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* ── 窄栏适配 ─────────────────────────── */
+@media (max-width: 360px) {
+  .llm-row {
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .coomi-model-fetch-row {
-    align-items: stretch;
+  .llm-cfg__footer-row {
     flex-direction: column;
+    align-items: stretch;
+  }
+
+  .llm-cfg__actions {
+    justify-content: flex-end;
   }
 }
 </style>

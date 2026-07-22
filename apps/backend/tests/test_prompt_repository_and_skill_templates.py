@@ -66,8 +66,21 @@ def test_default_agent_skill_templates_are_detailed_universal_and_migrate_legacy
 
     legacy_path = skills_root / "设计角色.md"
     legacy_path.write_text(_LEGACY_AGENT_SKILLS_V1["设计角色.md"].strip() + "\n", encoding="utf-8")
+    legacy_story_path = skills_root / "故事生成后更新.md"
+    legacy_story = legacy_story_path.read_text(encoding="utf-8")
+    legacy_story = legacy_story.replace(
+        "3. 在同一次正文增量中直接同步有证据且可安全合并的角色、变量、物品、事实和关系；重大变化进入待确认。",
+        "3. 同步角色档案和长期记忆，重大变化进入待确认。",
+    ).replace(
+        "- 用户显式要求延期时不应用记忆增量；需复核的删除、冲突和重大关系变化始终保留待确认。\n",
+        "",
+    )
+    legacy_story_path.write_text(legacy_story, encoding="utf-8")
     custom_path = skills_root / "角色更新.md"
     custom_path.write_text("# 我的自定义角色更新\n", encoding="utf-8")
     service.ensure_project_structure(tmp_path)
     assert "模板版本：2" in legacy_path.read_text(encoding="utf-8")
+    migrated_story = legacy_story_path.read_text(encoding="utf-8")
+    assert "在同一次正文增量中直接同步" in migrated_story
+    assert "用户显式要求延期时不应用记忆增量" in migrated_story
     assert custom_path.read_text(encoding="utf-8") == "# 我的自定义角色更新\n"

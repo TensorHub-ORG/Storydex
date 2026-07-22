@@ -435,9 +435,10 @@ class StorydexApplyStoryIncrementTool(_StorydexWorkspaceToolMixin, BaseTool):
     name = "StorydexApplyStoryIncrement"
     description = (
         "Apply a Storydex post-generation increment: write story fragments, store readable "
-        "Markdown variable thinking, optionally merge machine-readable variable operations, "
+        "Markdown variable thinking, merge safe machine-readable variable operations, "
         "create or update character files, merge facts and relationships, and optionally "
-        "sync the local WIKI knowledge graph."
+        "sync the local WIKI knowledge graph. Safe memory deltas accompanying newly generated "
+        "fragments are applied immediately unless applyVariables is explicitly false."
     )
     access = ToolAccess.WRITE
     concurrency = ToolConcurrency.BLOCKING
@@ -461,7 +462,11 @@ class StorydexApplyStoryIncrementTool(_StorydexWorkspaceToolMixin, BaseTool):
                 },
                 "applyVariables": {
                     "type": "boolean",
-                    "description": "Whether to write variable thinking and optional fact/relationship memory.",
+                    "description": (
+                        "Whether to apply variable thinking and fact/item/relationship memory. Omit for newly "
+                        "generated fragments to apply their safe memory deltas immediately; set false only to "
+                        "explicitly defer memory organization."
+                    ),
                 },
                 "applyWiki": {
                     "type": "boolean",

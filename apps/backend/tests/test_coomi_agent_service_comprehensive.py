@@ -766,6 +766,8 @@ def test_build_system_prompt_and_tool_registry(monkeypatch, tmp_path):
     normal = asyncio.run(coomi._build_coomi_system_prompt(workspace_root=tmp_path, prompt="write"))
     plan = asyncio.run(coomi._build_coomi_system_prompt(workspace_root=tmp_path, prompt="plan", plan_mode=True))
     assert "Storydex Project Runtime" in normal
+    assert "generated memory deltas" in normal
+    assert "ask the user before passing applyVariables=true" not in normal
     assert "Plan Mode" in plan
 
     registered = []
@@ -987,7 +989,8 @@ def test_cross_workspace_session_isolation_and_clear(monkeypatch, tmp_path):
 
     ws_a = tmp_path / "workspace_a"
     ws_b = tmp_path / "workspace_b"
-    ws_a.mkdir(); ws_b.mkdir()
+    ws_a.mkdir()
+    ws_b.mkdir()
 
     shared_session = "shared-session"
 
