@@ -65,6 +65,10 @@ describe("agent store deterministic helpers", () => {
     });
     expect(u.summarizeTurnContractPacket(contract)).toContain("chapters/2.md");
     expect(u.summarizeTurnContractPacket(packet({ turnPlan: { selectedChapterTemplate: "id", selectedChapterTemplateDetail: { name: "Template" } } }))).toContain("Template");
+    expect(u.summarizeTurnContractPacket(packet({
+      intentFrame: { primary: "story_generation" },
+      updatePolicy: { autoUpdateVariables: false }
+    }))).toContain("正文生成后直接整理");
     expect(u.summarizePresetCompileFailures({ notes: [] })).toBe("");
     expect(u.summarizePresetCompileFailures({ notes: ["preset_compile_failed:", "preset_compile_failed: one", "preset_compile_failed: two", "preset_compile_failed: three"] })).toBeTruthy();
     expect(u.summarizeContextAssembly({})).toBe("");

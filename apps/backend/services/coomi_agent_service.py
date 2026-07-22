@@ -1744,8 +1744,12 @@ async def _build_coomi_system_prompt(
         + "and optional WIKI sync. "
         + "Do not force variable thinking into fixed JSON path/value entries; variableUpdates are optional machine operations only "
         + "when the change is clear enough to merge safely. "
-        + "If project settings do not auto-update variables, ask the user before passing applyVariables=true; "
-        + "if WIKI is not automatic, ask after variables are applied before passing applyWiki=true. "
+        + "For a newly generated fragment, include every safe, evidence-grounded variable, fact, item, character, "
+        + "and relationship increment in the same StorydexApplyStoryIncrement call; those generated memory deltas "
+        + "are applied immediately when applyVariables is omitted. Set applyVariables=false only when the user "
+        + "explicitly asks to defer memory updates. Review-required operations (deletions, conflicts, or major "
+        + "relationship changes) must remain pending and must never be forced through. "
+        + "If WIKI is not automatic, ask after variables are applied before passing applyWiki=true. "
         + "All newly mentioned characters must be included in newCharacters or characterUpdates, even when every unknown field is only `未知`.\n"
         + story_options
         + contract_options
@@ -1858,6 +1862,11 @@ def _render_turn_contract(value: Dict[str, Any] | None) -> str:
         "- updates: "
         f"autoUpdateVariables={bool(update_policy.get('autoUpdateVariables', False))}, "
         f"autoUpdateWiki={bool(update_policy.get('autoUpdateWiki', False))}"
+    )
+    lines.append(
+        "- generatedMemory: safe, evidence-grounded memory deltas included with a newly generated fragment "
+        "are applied immediately unless the caller explicitly sets applyVariables=false; review-required "
+        "operations remain pending."
     )
     context_blocks = _render_context_assembly_blocks(context_assembly)
     if context_blocks:

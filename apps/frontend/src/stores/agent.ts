@@ -1289,7 +1289,12 @@ function summarizeTurnContractPacket(packet: AgentStreamPacket): string {
   if (toolCount) {
     pieces.push(`领域工具：${toolCount} 个`);
   }
-  pieces.push(`变量：${Boolean(updatePolicy.autoUpdateVariables) ? "自动更新" : "生成后询问"}`);
+  const variableUpdateLabel = Boolean(updatePolicy.autoUpdateVariables)
+    ? "自动更新"
+    : intent === "story_generation"
+      ? "正文生成后直接整理"
+      : "生成后询问";
+  pieces.push(`变量：${variableUpdateLabel}`);
   pieces.push(`WIKI：${Boolean(updatePolicy.autoUpdateWiki) ? "自动更新" : "变量后询问"}`);
   return pieces.join(" · ");
 }
