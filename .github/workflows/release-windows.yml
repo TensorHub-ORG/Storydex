@@ -113,6 +113,20 @@ jobs:
           npm --prefix apps/desktop run check:release
           npm --prefix apps/desktop run test:update-feed
 
+      - name: Require Windows code-signing certificate
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
+        shell: pwsh
+        env:
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($name in @("CSC_LINK", "CSC_KEY_PASSWORD")) {
+            if (-not (Get-Item "Env:$name" -ErrorAction SilentlyContinue).Value) {
+              throw "Missing required Windows signing secret: $name"
+            }
+          }
+
       - name: Prepare embedded Python
         shell: pwsh
         run: |
@@ -123,9 +137,43 @@ jobs:
 
       - name: Build Windows package
         shell: cmd
+        env:
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+          STORYDEX_REQUIRE_SIGNING: ${{ (github.event_name == 'push' || inputs.dry_run == false) && '1' || '0' }}
         run: |
           chcp 65001
           npm --prefix apps/desktop run package:win
+
+      - name: Verify Windows code signatures
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
+        shell: pwsh
+        env:
+          STORYDEX_SETUP_NAME: ${{ steps.metadata.outputs.setup_name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $targets = @(
+            "apps/desktop/release/win-unpacked/Storydex.exe",
+            "apps/desktop/release/$env:STORYDEX_SETUP_NAME"
+          )
+          foreach ($target in $targets) {
+            if (-not (Test-Path -LiteralPath $target)) {
+              throw "Signed release target not found: $target"
+            }
+            $signature = Get-AuthenticodeSignature -LiteralPath $target
+            if ($signature.Status -ne "Valid") {
+              throw "Invalid Authenticode signature for $target: $($signature.Status) $($signature.StatusMessage)"
+            }
+            Write-Host "Verified signature: $target [$($signature.SignerCertificate.Subject)]"
+          }
+          $updateConfigPath = "apps/desktop/release/win-unpacked/resources/app-update.yml"
+          if (-not (Test-Path -LiteralPath $updateConfigPath)) {
+            throw "Packaged updater configuration not found: $updateConfigPath"
+          }
+          $updateConfig = Get-Content -Raw -LiteralPath $updateConfigPath
+          if ($updateConfig -notmatch "(?m)^publisherName:") {
+            throw "app-update.yml does not contain publisherName; downloaded installer signatures would not be verified."
+          }
 
       - name: Prepare release assets
         id: release

@@ -9,7 +9,6 @@ const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
 const productName = packageJson.build?.productName || "Storydex";
 const executableName = packageJson.build?.win?.executableName || productName;
 const version = packageJson.build?.extraMetadata?.version || packageJson.version || "1.0.0";
-const executablePath = path.join(desktopRoot, "release", "win-unpacked", `${executableName}.exe`);
 const iconPath = path.resolve(
   desktopRoot,
   "..",
@@ -25,7 +24,7 @@ function ensureFileExists(filePath, label) {
   }
 }
 
-function main() {
+function patchExecutable(executablePath) {
   ensureFileExists(executablePath, "packaged executable");
   ensureFileExists(iconPath, "desktop icon");
 
@@ -73,4 +72,12 @@ function main() {
   console.log(`[Storydex Desktop] Patched executable icon/version: ${executablePath}`);
 }
 
-main();
+function main() {
+  patchExecutable(path.join(desktopRoot, "release", "win-unpacked", `${executableName}.exe`));
+}
+
+if (require.main === module) {
+  main();
+}
+
+module.exports = { patchExecutable };

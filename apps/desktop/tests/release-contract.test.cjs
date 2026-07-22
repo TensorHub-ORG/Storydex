@@ -92,3 +92,21 @@ test("desktop updater retries transient module replacement and delegates install
   assert.ok(fs.existsSync(path.join(root, "electron", "update-helper.ps1")));
 });
 
+test("production Windows releases sign both the app and installer before publishing", () => {
+  const workflow = fs.readFileSync(path.join(projectRoot, ".github", "workflows", "release-windows.yml"), "utf8");
+  const afterPack = fs.readFileSync(path.join(root, "scripts", "after-pack.cjs"), "utf8");
+  const packageScript = String(pkg.scripts?.["package:win"] || "");
+  assert.equal(pkg.build.win.signAndEditExecutable, false);
+  assert.equal(pkg.build.afterPack, "scripts/after-pack.cjs");
+  assert.equal(pkg.build.win.signtoolOptions.sign, "scripts/windows-sign.cjs");
+  assert.deepEqual(pkg.build.win.signtoolOptions.signingHashAlgorithms, ["sha256"]);
+  assert.match(afterPack, /packager\.sign\(executablePath\)/);
+  assert.match(packageScript, /electron-builder --win nsis/);
+  assert.doesNotMatch(packageScript, /--prepackaged|signAndEditExecutable=false/);
+  assert.match(workflow, /WINDOWS_CSC_LINK/);
+  assert.match(workflow, /WINDOWS_CSC_KEY_PASSWORD/);
+  assert.match(workflow, /Get-AuthenticodeSignature/);
+  assert.match(workflow, /Status\s*-ne\s*\"Valid\"/);
+  assert.match(workflow, /publisherName/);
+});
+
