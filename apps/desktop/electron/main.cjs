@@ -3,6 +3,7 @@ const fs = require("fs");
 const path = require("path");
 const { pathToFileURL } = require("url");
 const { spawn } = require("child_process");
+const { launchUpdateHelper, readActiveInstallLock } = require("./update-installer.cjs");
 let resolveUpdateFeedUrl = (desktopPackage, overrideUrl) =>
   String(overrideUrl || desktopPackage?.storydexUpdateFeedUrl || desktopPackage?.build?.extraMetadata?.storydexUpdateFeedUrl || "").trim();
 try {
@@ -636,6 +637,7 @@ let downloadedInstallerPath = "";
 let updaterConfigured = false;
 let updaterRetryTimer = null;
 let updaterRetryIndex = 0;
+let updaterInstallPromise = null;
 const UPDATER_RETRY_DELAYS_MS = [1_000, 3_000, 7_000];
 let updaterState = {
   supported: false,
@@ -671,19 +673,7 @@ function updaterInstallLockPath() {
 }
 
 function readUpdaterInstallLock() {
-  try {
-    const lockPath = updaterInstallLockPath();
-    if (!fs.existsSync(lockPath)) return null;
-    const payload = JSON.parse(fs.readFileSync(lockPath, "utf8"));
-    const updatedAt = Date.parse(String(payload?.updatedAt || ""));
-    if (Number.isFinite(updatedAt) && Date.now() - updatedAt > 30 * 60 * 1000) {
-      fs.rmSync(lockPath, { force: true });
-      return null;
-    }
-    return payload && typeof payload === "object" ? payload : null;
-  } catch {
-    return null;
-  }
+  return readActiveInstallLock(updaterInstallLockPath());
 }
 
 async function showUpdateInstallInProgress() {
@@ -839,6 +829,16 @@ async function downloadDesktopUpdate() {
 }
 
 function installDesktopUpdate() {
+  if (updaterInstallPromise) {
+    return updaterInstallPromise;
+  }
+  updaterInstallPromise = performInstallDesktopUpdate().finally(() => {
+    if (!quitting) updaterInstallPromise = null;
+  });
+  return updaterInstallPromise;
+}
+
+async function performInstallDesktopUpdate() {
   const autoUpdater = updaterState.supported ? resolveAutoUpdater() : null;
   if (!autoUpdater || updaterState.status !== "downloaded") {
     return false;
@@ -849,24 +849,19 @@ function installDesktopUpdate() {
   }
   try {
     const runtimeRoot = updaterRuntimeRoot();
-    fs.mkdirSync(runtimeRoot, { recursive: true });
     const lockPath = updaterInstallLockPath();
     const logPath = path.join(runtimeRoot, "install.log");
-    fs.writeFileSync(lockPath, JSON.stringify({ state: "preparing", updatedAt: new Date().toISOString() }), "utf8");
     const helperScript = path.join(__dirname, "update-helper.ps1");
-    const helper = spawn(
-      "powershell.exe",
-      [
-        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", helperScript,
-        "-InstallerPath", downloadedInstallerPath,
-        "-AppPath", process.execPath,
-        "-LockPath", lockPath,
-        "-ParentPid", String(process.pid),
-        "-LogPath", logPath
-      ],
-      { detached: true, stdio: "ignore", windowsHide: false }
-    );
-    helper.unref();
+    const helper = await launchUpdateHelper({
+      helperScript,
+      installerPath: downloadedInstallerPath,
+      appPath: process.execPath,
+      lockPath,
+      parentPid: process.pid,
+      logPath
+    });
+    helper.unref?.();
+    setUpdaterState({ status: "installing", error: "" });
     quitting = true;
     stopBackendKernel();
     setTimeout(() => app.quit(), 150).unref?.();

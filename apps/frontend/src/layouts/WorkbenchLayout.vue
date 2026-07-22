@@ -38,6 +38,7 @@
     </div>
 
     <StatusBar />
+    <UpdateNotification />
 
     <SystemSettingsWindow :visible="uiStore.systemSettingsOpen" @close="uiStore.setSystemSettingsOpen(false)" />
   </div>
@@ -56,6 +57,7 @@ import StatusBar from "@/components/StatusBar.vue";
 import StoryStatePanel from "@/components/StoryStatePanel.vue";
 import SystemSettingsWindow from "@/components/SystemSettingsWindow.vue";
 import TopHeader from "@/components/TopHeader.vue";
+import UpdateNotification from "@/components/UpdateNotification.vue";
 import { useTheme } from "@/composables/useTheme";
 import { useUiStore } from "@/stores/ui";
 import { useWorkspaceStore } from "@/stores/workspace";
