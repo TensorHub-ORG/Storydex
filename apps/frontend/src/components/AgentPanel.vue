@@ -80,9 +80,9 @@
               <button
                 class="coomi-run-action"
                 type="button"
-                title="撤回并重新编辑"
-                aria-label="撤回并重新编辑"
-                :disabled="agentStore.isRollingBack"
+                title="编辑最新消息"
+                aria-label="编辑最新消息"
+                :disabled="agentStore.isRollingBack || agentStore.isReexecuting"
                 @click="handleRollbackEdit(run)"
               >
                 <span class="material-symbols-rounded">edit</span>
@@ -92,7 +92,7 @@
                 type="button"
                 title="删除本轮"
                 aria-label="删除本轮"
-                :disabled="agentStore.isRollingBack"
+                :disabled="agentStore.isRollingBack || agentStore.isReexecuting"
                 @click="handleRollbackDelete(run)"
               >
                 <span class="material-symbols-rounded">delete</span>
@@ -206,18 +206,6 @@
     </div>
 
     <footer ref="composerRef" class="coomi-composer">
-      <div
-        class="coomi-composer-resizer"
-        :class="{ dragging: composerResizeActive }"
-        role="separator"
-        aria-orientation="horizontal"
-        :aria-valuemin="COMPOSER_MIN_HEIGHT"
-        :aria-valuemax="composerHeightCeiling"
-        :aria-valuenow="effectiveComposerMaxHeight"
-        aria-label="拖动调整输入框高度"
-        title="拖动调整输入框高度"
-        @pointerdown="startComposerResize"
-      ></div>
       <div v-if="composerError" class="coomi-error">{{ composerError }}</div>
       <div v-if="collapsedHandlesVisible" class="coomi-collapsed-handles">
         <button
@@ -307,9 +295,10 @@
               <input
                 type="number"
                 min="1"
-                max="20"
                 step="1"
                 :value="agentStore.storyFragmentCount"
+                :disabled="isSingleFileChapterTemplate"
+                :title="isSingleFileChapterTemplate ? '单正文文件模板固定为 1 个文件' : '同一章节目录下生成的片段文件数量'"
                 @input="updateStoryFragmentCount"
               />
             </label>
@@ -348,6 +337,9 @@
             </small>
             <small v-else-if="storyChapterTemplateErrorMessage" class="coomi-story-template-hint error">
               {{ storyChapterTemplateErrorMessage }}
+            </small>
+            <small class="coomi-story-template-hint">
+              片段字数由 Storydex 内置统计精确验收：忽略空白后，每个 Unicode 字符计 1 字。
             </small>
           </div>
         </div>
@@ -529,6 +521,93 @@
           <small>{{ command.description }}</small>
         </button>
       </div>
+      <section v-if="agentStore.editingTraceId" class="coomi-edit-session" aria-live="polite">
+        <div class="coomi-edit-session-copy">
+          <strong>正在编辑最新一条用户消息</strong>
+          <span>原消息、回答和 trace 会保留到“重新执行”请求被后端接受。</span>
+          <span v-if="agentStore.editingHasFileChanges" class="coomi-edit-file-warning">
+            重新执行只替换对话，不自动撤销文件变更。
+          </span>
+        </div>
+        <div class="coomi-edit-session-actions">
+          <button type="button" class="coomi-secondary-action" :disabled="agentStore.isReexecuting" @click="handleCancelEdit">
+            取消编辑
+          </button>
+          <button
+            type="button"
+            class="coomi-primary-action"
+            :disabled="agentStore.isReexecuting || !agentStore.promptInput.trim()"
+            @click="handleReexecuteEdit"
+          >
+            {{ agentStore.isReexecuting ? "正在重新执行" : "重新执行" }}
+          </button>
+        </div>
+      </section>
+      <section
+        v-if="agentStore.followupPaused || visibleFollowups.length"
+        class="coomi-followup-mailbox"
+        aria-label="待发送信息"
+      >
+        <header class="coomi-followup-head">
+          <div>
+            <strong>待发送信息</strong>
+            <span>{{ visibleFollowups.length }} 条</span>
+          </div>
+          <button
+            v-if="agentStore.followupPaused"
+            type="button"
+            class="coomi-followup-resume"
+            :disabled="agentStore.isReexecuting"
+            @click="handleResumeFollowups"
+          >
+            恢复发送
+          </button>
+        </header>
+        <p v-if="agentStore.followupPaused" class="coomi-followup-paused">
+          队列已暂停：{{ followupPauseLabel(agentStore.followupPauseReason) }}
+        </p>
+        <article
+          v-for="message in visibleFollowups"
+          :key="message.messageId"
+          class="coomi-followup-item"
+          :class="[`mode-${message.mode}`, `status-${message.status}`]"
+        >
+          <div class="coomi-followup-meta">
+            <span>{{ message.mode === "steer" ? "引导" : "排队" }}</span>
+            <span>{{ followupStatusLabel(message) }}</span>
+          </div>
+          <textarea
+            v-if="editingFollowupId === message.messageId"
+            v-model="editingFollowupDraft"
+            class="coomi-followup-editor"
+            rows="2"
+            @keydown.stop
+          ></textarea>
+          <p v-else class="coomi-followup-content">{{ message.content }}</p>
+          <div class="coomi-followup-actions">
+            <template v-if="editingFollowupId === message.messageId">
+              <button type="button" @click="cancelFollowupEdit">取消</button>
+              <button type="button" :disabled="!editingFollowupDraft.trim()" @click="saveFollowupEdit(message)">保存</button>
+            </template>
+            <template v-else>
+              <button v-if="canEditFollowup(message)" type="button" @click="beginFollowupEdit(message)">编辑</button>
+              <button
+                v-if="canSteerFollowup(message)"
+                type="button"
+                class="steer"
+                :disabled="agentStore.isReexecuting || !agentStore.isRunning || !agentStore.currentTraceId"
+                :title="agentStore.isRunning ? '将这条排队信息改为立即引导' : '当前没有运行中的执行'"
+                @click="handleSteerFollowup(message)"
+              >
+                立即引导执行
+              </button>
+              <button v-if="canEditFollowup(message)" type="button" class="danger" @click="handleDeleteFollowup(message)">
+                删除
+              </button>
+            </template>
+          </div>
+        </article>
+      </section>
       <div v-if="executionFloatVisible && !executionFloatCollapsed" class="coomi-execution-float-slot">
         <AgentExecutionFloatBar @collapse="collapseExecutionFloat" />
       </div>
@@ -538,8 +617,8 @@
           v-model="agentStore.promptInput"
           class="coomi-input"
           :style="{ maxHeight: `${effectiveComposerMaxHeight}px` }"
-          :disabled="agentStore.isRunning || Boolean(agentStore.pendingCommitPrompt)"
-          placeholder="输入信息（Enter发送，Shift+Enter换行，输入“/”查看可用指令）"
+          :disabled="agentStore.isReexecuting"
+          :placeholder="composerPlaceholder"
           rows="1"
           @keydown="handleComposerKeydown"
           @input="handleComposerInput"
@@ -547,13 +626,23 @@
         <button
           class="coomi-send"
           type="button"
-          :class="{ stop: agentStore.isRunning }"
-          :disabled="Boolean(agentStore.pendingCommitPrompt) || (!agentStore.isRunning && !agentStore.promptInput.trim())"
-          :title="agentStore.isRunning ? '停止执行' : '发送'"
-          :aria-label="agentStore.isRunning ? '停止执行' : '发送消息'"
+          :disabled="agentStore.isReexecuting || Boolean(agentStore.editingTraceId) || !agentStore.promptInput.trim()"
+          :title="agentStore.isRunning ? '加入待发送队列' : '发送'"
+          :aria-label="agentStore.isRunning ? '加入待发送队列' : '发送消息'"
           @click="handleSubmitOrStop"
         >
-          <span class="material-symbols-rounded">{{ agentStore.isRunning ? "stop" : "arrow_upward" }}</span>
+          <span class="material-symbols-rounded">arrow_upward</span>
+        </button>
+        <button
+          v-if="agentStore.isRunning"
+          class="coomi-stop-run"
+          type="button"
+          :disabled="agentStore.isStopping"
+          title="停止执行"
+          aria-label="停止执行"
+          @click="handleStopRun"
+        >
+          <span class="coomi-stop-glyph" aria-hidden="true"></span>
         </button>
       </div>
     </footer>
@@ -602,6 +691,7 @@ import {
 } from "@/utils/workspaceLinks";
 import type {
   AgentExecutionRun,
+  AgentFollowupMessage,
   AgentPendingApproval,
   CoomiWaterfallItem,
   CoomiWaterfallItemStatus,
@@ -645,6 +735,8 @@ const dockRef = ref<HTMLElement | null>(null);
 const streamRef = ref<HTMLElement | null>(null);
 const composerRef = ref<HTMLElement | null>(null);
 const inputRef = ref<HTMLTextAreaElement | null>(null);
+const editingFollowupId = ref("");
+const editingFollowupDraft = ref("");
 const commandMenuOpen = ref(false);
 const permissionMenuOpen = ref(false);
 const reasoningMenuOpen = ref(false);
@@ -667,13 +759,7 @@ let runtimeTimer: number | null = null;
 const SCROLL_BOTTOM_THRESHOLD = 48;
 const COMPOSER_MIN_HEIGHT = 34;
 const DEFAULT_COMPOSER_MAX_HEIGHT = 180;
-const COMPOSER_MAX_HEIGHT_STORAGE_KEY = "storydex.composerMaxHeight";
-const composerMaxHeight = ref(DEFAULT_COMPOSER_MAX_HEIGHT);
-const composerResizeActive = ref(false);
 const composerHeightCeiling = ref(Number.POSITIVE_INFINITY);
-let composerResizePointerId: number | null = null;
-let composerResizeStartY = 0;
-let composerResizeStartHeight = DEFAULT_COMPOSER_MAX_HEIGHT;
 const executionFloatSignature = computed(() => {
   if (workspaceStore.launchScreenVisible) {
     return "";
@@ -708,6 +794,18 @@ const composerError = computed(() => {
     return "";
   }
   return message;
+});
+const visibleFollowups = computed(() =>
+  agentStore.followups.filter((message) => message.status !== "sent" && message.status !== "cancelled")
+);
+const composerPlaceholder = computed(() => {
+  if (agentStore.editingTraceId) {
+    return "修改最新消息后选择“取消编辑”或“重新执行”";
+  }
+  if (agentStore.isRunning) {
+    return "继续输入：发送将加入待执行队列";
+  }
+  return "输入信息（Enter发送，Shift+Enter换行，输入“/”查看可用指令）";
 });
 const slashCommands = [
   { value: "/plan", description: "进入计划模式" },
@@ -813,6 +911,10 @@ const storyOptionsLabel = computed(
 const selectedChapterTemplate = computed(() =>
   agentStore.storyChapterTemplates.find((template) => template.id === agentStore.storyChapterTemplateId) || null
 );
+const isSingleFileChapterTemplate = computed(
+  () => agentStore.storyChapterTemplateId === "single_file_chapter_directory"
+    || selectedChapterTemplate.value?.contentMode === "single_file"
+);
 const selectedChapterTemplateDescription = computed(() => {
   const template = selectedChapterTemplate.value;
   if (!template) {
@@ -820,7 +922,8 @@ const selectedChapterTemplateDescription = computed(() => {
   }
   const parts = [
     template.description,
-    template.segmentNaming ? `片段：${template.segmentNaming}` : ""
+    template.segmentNaming ? `文件：${template.segmentNaming}` : "",
+    template.contentMode === "single_file" ? "片段数量固定为 1" : "片段数量不受每章 3 段限制"
   ].filter(Boolean);
   return parts.join(" · ");
 });
@@ -928,13 +1031,13 @@ function updateComposerHeightCeiling(): void {
     : Number.POSITIVE_INFINITY;
 }
 const effectiveComposerMaxHeight = computed(() =>
-  clamp(composerMaxHeight.value, COMPOSER_MIN_HEIGHT, composerHeightCeiling.value)
+  clamp(DEFAULT_COMPOSER_MAX_HEIGHT, COMPOSER_MIN_HEIGHT, composerHeightCeiling.value)
 );
 
 onMounted(async () => {
   window.addEventListener("pointerdown", handleDocumentPointerDown);
   window.addEventListener("resize", handleComposerPanelResize);
-  restoreComposerMaxHeight();
+  updateComposerHeightCeiling();
   await nextTick();
   resizeComposer();
   await agentStore.refreshCoomiStatus();
@@ -942,13 +1045,13 @@ onMounted(async () => {
   await agentStore.loadSessions();
   if (agentStore.currentSessionId) {
     await agentStore.loadHistory();
+    await agentStore.loadFollowups();
   }
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener("pointerdown", handleDocumentPointerDown);
   window.removeEventListener("resize", handleComposerPanelResize);
-  finishComposerResize();
   stopRuntimeTimer();
 });
 
@@ -1072,7 +1175,8 @@ watch(
   () => [
     workspaceStore.currentProject?.workspaceRoot || "",
     workspaceStore.storySettings.storyFragmentCount,
-    workspaceStore.storySettings.storyFragmentWordCount
+    workspaceStore.storySettings.storyFragmentWordCount,
+    workspaceStore.storySettings.storyChapterTemplateId
   ],
   () => {
     syncStoryGenerationOptionsFromProjectSettings();
@@ -1081,16 +1185,16 @@ watch(
 );
 
 async function handleSubmitOrStop(): Promise<void> {
-  if (agentStore.isRunning) {
-    agentStore.stopActiveRun();
-    return;
-  }
-  if (agentStore.pendingCommitPrompt) {
+  if (agentStore.editingTraceId || agentStore.isReexecuting) {
     return;
   }
   await agentStore.runPrompt();
   await nextTick();
   resizeComposer();
+}
+
+async function handleStopRun(): Promise<void> {
+  await agentStore.stopActiveRun();
 }
 
 async function handleNoSnapshotConfirm(): Promise<void> {
@@ -1102,6 +1206,13 @@ function handleNoSnapshotCancel(): void {
 }
 
 function handleComposerKeydown(event: KeyboardEvent): void {
+  if (agentStore.editingTraceId) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      handleCancelEdit();
+    }
+    return;
+  }
   if (agentStore.pendingApproval) {
     if (event.key === "Escape") {
       event.preventDefault();
@@ -1203,7 +1314,9 @@ function updateStoryFragmentWordCount(event: Event): void {
 
 function updateStoryChapterTemplate(event: Event): void {
   const target = event.target as HTMLSelectElement | null;
-  agentStore.setStoryGenerationOptions({ chapterTemplateId: target?.value || "default_chapter_directory" });
+  void persistStoryGenerationOptions({
+    chapterTemplateId: target?.value || "default_chapter_directory"
+  });
 }
 
 function syncStoryGenerationOptionsFromProjectSettings(): void {
@@ -1213,11 +1326,15 @@ function syncStoryGenerationOptionsFromProjectSettings(): void {
   agentStore.setStoryGenerationOptions({
     fragmentCount: workspaceStore.storySettings.storyFragmentCount,
     fragmentWordCount: workspaceStore.storySettings.storyFragmentWordCount,
-    chapterTemplateId: agentStore.storyChapterTemplateId || "default_chapter_directory"
+    chapterTemplateId: workspaceStore.storySettings.storyChapterTemplateId || "default_chapter_directory"
   });
 }
 
-async function persistStoryGenerationOptions(options: { fragmentCount?: number; fragmentWordCount?: number }): Promise<void> {
+async function persistStoryGenerationOptions(options: {
+  fragmentCount?: number;
+  fragmentWordCount?: number;
+  chapterTemplateId?: string;
+}): Promise<void> {
   agentStore.setStoryGenerationOptions(options);
   if (workspaceStore.launchScreenVisible || !workspaceStore.currentProject) {
     return;
@@ -1225,7 +1342,8 @@ async function persistStoryGenerationOptions(options: { fragmentCount?: number; 
   try {
     await workspaceStore.updateStorySettings({
       storyFragmentCount: agentStore.storyFragmentCount,
-      storyFragmentWordCount: agentStore.storyFragmentWordCount
+      storyFragmentWordCount: agentStore.storyFragmentWordCount,
+      storyChapterTemplateId: agentStore.storyChapterTemplateId
     });
   } catch (error: unknown) {
     console.warn("Failed to persist Storydex story generation options.", error);
@@ -1305,8 +1423,11 @@ function canRollbackRun(run: AgentExecutionRun): boolean {
     run.traceId
     && run.traceId === latestConversationTraceId.value
     && run.status !== "running"
+    && run.status !== "superseded"
     && !agentStore.isRunning
     && !agentStore.isRollingBack
+    && !agentStore.isReexecuting
+    && !agentStore.editingTraceId
   );
 }
 
@@ -1314,8 +1435,7 @@ async function handleRollbackEdit(run: AgentExecutionRun): Promise<void> {
   if (!canRollbackRun(run)) {
     return;
   }
-  const rolledBack = await agentStore.rollbackLatestRun({ refillComposer: true });
-  if (!rolledBack) {
+  if (!agentStore.beginEditLatestRun(run)) {
     return;
   }
   await nextTick();
@@ -1323,6 +1443,23 @@ async function handleRollbackEdit(run: AgentExecutionRun): Promise<void> {
   const cursor = inputRef.value?.value.length || 0;
   inputRef.value?.setSelectionRange(cursor, cursor);
   resizeComposer();
+}
+
+function handleCancelEdit(): void {
+  agentStore.cancelEditLatestRun();
+  void nextTick(() => {
+    inputRef.value?.focus();
+    resizeComposer();
+  });
+}
+
+async function handleReexecuteEdit(): Promise<void> {
+  const accepted = await agentStore.reexecuteEditedLatestRun();
+  await nextTick();
+  resizeComposer();
+  if (!accepted) {
+    inputRef.value?.focus();
+  }
 }
 
 async function handleRollbackDelete(run: AgentExecutionRun): Promise<void> {
@@ -1333,6 +1470,92 @@ async function handleRollbackDelete(run: AgentExecutionRun): Promise<void> {
     return;
   }
   await agentStore.rollbackLatestRun({ refillComposer: false });
+}
+
+function beginFollowupEdit(message: AgentFollowupMessage): void {
+  if (!canEditFollowup(message)) {
+    return;
+  }
+  editingFollowupId.value = message.messageId;
+  editingFollowupDraft.value = message.content;
+}
+
+function cancelFollowupEdit(): void {
+  editingFollowupId.value = "";
+  editingFollowupDraft.value = "";
+}
+
+async function saveFollowupEdit(message: AgentFollowupMessage): Promise<void> {
+  const content = editingFollowupDraft.value.trim();
+  if (!content || editingFollowupId.value !== message.messageId) {
+    return;
+  }
+  if (await agentStore.editFollowup(message.messageId, content)) {
+    cancelFollowupEdit();
+  }
+}
+
+async function handleDeleteFollowup(message: AgentFollowupMessage): Promise<void> {
+  if (!canEditFollowup(message) || !window.confirm("删除这条待发送信息？")) {
+    return;
+  }
+  if (await agentStore.deleteFollowup(message.messageId)) {
+    if (editingFollowupId.value === message.messageId) {
+      cancelFollowupEdit();
+    }
+  }
+}
+
+async function handleSteerFollowup(message: AgentFollowupMessage): Promise<void> {
+  if (
+    !canSteerFollowup(message) ||
+    !agentStore.isRunning ||
+    !agentStore.currentTraceId ||
+    agentStore.isReexecuting
+  ) {
+    return;
+  }
+  await agentStore.steerFollowup(message.messageId);
+}
+
+async function handleResumeFollowups(): Promise<void> {
+  await agentStore.resumeFollowups();
+}
+
+function canEditFollowup(message: AgentFollowupMessage): boolean {
+  return message.status === "pending" || message.status === "steering";
+}
+
+function canSteerFollowup(message: AgentFollowupMessage): boolean {
+  return message.mode === "queued" && message.status === "pending";
+}
+
+function followupStatusLabel(message: AgentFollowupMessage): string {
+  if (message.statusDetail) {
+    return message.statusDetail;
+  }
+  return {
+    pending: "等待当前轮完成",
+    steering: "等待安全中断点",
+    dispatching: "正在启动下一轮",
+    sent: "已发送",
+    cancelled: "已删除",
+    failed: "发送失败"
+  }[message.status] || message.status;
+}
+
+function followupPauseLabel(reason: string): string {
+  return {
+    manual_stop: "已手动停止执行",
+    execution_stopped: "当前执行已停止",
+    permission_request: "等待权限确认",
+    snapshot_confirmation: "等待恢复点确认",
+    git_commit_prompt: "等待本地版本处理",
+    needs_user_input: "等待补充信息",
+    execution_error: "当前执行发生错误",
+    preflight_error: "执行预处理失败",
+    client_disconnected: "连接已中断"
+  }[reason] || reason || "等待用户恢复";
 }
 
 async function handleConfigSaved(): Promise<void> {
@@ -1370,68 +1593,6 @@ function resizeComposer(): void {
   }
   input.style.height = "auto";
   input.style.height = `${Math.min(effectiveComposerMaxHeight.value, Math.max(COMPOSER_MIN_HEIGHT, input.scrollHeight))}px`;
-}
-
-function restoreComposerMaxHeight(): void {
-  updateComposerHeightCeiling();
-  try {
-    const storedHeight = Number(window.localStorage.getItem(COMPOSER_MAX_HEIGHT_STORAGE_KEY));
-    if (Number.isFinite(storedHeight) && storedHeight > 0) {
-      composerMaxHeight.value = clamp(storedHeight, COMPOSER_MIN_HEIGHT, composerHeightCeiling.value);
-    }
-  } catch {
-    // localStorage may be unavailable in restricted browser contexts.
-  }
-}
-
-function persistComposerMaxHeight(): void {
-  try {
-    window.localStorage.setItem(COMPOSER_MAX_HEIGHT_STORAGE_KEY, String(composerMaxHeight.value));
-  } catch {
-    // Keep the current-session adjustment when persistence is unavailable.
-  }
-}
-
-function startComposerResize(event: PointerEvent): void {
-  if (event.button !== 0) {
-    return;
-  }
-  event.preventDefault();
-  updateComposerHeightCeiling();
-  composerResizePointerId = event.pointerId;
-  composerResizeStartY = event.clientY;
-  composerResizeStartHeight = effectiveComposerMaxHeight.value;
-  composerResizeActive.value = true;
-  (event.currentTarget as HTMLElement | null)?.setPointerCapture?.(event.pointerId);
-  document.body.classList.add("is-resizing-composer");
-  window.addEventListener("pointermove", handleComposerResize);
-  window.addEventListener("pointerup", finishComposerResize);
-  window.addEventListener("pointercancel", finishComposerResize);
-}
-
-function handleComposerResize(event: PointerEvent): void {
-  if (composerResizePointerId === null || event.pointerId !== composerResizePointerId) {
-    return;
-  }
-  composerMaxHeight.value = clamp(
-    composerResizeStartHeight + composerResizeStartY - event.clientY,
-    COMPOSER_MIN_HEIGHT,
-    composerHeightCeiling.value
-  );
-  persistComposerMaxHeight();
-  resizeComposer();
-}
-
-function finishComposerResize(event?: PointerEvent): void {
-  if (event && composerResizePointerId !== null && event.pointerId !== composerResizePointerId) {
-    return;
-  }
-  composerResizePointerId = null;
-  composerResizeActive.value = false;
-  document.body.classList.remove("is-resizing-composer");
-  window.removeEventListener("pointermove", handleComposerResize);
-  window.removeEventListener("pointerup", finishComposerResize);
-  window.removeEventListener("pointercancel", finishComposerResize);
 }
 
 function handleComposerPanelResize(): void {
@@ -1809,6 +1970,7 @@ function formatStatus(status: string, errorMessage: string): string {
   if (errorMessage) return "错误";
   if (status === "running") return "运行中";
   if (status === "completed") return "已完成";
+  if (status === "superseded") return "已被替换";
   if (status === "cancelled" || status === "stopped") return "已停止";
   if (status === "failed") return "错误";
   return status || "空闲";
@@ -1903,6 +2065,7 @@ defineExpose({
     reasoningLabel,
     storyOptionsLabel,
     selectedChapterTemplate,
+    isSingleFileChapterTemplate,
     selectedChapterTemplateDescription,
     storyChapterTemplateErrorMessage,
     contextRatio,
@@ -1911,6 +2074,8 @@ defineExpose({
     contextTooltip,
     filteredCommands,
     commandMenuVisible,
+    visibleFollowups,
+    composerPlaceholder,
     approvalQueue,
     activeApproval,
     activeApprovalDraft,
@@ -1935,10 +2100,8 @@ defineExpose({
     commitMessage,
     executionFloatCollapsed,
     promptDockCollapsed,
-    composerMaxHeight,
     composerHeightCeiling,
     effectiveComposerMaxHeight,
-    composerResizeActive,
     buildPendingTargetPathOperationItems,
     buildLiveOperationItemsForPending,
     attachPendingWriteContext,
@@ -1946,6 +2109,7 @@ defineExpose({
     handleApproveOperation,
     handleRejectOperation,
     handleSubmitOrStop,
+    handleStopRun,
     handleNoSnapshotConfirm,
     handleNoSnapshotCancel,
     handleComposerKeydown,
@@ -1970,15 +2134,23 @@ defineExpose({
     canRollbackRun,
     handleRollbackEdit,
     handleRollbackDelete,
+    handleCancelEdit,
+    handleReexecuteEdit,
+    beginFollowupEdit,
+    cancelFollowupEdit,
+    saveFollowupEdit,
+    handleDeleteFollowup,
+    handleSteerFollowup,
+    handleResumeFollowups,
+    canEditFollowup,
+    canSteerFollowup,
+    followupStatusLabel,
+    followupPauseLabel,
     handleConfigSaved,
     insertCommand,
     selectCommand,
     handleComposerInput,
     resizeComposer,
-    restoreComposerMaxHeight,
-    startComposerResize,
-    handleComposerResize,
-    finishComposerResize,
     isApprovalDraftComplete,
     goToApproval,
     selectApprovalOption,
@@ -2082,7 +2254,8 @@ defineExpose({
 }
 
 .coomi-icon-btn,
-.coomi-send {
+.coomi-send,
+.coomi-stop-run {
   border: 0;
   background: transparent;
   color: inherit;
@@ -2716,46 +2889,6 @@ defineExpose({
   border-top: 1px solid var(--border-subtle);
 }
 
-.coomi-composer-resizer {
-  position: absolute;
-  z-index: 7;
-  top: -5px;
-  left: 12px;
-  right: 12px;
-  height: 10px;
-  cursor: ns-resize;
-  touch-action: none;
-}
-
-.coomi-composer-resizer::before {
-  content: "";
-  position: absolute;
-  top: 4px;
-  left: 50%;
-  width: 42px;
-  height: 2px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--border-strong) 78%, transparent);
-  opacity: 0;
-  transform: translateX(-50%);
-  transition:
-    opacity 0.16s ease,
-    background-color 0.16s ease,
-    width 0.16s ease;
-}
-
-.coomi-composer-resizer:hover::before,
-.coomi-composer-resizer:focus-visible::before,
-.coomi-composer-resizer.dragging::before {
-  width: 54px;
-  background: color-mix(in srgb, var(--accent-strong) 72%, var(--border-strong));
-  opacity: 1;
-}
-
-.coomi-composer-resizer:focus-visible {
-  outline: none;
-}
-
 .coomi-error {
   color: var(--danger);
   font-size: 12px;
@@ -2804,6 +2937,7 @@ defineExpose({
 
 .coomi-composer-status {
   position: relative;
+  container: coomi-composer-status / inline-size;
   display: flex;
   align-items: center;
   gap: 7px;
@@ -2890,6 +3024,7 @@ defineExpose({
 }
 
 .coomi-story-control {
+  position: static;
   flex: 0 0 auto;
 }
 
@@ -2921,8 +3056,18 @@ defineExpose({
 }
 
 .coomi-story-popover {
-  width: 238px;
+  right: 8px;
+  left: auto;
+  width: min(260px, calc(100% - 16px));
+  max-width: calc(100% - 16px);
+  max-height: min(360px, calc(100vh - 120px));
+  box-sizing: border-box;
   gap: 8px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: color-mix(in srgb, var(--text-muted) 45%, transparent) transparent;
+  scrollbar-width: thin;
 }
 
 .coomi-story-field {
@@ -2951,6 +3096,7 @@ defineExpose({
 
 .coomi-story-field select {
   cursor: pointer;
+  text-overflow: ellipsis;
 }
 
 .coomi-story-field input:focus,
@@ -2961,6 +3107,7 @@ defineExpose({
 .coomi-story-template-hint {
   display: block;
   margin: -2px 0 0 70px;
+  overflow-wrap: anywhere;
   color: var(--text-muted);
   font-size: 11px;
   line-height: 1.35;
@@ -2968,6 +3115,24 @@ defineExpose({
 
 .coomi-story-template-hint.error {
   color: var(--danger);
+}
+
+@container coomi-composer-status (max-width: 250px) {
+  .coomi-story-popover {
+    right: 6px;
+    width: calc(100% - 12px);
+    max-width: calc(100% - 12px);
+    padding: 7px;
+  }
+
+  .coomi-story-field {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+
+  .coomi-story-template-hint {
+    margin-left: 0;
+  }
 }
 
 .coomi-choice-card {
@@ -3423,6 +3588,163 @@ defineExpose({
   cursor: default;
 }
 
+.coomi-edit-session,
+.coomi-followup-mailbox {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg-input) 94%, transparent);
+}
+
+.coomi-edit-session {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--border-subtle));
+}
+
+.coomi-edit-session-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.coomi-edit-session-copy strong {
+  color: var(--text-main);
+  font-size: 12px;
+}
+
+.coomi-edit-file-warning {
+  color: var(--warning);
+}
+
+.coomi-edit-session-actions,
+.coomi-followup-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.coomi-secondary-action,
+.coomi-primary-action,
+.coomi-followup-resume,
+.coomi-followup-actions button {
+  min-height: 27px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-soft);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.coomi-primary-action,
+.coomi-followup-resume {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.coomi-followup-actions button.danger {
+  color: var(--danger);
+}
+
+.coomi-followup-actions button.steer {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--border-subtle));
+  color: var(--accent);
+}
+
+.coomi-followup-actions button.steer:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.coomi-secondary-action:disabled,
+.coomi-primary-action:disabled,
+.coomi-followup-resume:disabled,
+.coomi-followup-actions button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.coomi-followup-mailbox {
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.coomi-followup-head,
+.coomi-followup-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.coomi-followup-head > div {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.coomi-followup-head strong {
+  color: var(--text-main);
+  font-size: 12px;
+}
+
+.coomi-followup-head span,
+.coomi-followup-meta,
+.coomi-followup-paused {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.coomi-followup-paused {
+  margin: 0;
+  color: var(--warning);
+}
+
+.coomi-followup-item {
+  display: grid;
+  gap: 5px;
+  padding-top: 7px;
+  border-top: 1px solid var(--border-ghost);
+}
+
+.coomi-followup-item.mode-steer .coomi-followup-meta span:first-child {
+  color: var(--accent);
+}
+
+.coomi-followup-content {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.coomi-followup-editor {
+  width: 100%;
+  min-height: 54px;
+  resize: vertical;
+  padding: 7px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  outline: none;
+  background: var(--bg-card-muted);
+  color: var(--text-main);
+  font: inherit;
+  font-size: 12px;
+}
+
 .coomi-input-shell {
   position: relative;
   display: flex;
@@ -3526,6 +3848,41 @@ defineExpose({
     box-shadow 0.18s ease;
   isolation: isolate;
   overflow: visible;
+}
+
+.coomi-stop-run {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.coomi-stop-run {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+.coomi-stop-run:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 16%, transparent);
+}
+
+.coomi-stop-glyph {
+  display: block;
+  width: 9px;
+  height: 9px;
+  border-radius: 1px;
+  background: currentColor;
+  box-shadow: 0 0 0 0.5px currentColor;
+}
+
+.coomi-stop-run:disabled {
+  cursor: default;
+  opacity: 0.45;
 }
 
 .coomi-send:hover:not(:disabled) {

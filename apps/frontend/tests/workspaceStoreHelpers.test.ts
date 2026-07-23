@@ -11,22 +11,24 @@ describe("workspace store deterministic helpers", () => {
     expect(u.storyChapterProgressRelativePath("custom")).toBe("custom/memory/chapter-progress.json");
     const payload = u.normalizeStorySettingsPayload({
       segmentExtension: "txt", maxSegmentsPerChapter: 1000, storyFragmentCount: 0, storyFragmentWordCount: 99999,
+      storyChapterTemplateId: "single_file_chapter_directory",
       autoUpdateVariables: "true" as never, autoUpdateWiki: "off" as never, agentCommitPromptEnabled: "0" as never,
       autoNameChapterDirectories: "auto" as never, contextConcisionMinCalls: 7, contextConcisionMaxCalls: 2,
       contextConcisionMaxInputTokens: 999999, chapterCompletion: { "chapters/a": { completed: true } as never }
     });
-    expect(payload).toMatchObject({ segmentExtension: ".txt", maxSegmentsPerChapter: 99, storyFragmentCount: 1, storyFragmentWordCount: 20000, autoUpdateVariables: true, autoUpdateWiki: false, chapterDirectoryNamingMode: "auto", contextConcisionMaxCalls: 7 });
+    expect(payload).toMatchObject({ segmentExtension: ".txt", maxSegmentsPerChapter: 99, storyFragmentCount: 1, storyFragmentWordCount: 20000, storyChapterTemplateId: "single_file_chapter_directory", autoUpdateVariables: true, autoUpdateWiki: false, chapterDirectoryNamingMode: "auto", contextConcisionMaxCalls: 7 });
     const fallback = { ...u.defaultStoryProjectSettings(), storyFragmentCount: 4, autoUpdateWiki: true };
-    const response = u.normalizeStorySettingsResponse({ storySegmentFormat: "txt", max_segments_per_chapter: 5, story_fragment_word_count: 1200, auto_name_chapter_title: "manual", updatedAt: " now " } as never, { source: "api", fallbackPath: "fallback.json", fallbackSettings: fallback, currentSettings: null });
-    expect(response).toMatchObject({ segmentExtension: ".txt", maxSegmentsPerChapter: 5, storyFragmentCount: 4, storyFragmentWordCount: 1200, autoUpdateWiki: true, autoNameChapterDirectories: false, updatedAt: "now" });
-    const fromFile = u.normalizeStorySettingsFromProjectFile({ story_settings: JSON.stringify({ storySegmentFormat: "txt", storyFragmentCount: 3, auto_update_variables: "enabled", chapterNamingMode: "auto" }) }, "settings.json", { chapters: { "chapters/one": true }, updated_at: "date" });
-    expect(fromFile).toMatchObject({ segmentExtension: ".txt", storyFragmentCount: 3, autoUpdateVariables: true, autoNameChapterDirectories: true, source: "project_file" });
+    const response = u.normalizeStorySettingsResponse({ storySegmentFormat: "txt", max_segments_per_chapter: 5, story_fragment_word_count: 1200, story_chapter_template_id: "single_file_chapter_directory", auto_name_chapter_title: "manual", updatedAt: " now " } as never, { source: "api", fallbackPath: "fallback.json", fallbackSettings: fallback, currentSettings: null });
+    expect(response).toMatchObject({ segmentExtension: ".txt", maxSegmentsPerChapter: 5, storyFragmentCount: 4, storyFragmentWordCount: 1200, storyChapterTemplateId: "single_file_chapter_directory", autoUpdateWiki: true, autoNameChapterDirectories: false, updatedAt: "now" });
+    const fromFile = u.normalizeStorySettingsFromProjectFile({ story_settings: JSON.stringify({ storySegmentFormat: "txt", storyFragmentCount: 3, storyChapterTemplateId: "single_file_chapter_directory", auto_update_variables: "enabled", chapterNamingMode: "auto" }) }, "settings.json", { chapters: { "chapters/one": true }, updated_at: "date" });
+    expect(fromFile).toMatchObject({ segmentExtension: ".txt", storyFragmentCount: 3, storyChapterTemplateId: "single_file_chapter_directory", autoUpdateVariables: true, autoNameChapterDirectories: true, source: "project_file" });
   });
 
   it("covers primitive setting and JSON normalization branches", () => {
     for (const value of ["txt", ".txt", "md", null]) expect([".txt", ".md"]).toContain(u.normalizeStorySegmentExtension(value));
     expect(u.normalizeStoryMaxSegmentsPerChapter("bad")).toBe(3); expect(u.normalizeStoryMaxSegmentsPerChapter(-1)).toBe(1);
-    expect(u.normalizeStoryFragmentCount("bad")).toBe(1); expect(u.normalizeStoryFragmentCount(99)).toBe(20);
+    expect(u.normalizeStoryFragmentCount("bad")).toBe(1); expect(u.normalizeStoryFragmentCount(99)).toBe(99);
+    expect(u.normalizeStoryChapterTemplateId(" ")).toBe("default_chapter_directory");
     expect(u.normalizeStoryFragmentWordCount("bad")).toBe(2000); expect(u.normalizeStoryFragmentWordCount(1)).toBe(100);
     expect(u.normalizeStoryCallCount("bad", 2)).toBe(2); expect(u.normalizeStoryCallCount(99, 2)).toBe(8);
     expect(u.normalizeStoryContextTokens("bad", 5000)).toBe(5000); expect(u.normalizeStoryContextTokens(1, 5000)).toBe(4000);
@@ -35,7 +37,7 @@ describe("workspace store deterministic helpers", () => {
     expect(u.normalizeChapterCompletionMap(null)).toEqual({});
     expect(u.normalizeChapterCompletionMap({ "": true, "chapters/a": true, "chapters/b": { completed: false } })).toEqual({ "chapters/a": true, "chapters/b": false });
     expect(u.parseJsonObject('{"a":1}')).toEqual({ a: 1 }); expect(u.parseJsonObject("bad")).toEqual({}); expect(u.parseJsonObject([])).toEqual({});
-    expect(u.hasExtendedStorySettingsPayload({} as never)).toBe(false); expect(u.hasExtendedStorySettingsPayload({ story_fragment_count: 1 } as never)).toBe(true);
+    expect(u.hasExtendedStorySettingsPayload({} as never)).toBe(false); expect(u.hasExtendedStorySettingsPayload({ story_fragment_count: 1 } as never)).toBe(true); expect(u.hasExtendedStorySettingsPayload({ story_chapter_template_id: "single" } as never)).toBe(true);
   });
 
   it("walks trees, diagnostics and story segment candidates", () => {

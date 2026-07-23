@@ -28,6 +28,11 @@ from services.preset_schema import (
     write_preset_sidecar as _write_preset_sidecar_impl,
 )
 from services.storydex_manifest import ensure_manifest as ensure_storydex_manifest
+from services.story_word_count_service import (
+    STORY_WORD_COUNT_ALGORITHM,
+    count_story_file_words,
+    count_story_text_words,
+)
 
 _TEXT_SEGMENT_SUFFIXES = {".md", ".txt"}
 _INVALID_FILE_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
@@ -49,6 +54,11 @@ _PRESET_LIBRARY_DIRS = {"library", "imported", "blocked"}
 _TERM_RE = re.compile(r"[A-Za-z0-9_]{3,}|[\u4e00-\u9fff]{2,}")
 _REWRITE_CHAPTER_RE = re.compile(r"(?:重写|rewrite)[^\d一二三四五六七八九十百千万两零〇]{0,12}(?:第)?([0-9一二三四五六七八九十百千万两零〇]+)\s*章", re.IGNORECASE)
 _UNKNOWN_CHARACTER_FIELD_VALUE = "未知"
+
+DEFAULT_CHAPTER_TEMPLATE_ID = "default_chapter_directory"
+SINGLE_FILE_CHAPTER_TEMPLATE_ID = "single_file_chapter_directory"
+MULTI_FRAGMENT_CONTENT_MODE = "multi_fragment"
+SINGLE_FILE_CONTENT_MODE = "single_file"
 
 _SYSTEM_RULE_TEMPLATE = """# Storydex 项目规则
 
@@ -561,6 +571,7 @@ _DEFAULT_CHARACTER_TEMPLATE_ID = "default_character_template"
 _DEFAULT_CHARACTER_TEMPLATE_JSON = "default-character-template.json"
 _DEFAULT_CHARACTER_TEMPLATE_MARKDOWN = "default-character-template.md"
 _DEFAULT_CHAPTER_TEMPLATE_JSON = "default-chapter-directory-template.json"
+_SINGLE_FILE_CHAPTER_TEMPLATE_JSON = "single-file-chapter-directory-template.json"
 _CHARACTER_TEMPLATE_TITLE_KEYS = {
     "定位": "positioning",
     "基本信息": "basic_info",
@@ -634,6 +645,12 @@ class StoryProjectService:
             ),
             self.default_chapter_template_json_path(root): json.dumps(
                 self.default_chapter_directory_template(),
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            self.single_file_chapter_template_json_path(root): json.dumps(
+                self.default_single_file_chapter_directory_template(),
                 ensure_ascii=False,
                 indent=2,
             )
@@ -723,6 +740,7 @@ class StoryProjectService:
             "maxSegmentsPerChapter": 3,
             "storyFragmentCount": 1,
             "storyFragmentWordCount": 2000,
+            "storyChapterTemplateId": DEFAULT_CHAPTER_TEMPLATE_ID,
             "autoUpdateVariables": False,
             "autoUpdateWiki": False,
             "autoUpdateVariablesNote": "自动更新变量需要较多耗时，建议每次仅生成单条剧情片段。",
@@ -889,10 +907,11 @@ class StoryProjectService:
     def default_chapter_directory_template(self) -> Dict[str, Any]:
         return {
             "version": 1,
-            "id": "default_chapter_directory",
-            "name": "默认章节目录",
-            "description": "目录式章节结构：chapters/第X章 标题/001.md，适合持续长篇创作和分段续写。",
+            "id": DEFAULT_CHAPTER_TEMPLATE_ID,
+            "name": "章节目录（多片段文件）",
+            "description": "一个章节目录下可按片段数量创建任意多个正文文件，不受旧的每章 3 段限制。",
             "chapterMode": "directory",
+            "contentMode": MULTI_FRAGMENT_CONTENT_MODE,
             "chapterNamePattern": "第X章 标题",
             "segmentNaming": "001.md",
             "initialChapters": [
@@ -904,8 +923,35 @@ class StoryProjectService:
                 }
             ],
             "rules": [
-                "全新故事默认使用本模板创建章节目录。",
-                "正文片段只写入 chapters/ 下的章节目录或章节文件。",
+                "每个章节使用一个目录，正文片段按 001、002、003……递增保存。",
+                "片段文件数量由本轮片段数量决定，不设置每章三个文件之类的固定上限。",
+                "正文片段只写入 chapters/ 下的章节目录。",
+                "变量思考记录写入 .storydex/memory/chapters/，优先 Markdown，可选机器快照。",
+            ],
+        }
+
+    def default_single_file_chapter_directory_template(self) -> Dict[str, Any]:
+        return {
+            "version": 1,
+            "id": SINGLE_FILE_CHAPTER_TEMPLATE_ID,
+            "name": "章节目录（单正文文件）",
+            "description": "一个章节目录下只保留一个正文文件，承载本章节的全部剧情；续写时继续写入该文件。",
+            "chapterMode": "directory",
+            "contentMode": SINGLE_FILE_CONTENT_MODE,
+            "chapterNamePattern": "第X章 标题",
+            "segmentNaming": "正文.md",
+            "initialChapters": [
+                {
+                    "number": 1,
+                    "title": "未命名",
+                    "directory": "第1章 未命名",
+                    "firstSegment": "正文.md",
+                }
+            ],
+            "rules": [
+                "每个章节使用一个目录，目录内只允许一个正文文件。",
+                "本模板的有效片段数量固定为 1；片段字数约束本轮新增或重写的正文。",
+                "续写已有章节时追加到同一正文文件，重写时替换该文件。",
                 "变量思考记录写入 .storydex/memory/chapters/，优先 Markdown，可选机器快照。",
             ],
         }
@@ -1081,6 +1127,9 @@ class StoryProjectService:
     def default_chapter_template_json_path(self, workspace_root: Path) -> Path:
         return self.chapter_templates_root(workspace_root) / _DEFAULT_CHAPTER_TEMPLATE_JSON
 
+    def single_file_chapter_template_json_path(self, workspace_root: Path) -> Path:
+        return self.chapter_templates_root(workspace_root) / _SINGLE_FILE_CHAPTER_TEMPLATE_JSON
+
     def list_chapter_templates(self, workspace_root: Path) -> List[Dict[str, Any]]:
         root = Path(workspace_root).resolve()
         self.ensure_project_structure(root)
@@ -1103,9 +1152,13 @@ class StoryProjectService:
                     "relativePath": path.relative_to(root).as_posix(),
                     "description": str(payload.get("description") or ""),
                     "chapterMode": str(payload.get("chapterMode") or "directory"),
+                    "contentMode": self._normalize_chapter_content_mode(payload.get("contentMode")),
                     "chapterNamePattern": str(payload.get("chapterNamePattern") or ""),
                     "segmentNaming": str(payload.get("segmentNaming") or "001.md"),
                     "initialChapters": payload.get("initialChapters") if isinstance(payload.get("initialChapters"), list) else [],
+                    "rules": [str(item) for item in payload.get("rules", []) if str(item).strip()]
+                    if isinstance(payload.get("rules"), list)
+                    else [],
                 }
             )
         return templates
@@ -1141,6 +1194,313 @@ class StoryProjectService:
             fallback=f"第{number}章 {title}",
         )
         return f"chapters/{chapter_dir}/{first_segment}"
+
+    def plan_story_generation_targets(
+        self,
+        workspace_root: Path,
+        *,
+        template: Dict[str, Any],
+        fragment_count: int,
+        active_file: str = "",
+        prompt: str = "",
+        is_new_story: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Build authoritative chapter paths without relying on model guesses."""
+
+        root = Path(workspace_root).resolve()
+        self.ensure_project_structure(root)
+        settings = self.read_project_settings(root)
+        extension = "." + self._normalize_story_segment_format(settings.get("storySegmentFormat"))
+        content_mode = self._normalize_chapter_content_mode(template.get("contentMode"))
+        rewrite_chapter = _extract_rewrite_chapter_number(prompt)
+
+        if content_mode == SINGLE_FILE_CONTENT_MODE:
+            target_path = self._single_file_chapter_target(
+                root,
+                template=template,
+                active_file=active_file,
+                prompt=prompt,
+                extension=extension,
+                is_new_story=is_new_story,
+                rewrite_chapter=rewrite_chapter,
+            )
+            absolute = root / target_path
+            write_mode = "replace" if rewrite_chapter or not absolute.exists() else "append"
+            return [
+                {
+                    "order": 1,
+                    "path": target_path,
+                    "writeMode": write_mode,
+                    "baselineWordCount": self.count_story_file_words(absolute) if absolute.is_file() else 0,
+                    "contentMode": content_mode,
+                }
+            ]
+
+        effective_count = self._normalize_story_fragment_count(fragment_count)
+        first_path = self._multi_fragment_start_path(
+            root,
+            template=template,
+            active_file=active_file,
+            prompt=prompt,
+            extension=extension,
+            is_new_story=is_new_story,
+            rewrite_chapter=rewrite_chapter,
+        )
+        paths = self._expand_multi_fragment_paths(
+            root,
+            first_path=first_path,
+            fragment_count=effective_count,
+            extension=extension,
+        )
+        return [
+            {
+                "order": index,
+                "path": relative_path,
+                "writeMode": "replace",
+                "baselineWordCount": self.count_story_file_words(root / relative_path)
+                if (root / relative_path).is_file()
+                else 0,
+                "contentMode": content_mode,
+            }
+            for index, relative_path in enumerate(paths, start=1)
+        ]
+
+    def validate_story_generation_turn(
+        self,
+        workspace_root: Path,
+        turn_contract: Dict[str, Any] | None,
+    ) -> Dict[str, Any]:
+        contract = turn_contract if isinstance(turn_contract, dict) else {}
+        intent = contract.get("intentFrame") if isinstance(contract.get("intentFrame"), dict) else {}
+        turn_plan = contract.get("turnPlan") if isinstance(contract.get("turnPlan"), dict) else {}
+        if str(intent.get("primary") or "") != "story_generation":
+            return {"applicable": False, "passed": True}
+
+        targets = turn_plan.get("fragmentTargets") if isinstance(turn_plan.get("fragmentTargets"), list) else []
+        target_word_count = self._normalize_story_fragment_word_count(turn_plan.get("fragmentWordCount"))
+        content_mode = self._normalize_chapter_content_mode(turn_plan.get("chapterContentMode"))
+        root = Path(workspace_root).resolve()
+        results: List[Dict[str, Any]] = []
+        passed = bool(targets)
+
+        for index, raw_target in enumerate(targets, start=1):
+            target = raw_target if isinstance(raw_target, dict) else {}
+            relative_path = self._normalize_relative_path(str(target.get("path") or ""))
+            path = root / relative_path if relative_path else root
+            exists = bool(relative_path and path.is_file())
+            actual_file_count = self.count_story_file_words(path) if exists else 0
+            baseline = max(0, self._safe_int(target.get("baselineWordCount"), fallback=0, minimum=0, maximum=10**9))
+            write_mode = str(target.get("writeMode") or "replace")
+            generated_count = max(0, actual_file_count - baseline) if write_mode == "append" else actual_file_count
+            item_passed = exists and generated_count == target_word_count
+            passed = passed and item_passed
+            results.append(
+                {
+                    "order": index,
+                    "path": relative_path,
+                    "exists": exists,
+                    "writeMode": write_mode,
+                    "baselineWordCount": baseline,
+                    "fileWordCount": actual_file_count,
+                    "generatedWordCount": generated_count,
+                    "targetWordCount": target_word_count,
+                    "difference": generated_count - target_word_count,
+                    "status": "passed" if item_passed else "failed",
+                }
+            )
+
+        structure_passed = self._validate_chapter_target_structure(root, targets, content_mode=content_mode)
+        passed = passed and structure_passed
+        return {
+            "_type": "StoryGenerationValidation",
+            "_version": 1,
+            "applicable": True,
+            "passed": passed,
+            "status": "success" if passed else "error",
+            "algorithm": STORY_WORD_COUNT_ALGORITHM,
+            "countingRule": "count every non-whitespace Unicode character",
+            "exact": True,
+            "fragmentCount": len(targets),
+            "targetWordCount": target_word_count,
+            "chapterContentMode": content_mode,
+            "structurePassed": structure_passed,
+            "fragments": results,
+            "message": (
+                "正文数量、章节结构和客观字数均已通过 Storydex 校验。"
+                if passed
+                else "正文尚未满足章节模板或精确字数约束，不能结束本轮。"
+            ),
+        }
+
+    @staticmethod
+    def count_story_text_words(content: str) -> int:
+        return count_story_text_words(content)
+
+    @staticmethod
+    def count_story_file_words(path: Path) -> int:
+        try:
+            return count_story_file_words(path)
+        except (OSError, UnicodeDecodeError):
+            return 0
+
+    def _single_file_chapter_target(
+        self,
+        root: Path,
+        *,
+        template: Dict[str, Any],
+        active_file: str,
+        prompt: str,
+        extension: str,
+        is_new_story: bool,
+        rewrite_chapter: Optional[int],
+    ) -> str:
+        if rewrite_chapter:
+            existing = self.resolve_existing_chapter_by_number(root, rewrite_chapter)
+            if existing:
+                return existing
+        if is_new_story:
+            return self.initial_segment_path_from_chapter_template(template)
+
+        active = self._normalize_relative_path(active_file)
+        active_path = root / active if active else None
+        if active_path is not None and active_path.is_file() and active.startswith("chapters/"):
+            return active
+
+        chapter_dir = active_path if active_path is not None and active_path.is_dir() else None
+        if chapter_dir is None and active.startswith("chapters/") and len(Path(active).parts) >= 3:
+            candidate = root / Path(active).parent
+            if candidate.is_dir():
+                chapter_dir = candidate
+        if chapter_dir is None:
+            for state in reversed(self.list_chapter_states(root)):
+                candidate = root / state.relative_path
+                if not state.completed and candidate.is_dir():
+                    chapter_dir = candidate
+                    break
+        if chapter_dir is not None:
+            files = self._sorted_segment_files(chapter_dir)
+            if files:
+                return files[0].relative_to(root).as_posix()
+            name = self._safe_template_path_part(str(template.get("segmentNaming") or f"正文{extension}"), fallback=f"正文{extension}")
+            if not Path(name).suffix:
+                name += extension
+            return (chapter_dir / name).relative_to(root).as_posix()
+
+        return self._new_chapter_first_path(root, template=template, extension=extension, prompt=prompt)
+
+    def _multi_fragment_start_path(
+        self,
+        root: Path,
+        *,
+        template: Dict[str, Any],
+        active_file: str,
+        prompt: str,
+        extension: str,
+        is_new_story: bool,
+        rewrite_chapter: Optional[int],
+    ) -> str:
+        if rewrite_chapter:
+            existing = self.resolve_existing_chapter_by_number(root, rewrite_chapter)
+            if existing:
+                return existing
+        if is_new_story:
+            return self.initial_segment_path_from_chapter_template(template)
+
+        active = self._normalize_relative_path(active_file)
+        if active.startswith("chapters/"):
+            active_path = root / active
+            chapter_dir = active_path if active_path.is_dir() else active_path.parent
+            if chapter_dir.is_dir() and chapter_dir != root / "chapters":
+                return self._next_segment_path_in_chapter(
+                    chapter_dir=chapter_dir,
+                    workspace_root=root,
+                    extension=extension,
+                )
+        for state in reversed(self.list_chapter_states(root)):
+            chapter_dir = root / state.relative_path
+            if not state.completed and chapter_dir.is_dir():
+                return self._next_segment_path_in_chapter(
+                    chapter_dir=chapter_dir,
+                    workspace_root=root,
+                    extension=extension,
+                )
+        return self._new_chapter_first_path(root, template=template, extension=extension, prompt=prompt)
+
+    def _new_chapter_first_path(
+        self,
+        root: Path,
+        *,
+        template: Dict[str, Any],
+        extension: str,
+        prompt: str,
+    ) -> str:
+        states = self.list_chapter_states(root)
+        number = (states[-1].chapter_number + 1) if states else 1
+        title = self._extract_requested_chapter_title(prompt) or "未命名"
+        chapter_name = self._chapter_name_from_template(template, number=number, title=title)
+        chapter_name = self._safe_template_path_part(chapter_name, fallback=f"第{number}章 {title}")
+        segment_name = self._safe_template_path_part(
+            str(template.get("segmentNaming") or self._default_segment_name(extension)),
+            fallback=self._default_segment_name(extension),
+        )
+        if not Path(segment_name).suffix:
+            segment_name += extension
+        return f"chapters/{chapter_name}/{segment_name}"
+
+    def _expand_multi_fragment_paths(
+        self,
+        root: Path,
+        *,
+        first_path: str,
+        fragment_count: int,
+        extension: str,
+    ) -> List[str]:
+        normalized = self._normalize_relative_path(first_path)
+        path = Path(normalized)
+        if fragment_count <= 1 or len(path.parts) < 3:
+            return [normalized]
+        chapter_dir = root / path.parent
+        existing = self._sorted_segment_files(chapter_dir) if chapter_dir.is_dir() else []
+        naming = self._detect_segment_naming(existing) if existing else self._detect_segment_naming([path])
+        first_number = self._extract_segment_number(path.stem) or 1
+        results = [normalized]
+        for offset in range(1, fragment_count):
+            number = first_number + offset
+            if naming["style"] == "seg":
+                file_name = f"seg-{number:04d}{extension}"
+            elif naming["style"] == "prefix":
+                width = int(naming.get("width") or 3)
+                prefix = str(naming.get("prefix") or "")
+                file_name = f"{prefix}{number:0{width}d}{extension}"
+            else:
+                file_name = f"{number:03d}{extension}"
+            results.append((path.parent / file_name).as_posix())
+        return results
+
+    def _validate_chapter_target_structure(
+        self,
+        root: Path,
+        targets: List[Any],
+        *,
+        content_mode: str,
+    ) -> bool:
+        normalized_targets = [
+            self._normalize_relative_path(str(item.get("path") or ""))
+            for item in targets
+            if isinstance(item, dict) and str(item.get("path") or "").strip()
+        ]
+        if not normalized_targets or any(len(Path(item).parts) < 3 for item in normalized_targets):
+            return False
+        parents = {Path(item).parent.as_posix() for item in normalized_targets}
+        if len(parents) != 1:
+            return False
+        if content_mode != SINGLE_FILE_CONTENT_MODE:
+            return len(set(normalized_targets)) == len(normalized_targets)
+        chapter_dir = root / next(iter(parents))
+        if not chapter_dir.is_dir():
+            return False
+        files = self._sorted_segment_files(chapter_dir)
+        return len(files) == 1 and files[0].relative_to(root).as_posix() == normalized_targets[0]
 
     def chapter_progress_path(self, workspace_root: Path) -> Path:
         return self.storydex_root(workspace_root) / "memory" / "chapter-progress.json"
@@ -1180,6 +1540,9 @@ class StoryProjectService:
                 "maxSegmentsPerChapter": self._normalize_max_segments_per_chapter(payload.get("maxSegmentsPerChapter")),
                 "storyFragmentCount": self._normalize_story_fragment_count(payload.get("storyFragmentCount")),
                 "storyFragmentWordCount": self._normalize_story_fragment_word_count(payload.get("storyFragmentWordCount")),
+                "storyChapterTemplateId": self._normalize_story_chapter_template_id(
+                    payload.get("storyChapterTemplateId", payload.get("story_chapter_template_id"))
+                ),
                 "autoUpdateVariables": self._normalize_bool(payload.get("autoUpdateVariables"), default=False),
                 "autoUpdateWiki": self._normalize_bool(payload.get("autoUpdateWiki"), default=False),
                 "autoUpdateVariablesNote": str(
@@ -1218,6 +1581,12 @@ class StoryProjectService:
         )
         current["storyFragmentWordCount"] = self._normalize_story_fragment_word_count(
             payload.get("storyFragmentWordCount", current.get("storyFragmentWordCount"))
+        )
+        current["storyChapterTemplateId"] = self._normalize_story_chapter_template_id(
+            payload.get(
+                "storyChapterTemplateId",
+                payload.get("story_chapter_template_id", current.get("storyChapterTemplateId")),
+            )
         )
         current["autoUpdateVariables"] = self._normalize_bool(
             payload.get("autoUpdateVariables", current.get("autoUpdateVariables")),
@@ -2047,7 +2416,112 @@ class StoryProjectService:
         with ledger.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
 
-    def apply_story_generation_increment(self, workspace_root: Path, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _prepare_constrained_story_increment(
+        self,
+        workspace_root: Path,
+        *,
+        payload: Dict[str, Any],
+        fragments: List[Dict[str, Any]],
+        generation_contract: Dict[str, Any] | None,
+    ) -> tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any] | None]:
+        contract = generation_contract if isinstance(generation_contract, dict) else {}
+        intent = contract.get("intentFrame") if isinstance(contract.get("intentFrame"), dict) else {}
+        turn_plan = contract.get("turnPlan") if isinstance(contract.get("turnPlan"), dict) else {}
+        if str(intent.get("primary") or "") != "story_generation":
+            return payload, fragments, None
+
+        targets = turn_plan.get("fragmentTargets") if isinstance(turn_plan.get("fragmentTargets"), list) else []
+        expected_count = self._normalize_story_fragment_count(turn_plan.get("fragmentCount"))
+        target_word_count = self._normalize_story_fragment_word_count(turn_plan.get("fragmentWordCount"))
+        content_mode = self._normalize_chapter_content_mode(turn_plan.get("chapterContentMode"))
+        actual_count = len(fragments)
+        results: List[Dict[str, Any]] = []
+        passed = bool(targets) and len(targets) == expected_count and actual_count == expected_count
+        prepared: List[Dict[str, Any]] = []
+
+        for index in range(max(actual_count, expected_count)):
+            fragment = dict(fragments[index]) if index < actual_count else {}
+            target = targets[index] if index < len(targets) and isinstance(targets[index], dict) else {}
+            text = self._story_increment_fragment_text(fragment)
+            actual_word_count = count_story_text_words(text)
+            relative_path = self._normalize_relative_path(str(target.get("path") or ""))
+            write_mode = str(target.get("writeMode") or "replace")
+            baseline = max(0, self._safe_int(target.get("baselineWordCount"), fallback=0, minimum=0, maximum=10**9))
+            current_count = self.count_story_file_words(workspace_root / relative_path) if relative_path else 0
+            baseline_matches = write_mode != "append" or current_count == baseline
+            item_passed = bool(relative_path and text) and actual_word_count == target_word_count and baseline_matches
+            passed = passed and item_passed
+            results.append(
+                {
+                    "order": index + 1,
+                    "path": relative_path,
+                    "writeMode": write_mode,
+                    "baselineWordCount": baseline,
+                    "currentWordCount": current_count,
+                    "baselineMatches": baseline_matches,
+                    "actualWordCount": actual_word_count,
+                    "targetWordCount": target_word_count,
+                    "difference": actual_word_count - target_word_count,
+                    "status": "passed" if item_passed else "failed",
+                }
+            )
+            if index < actual_count:
+                fragment["path"] = relative_path
+                fragment["_storydexWriteMode"] = write_mode
+                fragment["_storydexBaselineWordCount"] = baseline
+                fragment["_storydexTargetWordCount"] = target_word_count
+                prepared.append(fragment)
+
+        structure_passed = self._validate_planned_target_structure(targets, content_mode=content_mode)
+        passed = passed and structure_passed
+        validation = {
+            "_type": "StoryGenerationValidation",
+            "_version": 1,
+            "applicable": True,
+            "passed": passed,
+            "status": "success" if passed else "error",
+            "algorithm": STORY_WORD_COUNT_ALGORITHM,
+            "countingRule": "count every non-whitespace Unicode character",
+            "exact": True,
+            "expectedFragmentCount": expected_count,
+            "actualFragmentCount": actual_count,
+            "targetWordCount": target_word_count,
+            "chapterContentMode": content_mode,
+            "structurePassed": structure_passed,
+            "fragments": results,
+            "message": (
+                "正文已通过 Storydex 落盘前客观字数和章节结构校验。"
+                if passed
+                else "请按失败项修订正文：每个片段必须使用 Storydex 非空白字符统计精确达到目标字数，且数量和章节模板必须完全一致。"
+            ),
+        }
+        if not passed:
+            return payload, fragments, validation
+        next_payload = dict(payload)
+        next_payload["fragments"] = prepared
+        return next_payload, prepared, validation
+
+    def _validate_planned_target_structure(self, targets: List[Any], *, content_mode: str) -> bool:
+        paths = [
+            self._normalize_relative_path(str(item.get("path") or ""))
+            for item in targets
+            if isinstance(item, dict) and str(item.get("path") or "").strip()
+        ]
+        if not paths or any(len(Path(item).parts) < 3 or Path(item).parts[0] != "chapters" for item in paths):
+            return False
+        if len({Path(item).parent.as_posix() for item in paths}) != 1:
+            return False
+        if content_mode == SINGLE_FILE_CONTENT_MODE:
+            return len(paths) == 1
+        return len(paths) == len(set(paths))
+
+    def apply_story_generation_increment(
+        self,
+        workspace_root: Path,
+        payload: Dict[str, Any],
+        *,
+        generation_contract: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         """Apply a structured post-generation increment to Storydex project files."""
         root = Path(workspace_root).resolve()
         self.ensure_project_structure(root)
@@ -2058,6 +2532,22 @@ class StoryProjectService:
         active_file = self._normalize_relative_path(str(payload.get("activeFile") or payload.get("active_file") or ""))
         prompt = str(payload.get("prompt") or "").strip()
         fragments = self._normalize_story_increment_fragments(payload)
+        payload, fragments, constraint_validation = self._prepare_constrained_story_increment(
+            root,
+            payload=payload,
+            fragments=fragments,
+            generation_contract=generation_contract,
+        )
+        if constraint_validation and not bool(constraint_validation.get("passed")):
+            return {
+                "ok": False,
+                "accepted": False,
+                "code": "story_generation_constraints_not_met",
+                "message": str(constraint_validation.get("message") or "正文未满足生成约束。"),
+                "wordCountValidation": constraint_validation,
+                "writtenPaths": [],
+                "writtenPathCount": 0,
+            }
         if not fragments:
             fragments = [{}]
 
@@ -2122,7 +2612,13 @@ class StoryProjectService:
             if segment_text:
                 segment_path = root / segment_relative_path
                 segment_path.parent.mkdir(parents=True, exist_ok=True)
-                segment_path.write_text(segment_text.rstrip() + "\n", encoding="utf-8")
+                write_mode = str(fragment.get("_storydexWriteMode") or "replace")
+                if write_mode == "append" and segment_path.is_file():
+                    existing_text = segment_path.read_text(encoding="utf-8-sig").rstrip()
+                    next_text = f"{existing_text}\n\n{segment_text.rstrip()}" if existing_text else segment_text.rstrip()
+                    segment_path.write_text(next_text + "\n", encoding="utf-8")
+                else:
+                    segment_path.write_text(segment_text.rstrip() + "\n", encoding="utf-8")
 
             # A newly-created non-canonical directory is only visible to the
             # normalizer after the segment has been written. Apply the rename mapping
@@ -2263,6 +2759,19 @@ class StoryProjectService:
                     "itemUpdateCount": len(item_updates),
                     "factUpdateCount": len(stage2_output.get("fact_updates", [])),
                     "relationshipUpdateCount": len(stage2_output.get("relationship_updates", [])),
+                    "wordCount": self.count_story_file_words(root / segment_relative_path),
+                    "generatedWordCount": count_story_text_words(segment_text),
+                    "targetWordCount": int(fragment.get("_storydexTargetWordCount") or 0),
+                    "wordCountDifference": count_story_text_words(segment_text)
+                    - int(fragment.get("_storydexTargetWordCount") or 0),
+                    "wordCountStatus": (
+                        "passed"
+                        if not fragment.get("_storydexTargetWordCount")
+                        or count_story_text_words(segment_text) == int(fragment.get("_storydexTargetWordCount") or 0)
+                        else "failed"
+                    ),
+                    "wordCountAlgorithm": STORY_WORD_COUNT_ALGORITHM,
+                    "writeMode": str(fragment.get("_storydexWriteMode") or "replace"),
                 }
             )
 
@@ -2355,6 +2864,11 @@ class StoryProjectService:
                 "autoUpdateVariablesNote": str(settings.get("autoUpdateVariablesNote") or ""),
             },
             "fragments": fragment_results,
+            "wordCountValidation": constraint_validation or {
+                "applicable": False,
+                "passed": True,
+                "algorithm": STORY_WORD_COUNT_ALGORITHM,
+            },
             "chapterSummaryPath": chapter_summary_path,
             "writtenPaths": unique_written_paths,
             "writtenPathCount": len(unique_written_paths),
@@ -2978,7 +3492,7 @@ class StoryProjectService:
             normalized = int(value)
         except (TypeError, ValueError):
             normalized = 1
-        return max(1, min(20, normalized))
+        return max(1, normalized)
 
     @staticmethod
     def _normalize_story_fragment_word_count(value: Any) -> int:
@@ -2987,6 +3501,18 @@ class StoryProjectService:
         except (TypeError, ValueError):
             normalized = 2000
         return max(100, min(20000, normalized))
+
+    @staticmethod
+    def _normalize_story_chapter_template_id(value: Any) -> str:
+        normalized = str(value or DEFAULT_CHAPTER_TEMPLATE_ID).strip()
+        return normalized or DEFAULT_CHAPTER_TEMPLATE_ID
+
+    @staticmethod
+    def _normalize_chapter_content_mode(value: Any) -> str:
+        normalized = str(value or MULTI_FRAGMENT_CONTENT_MODE).strip().lower().replace("-", "_")
+        if normalized in {"single", "single_file", "one_file", "chapter_file"}:
+            return SINGLE_FILE_CONTENT_MODE
+        return MULTI_FRAGMENT_CONTENT_MODE
 
     @staticmethod
     def _normalize_llm_call_count(value: Any, *, fallback: int) -> int:

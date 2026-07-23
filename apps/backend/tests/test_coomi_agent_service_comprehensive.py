@@ -291,7 +291,6 @@ def test_event_translator_all_events_and_tool_ids():
     translator = coomi._CoomiEventTranslator(session_id="s")
     cases = [
         (_event("TextChunk", content="x"), "TextChunk"),
-        (_event("ReasoningChunk", content="r"), "ReasoningChunk"),
         (_event("ToolStart", tool_name="Read", tool_call_id="", arguments={"path": "a"}), "ToolStart"),
         (_event("ToolRunning", tool_name="Read", tool_call_id=""), "ToolRunning"),
         (_event("ToolDone", tool_name="Read", tool_call_id="", elapsed=0.2, is_error=False, result_preview="ok"), "ToolDone"),
@@ -304,6 +303,7 @@ def test_event_translator_all_events_and_tool_ids():
     for event, expected in cases:
         translated = translator.translate(event)
         assert translated[0] == expected
+    assert translator.translate(_event("ReasoningChunk", content="hidden")) is None
     assert translator.translate(_event("Unknown")) is None
     explicit = translator.translate(_event("ToolStart", tool_name="Write", tool_call_id="id", arguments={}))
     assert explicit[1]["tool_call_id"] == "id"
@@ -585,7 +585,7 @@ def test_runtime_creation_new_cached_and_restored(monkeypatch, tmp_path):
     service = coomi.StorydexCoomiAgentService()
     monkeypatch.setattr(coomi, "_build_coomi_system_prompt", lambda **kwargs: asyncio.sleep(0, result="system"))
     monkeypatch.setattr(coomi, "_resolve_context_window", lambda: 4096)
-    monkeypatch.setattr(coomi, "_create_storydex_tool_registry", lambda root, policy=None: "registry")
+    monkeypatch.setattr(coomi, "_create_storydex_tool_registry", lambda root, policy=None, turn_contract=None: "registry")
     monkeypatch.setattr(coomi, "_write_coomi_session_binding", lambda **kwargs: None)
     monkeypatch.setattr(coomi, "_sync_coomi_runtime_workspace", lambda **kwargs: setattr(kwargs["session"], "synced", True))
 
@@ -656,7 +656,7 @@ def test_runtime_creation_new_cached_and_restored(monkeypatch, tmp_path):
 def test_nonempty_loop_success_cancel_and_error(monkeypatch, tmp_path):
     service = coomi.StorydexCoomiAgentService()
     monkeypatch.setattr(service, "get_status", lambda **kwargs: {})
-    monkeypatch.setattr(coomi, "_create_storydex_tool_registry", lambda root, policy=None: "registry")
+    monkeypatch.setattr(coomi, "_create_storydex_tool_registry", lambda root, policy=None, turn_contract=None: "registry")
     monkeypatch.setattr(coomi, "_resolve_context_window", lambda: 100)
     monkeypatch.setattr(coomi, "_resolve_loop_spec", lambda root, body: (None, "spec"))
     monkeypatch.setattr(service, "_create_permission_system", lambda *args: types.SimpleNamespace())
@@ -776,7 +776,7 @@ def test_build_system_prompt_and_tool_registry(monkeypatch, tmp_path):
     registry_module.create_default_registry = lambda: registry
     monkeypatch.setitem(sys.modules, "coomi.tools.registry", registry_module)
     runtime_tools = types.ModuleType("services.storydex_coomi_runtime_tools")
-    runtime_tools.create_workspace_bound_tool_overrides = lambda root: ["read", "write"]
+    runtime_tools.create_workspace_bound_tool_overrides = lambda root, turn_contract=None: ["read", "write"]
     monkeypatch.setitem(sys.modules, "services.storydex_coomi_runtime_tools", runtime_tools)
     agent_tools = types.ModuleType("services.storydex_agent_tools")
 
@@ -785,14 +785,15 @@ def test_build_system_prompt_and_tool_registry(monkeypatch, tmp_path):
             self.kwargs = kwargs
 
     for name in (
-        "StorydexApplyStoryIncrementTool", "StorydexHelpGuideSearchTool", "StorydexProjectSearchTool",
-        "StorydexRuntimePresetStatusTool", "StorydexSyncWikiTool", "StorydexVersionStatusTool", "StorydexWikiQueryTool",
+            "StorydexApplyStoryIncrementTool", "StorydexHelpGuideSearchTool", "StorydexProjectSearchTool",
+            "StorydexRuntimePresetStatusTool", "StorydexSyncWikiTool", "StorydexVersionStatusTool", "StorydexWikiQueryTool",
+            "StorydexWordCountTool",
     ):
         setattr(agent_tools, name, DummyTool)
     monkeypatch.setitem(sys.modules, "services.storydex_agent_tools", agent_tools)
     result = coomi._create_storydex_tool_registry(tmp_path)
     assert result is registry
-    assert len(registered) == 9
+    assert len(registered) == 10
 
 
 def test_status_context_config_parsing_and_sync_chat(monkeypatch, tmp_path):
@@ -946,7 +947,7 @@ def test_cross_workspace_session_isolation_and_clear(monkeypatch, tmp_path):
     service = coomi.StorydexCoomiAgentService()
     monkeypatch.setattr(coomi, "_build_coomi_system_prompt", lambda **kwargs: asyncio.sleep(0, result="system"))
     monkeypatch.setattr(coomi, "_resolve_context_window", lambda: 4096)
-    monkeypatch.setattr(coomi, "_create_storydex_tool_registry", lambda root, policy=None: "registry")
+    monkeypatch.setattr(coomi, "_create_storydex_tool_registry", lambda root, policy=None, turn_contract=None: "registry")
     monkeypatch.setattr(coomi, "_write_coomi_session_binding", lambda **kwargs: None)
     monkeypatch.setattr(coomi, "_sync_coomi_runtime_workspace", lambda **kwargs: setattr(kwargs["session"], "synced", True))
     monkeypatch.setattr(coomi, "_restore_bound_coomi_session", lambda **kwargs: None)

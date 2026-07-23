@@ -12,9 +12,9 @@ annotated-types==0.7.0 \
     # via
     #   -r requirements.txt
     #   pydantic
-anthropic==0.86.0 \
-    --hash=sha256:60023a7e879aa4fbb1fed99d487fe407b2ebf6569603e5047cfe304cebdaa0e5 \
-    --hash=sha256:9d2bbd339446acce98858c5627d33056efe01f70435b22b63546fe7edae0cd57
+anthropic==0.104.0 \
+    --hash=sha256:18f73ba3429aab237cdd146a486d20b4da3c008fb4a3ba83f237b27793e884c7 \
+    --hash=sha256:1ae8ef4709e90cc2068c8e8a63c1ecb63cc5360d325a4bef8b296aad76148be3
     # via -r requirements.txt
 anyio==4.12.1 \
     --hash=sha256:41cfcc3a4c85d3f05c932da7c26d0201ac36f72abd4435ba90d0464a3ffed703 \
@@ -169,8 +169,8 @@ colorama==0.4.6 \
     #   click
     #   pytest
     #   tqdm
-coomi-agent==1.1.2+storydex.usage1 \
-    --hash=sha256:e7d1ebc547225d525e06ac6bcd1861949ff01b85408eee2cd8ab0a04d9b8a16b
+coomi-agent==1.2.1 \
+    --hash=sha256:c8d1517150ed8150df626547b448e0f768e6fa60bf06a8108a15e880dc68d6b9
     # via -r requirements.txt
 distro==1.9.0 \
     --hash=sha256:2fa77c6fd8940f116ee1d6b94a2f90b13b5ea8d019b98bc8bafdcabcdd9bdbed \

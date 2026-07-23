@@ -13,6 +13,7 @@ from services.file_history_service import get_file_history_service
 from services.hooks_service import get_hooks_service
 from services.media_reader import MediaReader
 from services.story_project_service import get_story_project_service
+from services.story_word_count_service import count_story_text_words
 from storage.file_adapter import FileAdapter
 from core.bounded_text_io import MAX_FULL_READ_BYTES
 
@@ -647,7 +648,7 @@ class WorkspaceIO:
 
     @staticmethod
     def _count_story_text_words(content: str) -> int:
-        return sum(1 for char in str(content or "") if not char.isspace())
+        return count_story_text_words(content)
 
     def _build_operation_preview(
         self,

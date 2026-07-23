@@ -6,7 +6,7 @@
       <ActivityBar />
 
       <template v-if="showStorydexSidebar">
-        <div class="storydex-sidebar-shell">
+        <div class="storydex-sidebar-shell workspace-font-pane" :style="leftPaneFontStyle">
           <component :is="sidebarComponent" />
         </div>
         <div
@@ -16,13 +16,18 @@
         ></div>
       </template>
 
-      <EditorPane v-if="!relationshipGraphMode" />
-      <div v-else-if="workspaceStore.launchScreenVisible" class="storydex-relationship-empty">
+      <EditorPane v-if="!relationshipGraphMode" class="workspace-font-pane" :style="centerPaneFontStyle" />
+      <div
+        v-else-if="workspaceStore.launchScreenVisible"
+        class="storydex-relationship-empty workspace-font-pane"
+        :style="centerPaneFontStyle"
+      >
         先打开一个 Storydex 项目，再查看知识图谱和WIKI。
       </div>
       <StoryStatePanel
         v-else
-        class="storydex-relationship-workspace"
+        class="storydex-relationship-workspace workspace-font-pane"
+        :style="centerPaneFontStyle"
         initial-tab="relations"
         relationship-only
         expanded
@@ -34,7 +39,7 @@
         title="拖动调整 Agent 栏宽度"
         @pointerdown="startResize('agent', $event)"
       ></div>
-      <AgentPanel v-if="showAgentPanel" />
+      <AgentPanel v-if="showAgentPanel" class="workspace-font-pane" :style="rightPaneFontStyle" />
     </div>
 
     <StatusBar />
@@ -61,10 +66,12 @@ import UpdateNotification from "@/components/UpdateNotification.vue";
 import { useTheme } from "@/composables/useTheme";
 import { useUiStore } from "@/stores/ui";
 import { useWorkspaceStore } from "@/stores/workspace";
+import { paneFontScaleStyle } from "@/utils/paneFontScale";
 
 const uiStore = useUiStore();
 const workspaceStore = useWorkspaceStore();
-const { applyTheme, applyTypography } = useTheme();
+const { applyTheme, applyPaneFontScale } = useTheme();
+applyPaneFontScale();
 
 const workspaceRef = ref<HTMLElement | null>(null);
 
@@ -90,6 +97,9 @@ const sidebarComponent = computed(() => {
   }
   return ExplorerSidebar;
 });
+const leftPaneFontStyle = computed(() => paneFontScaleStyle(uiStore.leftPaneFontScale));
+const centerPaneFontStyle = computed(() => paneFontScaleStyle(uiStore.centerPaneFontScale));
+const rightPaneFontStyle = computed(() => paneFontScaleStyle(uiStore.rightPaneFontScale));
 
 const workspaceStyle = computed(() => {
   const sidebarWidth = workspaceStore.launchScreenVisible ? Math.min(uiStore.sidebarWidth, 320) : uiStore.sidebarWidth;
@@ -114,12 +124,6 @@ const workspaceStyle = computed(() => {
 watch(
   () => uiStore.theme,
   (nextTheme) => applyTheme(nextTheme),
-  { immediate: true }
-);
-
-watch(
-  () => [uiStore.fileFontSize, uiStore.playerFontSize] as const,
-  ([fileFontSize, playerFontSize]) => applyTypography({ fileFontSize, playerFontSize }),
   { immediate: true }
 );
 
@@ -190,6 +194,10 @@ function clamp(value: number, min: number, max: number): number {
 <style scoped>
 .workspace {
   position: relative;
+}
+
+.workspace-font-pane {
+  font-size: var(--ui-pane-scaled-px-14, 14px);
 }
 
 .storydex-sidebar-shell {

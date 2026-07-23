@@ -10,8 +10,11 @@ describe("agent store deterministic helpers", () => {
     const events = [
       ["ToolStart", { tool_name: "read" }], ["TextChunk", { content: "text" }],
       ["ReasoningChunk", { content: "reason" }], ["GitCommitPrompt", { status: "pending" }],
+      ["ConnectionRetry", { attempt: 1, maxAttempts: 3, message: "retry" }],
       ["TaskStarted", { title: "task" }], ["TaskCompleted", {}], ["TaskFailed", {}], ["TaskSkipped", {}],
-      ["TurnContract", { status: "needs_user_input" }], ["RunAccepted", { label: "accepted" }],
+      ["TurnContract", { status: "needs_user_input" }],
+      ["StoryGenerationValidation", { passed: false, message: "needs correction" }],
+      ["RunAccepted", { label: "accepted" }],
       ["TurnPhase", { detail: "phase" }], ["UsageUpdate", {}], ["CompressionEvent", {}],
       ["AgentCompleted", { total_tokens: 12 }], ["AgentCancelled", {}], ["AgentError", { message: "bad" }],
       ["Unknown", {}]
@@ -32,11 +35,14 @@ describe("agent store deterministic helpers", () => {
       { _type: "RunAccepted", elapsedMs: 1000, label: "Accepted", detail: "Detail" },
       { _type: "TurnPhase", status: "running", label: "Phase" },
       { _type: "TextChunk", content: "two" }, { _type: "ReasoningChunk", content: "why" },
+      { _type: "ConnectionRetry", attempt: 1, maxAttempts: 3, message: "retry" },
       { _type: "ToolStart", tool_name: "write_file", tool_call_id: "1", arguments: { path: "a.md" } },
       { _type: "ToolRunning", tool_name: "write_file", progress: "half" },
       { _type: "ToolDone", tool_name: "write_file", is_error: false, result_preview: "done" },
       { _type: "ToolCacheHit", tool_name: "read_file" },
       { _type: "TurnContract", status: "ready" },
+      { _type: "StoryGenerationValidation", passed: false, targetWordCount: 100, structurePassed: true, fragments: [{ path: "chapters/1/001.md", generatedWordCount: 90, targetWordCount: 100, difference: -10 }] },
+      { _type: "ContinuationStarted", continuationMode: "story_generation_correction", correctionAttempt: 1, maximumCorrectionAttempts: 2 },
       { _type: "GitCommitPrompt", changedFileCount: 2 }, { _type: "GitCommitResult", created: true },
       { _type: "AgentError", error_type: "provider", message: "bad" }, { _type: "Unknown" }
     ];
@@ -69,6 +75,12 @@ describe("agent store deterministic helpers", () => {
       intentFrame: { primary: "story_generation" },
       updatePolicy: { autoUpdateVariables: false }
     }))).toContain("正文生成后直接整理");
+    expect(u.summarizeStoryGenerationValidationPacket(packet({
+      passed: false,
+      targetWordCount: 100,
+      structurePassed: true,
+      fragments: [{ path: "chapters/1/001.md", generatedWordCount: 90, targetWordCount: 100, difference: -10 }]
+    }))).toContain("90/100");
     expect(u.summarizePresetCompileFailures({ notes: [] })).toBe("");
     expect(u.summarizePresetCompileFailures({ notes: ["preset_compile_failed:", "preset_compile_failed: one", "preset_compile_failed: two", "preset_compile_failed: three"] })).toBeTruthy();
     expect(u.summarizeContextAssembly({})).toBe("");
@@ -145,7 +157,7 @@ describe("agent store deterministic helpers", () => {
     expect(u.normalizeSessionSummaries("bad")).toEqual([]);
     expect(u.normalizeSessionSummaries([null, {}, { sessionId: "s", createdAt: "2020-01-01", traceCount: 1 }, { sessionId: "new", updatedAt: "2021-01-01" }])[0].sessionId).toBe("new");
     expect(u.normalizeStoryChapterTemplates("bad")).toEqual([]);
-    expect(u.normalizeStoryChapterTemplates([null, {}, { id: " x ", name: "", chapterMode: "", segmentNaming: "" }])[0]).toMatchObject({ id: "x", name: "x" });
+    expect(u.normalizeStoryChapterTemplates([null, {}, { id: " x ", name: "", chapterMode: "", contentMode: "single_file", segmentNaming: "" }])[0]).toMatchObject({ id: "x", name: "x", contentMode: "single_file" });
     expect(u.normalizeStoryChapterTemplateError(new Error("bad"))).toContain("bad");
     expect(u.normalizeStoryChapterTemplateError("bad")).toBeTruthy();
     expect(u.isStoryChapterTemplateNotFoundError({ response: { status: 404 } })).toBe(true);

@@ -75,7 +75,7 @@ requireDirectory("backend source", path.join(appRoot, "backend"));
 requireFile("runtime requirements", path.join(appRoot, "backend", "requirements-runtime.txt"));
 requireFile("runtime requirements lock", path.join(appRoot, "backend", "requirements-runtime.lock"));
 requireFile(
-  "Storydex Coomi usage wheel",
+  "Storydex Coomi runtime wheel",
   path.join(
     appRoot,
     "backend",

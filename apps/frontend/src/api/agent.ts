@@ -9,6 +9,9 @@ import type {
   AgentCoomiConfigUpdateRequest,
   AgentCoomiStatusResponse,
   AgentExecutionRollbackResponse,
+  AgentFollowupMailboxResponse,
+  AgentFollowupMessage,
+  AgentFollowupMode,
   AgentHistoryResponse,
   AgentSessionsResponse,
   AgentStreamPacket
@@ -18,6 +21,17 @@ import type { ApiEnvelope, ApiResult, ApiTrace } from "@/types/api";
 import type { WorkspaceGitDiffResponse } from "@/types/workspace";
 
 export class AgentApiError extends ApiResponseError {}
+
+function unwrapAgentEnvelope<T>(envelope: ApiEnvelope<T>, fallback: string): ApiResult<T> {
+  try {
+    return unwrapEnvelope(envelope, fallback);
+  } catch (error: unknown) {
+    if (error instanceof ApiResponseError) {
+      throw new AgentApiError(error.message, error.code, error.details, error.trace, error.audit);
+    }
+    throw error;
+  }
+}
 
 function buildTraceHeaders(traceId?: string): Record<string, string> | undefined {
   return traceId ? { "x-trace-id": traceId } : undefined;
@@ -136,7 +150,10 @@ export async function streamAgentPrompt(
           continue;
         }
 
-        if (packet.type === "AgentCompleted" || packet.type === "AgentCancelled" || packet.type === "final") {
+        // AgentCompleted can be an in-band turn boundary when the backend is
+        // draining durable FIFO continuations.  Only the wrapper's final/done
+        // packet terminates the transport.
+        if (packet.type === "final") {
           sawTerminalPacket = true;
         }
 
@@ -174,11 +191,12 @@ export async function fetchAgentHistory(limit = 40, sessionId?: string): Promise
 }
 
 export async function rollbackLatestExecution(
-  sessionId: string
+  sessionId: string,
+  expectedTraceId = ""
 ): Promise<ApiResult<AgentExecutionRollbackResponse>> {
   const response = await apiClient.post<ApiEnvelope<AgentExecutionRollbackResponse>>(
     "/agent/executions/rollback-latest",
-    { sessionId }
+    { sessionId, expectedTraceId }
   );
 
   try {
@@ -189,6 +207,94 @@ export async function rollbackLatestExecution(
     }
     throw error;
   }
+}
+
+export async function fetchAgentFollowups(
+  sessionId: string,
+  workspaceRoot?: string
+): Promise<ApiResult<AgentFollowupMailboxResponse>> {
+  const response = await apiClient.get<ApiEnvelope<AgentFollowupMailboxResponse>>("/agent/followups", {
+    params: { sessionId, workspaceRoot: workspaceRoot || undefined }
+  });
+  return unwrapAgentEnvelope(response.data, "Unable to load pending follow-ups.");
+}
+
+export async function enqueueAgentFollowup(payload: {
+  messageId: string;
+  sessionId: string;
+  activeTraceId?: string;
+  expectedTraceId?: string;
+  workspaceRoot?: string;
+  content: string;
+  mode: AgentFollowupMode;
+}): Promise<ApiResult<{ message: AgentFollowupMessage; steerRequested: boolean }>> {
+  const response = await apiClient.post<ApiEnvelope<{ message: AgentFollowupMessage; steerRequested: boolean }>>(
+    "/agent/followups",
+    payload
+  );
+  return unwrapAgentEnvelope(response.data, "Unable to queue the follow-up.");
+}
+
+export async function updateAgentFollowup(
+  messageId: string,
+  payload: {
+    sessionId: string;
+    expectedTraceId?: string;
+    workspaceRoot?: string;
+    content?: string;
+    mode?: AgentFollowupMode;
+  }
+): Promise<ApiResult<{ message: AgentFollowupMessage; steerRequested: boolean }>> {
+  const response = await apiClient.patch<ApiEnvelope<{ message: AgentFollowupMessage; steerRequested: boolean }>>(
+    `/agent/followups/${encodeURIComponent(messageId)}`,
+    payload
+  );
+  return unwrapAgentEnvelope(response.data, "Unable to update the follow-up.");
+}
+
+export async function deleteAgentFollowup(
+  messageId: string,
+  sessionId: string,
+  workspaceRoot?: string
+): Promise<ApiResult<{ message: AgentFollowupMessage }>> {
+  const response = await apiClient.delete<ApiEnvelope<{ message: AgentFollowupMessage }>>(
+    `/agent/followups/${encodeURIComponent(messageId)}`,
+    { params: { sessionId, workspaceRoot: workspaceRoot || undefined } }
+  );
+  return unwrapAgentEnvelope(response.data, "Unable to delete the follow-up.");
+}
+
+export async function steerAgentFollowup(
+  messageId: string,
+  payload: { sessionId: string; expectedTraceId: string; workspaceRoot?: string }
+): Promise<ApiResult<{ message: AgentFollowupMessage; steerRequested: boolean }>> {
+  const response = await apiClient.post<ApiEnvelope<{ message: AgentFollowupMessage; steerRequested: boolean }>>(
+    `/agent/followups/${encodeURIComponent(messageId)}/steer`,
+    payload
+  );
+  return unwrapAgentEnvelope(response.data, "Unable to steer the active execution.");
+}
+
+export async function resumeAgentFollowups(
+  sessionId: string,
+  workspaceRoot?: string
+): Promise<ApiResult<AgentFollowupMailboxResponse>> {
+  const response = await apiClient.post<ApiEnvelope<AgentFollowupMailboxResponse>>("/agent/followups/resume", {
+    sessionId,
+    workspaceRoot: workspaceRoot || ""
+  });
+  return unwrapAgentEnvelope(response.data, "Unable to resume pending follow-ups.");
+}
+
+export async function stopAgentExecution(payload: {
+  sessionId: string;
+  expectedTraceId: string;
+  workspaceRoot?: string;
+}): Promise<ApiResult<{ accepted: boolean; activeTraceId: string; mailboxPaused: boolean; pauseReason: string }>> {
+  const response = await apiClient.post<
+    ApiEnvelope<{ accepted: boolean; activeTraceId: string; mailboxPaused: boolean; pauseReason: string }>
+  >("/agent/executions/stop", payload);
+  return unwrapAgentEnvelope(response.data, "Unable to stop the active execution.");
 }
 
 export async function fetchAgentSessions(): Promise<ApiResult<AgentSessionsResponse>> {

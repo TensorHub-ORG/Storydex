@@ -14,6 +14,8 @@ from services.secure_storage_service import SecureStorageError, SecureStorageSer
 
 MAX_RECENT_PROJECTS = 8
 WORKBENCH_MODES = {"storydex"}
+MIN_PANE_FONT_SCALE = 75
+MAX_PANE_FONT_SCALE = 150
 
 
 class GlobalConfigService:
@@ -208,6 +210,8 @@ class GlobalConfigService:
 
     @staticmethod
     def _normalize_ui_preferences(payload: Dict[str, Any]) -> Dict[str, Any]:
+        file_font_size = GlobalConfigService._clamp_int(payload.get("fileFontSize"), 16, minimum=12, maximum=24)
+        legacy_center_scale = ((file_font_size * 5 + 2) // 4) * 5
         return {
             "theme": str(payload.get("theme") or "default").strip() or "default",
             "activeActivity": str(payload.get("activeActivity") or "resources").strip() or "resources",
@@ -220,7 +224,25 @@ class GlobalConfigService:
             "sidebarCollapsed": bool(payload.get("sidebarCollapsed", False)),
             "agentCollapsed": bool(payload.get("agentCollapsed", False)),
             "agentWidth": GlobalConfigService._clamp_int(payload.get("agentWidth"), 560, minimum=320, maximum=760),
-            "fileFontSize": GlobalConfigService._clamp_int(payload.get("fileFontSize"), 16, minimum=12, maximum=24),
+            "leftPaneFontScale": GlobalConfigService._clamp_int(
+                payload.get("leftPaneFontScale"),
+                100,
+                minimum=MIN_PANE_FONT_SCALE,
+                maximum=MAX_PANE_FONT_SCALE,
+            ),
+            "centerPaneFontScale": GlobalConfigService._clamp_int(
+                payload.get("centerPaneFontScale"),
+                legacy_center_scale,
+                minimum=MIN_PANE_FONT_SCALE,
+                maximum=MAX_PANE_FONT_SCALE,
+            ),
+            "rightPaneFontScale": GlobalConfigService._clamp_int(
+                payload.get("rightPaneFontScale"),
+                100,
+                minimum=MIN_PANE_FONT_SCALE,
+                maximum=MAX_PANE_FONT_SCALE,
+            ),
+            "fileFontSize": file_font_size,
             "playerFontSize": GlobalConfigService._clamp_int(
                 payload.get("playerFontSize"),
                 14,

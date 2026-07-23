@@ -101,36 +101,51 @@
                   <div class="system-settings-block-title">字体大小</div>
 
                   <label class="system-settings-field">
-                    <span>文件显示字体大小</span>
+                    <span>左侧栏字体倍率</span>
                     <div class="system-settings-range-row">
                       <input
-                        v-model.number="fileFontSizeModel"
+                        v-model.number="leftPaneFontScaleModel"
                         class="system-settings-range"
                         type="range"
-                        min="12"
-                        max="24"
-                        step="1"
+                        :min="MIN_PANE_FONT_SCALE"
+                        :max="MAX_PANE_FONT_SCALE"
+                        :step="PANE_FONT_SCALE_STEP"
                       />
-                      <span class="system-settings-range-value">{{ fileFontSizeModel }} px</span>
+                      <span class="system-settings-range-value">{{ leftPaneFontScaleModel }}%</span>
                     </div>
                   </label>
 
                   <label class="system-settings-field">
-                    <span>玩家模式字体大小</span>
+                    <span>中间栏字体倍率</span>
                     <div class="system-settings-range-row">
                       <input
-                        v-model.number="playerFontSizeModel"
+                        v-model.number="centerPaneFontScaleModel"
                         class="system-settings-range"
                         type="range"
-                        min="12"
-                        max="28"
-                        step="1"
+                        :min="MIN_PANE_FONT_SCALE"
+                        :max="MAX_PANE_FONT_SCALE"
+                        :step="PANE_FONT_SCALE_STEP"
                       />
-                      <span class="system-settings-range-value">{{ playerFontSizeModel }} px</span>
+                      <span class="system-settings-range-value">{{ centerPaneFontScaleModel }}%</span>
                     </div>
                   </label>
 
-                  <div class="system-settings-inline-note">修改后自动保存</div>
+                  <label class="system-settings-field">
+                    <span>右侧栏字体倍率</span>
+                    <div class="system-settings-range-row">
+                      <input
+                        v-model.number="rightPaneFontScaleModel"
+                        class="system-settings-range"
+                        type="range"
+                        :min="MIN_PANE_FONT_SCALE"
+                        :max="MAX_PANE_FONT_SCALE"
+                        :step="PANE_FONT_SCALE_STEP"
+                      />
+                      <span class="system-settings-range-value">{{ rightPaneFontScaleModel }}%</span>
+                    </div>
+                  </label>
+
+                  <div class="system-settings-inline-note">保留各栏原有字号层级，仅按倍率缩放；修改后自动保存</div>
                 </section>
               </div>
 
@@ -360,6 +375,7 @@ import type { ThemeCode } from "@/constants/themes";
 import { useUiStore } from "@/stores/ui";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type { StorySegmentExtension } from "@/types/workspace";
+import { MAX_PANE_FONT_SCALE, MIN_PANE_FONT_SCALE, PANE_FONT_SCALE_STEP } from "@/utils/paneFontScale";
 
 type SettingsSectionId = "appearance" | "layout" | "agent" | "project" | "about";
 
@@ -484,14 +500,19 @@ const agentWidthModel = computed({
   set: (value: number) => uiStore.setAgentWidth(Number(value))
 });
 
-const fileFontSizeModel = computed({
-  get: () => uiStore.fileFontSize,
-  set: (value: number) => uiStore.setFileFontSize(Number(value))
+const leftPaneFontScaleModel = computed({
+  get: () => uiStore.leftPaneFontScale,
+  set: (value: number) => uiStore.setLeftPaneFontScale(Number(value))
 });
 
-const playerFontSizeModel = computed({
-  get: () => uiStore.playerFontSize,
-  set: (value: number) => uiStore.setPlayerFontSize(Number(value))
+const centerPaneFontScaleModel = computed({
+  get: () => uiStore.centerPaneFontScale,
+  set: (value: number) => uiStore.setCenterPaneFontScale(Number(value))
+});
+
+const rightPaneFontScaleModel = computed({
+  get: () => uiStore.rightPaneFontScale,
+  set: (value: number) => uiStore.setRightPaneFontScale(Number(value))
 });
 
 

@@ -196,7 +196,14 @@ STORYDEX_MANIFEST: List[DirSpec] = [
         "role": "agent",
         "create_on_init": True,
         "description": "Agent runtime assets",
-        "readme": "# Agent 运行资产\n\n存放技能、会话、计划和运行时临时文件。\n",
+        "readme": "# Agent 运行资产\n\n存放技能、会话、计划、日志和运行时临时文件。\n",
+    },
+    {
+        "path": ".storydex/.agent/logs",
+        "layer": "runtime",
+        "role": "logs",
+        "create_on_init": False,
+        "description": "Agent execution and hook logs",
     },
     {
         "path": ".storydex/.agent/skills",

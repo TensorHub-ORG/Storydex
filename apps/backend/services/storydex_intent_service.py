@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import re
 from collections import OrderedDict
@@ -42,8 +43,24 @@ _INTENT_SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 DEFAULT_LLM_TIMEOUT_SECONDS = 2.0
 _MAX_PROMPT_CHARS = 2000
 _MAX_SESSION_MEMORY = 256
+_INTENT_MAX_OUTPUT_TOKENS = 160
 _FOLLOW_UP_RE = re.compile(r"^(执行|继续|确认|好的?|可以|是的|就这么做|开始|继续执行)[。.!！\s]*$")
 _VARIABLE_ACTION_RE = re.compile(r"(变量|状态).*(整理|更新|同步|归档)|(整理|更新|同步|归档).*(变量|状态)")
+_ADVISORY_RE = re.compile(
+    r"(建议|意见|评价|点评|评估|分析一下|怎么看|怎么样|写得如何|写得怎么样|如何看|你觉得|好不好|是否合理|"
+    r"有什么问题|哪里有问题|优缺点|可行吗|应该吗|怎么理解|为什么|如何|怎样|"
+    r"advice|suggest(?:ion)?|review|evaluate|assessment|opinion|what do you think|"
+    r"how (?:should|can|do)|why\b|explain)",
+    re.IGNORECASE,
+)
+_MUTATION_REQUEST_RE = re.compile(
+    r"(请|帮我|替我|直接|立即|现在|需要你)?.{0,8}"
+    r"(修改|改成|改写|重写|续写|扩写|创建|生成|新增|添加|删除|移除|更新|整理|同步|"
+    r"归档|执行|实现|修复|写入|保存|落盘|提交|应用|替换|移动|重命名|"
+    r"edit|rewrite|continue writing|create|generate|add|delete|remove|update|organize|"
+    r"sync|execute|implement|fix|save|apply|replace|move|rename)",
+    re.IGNORECASE,
+)
 
 # 内置意图目录：描述、资产落点（与 TurnContract assetTargets 对齐）、少样本示例。
 _BUILTIN_INTENT_CATALOG: Dict[str, Dict[str, Any]] = {
@@ -182,6 +199,212 @@ def heuristic_intent_frame(*, prompt: str, active_file: str) -> Dict[str, Any]:
     }
 
 
+def is_advisory_request(prompt: str) -> bool:
+    """Return True for requests that ask for judgment or guidance, not mutation.
+
+    In particular, the bare Chinese character ``写`` is intentionally not a
+    mutation signal: phrases such as ``这段写得怎么样`` are advisory.
+    """
+
+    normalized = " ".join(str(prompt or "").strip().split())
+    if not normalized or normalized.startswith("/"):
+        return False
+    return bool(_ADVISORY_RE.search(normalized)) and not bool(_MUTATION_REQUEST_RE.search(normalized))
+
+
+class _BoundedIntentProvider:
+    """Apply metadata-call limits without modifying the pinned Coomi wheel."""
+
+    def __init__(self, provider: Any) -> None:
+        object.__setattr__(self, "_provider", provider)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._provider, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "_provider":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._provider, name, value)
+
+    async def chat(
+        self,
+        messages: list[Dict[str, Any]],
+        tools: list[Dict[str, Any]] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        del tools, kwargs
+        direct = await _bounded_metadata_chat(self._provider, messages)
+        if direct is not None:
+            return direct
+        return await _invoke_provider_chat(self._provider, messages)
+
+
+async def _bounded_metadata_chat(provider: Any, messages: list[Dict[str, Any]]) -> Any | None:
+    """Use strict, short, low-reasoning requests when the provider exposes its client.
+
+    The pinned Coomi providers accept ``**kwargs`` but currently do not forward
+    metadata options to their SDK clients.  Storydex keeps this narrow adapter
+    local to intent routing so the desktop wheel remains untouched and normal
+    agent calls retain their existing provider behavior.
+    """
+
+    config = getattr(provider, "config", None)
+    provider_type = _normalize_provider_mode(getattr(config, "type", ""))
+    model = str(getattr(provider, "model", "") or "").strip()
+    client = getattr(provider, "client", None)
+    schema = _intent_response_schema()
+
+    if provider_type == "openai_responses" and model:
+        create_response = getattr(getattr(client, "responses", None), "create", None)
+        build_params = getattr(provider, "_build_params", None)
+        if callable(create_response) and callable(build_params):
+            try:
+                params = dict(build_params(messages, None, stream=False))
+                params.update(
+                    {
+                        "text": {
+                            "format": {
+                                "type": "json_schema",
+                                "name": "storydex_intent",
+                                "schema": schema,
+                                "strict": True,
+                            }
+                        },
+                        "max_output_tokens": _INTENT_MAX_OUTPUT_TOKENS,
+                        "store": False,
+                    }
+                )
+                if _is_reasoning_model(model):
+                    params["reasoning"] = {"effort": "low"}
+                else:
+                    params["temperature"] = 0
+                raw_response = create_response(**params)
+                if inspect.isawaitable(raw_response):
+                    raw_response = await raw_response
+                return _metadata_llm_response(
+                    content=str(getattr(raw_response, "output_text", "") or ""),
+                )
+            except Exception:
+                # The outer stage deadline still applies. Providers without
+                # strict Responses JSON support fall back to Coomi's normal
+                # chat call and the strict system prompt.
+                return None
+
+    completions = getattr(getattr(client, "chat", None), "completions", None)
+    create_completion = getattr(completions, "create", None)
+    if provider_type == "openai_compatible" and callable(create_completion) and model:
+        params: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            # Compatible relays vary widely in JSON-schema support. JSON
+            # object mode remains the bounded common denominator while the
+            # system prompt supplies the exact schema.
+            "response_format": {"type": "json_object"},
+        }
+        if _is_reasoning_model(model):
+            params.update(
+                {
+                    "max_completion_tokens": _INTENT_MAX_OUTPUT_TOKENS,
+                    "reasoning_effort": "low",
+                }
+            )
+        else:
+            params.update({"max_tokens": _INTENT_MAX_OUTPUT_TOKENS, "temperature": 0})
+        try:
+            raw_response = create_completion(**params)
+            if inspect.isawaitable(raw_response):
+                raw_response = await raw_response
+            choice = raw_response.choices[0]
+            message = choice.message
+            return _metadata_llm_response(
+                content=str(getattr(message, "content", "") or ""),
+                reasoning_content=str(getattr(message, "reasoning_content", "") or ""),
+            )
+        except Exception:
+            # The outer stage deadline still applies.  Providers without JSON
+            # schema/response-format support fall back to the strict prompt.
+            return None
+
+    create_message = getattr(getattr(client, "messages", None), "create", None)
+    convert_messages = getattr(provider, "_convert_messages", None)
+    if callable(create_message) and callable(convert_messages) and model:
+        try:
+            system, converted = convert_messages(messages)
+            params = {
+                "model": model,
+                "max_tokens": _INTENT_MAX_OUTPUT_TOKENS,
+                "temperature": 0,
+                "messages": converted,
+            }
+            if system:
+                params["system"] = system
+            raw_response = create_message(**params)
+            if inspect.isawaitable(raw_response):
+                raw_response = await raw_response
+            content = "".join(
+                str(getattr(block, "text", "") or "")
+                for block in (getattr(raw_response, "content", None) or [])
+                if str(getattr(block, "type", "") or "") == "text"
+            )
+            return _metadata_llm_response(content=content)
+        except Exception:
+            return None
+    return None
+
+
+def _intent_response_schema() -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "primary": {"type": "string"},
+            "secondary": {"type": "string"},
+            "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+            "reason": {"type": "string"},
+        },
+        "required": ["primary", "secondary", "confidence", "reason"],
+    }
+
+
+def _normalize_provider_mode(value: Any) -> str:
+    normalized = str(value or "openai_compatible").strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized in {"openai", "responses", "response", "openai_response", "openai_responses"}:
+        return "openai_responses"
+    if normalized in {"anthropic", "anthropic_message", "anthropic_messages", "messages"}:
+        return "anthropic_messages"
+    return "openai_compatible"
+
+
+def _is_reasoning_model(model: str) -> bool:
+    lowered = str(model or "").strip().lower()
+    return lowered.startswith(("o1", "o3", "o4")) or "gpt-5" in lowered
+
+
+async def _invoke_provider_chat(provider: Any, messages: list[Dict[str, Any]]) -> Any:
+    chat = getattr(provider, "chat")
+    if inspect.iscoroutinefunction(chat):
+        return await chat(messages, None)
+    response = await asyncio.to_thread(chat, messages, None)
+    return await response if inspect.isawaitable(response) else response
+
+
+def _metadata_llm_response(*, content: str, reasoning_content: str = "") -> Any:
+    try:
+        from coomi.types import LLMResponse
+
+        return LLMResponse(
+            content=content,
+            tool_calls=None,
+            usage=None,
+            reasoning_content=reasoning_content or None,
+        )
+    except (ImportError, TypeError):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(content=content, tool_calls=None, usage=None, reasoning_content=reasoning_content or None)
+
+
 def is_valid_intent_frame(frame: Any) -> bool:
     """校验分类管线产出的意图帧：primary 为合法 slug 且带 method 出处标记。"""
     if not isinstance(frame, dict):
@@ -315,22 +538,54 @@ class StorydexIntentService:
         session_id: str = "",
     ) -> Dict[str, Any]:
         normalized_prompt = str(prompt or "").strip()
-        catalog = self._catalog(workspace_root)
         session_key = self._session_key(workspace_root=workspace_root, session_id=session_id)
+
+        # The deterministic and advisory paths must stay independent from cold
+        # filesystem, history and provider initialization.  In particular this
+        # keeps review-style prompts such as ``这段写得怎么样`` in the sub-100ms
+        # path even when the project registry lives on slow storage.
+        if not normalized_prompt or normalized_prompt.startswith("/"):
+            frame = heuristic_intent_frame(prompt=normalized_prompt, active_file=active_file)
+            frame["method"] = "deterministic"
+            catalog = build_intent_catalog()
+            _enrich_frame(frame, catalog)
+            self._remember(
+                session_key=session_key,
+                prompt=normalized_prompt,
+                primary=str(frame.get("primary") or ""),
+            )
+            return frame
+        if is_advisory_request(normalized_prompt):
+            frame = {
+                "primary": "general",
+                "confidence": "high",
+                "signals": ["local_advisory_rule"],
+                "method": "advisory_fast",
+                "reason": "Local rule identified a consultation, suggestion, or evaluation request.",
+            }
+            catalog = build_intent_catalog()
+            _enrich_frame(frame, catalog)
+            self._remember(
+                session_key=session_key,
+                prompt=normalized_prompt,
+                primary="general",
+            )
+            return frame
+
+        # Registry and trace-history reads are filesystem work.  Keep them off
+        # the request loop so the outer hard deadline also covers cold storage.
+        catalog = await asyncio.to_thread(self._catalog, workspace_root)
         previous_turn = self._session_turns.get(session_key) if session_key else None
         is_follow_up = bool(_FOLLOW_UP_RE.match(normalized_prompt))
         if session_id and (is_follow_up or previous_turn is None):
-            persisted_turn = self._load_persisted_turn(
+            persisted_turn = await asyncio.to_thread(
+                self._load_persisted_turn,
                 session_id=session_id,
                 workspace_root=workspace_root,
             )
             if persisted_turn:
                 previous_turn = {**persisted_turn, **(previous_turn or {})}
-        # 确定性短路：slash 命令与空输入不需要语义分类。
-        if not normalized_prompt or normalized_prompt.startswith("/"):
-            frame = heuristic_intent_frame(prompt=normalized_prompt, active_file=active_file)
-            frame["method"] = "deterministic"
-        elif is_follow_up and previous_turn:
+        if is_follow_up and previous_turn:
             frame = self._follow_up_frame(previous_turn)
         else:
             heuristic = heuristic_intent_frame(prompt=normalized_prompt, active_file=active_file)
@@ -488,8 +743,21 @@ class StorydexIntentService:
             with _storydex_coomi_home():
                 from services.llm_replay import get_replayable_llm_provider, llm_purpose
 
+                def create_provider() -> Any:
+                    from coomi.services import get_llm_provider
+
+                    main_provider = get_llm_provider()
+                    try:
+                        from coomi.services.llm.factory import create_fast_provider
+
+                        fast_provider = create_fast_provider(main_provider)
+                    except Exception:
+                        fast_provider = None
+                    bounded_provider = _BoundedIntentProvider(fast_provider or main_provider)
+                    return get_replayable_llm_provider(bounded_provider)
+
                 with llm_purpose("intent"):
-                    provider = get_replayable_llm_provider()
+                    provider = await asyncio.to_thread(create_provider)
                     response = await asyncio.wait_for(
                         _call_provider_chat(
                             provider,

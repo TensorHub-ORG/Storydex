@@ -6,29 +6,28 @@ from importlib.metadata import version
 
 from services.coomi_agent_service import _CoomiEventTranslator
 from services.coomi_version_service import read_expected_coomi_version
+from services.llm_replay import normalize_llm_usage
 
 
-def test_usage_provenance_public_contract_or_pinned_legacy_baseline():
-    from coomi.services import LLMUsage
-    from coomi.services.llm import UsageStreamAccumulator, usage_from_response
-
+def test_usage_provenance_is_owned_by_storydex_adapter():
     assert version("coomi-agent") == read_expected_coomi_version()
 
-    missing = LLMUsage(
+    payload = normalize_llm_usage(
+        {
+            "requested_model": "contract-model",
+            "estimated_input_tokens": 12,
+            "estimator": "contract-estimator",
+        },
         source="missing",
-        protocol="openai_chat",
-        requested_model="contract-model",
-        estimated_input_tokens=12,
-        estimator="contract-estimator",
+        protocol="openai_responses",
     )
-    payload = missing.to_dict()
+    assert payload is not None
     assert payload["_type"] == "LLMUsage"
     assert payload["_version"] == 1
     assert payload["source"] == "missing"
-    assert payload["prompt_tokens"] is None
-    assert payload["estimated_input_tokens"] == 12
-    assert UsageStreamAccumulator is not None
-    assert usage_from_response is not None
+    assert payload["inputTokens"] is None
+    assert payload["estimatedInputTokens"] == 12
+    assert payload["protocol"] == "openai_responses"
 
 
 def test_agent_and_loop_public_signatures():
@@ -72,6 +71,7 @@ def test_translated_public_event_shapes():
         AgentCancelled,
         AgentError,
         CompressionEvent,
+        ConnectionRetry,
         ReasoningChunk,
         TextChunk,
         ToolDone,
@@ -81,9 +81,12 @@ def test_translated_public_event_shapes():
     )
 
     translator = _CoomiEventTranslator(session_id="contract-session")
+    # Hidden model reasoning is intentionally not part of Storydex's public
+    # event contract and must never reach SSE, trace history, or audit logs.
+    assert translator.translate(ReasoningChunk(content="reason")) is None
     cases = [
         (TextChunk(content="text"), "TextChunk", "content"),
-        (ReasoningChunk(content="reason"), "ReasoningChunk", "content"),
+        (ConnectionRetry(attempt=1, max_attempts=3, delay=0.5, message="retry"), "ConnectionRetry", "maxAttempts"),
         (ToolStart(tool_name="Read", arguments={}), "ToolStart", "tool_name"),
         (ToolRunning(tool_name="Read"), "ToolRunning", "progress"),
         (ToolDone(tool_name="Read", result_preview="ok"), "ToolDone", "result_preview"),
@@ -135,4 +138,5 @@ def test_permissions_memory_cancel_and_config_public_contract(monkeypatch, tmp_p
 
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     config = ConfigManager()
-    assert config.data["version"] == 1
+    assert isinstance(config.data, dict)
+    assert config.list_providers() == []

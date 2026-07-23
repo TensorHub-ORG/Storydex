@@ -24,8 +24,13 @@ export interface UIPreferencesResponse {
   sidebarCollapsed: boolean;
   agentCollapsed: boolean;
   agentWidth: number;
-  fileFontSize: number;
-  playerFontSize: number;
+  leftPaneFontScale: number;
+  centerPaneFontScale: number;
+  rightPaneFontScale: number;
+  /** @deprecated Kept for compatibility with older Storydex preferences. */
+  fileFontSize?: number;
+  /** @deprecated Kept for compatibility with older Storydex preferences. */
+  playerFontSize?: number;
   updatedAt: string;
 }
 
@@ -37,8 +42,9 @@ export interface UIPreferencesUpdateRequest {
   sidebarCollapsed: boolean;
   agentCollapsed: boolean;
   agentWidth: number;
-  fileFontSize: number;
-  playerFontSize: number;
+  leftPaneFontScale: number;
+  centerPaneFontScale: number;
+  rightPaneFontScale: number;
 }
 
 export interface WorkspaceStateResponse {

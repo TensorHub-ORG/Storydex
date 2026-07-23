@@ -5,7 +5,9 @@ const api = vi.hoisted(() => ({
   streamAgentPrompt: vi.fn(), fetchAgentSessions: vi.fn(), fetchAgentHistory: vi.fn(),
   fetchAgentCoomiStatus: vi.fn(), submitAgentRunCommitDecision: vi.fn(), rollbackLatestExecution: vi.fn(), clearConversation: vi.fn(),
   deleteAgentSession: vi.fn(), cycleAgentCoomiPermission: vi.fn(), setAgentCoomiPermission: vi.fn(),
-  resolveAgentCoomiApproval: vi.fn()
+  resolveAgentCoomiApproval: vi.fn(), fetchAgentFollowups: vi.fn(), enqueueAgentFollowup: vi.fn(),
+  updateAgentFollowup: vi.fn(), deleteAgentFollowup: vi.fn(), steerAgentFollowup: vi.fn(),
+  resumeAgentFollowups: vi.fn(), stopAgentExecution: vi.fn()
 }));
 const chapterApi = vi.hoisted(() => ({ fetchStoryChapterTemplates: vi.fn() }));
 const git = vi.hoisted(() => ({ refreshSummary: vi.fn() }));
@@ -56,6 +58,9 @@ beforeEach(() => {
   api.deleteAgentSession.mockResolvedValue(envelope({ deleted: true }));
   api.submitAgentRunCommitDecision.mockResolvedValue(envelope({ created: false, reason: "skipped", changedFiles: [] }));
   api.rollbackLatestExecution.mockResolvedValue(envelope({ rolledBack: false, sessionId: "default", removedTraceId: "", prompt: "" }));
+  api.fetchAgentFollowups.mockResolvedValue(envelope({ messages: [], paused: false, pauseReason: "", revision: 0 }));
+  api.resumeAgentFollowups.mockResolvedValue(envelope({ messages: [], paused: false, pauseReason: "", revision: 1 }));
+  api.stopAgentExecution.mockResolvedValue(envelope({ accepted: true, activeTraceId: "trace", mailboxPaused: true, pauseReason: "manual_stop" }));
   chapterApi.fetchStoryChapterTemplates.mockResolvedValue(envelope({ items: [] }));
   git.refreshSummary.mockResolvedValue(undefined);
 });
@@ -79,6 +84,11 @@ describe("agent store lifecycle and normalization", () => {
     expect(store.currentSessionId).toBe(""); expect(store.availableSessions).toEqual([]);
     store.setStoryGenerationOptions({ fragmentCount: -1, fragmentWordCount: 99999, chapterTemplateId: "" });
     expect(store.storyFragmentCount).toBe(1); expect(store.storyFragmentWordCount).toBe(20000); expect(store.storyChapterTemplateId).toBeTruthy();
+    store.setStoryGenerationOptions({ fragmentCount: 99, chapterTemplateId: "default_chapter_directory" });
+    expect(store.storyFragmentCount).toBe(99);
+    store.storyChapterTemplates = [{ id: "single_file_chapter_directory", contentMode: "single_file" }] as never;
+    store.setStoryGenerationOptions({ fragmentCount: 8, chapterTemplateId: "single_file_chapter_directory" });
+    expect(store.storyFragmentCount).toBe(1);
   });
 
   it("refreshes status and permission modes across direct and fallback branches", async () => {
@@ -214,19 +224,26 @@ describe("commit and cancellation behavior", () => {
     vi.runAllTimers(); expect(store.isCommittingGit).toBe(false);
   });
 
-  it("aborts an active stream and maps abort versus provider errors", async () => {
+  it("stops through the backend while preserving a paused mailbox and maps provider errors", async () => {
     const store = useAgentStore();
-    let rejectStream!: (reason: unknown) => void;
-    api.streamAgentPrompt.mockImplementation((_request: unknown, _on: unknown, _trace: unknown, _session: unknown, signal: AbortSignal) => new Promise((_resolve, reject) => {
-      rejectStream = reject; signal.addEventListener("abort", () => reject(new AgentApiError("stopped", "request_aborted")));
+    let finishStream!: () => void;
+    let onPacket!: (packet: unknown) => void;
+    api.streamAgentPrompt.mockImplementation((_request: unknown, on: (packet: unknown) => void) => new Promise<void>((resolve) => {
+      onPacket = on;
+      finishStream = resolve;
     }));
     store.promptInput = "run";
     const running = store.runPrompt();
-    store.stopActiveRun();
-    await running; expect(store.executionHistory[0].status).toBe("stopped");
-    store.stopActiveRun();
+    await Promise.resolve();
+    await store.stopActiveRun();
+    expect(api.stopAgentExecution).toHaveBeenCalledWith(expect.objectContaining({ expectedTraceId: store.currentTraceId }));
+    expect(store.followupPaused).toBe(true);
+    expect(store.followupPauseReason).toBe("manual_stop");
+    onPacket({ _type: "AgentCancelled", reason: "manual_stop" });
+    finishStream();
+    await running; expect(store.executionHistory[0].status).toBe("cancelled");
+    await store.stopActiveRun();
     api.streamAgentPrompt.mockRejectedValueOnce(new Error("provider failed")); store.promptInput = "again";
     await store.runPrompt(); expect(store.executionHistory[0].status).toBe("failed");
-    void rejectStream;
   });
 });

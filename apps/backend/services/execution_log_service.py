@@ -117,7 +117,7 @@ def create_execution_log_session(
     from services.project_service import get_project_service
 
     project_service = get_project_service()
-    log_dir = project_service.storydex_root / "logs"
+    log_dir = project_service.agent_root / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = _build_unique_log_path(log_dir)
     return ExecutionLogSession(

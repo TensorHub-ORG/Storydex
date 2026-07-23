@@ -165,6 +165,7 @@ class StoryProjectSettingsResponse(BaseModel):
     context_concision_max_input_tokens: int = Field(default=32000, alias="contextConcisionMaxInputTokens")
     story_fragment_count: int = Field(default=1, alias="storyFragmentCount")
     story_fragment_word_count: int = Field(default=2000, alias="storyFragmentWordCount")
+    story_chapter_template_id: str = Field(default="default_chapter_directory", alias="storyChapterTemplateId")
     auto_update_variables: bool = Field(default=False, alias="autoUpdateVariables")
     auto_update_wiki: bool = Field(default=False, alias="autoUpdateWiki")
     auto_update_variables_note: str = Field(default="", alias="autoUpdateVariablesNote")
@@ -185,6 +186,7 @@ class StoryProjectSettingsUpdateRequest(BaseModel):
     context_concision_max_input_tokens: Optional[int] = Field(default=None, alias="contextConcisionMaxInputTokens")
     story_fragment_count: Optional[int] = Field(default=None, alias="storyFragmentCount")
     story_fragment_word_count: Optional[int] = Field(default=None, alias="storyFragmentWordCount")
+    story_chapter_template_id: Optional[str] = Field(default=None, alias="storyChapterTemplateId")
     auto_update_variables: Optional[bool] = Field(default=None, alias="autoUpdateVariables")
     auto_update_wiki: Optional[bool] = Field(default=None, alias="autoUpdateWiki")
     agent_commit_prompt_enabled: Optional[bool] = Field(default=None, alias="agentCommitPromptEnabled")
@@ -214,6 +216,7 @@ class StoryChapterTemplateResponse(BaseModel):
     relative_path: str = Field(alias="relativePath")
     description: str = ""
     chapter_mode: str = Field(default="directory", alias="chapterMode")
+    content_mode: str = Field(default="multi_fragment", alias="contentMode")
     chapter_name_pattern: str = Field(default="", alias="chapterNamePattern")
     segment_naming: str = Field(default="001.md", alias="segmentNaming")
 
@@ -276,13 +279,17 @@ def _build_story_settings_payload() -> Dict[str, Any]:
             minimum=1000,
             maximum=500000,
         ),
-        "storyFragmentCount": _bounded_int(project_settings.get("storyFragmentCount"), default=1, minimum=1, maximum=20),
+        "storyFragmentCount": _positive_int(project_settings.get("storyFragmentCount"), default=1),
         "storyFragmentWordCount": _bounded_int(
             project_settings.get("storyFragmentWordCount"),
             default=2000,
             minimum=100,
             maximum=20000,
         ),
+        "storyChapterTemplateId": str(
+            project_settings.get("storyChapterTemplateId") or "default_chapter_directory"
+        ).strip()
+        or "default_chapter_directory",
         "autoUpdateVariables": bool(project_settings.get("autoUpdateVariables", False)),
         "autoUpdateWiki": bool(project_settings.get("autoUpdateWiki", False)),
         "agentCommitPromptEnabled": bool(project_settings.get("agentCommitPromptEnabled", True)),
@@ -302,6 +309,14 @@ def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int
     except (TypeError, ValueError):
         parsed = default
     return max(minimum, min(maximum, parsed))
+
+
+def _positive_int(value: Any, *, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(1, parsed)
 
 
 def _build_git_summary_payload() -> Dict[str, Any]:
@@ -571,6 +586,7 @@ def update_story_project_settings(payload: StoryProjectSettingsUpdateRequest) ->
         "contextConcisionMaxInputTokens": payload.context_concision_max_input_tokens,
         "storyFragmentCount": payload.story_fragment_count,
         "storyFragmentWordCount": payload.story_fragment_word_count,
+        "storyChapterTemplateId": payload.story_chapter_template_id,
         "autoUpdateVariables": payload.auto_update_variables,
         "autoUpdateWiki": payload.auto_update_wiki,
         "agentCommitPromptEnabled": payload.agent_commit_prompt_enabled,

@@ -60,13 +60,14 @@ beforeEach(() => {
 });
 
 describe("CoomiConfigPanel", () => {
-  it("renders free-form model inputs and only the Save and Apply footer actions", async () => {
+  it("renders free-form model comboboxes and only the Save and Apply footer actions", async () => {
     const wrapper = shallowMount(CoomiConfigPanel, { props: { visible: true } });
     await flushPromises();
 
     expect(wrapper.find("input.coomi-model-input").exists()).toBe(true);
     expect(wrapper.find("input.coomi-fast-model-input").exists()).toBe(true);
-    expect(wrapper.findAll("datalist")).toHaveLength(2);
+    expect(wrapper.findAll("datalist")).toHaveLength(0);
+    expect(wrapper.findAll(".llm-model-combobox")).toHaveLength(2);
     expect(wrapper.text()).not.toContain("设为当前");
     expect(wrapper.text()).not.toContain("测试响应");
     expect(wrapper.findAll(".coomi-config-footer .coomi-config-action").map((button) => button.text())).toEqual([
@@ -75,7 +76,7 @@ describe("CoomiConfigPanel", () => {
     ]);
   });
 
-  it("keeps custom model names after fetching optional model suggestions", async () => {
+  it("keeps custom model names and renders fetched suggestions in a scrollable custom list", async () => {
     api.fetchAgentCoomiModels.mockResolvedValue({
       data: { endpoint: "https://primary.example/v1/models", models: ["listed-model", "listed-fast-model"] }
     });
@@ -91,12 +92,85 @@ describe("CoomiConfigPanel", () => {
 
     expect((standardInput.element as HTMLInputElement).value).toBe("private/custom-model");
     expect((fastInput.element as HTMLInputElement).value).toBe("private/custom-fast-model");
-    expect(wrapper.findAll("datalist option").map((option) => option.attributes("value"))).toEqual([
-      "listed-model",
-      "listed-fast-model",
+    const list = wrapper.find(".coomi-standard-model-options");
+    expect(list.exists()).toBe(true);
+    expect(list.classes()).toContain("llm-options-menu--models");
+    expect(list.findAll(".llm-model-option").map((option) => option.text())).toEqual([
       "listed-model",
       "listed-fast-model"
     ]);
+  });
+
+  it("normalizes legacy provider aliases to Coomi 1.2.1 canonical modes", async () => {
+    const wrapper = shallowMount(CoomiConfigPanel, { props: { visible: true } });
+    await flushPromises();
+
+    const typeTrigger = wrapper.find(".coomi-provider-type-trigger");
+    expect(typeTrigger.text()).toContain("OpenAI Responses");
+    await wrapper.findAll(".coomi-config-footer .coomi-config-action")[0].trigger("click");
+    await flushPromises();
+
+    const savedPayload = JSON.parse(api.updateAgentCoomiConfig.mock.calls[0][0].content);
+    expect(savedPayload.providers.primary.type).toBe("openai_responses");
+    expect(savedPayload.providers.secondary.type).toBe("openai_compatible");
+  });
+
+  it("omits the current provider type from the open menu instead of repeating its label", async () => {
+    const wrapper = shallowMount(CoomiConfigPanel, { props: { visible: true } });
+    await flushPromises();
+
+    const trigger = wrapper.find(".coomi-provider-type-trigger");
+    expect(trigger.text()).toContain("OpenAI Responses");
+    await trigger.trigger("click");
+
+    const options = wrapper.findAll(".llm-provider-type-option");
+    expect(options).toHaveLength(2);
+    expect(options.map((option) => option.text())).toEqual(["OpenAI Compatible", "Anthropic Messages"]);
+    expect(wrapper.find(".llm-options-menu--provider").text()).not.toContain("OpenAI Responses");
+
+    await options[0].trigger("click");
+    expect(wrapper.find(".coomi-provider-type-trigger").text()).toContain("OpenAI Compatible");
+    expect(wrapper.find(".llm-options-menu--provider").exists()).toBe(false);
+  });
+
+  it("supports keyboard selection in the fetched model list", async () => {
+    api.fetchAgentCoomiModels.mockResolvedValue({
+      data: { endpoint: "https://primary.example/v1/models", models: ["model-a", "model-b", "model-c"] }
+    });
+    const wrapper = shallowMount(CoomiConfigPanel, { props: { visible: true } });
+    await flushPromises();
+
+    await wrapper.find(".coomi-model-fetch-row button").trigger("click");
+    await flushPromises();
+    const standardInput = wrapper.find("input.coomi-model-input");
+    expect(standardInput.attributes("aria-expanded")).toBe("true");
+
+    await standardInput.trigger("keydown", { key: "ArrowDown" });
+    await standardInput.trigger("keydown", { key: "Enter" });
+    expect((standardInput.element as HTMLInputElement).value).toBe("model-b");
+    expect(standardInput.attributes("aria-expanded")).toBe("false");
+  });
+
+  it("shows the provider type explanation from a compact hoverable and clickable info icon", async () => {
+    const wrapper = shallowMount(CoomiConfigPanel, { props: { visible: true } });
+    await flushPromises();
+
+    const help = wrapper.find(".llm-field-help");
+    const trigger = wrapper.find(".llm-field-help__trigger");
+    expect(trigger.text()).toBe("!");
+    expect(trigger.attributes("aria-expanded")).toBe("false");
+    expect(wrapper.find(".llm-field-help__tooltip").exists()).toBe(false);
+
+    await help.trigger("mouseenter");
+    expect(wrapper.find(".llm-field-help__tooltip").exists()).toBe(true);
+    await help.trigger("mouseleave");
+    expect(wrapper.find(".llm-field-help__tooltip").exists()).toBe(false);
+
+    await trigger.trigger("click");
+    expect(trigger.attributes("aria-expanded")).toBe("true");
+    expect(wrapper.find(".llm-field-help__tooltip").text()).toContain("Coomi 1.2.1");
+    await trigger.trigger("keydown", { key: "Escape" });
+    expect(wrapper.find(".llm-field-help__tooltip").exists()).toBe(false);
   });
 
   it("saves without changing active and applies the edited provider after an id rename", async () => {

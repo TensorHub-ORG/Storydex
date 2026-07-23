@@ -4,14 +4,21 @@ import {
   clearConversation,
   cycleAgentCoomiPermission,
   deleteAgentSession,
+  deleteAgentFollowup,
+  enqueueAgentFollowup,
   fetchAgentCoomiStatus,
+  fetchAgentFollowups,
   fetchAgentHistory,
   fetchAgentSessions,
   rollbackLatestExecution,
+  resumeAgentFollowups,
   resolveAgentCoomiApproval,
   setAgentCoomiPermission,
+  steerAgentFollowup,
+  stopAgentExecution,
   streamAgentPrompt,
-  submitAgentRunCommitDecision
+  submitAgentRunCommitDecision,
+  updateAgentFollowup
 } from "@/api/agent";
 import { describeTransportError } from "@/api/client";
 import { fetchStoryChapterTemplates } from "@/api/workspace";
@@ -23,6 +30,9 @@ import type {
   AgentChatRequest,
   AgentCommitDecisionMode,
   AgentExecutionRun,
+  AgentFollowupMailboxResponse,
+  AgentFollowupMessage,
+  AgentFollowupMode,
   AgentPendingSnapshotConfirmation,
   AgentPendingApproval,
   AgentPendingCommitPrompt,
@@ -54,6 +64,8 @@ interface AgentState {
   executionHistory: AgentExecutionRun[];
   isRunning: boolean;
   isRollingBack: boolean;
+  isStopping: boolean;
+  isReexecuting: boolean;
   lastError: string;
   lastErrorCode: string | null;
   lastSuccess: string;
@@ -79,10 +91,19 @@ interface AgentState {
   storyChapterTemplates: StoryChapterTemplate[];
   storyChapterTemplatesLoading: boolean;
   storyChapterTemplatesError: string;
+  followups: AgentFollowupMessage[];
+  followupPaused: boolean;
+  followupPauseReason: string;
+  followupRevision: number;
+  editingTraceId: string;
+  editingOriginalPrompt: string;
+  editingDraftBackup: string;
+  editingHasFileChanges: boolean;
 }
 
 const MAX_EXECUTION_HISTORY = 40;
 const DEFAULT_CHAPTER_TEMPLATE_ID = "default_chapter_directory";
+const SINGLE_FILE_CHAPTER_TEMPLATE_ID = "single_file_chapter_directory";
 let activeStreamAbortController: AbortController | null = null;
 let commitProgressTimer: number | null = null;
 let commitActionClearTimer: number | null = null;
@@ -104,6 +125,8 @@ export const useAgentStore = defineStore("agent", {
     executionHistory: [],
     isRunning: false,
     isRollingBack: false,
+    isStopping: false,
+    isReexecuting: false,
     lastError: "",
     lastErrorCode: null,
     lastSuccess: "",
@@ -128,7 +151,15 @@ export const useAgentStore = defineStore("agent", {
     storyChapterTemplateId: DEFAULT_CHAPTER_TEMPLATE_ID,
     storyChapterTemplates: [],
     storyChapterTemplatesLoading: false,
-    storyChapterTemplatesError: ""
+    storyChapterTemplatesError: "",
+    followups: [],
+    followupPaused: false,
+    followupPauseReason: "",
+    followupRevision: 0,
+    editingTraceId: "",
+    editingOriginalPrompt: "",
+    editingDraftBackup: "",
+    editingHasFileChanges: false
   }),
 
   getters: {
@@ -169,11 +200,27 @@ export const useAgentStore = defineStore("agent", {
       this.currentSessionId = createSessionId();
     },
 
-    stopActiveRun(): void {
-      if (!this.isRunning || !activeStreamAbortController) {
+    async stopActiveRun(): Promise<void> {
+      if (!this.isRunning || this.isStopping) {
         return;
       }
-      activeStreamAbortController.abort();
+      const workspaceStore = useWorkspaceStore();
+      this.isStopping = true;
+      this.lastError = "";
+      try {
+        const result = await stopAgentExecution({
+          sessionId: this.currentSessionId || "default",
+          expectedTraceId: this.currentTraceId,
+          workspaceRoot: workspaceStore.currentProject?.workspaceRoot || workspaceStore.health?.workspaceRoot || ""
+        });
+        this.followupPaused = Boolean(result.data.mailboxPaused);
+        this.followupPauseReason = String(result.data.pauseReason || "manual_stop");
+      } catch (error: unknown) {
+        this.lastError = describeTransportError(error, "Failed to stop the current Coomi execution.");
+        this.lastErrorCode = error instanceof AgentApiError ? error.code ?? null : null;
+      } finally {
+        this.isStopping = false;
+      }
     },
 
     resetSession(options?: { clearSessionId?: boolean; clearAvailableSessions?: boolean }): void {
@@ -189,6 +236,8 @@ export const useAgentStore = defineStore("agent", {
       this.executionHistory = [];
       this.isRunning = false;
       this.isRollingBack = false;
+      this.isStopping = false;
+      this.isReexecuting = false;
       this.lastError = "";
       this.lastErrorCode = null;
       this.lastSuccess = "";
@@ -199,6 +248,14 @@ export const useAgentStore = defineStore("agent", {
       this.runStartedAt = null;
       this.isCommittingGit = false;
       this.commitActionLabel = "";
+      this.followups = [];
+      this.followupPaused = false;
+      this.followupPauseReason = "";
+      this.followupRevision = 0;
+      this.editingTraceId = "";
+      this.editingOriginalPrompt = "";
+      this.editingDraftBackup = "";
+      this.editingHasFileChanges = false;
       if (commitProgressTimer !== null) {
         window.clearTimeout(commitProgressTimer);
         commitProgressTimer = null;
@@ -271,6 +328,9 @@ export const useAgentStore = defineStore("agent", {
       this.pendingApprovals = this.pendingApprovals.filter((item) => item.approvalId !== approval.approvalId);
       try {
         await resolveAgentCoomiApproval(approval.approvalId, decision, response);
+        if (decision !== "cancel" && this.followupPaused && this.followupPauseReason === "permission_request") {
+          await this.resumeFollowups();
+        }
       } catch (error: unknown) {
         this.lastError = describeTransportError(error, "Failed to resolve Coomi approval.");
       }
@@ -287,6 +347,7 @@ export const useAgentStore = defineStore("agent", {
         return;
       }
       this.isCommittingGit = true;
+      let resumeQueueAfterDecision = false;
       this.commitActionLabel =
         mode === "auto" ? "正在生成提交说明" : mode === "manual" ? "正在创建本地版本" : "正在保留未提交修改";
       if (commitProgressTimer !== null) {
@@ -317,6 +378,7 @@ export const useAgentStore = defineStore("agent", {
         );
         this.applyStreamPacket(prompt.traceId, buildCommitDecisionPacket(prompt, result.data));
         this.pendingCommitPrompt = null;
+        resumeQueueAfterDecision = this.followupPaused && this.followupPauseReason === "git_commit_prompt";
         if (mode !== "skip" && Boolean(result.data.created)) {
           this.clearLiveChanges();
         }
@@ -336,6 +398,7 @@ export const useAgentStore = defineStore("agent", {
             );
             this.applyStreamPacket(prompt.traceId, buildCommitDecisionPacket(prompt, result.data));
             this.pendingCommitPrompt = null;
+            resumeQueueAfterDecision = this.followupPaused && this.followupPauseReason === "git_commit_prompt";
             if (Boolean(result.data.created)) {
               this.clearLiveChanges();
             }
@@ -354,6 +417,9 @@ export const useAgentStore = defineStore("agent", {
           commitProgressTimer = null;
         }
         this.isCommittingGit = false;
+        if (resumeQueueAfterDecision) {
+          void this.resumeFollowups();
+        }
         commitActionClearTimer = window.setTimeout(() => {
           if (!this.isCommittingGit) {
             this.commitActionLabel = "";
@@ -364,14 +430,22 @@ export const useAgentStore = defineStore("agent", {
     },
 
     setStoryGenerationOptions(options: { fragmentCount?: number; fragmentWordCount?: number; chapterTemplateId?: string }): void {
+      if (options.chapterTemplateId !== undefined) {
+        this.storyChapterTemplateId = String(options.chapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID).trim();
+      }
+      const selectedTemplate = this.storyChapterTemplates.find(
+        (item) => item.id === this.storyChapterTemplateId
+      );
+      const isSingleFileTemplate =
+        this.storyChapterTemplateId === SINGLE_FILE_CHAPTER_TEMPLATE_ID
+        || selectedTemplate?.contentMode === "single_file";
       if (options.fragmentCount !== undefined) {
-        this.storyFragmentCount = clampInteger(options.fragmentCount, 1, 20, 1);
+        this.storyFragmentCount = isSingleFileTemplate ? 1 : normalizePositiveInteger(options.fragmentCount, 1);
+      } else if (isSingleFileTemplate) {
+        this.storyFragmentCount = 1;
       }
       if (options.fragmentWordCount !== undefined) {
         this.storyFragmentWordCount = clampInteger(options.fragmentWordCount, 100, 20000, 2000);
-      }
-      if (options.chapterTemplateId !== undefined) {
-        this.storyChapterTemplateId = String(options.chapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID).trim();
       }
     },
 
@@ -398,6 +472,12 @@ export const useAgentStore = defineStore("agent", {
           this.storyChapterTemplateId = this.storyChapterTemplates.some((item) => item.id === DEFAULT_CHAPTER_TEMPLATE_ID)
             ? DEFAULT_CHAPTER_TEMPLATE_ID
             : (this.storyChapterTemplates[0]?.id || DEFAULT_CHAPTER_TEMPLATE_ID);
+        }
+        if (
+          this.storyChapterTemplateId === SINGLE_FILE_CHAPTER_TEMPLATE_ID
+          || this.storyChapterTemplates.find((item) => item.id === this.storyChapterTemplateId)?.contentMode === "single_file"
+        ) {
+          this.storyFragmentCount = 1;
         }
       } catch (error: unknown) {
         if (isStoryChapterTemplateNotFoundError(error)) {
@@ -504,6 +584,152 @@ export const useAgentStore = defineStore("agent", {
       }
     },
 
+    applyFollowupMailbox(mailbox: AgentFollowupMailboxResponse): void {
+      this.followups = [...(mailbox.messages || [])]
+        .filter((item) => item.status !== "sent" && item.status !== "cancelled")
+        .sort((left, right) => (left.sequence || 0) - (right.sequence || 0));
+      this.followupPaused = Boolean(mailbox.paused);
+      this.followupPauseReason = String(mailbox.pauseReason || "");
+      this.followupRevision = Number(mailbox.revision || 0);
+    },
+
+    async loadFollowups(): Promise<void> {
+      const workspaceStore = useWorkspaceStore();
+      const sessionId = this.currentSessionId || "default";
+      const workspaceRoot = workspaceStore.currentProject?.workspaceRoot || workspaceStore.health?.workspaceRoot || "";
+      try {
+        const result = await fetchAgentFollowups(sessionId, workspaceRoot);
+        if (this.currentSessionId === sessionId || (!this.currentSessionId && sessionId === "default")) {
+          this.applyFollowupMailbox(result.data);
+        }
+      } catch (error: unknown) {
+        this.lastError = describeTransportError(error, "Failed to load pending follow-ups.");
+      }
+    },
+
+    async enqueueFollowup(mode: AgentFollowupMode = "queued"): Promise<boolean> {
+      const content = this.promptInput.trim();
+      if (!content || !this.isRunning) {
+        return false;
+      }
+      const workspaceStore = useWorkspaceStore();
+      const messageId = createFollowupMessageId();
+      try {
+        const result = await enqueueAgentFollowup({
+          messageId,
+          sessionId: this.currentSessionId || "default",
+          activeTraceId: this.currentTraceId,
+          expectedTraceId: mode === "steer" ? this.currentTraceId : "",
+          workspaceRoot: workspaceStore.currentProject?.workspaceRoot || workspaceStore.health?.workspaceRoot || "",
+          content,
+          mode
+        });
+        this.upsertFollowup(result.data.message);
+        this.promptInput = "";
+        this.lastSuccess = mode === "steer" ? "引导信息已提交，正在等待安全中断点。" : "信息已加入待发送队列。";
+        return true;
+      } catch (error: unknown) {
+        this.lastError = describeTransportError(error, "Failed to queue the follow-up.");
+        this.lastErrorCode = error instanceof AgentApiError ? error.code ?? null : null;
+        return false;
+      }
+    },
+
+    async editFollowup(messageId: string, content: string): Promise<boolean> {
+      const workspaceStore = useWorkspaceStore();
+      try {
+        const result = await updateAgentFollowup(messageId, {
+          sessionId: this.currentSessionId || "default",
+          workspaceRoot: workspaceStore.currentProject?.workspaceRoot || workspaceStore.health?.workspaceRoot || "",
+          content
+        });
+        this.upsertFollowup(result.data.message);
+        return true;
+      } catch (error: unknown) {
+        this.lastError = describeTransportError(error, "Failed to edit the pending follow-up.");
+        return false;
+      }
+    },
+
+    async deleteFollowup(messageId: string): Promise<boolean> {
+      const workspaceStore = useWorkspaceStore();
+      try {
+        await deleteAgentFollowup(
+          messageId,
+          this.currentSessionId || "default",
+          workspaceStore.currentProject?.workspaceRoot || workspaceStore.health?.workspaceRoot || ""
+        );
+        this.followups = this.followups.filter((item) => item.messageId !== messageId);
+        return true;
+      } catch (error: unknown) {
+        this.lastError = describeTransportError(error, "Failed to delete the pending follow-up.");
+        return false;
+      }
+    },
+
+    async steerFollowup(messageId: string): Promise<boolean> {
+      if (!this.isRunning || !this.currentTraceId) {
+        return false;
+      }
+      const workspaceStore = useWorkspaceStore();
+      try {
+        const result = await steerAgentFollowup(messageId, {
+          sessionId: this.currentSessionId || "default",
+          expectedTraceId: this.currentTraceId,
+          workspaceRoot: workspaceStore.currentProject?.workspaceRoot || workspaceStore.health?.workspaceRoot || ""
+        });
+        this.upsertFollowup(result.data.message);
+        return true;
+      } catch (error: unknown) {
+        this.lastError = describeTransportError(error, "Failed to steer the active execution.");
+        this.lastErrorCode = error instanceof AgentApiError ? error.code ?? null : null;
+        return false;
+      }
+    },
+
+    async resumeFollowups(): Promise<void> {
+      const workspaceStore = useWorkspaceStore();
+      try {
+        const result = await resumeAgentFollowups(
+          this.currentSessionId || "default",
+          workspaceStore.currentProject?.workspaceRoot || workspaceStore.health?.workspaceRoot || ""
+        );
+        this.applyFollowupMailbox(result.data);
+        if (this.isRunning) {
+          return;
+        }
+        const next = this.followups.find((item) => item.mode === "queued" && item.status === "pending");
+        if (!next) {
+          return;
+        }
+        const latestTraceId = this.executionHistory[0]?.traceId || this.currentTraceId || "";
+        await this.executePromptRequest(
+          {
+            prompt: next.content,
+            activeFile: workspaceStore.activeFileBindingOrPath || workspaceStore.activeFile || "",
+            workspaceRoot: workspaceStore.currentProject?.workspaceRoot || workspaceStore.health?.workspaceRoot || "",
+            storyGeneration: {
+              fragmentCount: this.storyFragmentCount,
+              fragmentWordCount: this.storyFragmentWordCount,
+              chapterTemplateId: this.storyChapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID
+            },
+            sourceFollowupMessageId: next.messageId,
+            sourceFollowupExpectedTraceId: latestTraceId
+          },
+          { sessionId: this.currentSessionId || "default", preserveComposer: true }
+        );
+      } catch (error: unknown) {
+        this.lastError = describeTransportError(error, "Failed to resume pending follow-ups.");
+      }
+    },
+
+    upsertFollowup(message: AgentFollowupMessage): void {
+      const remaining = this.followups.filter((item) => item.messageId !== message.messageId);
+      this.followups = message.status === "sent" || message.status === "cancelled"
+        ? remaining
+        : [...remaining, message].sort((left, right) => (left.sequence || 0) - (right.sequence || 0));
+    },
+
     async selectSession(sessionId: string): Promise<void> {
       const normalized = String(sessionId || "").trim();
       if (!normalized || normalized === this.currentSessionId) {
@@ -513,6 +739,7 @@ export const useAgentStore = defineStore("agent", {
       this.resetSession();
       this.currentSessionId = normalized;
       await this.loadHistory();
+      await this.loadFollowups();
     },
 
     async clearConversation(): Promise<void> {
@@ -527,6 +754,101 @@ export const useAgentStore = defineStore("agent", {
       }
     },
 
+    beginEditLatestRun(run: AgentExecutionRun): boolean {
+      const latest = this.executionHistory[0];
+      if (
+        this.isRunning ||
+        this.isRollingBack ||
+        this.isReexecuting ||
+        !run.traceId ||
+        latest?.traceId !== run.traceId ||
+        run.status === "running"
+      ) {
+        return false;
+      }
+      this.editingTraceId = run.traceId;
+      this.editingOriginalPrompt = run.prompt;
+      this.editingDraftBackup = this.promptInput;
+      this.editingHasFileChanges = Boolean(run.changeLedger?.changedFileCount || run.changeLedger?.changedFiles?.length);
+      this.promptInput = run.prompt;
+      this.lastError = "";
+      this.lastErrorCode = null;
+      return true;
+    },
+
+    cancelEditLatestRun(): void {
+      if (!this.editingTraceId || this.isReexecuting) {
+        return;
+      }
+      this.promptInput = this.editingDraftBackup;
+      this.editingTraceId = "";
+      this.editingOriginalPrompt = "";
+      this.editingDraftBackup = "";
+      this.editingHasFileChanges = false;
+      this.lastError = "";
+      this.lastErrorCode = null;
+    },
+
+    async reexecuteEditedLatestRun(): Promise<boolean> {
+      const expectedTraceId = this.editingTraceId;
+      const prompt = this.promptInput.trim();
+      if (!expectedTraceId || !prompt || this.isRunning || this.isReexecuting) {
+        return false;
+      }
+      const target = this.executionHistory.find((run) => run.traceId === expectedTraceId);
+      if (!target || this.executionHistory[0]?.traceId !== expectedTraceId || target.status === "running") {
+        this.lastError = "最新一轮已发生变化，请重新进入编辑。";
+        this.lastErrorCode = "stale_trace";
+        return false;
+      }
+
+      const workspaceStore = useWorkspaceStore();
+      const existingTraceIds = new Set(this.executionHistory.map((run) => run.traceId));
+      this.isReexecuting = true;
+      this.lastError = "";
+      this.lastErrorCode = null;
+      const request: AgentChatRequest = {
+        prompt,
+        activeFile: workspaceStore.activeFileBindingOrPath || workspaceStore.activeFile || "",
+        workspaceRoot: workspaceStore.currentProject?.workspaceRoot || workspaceStore.health?.workspaceRoot || "",
+        storyGeneration: {
+          fragmentCount: this.storyFragmentCount,
+          fragmentWordCount: this.storyFragmentWordCount,
+          chapterTemplateId: this.storyChapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID
+        },
+        replaceLatestTraceId: expectedTraceId
+      };
+      try {
+        const succeeded = await this.executePromptRequest(request, { sessionId: this.currentSessionId || "default" });
+        const replacementRun = this.executionHistory.find((run) => !existingTraceIds.has(run.traceId));
+        const accepted = Boolean(
+          replacementRun?.events.some(
+            (event) => event.event === "TaskPlanCreated" || event.event === "TurnContract" || event.phase === "task_planning"
+          )
+        );
+        if (succeeded || accepted) {
+          const original = this.executionHistory.find((run) => run.traceId === expectedTraceId);
+          if (original) {
+            this.upsertExecutionRun({ ...original, status: "superseded" });
+          }
+          this.editingTraceId = "";
+          this.editingOriginalPrompt = "";
+          this.editingDraftBackup = "";
+          this.editingHasFileChanges = false;
+          this.lastSuccess = "已替换最新一轮对话；项目文件变更未自动撤销。";
+          return true;
+        }
+        if (replacementRun) {
+          this.executionHistory = this.executionHistory.filter((run) => run.traceId !== replacementRun.traceId);
+        }
+        this.currentTraceId = expectedTraceId;
+        this.promptInput = prompt;
+        return false;
+      } finally {
+        this.isReexecuting = false;
+      }
+    },
+
     async rollbackLatestRun(options: { refillComposer: boolean }): Promise<boolean> {
       if (this.isRunning || this.isRollingBack) {
         return false;
@@ -538,7 +860,7 @@ export const useAgentStore = defineStore("agent", {
       this.lastErrorCode = null;
       this.lastSuccess = "";
       try {
-        const result = await rollbackLatestExecution(sessionId);
+        const result = await rollbackLatestExecution(sessionId, this.executionHistory[0]?.traceId || "");
         if (!result.data.rolledBack) {
           return false;
         }
@@ -599,7 +921,11 @@ export const useAgentStore = defineStore("agent", {
 
     async runPrompt(): Promise<void> {
       const prompt = this.promptInput.trim();
-      if (!prompt || this.isRunning || this.pendingSnapshotConfirmation) {
+      if (!prompt || this.pendingSnapshotConfirmation || this.editingTraceId) {
+        return;
+      }
+      if (this.isRunning) {
+        await this.enqueueFollowup("queued");
         return;
       }
       const workspaceStore = useWorkspaceStore();
@@ -639,11 +965,11 @@ export const useAgentStore = defineStore("agent", {
 
     async executePromptRequest(
       request: AgentChatRequest,
-      options?: { sessionId?: string }
-    ): Promise<void> {
+      options?: { sessionId?: string; preserveComposer?: boolean }
+    ): Promise<boolean> {
       const prompt = String(request.prompt || "").trim();
       if (!prompt || this.isRunning) {
-        return;
+        return false;
       }
       const sessionId = options?.sessionId || this.currentSessionId || "default";
       const traceId = createTraceId();
@@ -698,14 +1024,17 @@ export const useAgentStore = defineStore("agent", {
       this.pendingCommitPrompt = null;
       this.runStartedAt = Date.now();
       this.isRunning = true;
-      this.promptInput = "";
+      if (!options?.preserveComposer) {
+        this.promptInput = "";
+      }
       this.upsertExecutionRun(run);
 
       activeStreamAbortController = new AbortController();
+      let succeeded = false;
       try {
         await streamAgentPrompt(
           request,
-          (packet) => this.applyStreamPacket(traceId, packet),
+          (packet) => this.applyStreamPacket(String(packet.traceId || traceId), packet),
           traceId,
           sessionId,
           activeStreamAbortController.signal
@@ -717,6 +1046,8 @@ export const useAgentStore = defineStore("agent", {
         const finished = this.executionHistory.find((item) => item.traceId === traceId);
         this.lastSuccess = finished?.status === "failed" ? "" : "Coomi run complete.";
         await this.loadSessions();
+        await this.loadFollowups();
+        succeeded = true;
       } catch (error: unknown) {
         const normalized = normalizeAgentError(error);
         if (normalized.code === "SNAPSHOT_FAILED") {
@@ -749,6 +1080,7 @@ export const useAgentStore = defineStore("agent", {
         this.runStartedAt = null;
         activeStreamAbortController = null;
       }
+      return succeeded;
     },
 
     clearLiveChanges(): void {
@@ -757,6 +1089,9 @@ export const useAgentStore = defineStore("agent", {
 
     applyStreamPacket(traceId: string, packet: AgentStreamPacket): void {
       const eventName = String(packet._type || packet.type || "");
+      if (eventName === "ReasoningChunk") {
+        return;
+      }
       let visiblePacket = packet;
       if (eventName === "TextChunk") {
         const visibleContent = stripDsmlToolText(packet.content);
@@ -765,7 +1100,50 @@ export const useAgentStore = defineStore("agent", {
         }
         visiblePacket = { ...packet, content: visibleContent };
       }
-      const current = this.executionHistory.find((run) => run.traceId === traceId);
+      let current = this.executionHistory.find((run) => run.traceId === traceId);
+      if (!current && eventName === "ContinuationStarted") {
+        const now = new Date().toISOString();
+        const prompt = String(packet.content || "");
+        const continuationSessionId = String(packet.sessionId || this.currentSessionId || "default");
+        current = {
+          traceId,
+          sessionId: continuationSessionId,
+          prompt,
+          route: "coomi",
+          agentMode: "coomi",
+          llmModel: this.coomiStatus?.model || "",
+          llmProvider: this.coomiStatus?.providerId || "",
+          status: "running",
+          noRestorePoint: false,
+          createdAt: String(packet.createdAt || now),
+          updatedAt: now,
+          lastAction: "chat",
+          reply: "",
+          trace: null,
+          audit: [],
+          events: [],
+          tasks: [],
+          changeLedger: createEmptyChangeLedger(traceId, continuationSessionId),
+          items: [
+            createWaterfallItem({
+              id: `${traceId}-user`,
+              type: "user",
+              status: "success",
+              title: "User",
+              content: prompt,
+              raw: { prompt, messageId: packet.messageId, continuationMode: packet.continuationMode }
+            })
+          ],
+          errorMessage: "",
+          errorCode: null
+        };
+        this.currentTraceId = traceId;
+        this.selectedTraceId = "";
+        this.lastPrompt = prompt;
+        this.lastReply = "";
+        this.runStartedAt = Date.now();
+        this.upsertExecutionRun(current);
+      }
       if (!current) {
         return;
       }
@@ -858,6 +1236,24 @@ export const useAgentStore = defineStore("agent", {
             contextTotalChars: Number(contextBudget.totalChars || 0)
           }
         ];
+      } else if (eventName === "StoryGenerationValidation") {
+        nextRun.audit = [
+          ...nextRun.audit,
+          {
+            action: "story_generation_validation",
+            version: Number(visiblePacket._version || 1),
+            passed: Boolean(visiblePacket.passed),
+            algorithm: String(visiblePacket.algorithm || ""),
+            exact: Boolean(visiblePacket.exact),
+            fragmentCount: Number(visiblePacket.fragmentCount || 0),
+            targetWordCount: Number(visiblePacket.targetWordCount || 0),
+            chapterContentMode: String(visiblePacket.chapterContentMode || ""),
+            structurePassed: Boolean(visiblePacket.structurePassed),
+            writeToolApplied: Boolean(visiblePacket.writeToolApplied),
+            correctionAttempt: Number(visiblePacket.correctionAttempt || 0),
+            fragments: Array.isArray(visiblePacket.fragments) ? visiblePacket.fragments : []
+          }
+        ];
       } else if (eventName === "PermissionRequest") {
         const approval = normalizePendingApproval(visiblePacket);
         if (approval) {
@@ -865,6 +1261,19 @@ export const useAgentStore = defineStore("agent", {
             ...this.pendingApprovals.filter((item) => item.approvalId !== approval.approvalId),
             approval
           ];
+        }
+        this.followupPaused = true;
+        this.followupPauseReason = "permission_request";
+      } else if (
+        eventName === "FollowupQueued" ||
+        eventName === "FollowupUpdated" ||
+        eventName === "SteerRequested" ||
+        eventName === "SteerApplied" ||
+        eventName === "ContinuationStarted"
+      ) {
+        const followup = normalizeFollowupPacket(visiblePacket, nextRun.sessionId);
+        if (followup) {
+          this.upsertFollowup(followup);
         }
       } else if (eventName === "TaskPlanCreated" || eventName === "TaskPlanUpdated") {
         nextRun.tasks = normalizeTaskPlan(visiblePacket.tasks, traceId, nextRun.tasks);
@@ -1042,6 +1451,46 @@ function streamPacketToWaterfallItem(
       raw
     });
   }
+  if (eventName === "ConnectionRetry") {
+    const attempt = Math.max(1, Number(packet.attempt || 1));
+    const maxAttempts = Math.max(attempt, Number(packet.maxAttempts || packet.max_attempts || attempt));
+    const message = String(packet.message || "模型连接中断，正在自动重试。");
+    return createWaterfallItem({
+      id: `${traceId}-connection-retry`,
+      type: "system",
+      status: "warning",
+      title: "模型连接重试",
+      content: `${message}（${attempt}/${maxAttempts}）`,
+      raw
+    });
+  }
+  if (eventName === "ContinuationStarted" && packet.continuationMode === "steer") {
+    const content = String(packet.content || "").trim();
+    if (!content) {
+      return null;
+    }
+    const continuationId = String(packet.segmentId || packet.messageId || "steer");
+    return createWaterfallItem({
+      id: `${traceId}-user-${continuationId}`,
+      type: "user",
+      status: "success",
+      title: "User",
+      content,
+      raw
+    });
+  }
+  if (eventName === "ContinuationStarted" && packet.continuationMode === "story_generation_correction") {
+    const attempt = Math.max(1, Number(packet.correctionAttempt || 1));
+    const maximum = Math.max(attempt, Number(packet.maximumCorrectionAttempts || attempt));
+    return createWaterfallItem({
+      id: `${traceId}-story-generation-correction`,
+      type: "system",
+      status: "running",
+      title: "正在按客观字数自动修订",
+      content: `第 ${attempt}/${maximum} 次修订；仍在同一执行中，尚未完成。`,
+      raw
+    });
+  }
   if (eventName === "ToolStart" || eventName === "ToolRunning" || eventName === "ToolDone" || eventName === "ToolCacheHit") {
     const toolCallId = String(packet.tool_call_id || packet.tool_name || `${traceId}-tool`);
     return createWaterfallItem({
@@ -1065,6 +1514,17 @@ function streamPacketToWaterfallItem(
       status,
       title: "Storydex 执行契约",
       content: summarizeTurnContractPacket(packet),
+      raw
+    });
+  }
+  if (eventName === "StoryGenerationValidation") {
+    const status = statusForPacket(eventName, packet);
+    return createWaterfallItem({
+      id: `${traceId}-story-generation-validation`,
+      type: status === "error" ? "error" : "system",
+      status,
+      title: "Storydex 正文客观验收",
+      content: summarizeStoryGenerationValidationPacket(packet),
       raw
     });
   }
@@ -1172,10 +1632,10 @@ function mergeWaterfallItem(items: CoomiWaterfallItem[], item: CoomiWaterfallIte
 
 function phaseForEvent(eventName: string): string {
   if (eventName.startsWith("Tool")) return "tool";
-  if (eventName === "TextChunk" || eventName === "ReasoningChunk") return "model";
+  if (eventName === "TextChunk" || eventName === "ReasoningChunk" || eventName === "ConnectionRetry") return "model";
   if (eventName === "GitAutoCommit" || eventName === "GitCommitPrompt" || eventName === "GitCommitResult") return "version_control";
   if (eventName.startsWith("Task")) return "planning";
-  if (eventName === "TurnContract") return "orchestration";
+  if (eventName === "TurnContract" || eventName === "StoryGenerationValidation") return "orchestration";
   if (eventName === "RunAccepted" || eventName === "UsageUpdate" || eventName === "CompressionEvent" || eventName === "TurnPhase") return "runtime";
   if (eventName.startsWith("Agent")) return "agent";
   return "runtime";
@@ -1198,6 +1658,10 @@ function statusForPacket(eventName: string, packet: AgentStreamPacket): CoomiWat
   if (eventName === "TurnContract") {
     return String(packet.status || "") === "needs_user_input" ? "warning" : "info";
   }
+  if (eventName === "StoryGenerationValidation") {
+    return packet.passed ? "success" : "error";
+  }
+  if (eventName === "ConnectionRetry") return "warning";
   if (eventName === "AgentCancelled") return "warning";
   if (eventName === "AgentCompleted" || eventName === "ToolDone") return "success";
   const status = String(packet.status || "").trim();
@@ -1211,9 +1675,15 @@ function detailForPacket(eventName: string, packet: AgentStreamPacket): string {
   if (eventName.startsWith("Task")) return String(packet.title || packet.detail || eventName);
   if (eventName.startsWith("Tool")) return String(packet.tool_name || eventName);
   if (eventName === "TextChunk" || eventName === "ReasoningChunk") return String(packet.content || "").slice(0, 240);
+  if (eventName === "ConnectionRetry") {
+    const attempt = Math.max(1, Number(packet.attempt || 1));
+    const maxAttempts = Math.max(attempt, Number(packet.maxAttempts || packet.max_attempts || attempt));
+    return `${String(packet.message || "模型连接中断，正在自动重试。")}（${attempt}/${maxAttempts}）`;
+  }
   if (eventName === "AgentError") return String(packet.message || "Coomi error");
   if (eventName === "GitAutoCommit" || eventName === "GitCommitPrompt" || eventName === "GitCommitResult") return summarizeGitAutoCommitPacket(packet);
   if (eventName === "TurnContract") return summarizeTurnContractPacket(packet);
+  if (eventName === "StoryGenerationValidation") return summarizeStoryGenerationValidationPacket(packet);
   if (eventName === "RunAccepted" || eventName === "TurnPhase") return String(packet.detail || packet.label || eventName);
   if (eventName === "AgentCompleted") return `tokens ${Number(packet.total_tokens || 0)}`;
   return eventName;
@@ -1297,6 +1767,27 @@ function summarizeTurnContractPacket(packet: AgentStreamPacket): string {
   pieces.push(`变量：${variableUpdateLabel}`);
   pieces.push(`WIKI：${Boolean(updatePolicy.autoUpdateWiki) ? "自动更新" : "变量后询问"}`);
   return pieces.join(" · ");
+}
+
+function summarizeStoryGenerationValidationPacket(packet: AgentStreamPacket): string {
+  const fragments = Array.isArray(packet.fragments) ? packet.fragments : [];
+  const summaries = fragments.slice(0, 6).map((value, index) => {
+    const fragment = toRecord(value) || {};
+    const path = firstString(fragment, ["path"]) || `片段 ${index + 1}`;
+    const actual = firstNumber(fragment, ["generatedWordCount", "actualWordCount", "fileWordCount"]) ?? 0;
+    const target = firstNumber(fragment, ["targetWordCount"]) ?? Number(packet.targetWordCount || 0);
+    const difference = firstNumber(fragment, ["difference"]) ?? actual - target;
+    const differenceLabel = difference === 0 ? "" : `，差 ${difference > 0 ? "+" : ""}${difference}`;
+    return `${path}：${actual}/${target} 字${differenceLabel}`;
+  });
+  if (fragments.length > summaries.length) {
+    summaries.push(`另有 ${fragments.length - summaries.length} 个片段`);
+  }
+  const result = packet.passed ? "通过" : "未通过";
+  const structure = packet.structurePassed === false ? "；章节结构不符合模板" : "";
+  const writeTool = packet.writeToolApplied === false ? "；本轮未成功执行受约束正文写入" : "";
+  const detail = summaries.length ? `；${summaries.join("；")}` : "";
+  return `${result}：按 Storydex 非空白字符统计精确验收${structure}${writeTool}${detail}`;
 }
 
 function summarizePresetCompileFailures(contextAssembly: Record<string, unknown>): string {
@@ -1556,6 +2047,7 @@ function normalizeStoryChapterTemplates(items: unknown): StoryChapterTemplate[] 
         relativePath: asString(record?.relativePath)?.trim() || "",
         description: asString(record?.description)?.trim() || "",
         chapterMode: asString(record?.chapterMode)?.trim() || "directory",
+        contentMode: asString(record?.contentMode)?.trim() || "multi_fragment",
         chapterNamePattern: asString(record?.chapterNamePattern)?.trim() || "",
         segmentNaming: asString(record?.segmentNaming)?.trim() || "001.md"
       };
@@ -2174,6 +2666,7 @@ function normalizeRunStatus(value: unknown, errorMessage: string): AgentRunStatu
     value === "failed" ||
     value === "cancelled" ||
     value === "stopped" ||
+    value === "superseded" ||
     value === "running"
   ) {
     return value;
@@ -2365,11 +2858,48 @@ function createTraceId(): string {
   return `trace-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+function createFollowupMessageId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return `followup-${crypto.randomUUID()}`;
+  }
+  return `followup-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
 function createSessionId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return `session-${crypto.randomUUID()}`;
   }
   return `session-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function normalizeFollowupPacket(packet: AgentStreamPacket, fallbackSessionId: string): AgentFollowupMessage | null {
+  const messageId = String(packet.messageId || "").trim();
+  const content = String(packet.content || "").trim();
+  const mode = packet.mode === "steer" ? "steer" : "queued";
+  const rawStatus = String(packet.status || "pending");
+  const status = (
+    ["pending", "steering", "dispatching", "sent", "cancelled", "failed"].includes(rawStatus)
+      ? rawStatus
+      : "pending"
+  ) as AgentFollowupMessage["status"];
+  if (!messageId || !content) {
+    return null;
+  }
+  const now = new Date().toISOString();
+  return {
+    messageId,
+    sessionId: String(packet.sessionId || fallbackSessionId || "default"),
+    activeTraceId: String(packet.activeTraceId || ""),
+    expectedTraceId: String(packet.expectedTraceId || ""),
+    content,
+    mode,
+    status,
+    statusDetail: String(packet.statusDetail || ""),
+    createdAt: String(packet.createdAt || now),
+    updatedAt: String(packet.updatedAt || now),
+    dispatchTraceId: String(packet.traceId || ""),
+    segmentId: String(packet.segmentId || "")
+  };
 }
 
 function toRecord(value: unknown): Record<string, unknown> | null {
@@ -2396,6 +2926,14 @@ function clampInteger(value: unknown, minimum: number, maximum: number, fallback
   return Math.max(minimum, Math.min(maximum, parsed));
 }
 
+function normalizePositiveInteger(value: unknown, fallback: number): number {
+  const parsed = Number.parseInt(String(value ?? "").trim(), 10);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.max(1, parsed);
+}
+
 // Deterministic normalization helpers are exposed only to Vitest. Keeping these
 // assertions close to the store lets security-sensitive path/session behavior be
 // tested directly without changing the production component API.
@@ -2410,6 +2948,7 @@ export const __agentStoreTestUtils = import.meta.env.MODE === "test" ? {
   detailForPacket,
   summarizeGitAutoCommitPacket,
   summarizeTurnContractPacket,
+  summarizeStoryGenerationValidationPacket,
   summarizePresetCompileFailures,
   summarizeContextAssembly,
   stripDsmlToolText,

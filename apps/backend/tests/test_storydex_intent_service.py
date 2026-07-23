@@ -13,17 +13,20 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 import types
 from contextlib import contextmanager
 
 from services.llm_replay import get_llm_metrics, llm_trace, reset_llm_metrics
 from services.storydex_intent_service import (
     StorydexIntentService,
+    _BoundedIntentProvider,
     _extract_json_object,
     _intent_messages,
     _parse_intent_frame,
     build_intent_catalog,
     heuristic_intent_frame,
+    is_advisory_request,
     is_valid_intent_frame,
 )
 from services.story_project_service import get_story_project_service
@@ -71,6 +74,105 @@ def test_classify_intent_uses_llm_structured_output(monkeypatch):
     assert frame["method"] == "llm"
     assert frame["signals"] == ["llm_classifier"]
     assert get_llm_metrics("intent-test")["llmCalls"][0]["purpose"] == "intent"
+
+
+def test_intent_metadata_provider_uses_short_low_reasoning_chat_request():
+    captured = {}
+
+    class Completions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return types.SimpleNamespace(
+                choices=[
+                    types.SimpleNamespace(
+                        message=types.SimpleNamespace(
+                            content='{"primary":"general","secondary":"","confidence":"high","reason":"advisory"}',
+                            reasoning_content="",
+                        )
+                    )
+                ]
+            )
+
+    provider = types.SimpleNamespace(
+        config=types.SimpleNamespace(type="openai_compatible"),
+        model="gpt-5-mini",
+        client=types.SimpleNamespace(chat=types.SimpleNamespace(completions=Completions())),
+    )
+    response = asyncio.run(
+        _BoundedIntentProvider(provider).chat(
+            [{"role": "system", "content": "Return JSON."}, {"role": "user", "content": "review"}]
+        )
+    )
+
+    assert captured["response_format"] == {"type": "json_object"}
+    assert captured["max_completion_tokens"] == 160
+    assert captured["reasoning_effort"] == "low"
+    assert "temperature" not in captured
+    assert getattr(response, "content")
+
+
+def test_intent_metadata_provider_uses_strict_openai_responses_schema():
+    captured = {}
+
+    class Responses:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return types.SimpleNamespace(
+                output_text='{"primary":"general","secondary":"","confidence":"high","reason":"advisory"}'
+            )
+
+    class Provider:
+        config = types.SimpleNamespace(type="openai_responses")
+        model = "gpt-5-mini"
+        client = types.SimpleNamespace(responses=Responses())
+
+        @staticmethod
+        def _build_params(messages, tools, *, stream=False):
+            assert tools is None
+            assert stream is False
+            return {"model": "gpt-5-mini", "instructions": messages[0]["content"], "input": messages[1:]}
+
+    response = asyncio.run(
+        _BoundedIntentProvider(Provider()).chat(
+            [{"role": "system", "content": "Return JSON."}, {"role": "user", "content": "review"}]
+        )
+    )
+
+    response_format = captured["text"]["format"]
+    assert response_format["type"] == "json_schema"
+    assert response_format["name"] == "storydex_intent"
+    assert response_format["strict"] is True
+    assert response_format["schema"]["additionalProperties"] is False
+    assert captured["max_output_tokens"] == 160
+    assert captured["reasoning"] == {"effort": "low"}
+    assert captured["store"] is False
+    assert "temperature" not in captured
+    assert getattr(response, "content")
+
+
+def test_advisory_rule_short_circuits_catalog_history_and_llm_under_100ms(monkeypatch):
+    service = StorydexIntentService()
+    monkeypatch.setattr(service, "_catalog", lambda root: (_ for _ in ()).throw(AssertionError("catalog must not load")))
+
+    async def forbidden_llm(**kwargs):
+        raise AssertionError("advisory requests must not call the intent model")
+
+    monkeypatch.setattr(service, "_llm_intent_frame", forbidden_llm)
+    started = time.perf_counter()
+    frame = asyncio.run(
+        service.classify_intent(
+            prompt="这段写得怎么样？",
+            active_file="chapters/001.md",
+            session_id="session-advisory",
+        )
+    )
+    elapsed = time.perf_counter() - started
+
+    assert frame["primary"] == "general"
+    assert frame["method"] == "advisory_fast"
+    assert elapsed < 0.1
+    assert is_advisory_request("这段写得怎么样？") is True
+    assert is_advisory_request("请修改这段文字并保存") is False
 
 
 def test_parse_intent_frame_accepts_fenced_json_and_normalizes_confidence():

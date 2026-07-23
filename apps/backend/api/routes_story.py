@@ -30,6 +30,7 @@ class StoryProjectSettingsResponse(BaseModel):
     max_segments_per_chapter: int = Field(alias="maxSegmentsPerChapter")
     story_fragment_count: int = Field(default=1, alias="storyFragmentCount")
     story_fragment_word_count: int = Field(default=2000, alias="storyFragmentWordCount")
+    story_chapter_template_id: str = Field(default="default_chapter_directory", alias="storyChapterTemplateId")
     auto_update_variables: bool = Field(default=False, alias="autoUpdateVariables")
     auto_update_wiki: bool = Field(default=False, alias="autoUpdateWiki")
     auto_update_variables_note: str = Field(default="", alias="autoUpdateVariablesNote")
@@ -55,6 +56,7 @@ class StoryProjectSettingsUpdateRequest(BaseModel):
     max_segments_per_chapter: Optional[int] = Field(default=None, alias="maxSegmentsPerChapter")
     story_fragment_count: Optional[int] = Field(default=None, alias="storyFragmentCount")
     story_fragment_word_count: Optional[int] = Field(default=None, alias="storyFragmentWordCount")
+    story_chapter_template_id: Optional[str] = Field(default=None, alias="storyChapterTemplateId")
     auto_update_variables: Optional[bool] = Field(default=None, alias="autoUpdateVariables")
     auto_update_wiki: Optional[bool] = Field(default=None, alias="autoUpdateWiki")
     agent_commit_prompt_enabled: Optional[bool] = Field(default=None, alias="agentCommitPromptEnabled")
@@ -87,6 +89,7 @@ class StoryChapterTemplateResponse(BaseModel):
     relative_path: str = Field(alias="relativePath")
     description: str = ""
     chapter_mode: str = Field(default="directory", alias="chapterMode")
+    content_mode: str = Field(default="multi_fragment", alias="contentMode")
     chapter_name_pattern: str = Field(default="", alias="chapterNamePattern")
     segment_naming: str = Field(default="001.md", alias="segmentNaming")
 

@@ -143,7 +143,7 @@ def test_task_planning_phase_is_emitted_before_planner_completes(monkeypatch, tm
     assert json.loads(intent_files[0].read_text(encoding="utf-8"))["state"] == "finalization_failed"
 
 
-def test_cold_intent_workers_are_serialized_to_avoid_provider_import_races(monkeypatch):
+def test_cold_intent_workers_are_isolated_and_do_not_queue_behind_each_other(monkeypatch):
     class BlockingIntentService:
         active = 0
         max_active = 0
@@ -166,12 +166,15 @@ def test_cold_intent_workers_are_serialized_to_avoid_provider_import_races(monke
             routes_agent._classify_intent_without_blocking_event_loop(prompt="two"),
         )
 
+    started = time.perf_counter()
     results = asyncio.run(run_both())
+    elapsed = time.perf_counter() - started
     assert [item["primary"] for item in results] == ["general", "general"]
-    assert service.max_active == 1
+    assert service.max_active == 2
+    assert elapsed < 0.055
 
 
-def test_slow_task_planning_emits_heartbeat_and_success(monkeypatch, tmp_path):
+def test_slow_task_planning_runs_in_background_without_blocking_agent_start(monkeypatch, tmp_path):
     coordinator = ExecutionCoordinator()
     monkeypatch.setattr(routes_agent, "execution_coordinator", coordinator)
     monkeypatch.setattr(routes_agent, "_PHASE_HEARTBEAT_SECONDS", 0.01)
@@ -189,8 +192,10 @@ def test_slow_task_planning_emits_heartbeat_and_success(monkeypatch, tmp_path):
             return False
 
         async def stream_events(self, **kwargs):
-            raise AssertionError("needs-user-input turn must not call the model")
-            yield
+            yield "AgentStarted", {"_type": "AgentStarted"}
+            await asyncio.sleep(0.06)
+            yield "TextChunk", {"content": "reply"}
+            yield "AgentCompleted", {"total_tokens": 1}
 
     monkeypatch.setattr(routes_agent, "_create_agent_task_plan", slow_plan)
     monkeypatch.setattr(routes_agent, "agent_git_autocommit_service", Git())
@@ -212,7 +217,7 @@ def test_slow_task_planning_emits_heartbeat_and_success(monkeypatch, tmp_path):
                 active_file="",
                 workspace_root=tmp_path,
                 story_generation={},
-                turn_contract={"status": "needs_user_input", "requiredQuestions": [{"message": "choose"}]},
+                turn_contract={"status": "ready", "intentFrame": {"primary": "content_generation"}},
                 git_snapshot=AgentGitSnapshot(workspace_root=tmp_path, available=True),
                 request=_ConnectedRequest(),
                 cancellation_token=routes_agent._CancellationToken(),
@@ -223,6 +228,13 @@ def test_slow_task_planning_emits_heartbeat_and_success(monkeypatch, tmp_path):
     planning = [item for item in packets if item.get("phase") == "task_planning"]
     assert any(item.get("heartbeat") is True for item in planning)
     assert planning[-1]["status"] == "success"
+    agent_started_index = next(index for index, item in enumerate(packets) if item.get("_type") == "AgentStarted")
+    planning_success_index = next(
+        index
+        for index, item in enumerate(packets)
+        if item.get("phase") == "task_planning" and item.get("status") == "success"
+    )
+    assert agent_started_index < planning_success_index
 
 
 def test_slow_model_first_output_emits_heartbeat_and_success(monkeypatch, tmp_path):
