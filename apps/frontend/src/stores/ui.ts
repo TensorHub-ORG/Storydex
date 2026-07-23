@@ -4,6 +4,11 @@ import { isThemeCode } from "@/constants/themes";
 import type { ThemeCode } from "@/constants/themes";
 import type { UIPreferencesResponse, WorkbenchMode } from "@/types/system";
 import { readCachedThemeCode, writeCachedThemeCode } from "@/utils/appearance";
+import {
+  DEFAULT_PANE_FONT_SCALE,
+  legacyFileFontSizeToPaneScale,
+  normalizePaneFontScale
+} from "@/utils/paneFontScale";
 
 interface UiState {
   bootstrapped: boolean;
@@ -14,16 +19,15 @@ interface UiState {
   sidebarCollapsed: boolean;
   agentCollapsed: boolean;
   agentWidth: number;
-  fileFontSize: number;
-  playerFontSize: number;
+  leftPaneFontScale: number;
+  centerPaneFontScale: number;
+  rightPaneFontScale: number;
   systemSettingsOpen: boolean;
 }
 
 const DEFAULT_WORKBENCH_MODE: WorkbenchMode = "storydex";
 const DEFAULT_SIDEBAR_WIDTH = 320;
 const DEFAULT_AGENT_WIDTH = 560;
-const DEFAULT_FILE_FONT_SIZE = 16;
-const DEFAULT_PLAYER_FONT_SIZE = 14;
 const VALID_ACTIVITY_IDS = new Set(["resources", "search", "source-control", "presets", "relationships", "prompts", "export"]);
 let persistTimer: number | null = null;
 
@@ -37,8 +41,9 @@ export const useUiStore = defineStore("ui", {
     sidebarCollapsed: false,
     agentCollapsed: false,
     agentWidth: DEFAULT_AGENT_WIDTH,
-    fileFontSize: DEFAULT_FILE_FONT_SIZE,
-    playerFontSize: DEFAULT_PLAYER_FONT_SIZE,
+    leftPaneFontScale: DEFAULT_PANE_FONT_SCALE,
+    centerPaneFontScale: DEFAULT_PANE_FONT_SCALE,
+    rightPaneFontScale: DEFAULT_PANE_FONT_SCALE,
     systemSettingsOpen: false
   }),
   actions: {
@@ -52,8 +57,10 @@ export const useUiStore = defineStore("ui", {
       this.sidebarCollapsed = Boolean(payload?.sidebarCollapsed ?? false);
       this.agentCollapsed = Boolean(payload?.agentCollapsed ?? false);
       this.agentWidth = clamp(Number(payload?.agentWidth ?? DEFAULT_AGENT_WIDTH), 320, 760);
-      this.fileFontSize = clamp(Number(payload?.fileFontSize ?? DEFAULT_FILE_FONT_SIZE), 12, 24);
-      this.playerFontSize = clamp(Number(payload?.playerFontSize ?? DEFAULT_PLAYER_FONT_SIZE), 12, 28);
+      const legacyCenterScale = legacyFileFontSizeToPaneScale(payload?.fileFontSize);
+      this.leftPaneFontScale = normalizePaneFontScale(payload?.leftPaneFontScale);
+      this.centerPaneFontScale = normalizePaneFontScale(payload?.centerPaneFontScale, legacyCenterScale);
+      this.rightPaneFontScale = normalizePaneFontScale(payload?.rightPaneFontScale);
       this.bootstrapped = true;
     },
 
@@ -103,13 +110,18 @@ export const useUiStore = defineStore("ui", {
       this.schedulePersist();
     },
 
-    setFileFontSize(size: number): void {
-      this.fileFontSize = clamp(Math.round(size), 12, 24);
+    setLeftPaneFontScale(scale: number): void {
+      this.leftPaneFontScale = normalizePaneFontScale(scale);
       this.schedulePersist();
     },
 
-    setPlayerFontSize(size: number): void {
-      this.playerFontSize = clamp(Math.round(size), 12, 28);
+    setCenterPaneFontScale(scale: number): void {
+      this.centerPaneFontScale = normalizePaneFontScale(scale);
+      this.schedulePersist();
+    },
+
+    setRightPaneFontScale(scale: number): void {
+      this.rightPaneFontScale = normalizePaneFontScale(scale);
       this.schedulePersist();
     },
 
@@ -139,8 +151,9 @@ export const useUiStore = defineStore("ui", {
         sidebarCollapsed: this.sidebarCollapsed,
         agentCollapsed: this.agentCollapsed,
         agentWidth: this.agentWidth,
-        fileFontSize: this.fileFontSize,
-        playerFontSize: this.playerFontSize
+        leftPaneFontScale: this.leftPaneFontScale,
+        centerPaneFontScale: this.centerPaneFontScale,
+        rightPaneFontScale: this.rightPaneFontScale
       });
     }
   }

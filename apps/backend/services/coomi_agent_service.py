@@ -203,6 +203,26 @@ class StorydexCoomiAgentService:
                 _LOGGER.warning("Coomi execution cancellation failed for %s: %s", key, exc)
         return cancelled
 
+    def request_steer(self, *, session_id: str, workspace_root: Path) -> bool:
+        """Interrupt model generation at Coomi's next cancellation checkpoint.
+
+        The Storydex execution handle is deliberately left running.  Coomi only
+        observes its own cancel token between stream chunks or after an atomic
+        tool batch, after which the adapter starts a continuation segment.
+        """
+
+        key = self._runtime_key(session_id=session_id, workspace_root=workspace_root)
+        with self._execution_cancel_lock:
+            callbacks = list(self._execution_cancellers.get(key, []))
+        requested = False
+        for callback in callbacks:
+            try:
+                callback()
+                requested = True
+            except Exception as exc:
+                _LOGGER.warning("Coomi steering checkpoint request failed for %s: %s", key, exc)
+        return requested
+
     async def create_task_plan(
         self,
         *,
@@ -221,7 +241,18 @@ class StorydexCoomiAgentService:
                 from services.llm_replay import get_replayable_llm_provider, llm_purpose, llm_trace
 
                 with llm_trace(trace_id), llm_purpose("plan"):
-                    provider = get_replayable_llm_provider()
+                    main_provider = get_replayable_llm_provider()
+                    try:
+                        from coomi.services.llm.factory import create_fast_provider
+
+                        fast_provider = await asyncio.to_thread(create_fast_provider, main_provider)
+                    except Exception:
+                        fast_provider = None
+                    provider = (
+                        get_replayable_llm_provider(fast_provider)
+                        if fast_provider is not None
+                        else main_provider
+                    )
                     response = await _call_provider_chat(
                         provider,
                         _task_planner_messages(
@@ -478,7 +509,7 @@ class StorydexCoomiAgentService:
                 setattr(agent, "context_window_size", _resolve_context_window())
                 _replace_runtime_tool_registry(
                     agent,
-                    _create_storydex_tool_registry(workspace_root, context_policy),
+                    _create_storydex_tool_registry(workspace_root, context_policy, turn_contract),
                 )
                 _sync_coomi_runtime_workspace(
                     agent=agent,
@@ -494,7 +525,7 @@ class StorydexCoomiAgentService:
             from services.llm_replay import get_replayable_llm_provider
 
             provider = get_replayable_llm_provider()
-            registry = _create_storydex_tool_registry(workspace_root, context_policy)
+            registry = _create_storydex_tool_registry(workspace_root, context_policy, turn_contract)
             permissions = self._permissions.get(runtime_key)
             if permissions is None:
                 permissions = self._create_permission_system(
@@ -639,7 +670,7 @@ class StorydexCoomiAgentService:
 
         provider = get_replayable_llm_provider()
         context_policy = context_policy_from_turn_contract(turn_contract)
-        registry = _create_storydex_tool_registry(workspace_root, context_policy)
+        registry = _create_storydex_tool_registry(workspace_root, context_policy, turn_contract)
         permissions = self._permissions.get(session_id)
         if permissions is None:
             from coomi.security import PermissionLevel, PermissionMode, PermissionSystem
@@ -949,6 +980,72 @@ class StorydexCoomiAgentService:
         result["rolledBack"] = True
         return result
 
+    def snapshot_session_history(self, session_id: str, *, workspace_root: Path) -> Dict[str, Any]:
+        normalized_session_id = str(session_id or "default").strip() or "default"
+        resolved_workspace = Path(workspace_root).resolve()
+        binding = _read_coomi_session_binding(
+            workspace_root=resolved_workspace,
+            storydex_session_id=normalized_session_id,
+        )
+        raw_history_path = str(binding.get("historyPath") or "").strip()
+        if not raw_history_path:
+            return {
+                "available": False,
+                "sessionId": normalized_session_id,
+                "workspaceRoot": resolved_workspace,
+            }
+        history_path = Path(raw_history_path).expanduser().resolve()
+        sessions_root = STORYDEX_COOMI_SESSIONS.resolve()
+        try:
+            history_path.relative_to(sessions_root)
+        except ValueError as exc:
+            raise ValueError("Coomi session history path is outside the Storydex sessions directory.") from exc
+        if not history_path.is_file():
+            return {
+                "available": False,
+                "sessionId": normalized_session_id,
+                "workspaceRoot": resolved_workspace,
+            }
+        return {
+            "available": True,
+            "sessionId": normalized_session_id,
+            "workspaceRoot": resolved_workspace,
+            "historyPath": history_path,
+            "historyBytes": history_path.read_bytes(),
+        }
+
+    def restore_session_history(self, snapshot: Dict[str, Any]) -> bool:
+        if not isinstance(snapshot, dict) or not bool(snapshot.get("available")):
+            return False
+        history_path = Path(snapshot.get("historyPath")).resolve()
+        sessions_root = STORYDEX_COOMI_SESSIONS.resolve()
+        try:
+            history_path.relative_to(sessions_root)
+        except ValueError as exc:
+            raise ValueError("Coomi session history path is outside the Storydex sessions directory.") from exc
+        content = snapshot.get("historyBytes")
+        if not isinstance(content, bytes):
+            raise ValueError("Coomi session history snapshot is invalid.")
+        temporary = history_path.with_name(f".{history_path.name}.{uuid4().hex}.tmp")
+        try:
+            history_path.parent.mkdir(parents=True, exist_ok=True)
+            with temporary.open("wb") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, history_path)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+        self.clear_session(
+            str(snapshot.get("sessionId") or "default"),
+            workspace_root=Path(snapshot.get("workspaceRoot")).resolve(),
+            delete_history=False,
+        )
+        return True
+
     def set_permission_mode(self, mode: str) -> Dict[str, Any]:
         normalized = _normalize_permission_mode(mode)
         with _storydex_coomi_home():
@@ -1190,7 +1287,10 @@ def _task_planner_messages(
         "activeFile": str(active_file or ""),
         "intent": str(intent.get("primary") or "general"),
         "turnStatus": str(contract.get("status") or "ready"),
-        "fragmentCount": _bounded_int(story_generation.get("fragmentCount") or turn_plan.get("fragmentCount"), default=1, minimum=1, maximum=20),
+        "fragmentCount": _positive_int(
+            story_generation.get("fragmentCount") or turn_plan.get("fragmentCount"),
+            default=1,
+        ),
         "fragmentWordCount": _bounded_int(
             story_generation.get("fragmentWordCount") or turn_plan.get("fragmentWordCount"),
             default=2000,
@@ -1593,6 +1693,7 @@ def _sync_coomi_runtime_workspace(
 def _create_storydex_tool_registry(
     workspace_root: Path,
     policy: ContextPolicy | None = None,
+    turn_contract: Dict[str, Any] | None = None,
 ) -> Any:
     from coomi.tools.registry import create_default_registry
     from services.storydex_agent_tools import (
@@ -1602,6 +1703,7 @@ def _create_storydex_tool_registry(
         StorydexRuntimePresetStatusTool,
         StorydexSyncWikiTool,
         StorydexVersionStatusTool,
+        StorydexWordCountTool,
         StorydexWikiQueryTool,
     )
     import importlib
@@ -1613,7 +1715,7 @@ def _create_storydex_tool_registry(
     registry = create_default_registry()
     # 同名覆盖默认工具：文件/Shell 工具全部显式绑定工作区，
     # 使 Agent 轮次不再依赖进程级 os.chdir。
-    for tool in runtime_tools.create_workspace_bound_tool_overrides(root):
+    for tool in runtime_tools.create_workspace_bound_tool_overrides(root, turn_contract=turn_contract):
         registry.register(tool)
     external_tool_overrides = getattr(
         runtime_tools,
@@ -1629,7 +1731,8 @@ def _create_storydex_tool_registry(
         registry.register(StorydexProjectSearchTool(workspace_root=root))
         registry.register(StorydexWikiQueryTool(workspace_root=root))
     registry.register(StorydexSyncWikiTool(workspace_root=root))
-    registry.register(StorydexApplyStoryIncrementTool(workspace_root=root))
+    registry.register(StorydexWordCountTool(workspace_root=root))
+    registry.register(StorydexApplyStoryIncrementTool(workspace_root=root, turn_contract=turn_contract))
     return registry
 
 
@@ -1708,7 +1811,7 @@ async def _build_coomi_system_prompt(
     retrieval_tools_prompt = (
         "Storydex registers domain tools outside Coomi: `StorydexRuntimePresetStatus`, "
         "`StorydexVersionStatus`, `StorydexHelpGuideSearch`, `StorydexProjectSearch`, "
-        "`StorydexWikiQuery`, `StorydexSyncWiki`, and `StorydexApplyStoryIncrement`. "
+        "`StorydexWikiQuery`, `StorydexSyncWiki`, `StorydexWordCount`, and `StorydexApplyStoryIncrement`. "
         "When the user asks how to use Storydex, where a feature is, or how a menu/settings/WIKI/version workflow works, "
         "call `StorydexHelpGuideSearch` before answering and ground the answer in the guide.\n"
         "Retrieval policy for story continuity: before referencing earlier plot details, foreshadowing, "
@@ -1751,6 +1854,10 @@ async def _build_coomi_system_prompt(
         + "relationship changes) must remain pending and must never be forced through. "
         + "If WIKI is not automatic, ask after variables are applied before passing applyWiki=true. "
         + "All newly mentioned characters must be included in newCharacters or characterUpdates, even when every unknown field is only `未知`.\n"
+        + "For story turns, never write or edit `chapters/` with generic Write/Edit tools. The selected fragment count, exact fragment word count, "
+        + "and chapter template are binding execution constraints. `StorydexApplyStoryIncrement` validates them before writing and uses the same "
+        + "non-whitespace character counter as the editor. Never estimate a count. If validation fails, revise using the returned difference and call "
+        + "the tool again. Use `StorydexWordCount` when you need to inspect an existing chapter file.\n"
         + story_options
         + contract_options
     )
@@ -1769,13 +1876,15 @@ async def _build_coomi_system_prompt(
 
 def _render_story_generation_options(value: Dict[str, Any] | None) -> str:
     payload = value if isinstance(value, dict) else {}
-    fragment_count = _bounded_int(payload.get("fragmentCount"), default=1, minimum=1, maximum=20)
+    fragment_count = _positive_int(payload.get("fragmentCount"), default=1)
     fragment_word_count = _bounded_int(payload.get("fragmentWordCount"), default=2000, minimum=100, maximum=20000)
+    chapter_template = str(payload.get("chapterTemplateId") or payload.get("chapterTemplate") or "").strip()
     return (
         "\nStory generation turn options:\n"
         + f"- fragmentCount: {fragment_count}\n"
         + f"- fragmentWordCount: {fragment_word_count}\n"
-        + "Use these values only for story creation or continuation turns; for other tasks, keep them as metadata.\n"
+        + (f"- chapterTemplateId: {chapter_template}\n" if chapter_template else "")
+        + "For story creation or continuation turns these values are mandatory, not estimates or suggestions.\n"
     )
 
 
@@ -1801,13 +1910,15 @@ def _render_turn_contract(value: Dict[str, Any] | None) -> str:
     if intent_skills:
         intent_line += f"; matching skills: {', '.join(intent_skills)}"
     status = str(contract.get("status") or "ready")
-    fragment_count = _bounded_int(turn_plan.get("fragmentCount"), default=1, minimum=1, maximum=20)
+    fragment_count = _positive_int(turn_plan.get("fragmentCount"), default=1)
     fragment_word_count = _bounded_int(turn_plan.get("fragmentWordCount"), default=2000, minimum=100, maximum=20000)
     requires_template = bool(turn_plan.get("requiresChapterTemplateSelection"))
     selected_template = str(turn_plan.get("selectedChapterTemplate") or "").strip()
     selected_template_detail = _dict_value(turn_plan.get("selectedChapterTemplateDetail"))
     invalid_template = str(turn_plan.get("invalidChapterTemplate") or "").strip()
     next_segment_path = str(turn_plan.get("nextSegmentPath") or "").strip()
+    chapter_content_mode = str(turn_plan.get("chapterContentMode") or "multi_fragment").strip()
+    fragment_targets = turn_plan.get("fragmentTargets") if isinstance(turn_plan.get("fragmentTargets"), list) else []
 
     lines = [
         "\nStorydex turn contract:",
@@ -1820,7 +1931,8 @@ def _render_turn_contract(value: Dict[str, Any] | None) -> str:
             f"localGitAutoCommit={bool(execution.get('localGitAutoCommit', True))}, "
             f"remotePush={bool(execution.get('remotePush', False))}"
         ),
-        f"- storyFragments: count={fragment_count}, wordsEach={fragment_word_count}",
+        f"- storyFragments: count={fragment_count}, exactNonWhitespaceCharactersEach={fragment_word_count}",
+        f"- chapterContentMode: {chapter_content_mode}",
     ]
 
     if requires_template:
@@ -1840,6 +1952,13 @@ def _render_turn_contract(value: Dict[str, Any] | None) -> str:
             lines.append(f"- selectedTemplateRules: {template_rules}")
     if next_segment_path:
         lines.append(f"- nextSegmentPath: {next_segment_path}")
+    target_paths = [str(item.get("path") or "") for item in fragment_targets if isinstance(item, dict) and str(item.get("path") or "")]
+    if target_paths:
+        lines.append(f"- authoritativeFragmentPaths: {', '.join(target_paths)}")
+    lines.append(
+        "- wordCountEnforcement: exact Storydex editor count (every non-whitespace Unicode character); "
+        "never estimate, and do not finish until Storydex validation passes."
+    )
 
     lines.append(
         "- context: inject active or compiled-safe presets only; use recent active characters and relevant facts, "
@@ -1960,18 +2079,24 @@ def _chapter_template_detail_label(value: Dict[str, Any], fallback: str) -> str:
 def _chapter_template_rules(value: Dict[str, Any]) -> str:
     pieces: list[str] = []
     chapter_mode = str(value.get("chapterMode") or "").strip()
+    content_mode = str(value.get("contentMode") or "").strip()
     chapter_pattern = str(value.get("chapterNamePattern") or "").strip()
     segment_naming = str(value.get("segmentNaming") or "").strip()
     initial_directory = str(value.get("initialChapterDirectory") or "").strip()
     initial_segment = str(value.get("initialChapterFirstSegment") or "").strip()
     if chapter_mode:
         pieces.append(f"mode={chapter_mode}")
+    if content_mode:
+        pieces.append(f"contentMode={content_mode}")
     if chapter_pattern:
         pieces.append(f"chapterNamePattern={chapter_pattern}")
     if segment_naming:
         pieces.append(f"segmentNaming={segment_naming}")
     if initial_directory or initial_segment:
         pieces.append(f"initial={initial_directory}/{initial_segment}".strip("/"))
+    rules = value.get("rules") if isinstance(value.get("rules"), list) else []
+    if rules:
+        pieces.append("rules=" + " | ".join(str(item) for item in rules if str(item).strip()))
     return ", ".join(pieces)
 
 
@@ -1981,6 +2106,14 @@ def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int
     except (TypeError, ValueError):
         parsed = default
     return max(minimum, min(maximum, parsed))
+
+
+def _positive_int(value: Any, *, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(1, parsed)
 
 
 class _StorydexApprovalContext:
@@ -2084,7 +2217,24 @@ class _CoomiEventTranslator:
         if name == "TextChunk":
             return "TextChunk", {"_type": "TextChunk", "_version": 1, "content": str(getattr(event, "content", ""))}
         if name == "ReasoningChunk":
-            return "ReasoningChunk", {"_type": "ReasoningChunk", "_version": 1, "content": str(getattr(event, "content", ""))}
+            # Hidden provider reasoning must not cross the Storydex adapter
+            # boundary or enter SSE, trace history and audit records.
+            return None
+        if name == "ConnectionRetry":
+            attempt = int(getattr(event, "attempt", 1) or 1)
+            max_attempts = int(getattr(event, "max_attempts", attempt) or attempt)
+            delay = float(getattr(event, "delay", 0.0) or 0.0)
+            return "ConnectionRetry", {
+                "_type": "ConnectionRetry",
+                "_version": 1,
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+                "maxAttempts": max_attempts,
+                "delay": delay,
+                "delaySeconds": delay,
+                "message": str(getattr(event, "message", "") or ""),
+                "status": "warning",
+            }
         if name == "ToolStart":
             tool_name = str(getattr(event, "tool_name", ""))
             event_tool_call_id = str(getattr(event, "tool_call_id", "") or "").strip()

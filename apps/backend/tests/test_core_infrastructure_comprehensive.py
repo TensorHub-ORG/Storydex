@@ -102,11 +102,16 @@ def test_execution_log_sanitization_session_context_and_unique_paths(monkeypatch
     second = execution_log_service._build_unique_log_path(log_dir)
     assert second != first
 
-    fake_project = types.SimpleNamespace(storydex_root=tmp_path / ".storydex", workspace_root=tmp_path)
+    fake_project = types.SimpleNamespace(
+        storydex_root=tmp_path / ".storydex",
+        agent_root=tmp_path / ".storydex" / ".agent",
+        workspace_root=tmp_path,
+    )
     import services.project_service as project_module
     monkeypatch.setattr(project_module, "get_project_service", lambda: fake_project)
     created = execution_log_service.create_execution_log_session(trace_id=" t ", session_id="", request_kind="", metadata={"a": 1})
     assert created.session_id == "default" and created.request_kind == "agent_run" and created.metadata == {"a": 1}
+    assert created.path.parent == tmp_path / ".storydex" / ".agent" / "logs"
 
 
 def test_secure_storage_roundtrip_validation_tampering_and_helpers(monkeypatch, tmp_path):
@@ -234,9 +239,13 @@ def test_global_config_preferences_workspace_auth_and_recent_projects(monkeypatc
 
     prefs = service.write_ui_preferences({
         "theme": "dark", "language": "zh-CN", "sidebarWidth": 9999, "agentWidth": "bad",
-        "fileFontSize": 1, "playerFontSize": 99, "workbenchMode": "invalid", "sidebarCollapsed": 1,
+        "fileFontSize": 24, "playerFontSize": 99, "leftPaneFontScale": 1,
+        "rightPaneFontScale": 999, "workbenchMode": "invalid", "sidebarCollapsed": 1,
     })
     assert prefs["theme"] == "dark" and prefs["sidebarWidth"] <= 1200 and prefs["fileFontSize"] >= 10
+    assert prefs["leftPaneFontScale"] == 75 and prefs["centerPaneFontScale"] == 150
+    assert prefs["rightPaneFontScale"] == 150
+    assert service._normalize_ui_preferences({"fileFontSize": 18})["centerPaneFontScale"] == 115
     assert service.read_ui_preferences()["sidebarCollapsed"] is True
     state = service.write_workspace_state({"recentProjects": "bad", "activeProjectRoot": str(tmp_path)})
     assert state["recentProjects"] == []

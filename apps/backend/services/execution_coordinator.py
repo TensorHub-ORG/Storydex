@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import hashlib
 import inspect
 import json
 import logging
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,7 +16,6 @@ from uuid import uuid4
 
 
 _LOGGER = logging.getLogger(__name__)
-_PREPARATION_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="storydex-execution-preparation")
 _OUTCOMES = {"completed", "failed", "cancelled"}
 _TERMINAL_STATES = _OUTCOMES | {"rejected", "unfinished"}
 _T = TypeVar("_T")
@@ -144,20 +141,17 @@ class ExecutionCoordinator:
         self,
         operation: Callable[[], Awaitable[_T]],
     ) -> _T:
-        """Run cold async setup on one worker loop, away from request loops."""
+        """Run async setup on the caller loop without a shared single-worker queue.
 
-        context = contextvars.copy_context()
+        Callers are responsible for moving their own synchronous filesystem or
+        provider initialization work to ``asyncio.to_thread``.  This prevents a
+        cancelled planner from head-of-line blocking the next intent request.
+        """
 
-        def run() -> _T:
-            return context.run(asyncio.run, operation())
-
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(_PREPARATION_EXECUTOR, run)
+        return await operation()
 
     async def classify_intent(self, intent_service: Any, **kwargs: Any) -> Dict[str, Any]:
-        return await self.run_serialized_preparation(
-            lambda: intent_service.classify_intent(**kwargs)
-        )
+        return await intent_service.classify_intent(**kwargs)
 
     def reconcile_workspace(self, workspace_root: Path) -> list[Dict[str, Any]]:
         if not self._slot.acquire(blocking=False):
@@ -183,6 +177,57 @@ class ExecutionCoordinator:
                 "maxMs": round(max(values), 4) if values else 0.0,
             }
             for key, values in sorted(samples.items())
+        }
+
+    def active_handle(
+        self,
+        *,
+        session_id: str = "",
+        workspace_root: Path | None = None,
+    ) -> "ExecutionHandle | None":
+        normalized_session = str(session_id or "").strip()
+        resolved_workspace = Path(workspace_root).resolve() if workspace_root is not None else None
+        with self._state_lock:
+            handle = self._active
+            if handle is None:
+                return None
+            if normalized_session and handle.session_id != normalized_session:
+                return None
+            if resolved_workspace is not None and handle.workspace_root != resolved_workspace:
+                return None
+            return handle
+
+    def cancel_active(
+        self,
+        *,
+        session_id: str,
+        expected_trace_id: str = "",
+        workspace_root: Path | None = None,
+        reason: str = "manual_stop",
+    ) -> Dict[str, Any]:
+        handle = self.active_handle(session_id=session_id, workspace_root=workspace_root)
+        if handle is None:
+            return {
+                "accepted": False,
+                "sessionId": str(session_id or "default").strip() or "default",
+                "activeTraceId": "",
+                "reason": "no_active_execution",
+            }
+        expected = str(expected_trace_id or "").strip()
+        if expected and handle.trace_id != expected:
+            return {
+                "accepted": False,
+                "sessionId": handle.session_id,
+                "activeTraceId": handle.trace_id,
+                "expectedTraceId": expected,
+                "reason": "stale_trace",
+            }
+        accepted = handle.cancel(reason)
+        return {
+            "accepted": accepted,
+            "sessionId": handle.session_id,
+            "activeTraceId": handle.trace_id,
+            "reason": str(reason or "manual_stop"),
         }
 
     def _create_handle(self, workspace_root: Path, session_id: str, trace_id: str) -> "ExecutionHandle":

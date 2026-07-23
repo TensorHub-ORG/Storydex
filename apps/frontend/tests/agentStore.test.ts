@@ -12,7 +12,9 @@ const api = vi.hoisted(() => ({
   deleteAgentSession: vi.fn(),
   cycleAgentCoomiPermission: vi.fn(),
   setAgentCoomiPermission: vi.fn(),
-  resolveAgentCoomiApproval: vi.fn()
+  resolveAgentCoomiApproval: vi.fn(),
+  fetchAgentFollowups: vi.fn(), enqueueAgentFollowup: vi.fn(), updateAgentFollowup: vi.fn(),
+  deleteAgentFollowup: vi.fn(), steerAgentFollowup: vi.fn(), resumeAgentFollowups: vi.fn(), stopAgentExecution: vi.fn()
 }));
 const git = vi.hoisted(() => ({ refreshSummary: vi.fn() }));
 const workspace = vi.hoisted(() => ({
@@ -58,7 +60,14 @@ beforeEach(() => {
   api.rollbackLatestExecution.mockResolvedValue({
     data: { rolledBack: false, sessionId: "default", removedTraceId: "", prompt: "" }
   });
+  api.fetchAgentFollowups.mockResolvedValue(envelopeMailbox());
+  api.resumeAgentFollowups.mockResolvedValue(envelopeMailbox());
+  api.stopAgentExecution.mockResolvedValue({ data: { accepted: true, activeTraceId: "trace", mailboxPaused: true, pauseReason: "manual_stop" } });
 });
+
+function envelopeMailbox(messages: unknown[] = []) {
+  return { data: { messages, paused: false, pauseReason: "", revision: 0 } };
+}
 
 describe("agent store streaming", () => {
   it("publishes immediate phases, updates heartbeats in place, and appends text chunks", async () => {
@@ -209,7 +218,7 @@ describe("agent store sessions and Git decision UX", () => {
 
     await expect(store.rollbackLatestRun({ refillComposer: true })).resolves.toBe(true);
 
-    expect(api.rollbackLatestExecution).toHaveBeenCalledWith("session-a");
+    expect(api.rollbackLatestExecution).toHaveBeenCalledWith("session-a", "trace-latest");
     expect(store.executionHistory.map((run) => run.traceId)).toEqual(["trace-previous"]);
     expect(store.currentTraceId).toBe("trace-previous");
     expect(store.lastPrompt).toBe("previous");
@@ -315,4 +324,212 @@ describe("agent store sessions and Git decision UX", () => {
     expect(api.submitAgentRunCommitDecision).not.toHaveBeenCalled();
     expect(store.lastError).not.toBe("");
   });
+
+  it("edits the latest message in two phases and restores the unsent draft on cancel", () => {
+    const store = useAgentStore();
+    const latest = {
+      traceId: "trace-latest", sessionId: "session-a", prompt: "original prompt", route: "coomi", agentMode: "coomi",
+      llmModel: "", llmProvider: "", status: "completed", createdAt: "2026-07-21T11:00:00Z",
+      updatedAt: "2026-07-21T11:00:00Z", lastAction: "chat", reply: "original reply", trace: { traceId: "trace-latest" },
+      audit: [{ action: "kept" }], events: [{ event: "AgentCompleted" }], tasks: [],
+      changeLedger: { traceId: "trace-latest", sessionId: "session-a", changedFiles: ["chapters/001.md"], changedFileCount: 1, added: 1, removed: 0, commitHash: "", shortHash: "", diffSource: "", updatedAt: "" },
+      items: [], errorMessage: "", errorCode: null
+    } as any;
+    store.currentSessionId = "session-a";
+    store.executionHistory = [latest];
+    store.promptInput = "unsent draft";
+
+    expect(store.beginEditLatestRun(latest)).toBe(true);
+    expect(api.rollbackLatestExecution).not.toHaveBeenCalled();
+    expect(store.promptInput).toBe("original prompt");
+    expect(store.editingHasFileChanges).toBe(true);
+    store.cancelEditLatestRun();
+
+    expect(store.promptInput).toBe("unsent draft");
+    expect(store.executionHistory[0].reply).toBe("original reply");
+    expect(store.executionHistory[0].trace?.traceId).toBe("trace-latest");
+    expect(api.rollbackLatestExecution).not.toHaveBeenCalled();
+  });
+
+  it("reexecutes only after confirmation and restores the original run when startup fails", async () => {
+    const store = useAgentStore();
+    const latest = {
+      traceId: "trace-latest", sessionId: "session-a", prompt: "original", route: "coomi", agentMode: "coomi",
+      llmModel: "", llmProvider: "", status: "completed", createdAt: "2026-07-21T11:00:00Z",
+      updatedAt: "2026-07-21T11:00:00Z", lastAction: "chat", reply: "answer", trace: { traceId: "trace-latest" },
+      audit: [], events: [], tasks: [], changeLedger: { traceId: "trace-latest", sessionId: "session-a", changedFiles: [], changedFileCount: 0, added: 0, removed: 0, commitHash: "", shortHash: "", diffSource: "", updatedAt: "" },
+      items: [], errorMessage: "", errorCode: null
+    } as any;
+    store.currentSessionId = "session-a";
+    store.currentTraceId = "trace-latest";
+    store.executionHistory = [latest];
+    store.beginEditLatestRun(latest);
+    store.promptInput = "replacement";
+    api.streamAgentPrompt.mockRejectedValueOnce(new AgentApiError("preflight failed", "replacement_preflight"));
+
+    await expect(store.reexecuteEditedLatestRun()).resolves.toBe(false);
+    const request = api.streamAgentPrompt.mock.calls[0][0];
+    expect(request.replaceLatestTraceId).toBe("trace-latest");
+    expect(store.executionHistory).toHaveLength(1);
+    expect(store.executionHistory[0].traceId).toBe("trace-latest");
+    expect(store.executionHistory[0].reply).toBe("answer");
+    expect(store.editingTraceId).toBe("trace-latest");
+  });
+
+  it("successfully replaces the latest dialogue while retaining the superseded run", async () => {
+    const store = useAgentStore();
+    const latest = {
+      traceId: "trace-latest", sessionId: "session-a", prompt: "original", route: "coomi", agentMode: "coomi",
+      llmModel: "", llmProvider: "", status: "completed", createdAt: "2026-07-21T11:00:00Z",
+      updatedAt: "2026-07-21T11:00:00Z", lastAction: "chat", reply: "original answer", trace: { traceId: "trace-latest" },
+      audit: [{ action: "kept" }], events: [{ event: "AgentCompleted" }], tasks: [],
+      changeLedger: { traceId: "trace-latest", sessionId: "session-a", changedFiles: ["chapters/001.md"], changedFileCount: 1, added: 1, removed: 0, commitHash: "", shortHash: "", diffSource: "", updatedAt: "" },
+      items: [], errorMessage: "", errorCode: null
+    } as any;
+    store.currentSessionId = "session-a";
+    store.currentTraceId = "trace-latest";
+    store.executionHistory = [latest];
+    store.promptInput = "draft before edit";
+    store.beginEditLatestRun(latest);
+    store.promptInput = "replacement prompt";
+
+    let replacementTraceId = "";
+    api.streamAgentPrompt.mockImplementationOnce(async (request: any, onPacket: (packet: any) => void, traceId: string) => {
+      replacementTraceId = traceId;
+      expect(request.replaceLatestTraceId).toBe("trace-latest");
+      onPacket({ _type: "RunAccepted", traceId });
+      onPacket({ _type: "TurnContract", traceId, status: "ready" });
+      onPacket({ _type: "TextChunk", traceId, content: "replacement answer" });
+      onPacket({ _type: "AgentCompleted", traceId });
+    });
+
+    await expect(store.reexecuteEditedLatestRun()).resolves.toBe(true);
+
+    expect(replacementTraceId).not.toBe("");
+    expect(store.executionHistory).toHaveLength(2);
+    expect(store.executionHistory[0].traceId).toBe(replacementTraceId);
+    expect(store.executionHistory[0].prompt).toBe("replacement prompt");
+    expect(store.executionHistory[0].reply).toBe("replacement answer");
+    expect(store.executionHistory[0].status).toBe("completed");
+    const superseded = store.executionHistory.find((run) => run.traceId === "trace-latest");
+    expect(superseded?.status).toBe("superseded");
+    expect(superseded?.reply).toBe("original answer");
+    expect(superseded?.trace?.traceId).toBe("trace-latest");
+    expect(store.editingTraceId).toBe("");
+    expect(store.promptInput).toBe("");
+    expect(api.rollbackLatestExecution).not.toHaveBeenCalled();
+  });
+
+  it("persists queued follow-ups and resumes the first pending message with an idempotent source id", async () => {
+    const store = useAgentStore();
+    store.currentSessionId = "session-a";
+    store.currentTraceId = "trace-active";
+    store.isRunning = true;
+    store.promptInput = "queued content";
+    const message = {
+      messageId: "followup-1", sessionId: "session-a", activeTraceId: "trace-active", expectedTraceId: "trace-active",
+      content: "queued content", mode: "queued", status: "pending", createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(), sequence: 1
+    };
+    api.enqueueAgentFollowup.mockResolvedValue({ data: { message, steerRequested: false } });
+    await expect(store.enqueueFollowup("queued")).resolves.toBe(true);
+    expect(api.enqueueAgentFollowup.mock.calls[0][0].messageId).toMatch(/^followup-/);
+    expect(store.followups[0].messageId).toBe("followup-1");
+
+    store.isRunning = false;
+    store.executionHistory = [{ ...latestRunForFollowup(), traceId: "trace-active" } as any];
+    api.resumeAgentFollowups.mockResolvedValue(envelopeMailbox([message]));
+    api.streamAgentPrompt.mockImplementationOnce(async (request: any, onPacket: (packet: any) => void) => {
+      expect(request.sourceFollowupMessageId).toBe("followup-1");
+      expect(request.sourceFollowupExpectedTraceId).toBe("trace-active");
+      onPacket({ _type: "AgentCompleted" });
+    });
+    await store.resumeFollowups();
+    expect(api.streamAgentPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it("removes steer messages when continuation starts and renders the guidance immediately", () => {
+    const store = useAgentStore();
+    store.currentSessionId = "session-a";
+    store.currentTraceId = "trace-active";
+    store.isRunning = true;
+    store.executionHistory = [{
+      ...latestRunForFollowup(),
+      status: "running",
+      items: [{
+        id: "trace-active-user",
+        type: "user",
+        status: "success",
+        title: "User",
+        content: "original prompt",
+        timestamp: new Date().toISOString()
+      }]
+    } as any];
+    const steering = {
+      messageId: "steer-1",
+      sessionId: "session-a",
+      activeTraceId: "trace-active",
+      expectedTraceId: "trace-active",
+      content: "new guidance",
+      mode: "steer",
+      status: "steering",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      sequence: 1
+    } as const;
+    store.followups = [steering];
+
+    const appliedPacket = {
+      _type: "SteerApplied",
+      messageId: "steer-1",
+      sessionId: "session-a",
+      activeTraceId: "trace-active",
+      content: "new guidance",
+      mode: "steer",
+      status: "sent",
+      segmentId: "trace-active-segment-2"
+    } as any;
+    store.applyStreamPacket("trace-active", appliedPacket);
+    expect(store.followups).toEqual([]);
+
+    const continuationPacket = {
+      ...appliedPacket,
+      _type: "ContinuationStarted",
+      continuationMode: "steer"
+    } as any;
+    store.applyStreamPacket("trace-active", continuationPacket);
+    store.applyStreamPacket("trace-active", continuationPacket);
+    expect(store.executionHistory[0].items.filter((item) => item.type === "user").map((item) => item.content)).toEqual([
+      "original prompt",
+      "new guidance"
+    ]);
+
+    store.applyFollowupMailbox({
+      _type: "FollowupMailbox",
+      _version: 1,
+      revision: 2,
+      workspaceRoot: "C:/isolated/story",
+      sessionId: "session-a",
+      activeTraceId: "trace-active",
+      paused: false,
+      pauseReason: "",
+      messages: [
+        { ...steering, status: "sent" },
+        { ...steering, messageId: "queued-1", content: "later", mode: "queued", status: "pending", sequence: 2 }
+      ],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+    expect(store.followups.map((message) => message.messageId)).toEqual(["queued-1"]);
+  });
 });
+
+function latestRunForFollowup() {
+  return {
+    traceId: "trace-active", sessionId: "session-a", prompt: "previous", route: "coomi", agentMode: "coomi",
+    llmModel: "", llmProvider: "", status: "completed", createdAt: "2026-07-21T11:00:00Z",
+    updatedAt: "2026-07-21T11:00:00Z", lastAction: "chat", reply: "answer", trace: null, audit: [], events: [], tasks: [],
+    changeLedger: { traceId: "trace-active", sessionId: "session-a", changedFiles: [], changedFileCount: 0, added: 0, removed: 0, commitHash: "", shortHash: "", diffSource: "", updatedAt: "" },
+    items: [], errorMessage: "", errorCode: null
+  };
+}

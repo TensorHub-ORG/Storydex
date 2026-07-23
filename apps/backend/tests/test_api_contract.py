@@ -37,6 +37,9 @@ class _GlobalConfig:
             "sidebarCollapsed": False,
             "agentCollapsed": False,
             "agentWidth": 560,
+            "leftPaneFontScale": 100,
+            "centerPaneFontScale": 100,
+            "rightPaneFontScale": 100,
             "fileFontSize": 16,
             "playerFontSize": 14,
             "updatedAt": "2026-01-01T00:00:00Z",
@@ -161,9 +164,18 @@ def test_system_envelopes_and_preferences_round_trip(client):
     assert health["trace"]["traceId"]
     bootstrap = assert_success(client.get("/api/v1/sys/bootstrap"))
     assert bootstrap["data"]["uiPreferences"]["theme"] == "default"
-    updated = assert_success(client.put("/api/v1/sys/ui-preferences", json={"theme": "dark", "sidebarWidth": 420}))
+    updated = assert_success(client.put("/api/v1/sys/ui-preferences", json={
+        "theme": "dark",
+        "sidebarWidth": 420,
+        "leftPaneFontScale": 90,
+        "centerPaneFontScale": 115,
+        "rightPaneFontScale": 130,
+    }))
     assert updated["data"]["theme"] == "dark"
     assert updated["data"]["sidebarWidth"] == 420
+    assert updated["data"]["leftPaneFontScale"] == 90
+    assert updated["data"]["centerPaneFontScale"] == 115
+    assert updated["data"]["rightPaneFontScale"] == 130
     agent_settings = assert_success(client.get("/api/v1/sys/agent-settings"))
     assert agent_settings["data"]["coomiMemoryEnabled"] is True
     updated_agent = assert_success(

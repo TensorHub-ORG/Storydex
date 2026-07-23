@@ -431,6 +431,63 @@ class StorydexSyncWikiTool(_StorydexWorkspaceToolMixin, BaseTool):
         return ToolResult(success=True, output=json.dumps(summary, ensure_ascii=False, indent=2), error=None)
 
 
+class StorydexWordCountTool(_StorydexWorkspaceToolMixin, BaseTool):
+    name = "StorydexWordCount"
+    description = (
+        "Read Storydex's authoritative fiction word count for chapter files. "
+        "This uses the exact same non-whitespace Unicode-character algorithm as the editor; never estimate counts yourself."
+    )
+    access = ToolAccess.READ_ONLY
+    concurrency = ToolConcurrency.PARALLEL
+    requires_confirmation = False
+
+    def get_parameters_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "One workspace-relative chapter file path."},
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional list of workspace-relative chapter file paths.",
+                },
+            },
+            "additionalProperties": False,
+        }
+
+    def run(self, arguments: Dict[str, Any]) -> ToolResult:
+        payload = dict(arguments or {})
+        raw_paths = payload.get("paths") if isinstance(payload.get("paths"), list) else []
+        if str(payload.get("path") or "").strip():
+            raw_paths = [payload.get("path"), *raw_paths]
+        service = get_story_project_service()
+        items = []
+        for raw_path in raw_paths[:100]:
+            relative_path = service._normalize_relative_path(str(raw_path or ""))  # noqa: SLF001
+            candidate = (self.workspace_root / relative_path).resolve() if relative_path else self.workspace_root
+            try:
+                candidate.relative_to(self.workspace_root)
+            except ValueError:
+                continue
+            if not relative_path.startswith("chapters/") or not candidate.is_file():
+                items.append({"path": relative_path, "exists": False, "wordCount": 0})
+                continue
+            items.append(
+                {
+                    "path": relative_path,
+                    "exists": True,
+                    "wordCount": service.count_story_file_words(candidate),
+                }
+            )
+        result = {
+            "ok": True,
+            "algorithm": "storydex_visible_characters_v1",
+            "countingRule": "count every non-whitespace Unicode character",
+            "items": items,
+        }
+        return ToolResult(success=True, output=json.dumps(result, ensure_ascii=False, indent=2), error=None)
+
+
 class StorydexApplyStoryIncrementTool(_StorydexWorkspaceToolMixin, BaseTool):
     name = "StorydexApplyStoryIncrement"
     description = (
@@ -443,6 +500,10 @@ class StorydexApplyStoryIncrementTool(_StorydexWorkspaceToolMixin, BaseTool):
     access = ToolAccess.WRITE
     concurrency = ToolConcurrency.BLOCKING
     requires_confirmation = False
+
+    def __init__(self, *, workspace_root: Path, turn_contract: Dict[str, Any] | None = None) -> None:
+        super().__init__(workspace_root=workspace_root)
+        self.turn_contract = dict(turn_contract) if isinstance(turn_contract, dict) else {}
 
     def get_parameters_schema(self) -> Dict[str, Any]:
         return {
@@ -562,7 +623,11 @@ class StorydexApplyStoryIncrementTool(_StorydexWorkspaceToolMixin, BaseTool):
     def run(self, arguments: Dict[str, Any]) -> ToolResult:
         payload = dict(arguments or {})
         workspace_root = self._resolve_workspace_root(payload.get("workspaceRoot"))
-        result = get_story_project_service().apply_story_generation_increment(workspace_root, payload)
+        result = get_story_project_service().apply_story_generation_increment(
+            workspace_root,
+            payload,
+            generation_contract=self.turn_contract,
+        )
         knowledge_review = result.get("knowledgeReview") if isinstance(result.get("knowledgeReview"), dict) else None
         if knowledge_review is not None:
             result = {
@@ -570,12 +635,12 @@ class StorydexApplyStoryIncrementTool(_StorydexWorkspaceToolMixin, BaseTool):
                 **{key: value for key, value in result.items() if key != "knowledgeReview"},
             }
         return ToolResult(
-            success=True,
+            success=bool(result.get("ok", True)),
             output=json.dumps(
                 result,
                 ensure_ascii=False,
                 indent=None if knowledge_review is not None else 2,
                 separators=(",", ":") if knowledge_review is not None else None,
             ),
-            error=None,
+            error=None if bool(result.get("ok", True)) else str(result.get("message") or "Story generation constraints were not met."),
         )

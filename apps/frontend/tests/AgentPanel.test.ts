@@ -7,7 +7,9 @@ const api = vi.hoisted(() => ({
   fetchAgentCoomiStatus: vi.fn(), fetchAgentSessions: vi.fn(), fetchAgentHistory: vi.fn(),
   submitAgentRunCommitDecision: vi.fn(), rollbackLatestExecution: vi.fn(), streamAgentPrompt: vi.fn(), clearConversation: vi.fn(),
   deleteAgentSession: vi.fn(), cycleAgentCoomiPermission: vi.fn(), setAgentCoomiPermission: vi.fn(),
-  resolveAgentCoomiApproval: vi.fn()
+  resolveAgentCoomiApproval: vi.fn(), fetchAgentFollowups: vi.fn(), enqueueAgentFollowup: vi.fn(),
+  updateAgentFollowup: vi.fn(), deleteAgentFollowup: vi.fn(), steerAgentFollowup: vi.fn(),
+  resumeAgentFollowups: vi.fn(), stopAgentExecution: vi.fn()
 }));
 const git = vi.hoisted(() => ({ summary: null as any, refreshSummary: vi.fn().mockResolvedValue(undefined) }));
 const workspace = vi.hoisted(() => ({
@@ -50,10 +52,13 @@ beforeEach(() => {
   api.clearConversation.mockResolvedValue({ data: { cleared: true } });
   api.deleteAgentSession.mockResolvedValue({ data: { deleted: true } });
   api.rollbackLatestExecution.mockResolvedValue({ data: { rolledBack: false, sessionId: "default", removedTraceId: "", prompt: "" } });
+  api.fetchAgentFollowups.mockResolvedValue({ data: { messages: [], paused: false, pauseReason: "", revision: 0 } });
+  api.resumeAgentFollowups.mockResolvedValue({ data: { messages: [], paused: false, pauseReason: "", revision: 1 } });
+  api.stopAgentExecution.mockResolvedValue({ data: { accepted: true, activeTraceId: "trace", mailboxPaused: true, pauseReason: "manual_stop" } });
 });
 
 describe("AgentPanel", () => {
-  it("shows rollback actions only for the latest finished run and hides them while running", async () => {
+  it("enters cancellable edit mode without rolling back and keeps delete semantics separate", async () => {
     const store = useAgentStore();
     const previous = {
       traceId: "trace-previous", sessionId: "session-a", prompt: "previous", route: "coomi", agentMode: "coomi",
@@ -70,6 +75,7 @@ describe("AgentPanel", () => {
       updatedAt: "2026-07-21T11:00:00Z"
     };
     store.executionHistory = [latest as any, previous as any];
+    store.promptInput = "unsent draft";
     const rollback = vi.spyOn(store, "rollbackLatestRun").mockResolvedValue(true);
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     const wrapper = shallowMount(AgentPanel, { attachTo: document.body });
@@ -78,14 +84,23 @@ describe("AgentPanel", () => {
     expect(wrapper.findAll(".coomi-run-actions")).toHaveLength(1);
     const buttons = wrapper.findAll(".coomi-run-action");
     expect(buttons).toHaveLength(2);
-    expect(buttons[0].attributes("aria-label")).toBe("撤回并重新编辑");
+    expect(buttons[0].attributes("aria-label")).toBe("编辑最新消息");
     expect(buttons[1].attributes("aria-label")).toBe("删除本轮");
 
     await buttons[0].trigger("click");
-    expect(rollback).toHaveBeenCalledWith({ refillComposer: true });
+    expect(rollback).not.toHaveBeenCalled();
+    expect(api.rollbackLatestExecution).not.toHaveBeenCalled();
+    expect(store.editingTraceId).toBe("trace-latest");
+    expect(store.promptInput).toBe("latest");
+    expect(wrapper.find(".coomi-edit-session").text()).toContain("取消编辑");
     expect(document.activeElement).toBe(wrapper.find("textarea.coomi-input").element);
 
-    await buttons[1].trigger("click");
+    await wrapper.find(".coomi-secondary-action").trigger("click");
+    expect(store.promptInput).toBe("unsent draft");
+    expect(store.executionHistory.map((run) => run.traceId)).toEqual(["trace-latest", "trace-previous"]);
+
+    const refreshedButtons = wrapper.findAll(".coomi-run-action");
+    await refreshedButtons[1].trigger("click");
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining("不会回滚已产生的文件变更"));
     expect(rollback).toHaveBeenCalledWith({ refillComposer: false });
 
@@ -95,35 +110,70 @@ describe("AgentPanel", () => {
     wrapper.unmount();
   });
 
-  it("resizes the composer by pointer drag and persists the user height", async () => {
+  it("keeps queue and stop actions in the composer while steering an existing queued message from the mailbox", async () => {
+    const store = useAgentStore();
+    store.currentSessionId = "session-a";
+    store.currentTraceId = "trace-active";
+    store.isRunning = true;
+    store.promptInput = "追加说明";
+    store.followupPaused = true;
+    store.followupPauseReason = "manual_stop";
+    store.followups = [{
+      messageId: "followup-1", sessionId: "session-a", activeTraceId: "trace-active", content: "稍后处理",
+      mode: "queued", status: "pending", statusDetail: "等待当前轮完成", createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(), sequence: 1
+    }];
+    api.fetchAgentFollowups.mockResolvedValueOnce({
+      data: { messages: store.followups, paused: true, pauseReason: "manual_stop", revision: 1 }
+    });
+    const enqueue = vi.spyOn(store, "enqueueFollowup").mockResolvedValue(true);
+    const steer = vi.spyOn(store, "steerFollowup").mockResolvedValue(true);
+    const stop = vi.spyOn(store, "stopActiveRun").mockResolvedValue(undefined);
+    const remove = vi.spyOn(store, "deleteFollowup").mockResolvedValue(true);
+    const resume = vi.spyOn(store, "resumeFollowups").mockResolvedValue(undefined);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    const wrapper = shallowMount(AgentPanel);
+    await nextTick();
+    expect(wrapper.find("textarea.coomi-input").attributes("disabled")).toBeUndefined();
+    expect(wrapper.find(".coomi-steer-send").exists()).toBe(false);
+    expect(wrapper.find(".coomi-stop-run").exists()).toBe(true);
+    expect(wrapper.find(".coomi-stop-run .coomi-stop-glyph").exists()).toBe(true);
+    expect(wrapper.find(".coomi-stop-run .material-symbols-rounded").exists()).toBe(false);
+
+    await wrapper.find(".coomi-send").trigger("click");
+    expect(enqueue).toHaveBeenCalledWith("queued");
+    await wrapper.find(".coomi-stop-run").trigger("click");
+    expect(stop).toHaveBeenCalledTimes(1);
+
+    expect(wrapper.find(".coomi-followup-mailbox").text()).toContain("队列已暂停");
+    const steerAction = wrapper.find(".coomi-followup-actions .steer");
+    expect(steerAction.text()).toBe("立即引导执行");
+    await steerAction.trigger("click");
+    expect(steer).toHaveBeenCalledWith("followup-1");
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    await wrapper.find(".coomi-followup-actions .danger").trigger("click");
+    expect(remove).toHaveBeenCalledWith("followup-1");
+    await wrapper.find(".coomi-followup-resume").trigger("click");
+    expect(resume).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it("grows the composer automatically without exposing a manual resize control", async () => {
     const wrapper = shallowMount(AgentPanel, { attachTo: document.body });
     const utils = (wrapper.vm as any).__testUtils;
-    const dock = wrapper.find(".coomi-dock").element;
     const input = wrapper.find("textarea.coomi-input").element as HTMLTextAreaElement;
-    const resizer = wrapper.find(".coomi-composer-resizer").element as HTMLElement;
-    Object.defineProperty(dock, "clientHeight", { configurable: true, value: 500 });
-    Object.defineProperty(input, "scrollHeight", { configurable: true, value: 600 });
-    Object.defineProperty(resizer, "setPointerCapture", { configurable: true, value: vi.fn() });
 
+    expect(wrapper.find(".coomi-composer-resizer").exists()).toBe(false);
     expect(input.style.maxHeight).toBe("180px");
-    utils.startComposerResize({
-      button: 0,
-      pointerId: 7,
-      clientY: 300,
-      currentTarget: resizer,
-      preventDefault: vi.fn()
-    } as any);
-    utils.handleComposerResize({ pointerId: 7, clientY: 200 } as any);
-    await nextTick();
+    Object.defineProperty(input, "scrollHeight", { configurable: true, value: 96 });
+    utils.resizeComposer();
+    expect(input.style.height).toBe("96px");
 
-    expect(utils.composerMaxHeight.value).toBe(280);
-    expect(input.style.maxHeight).toBe("280px");
-    expect(input.style.height).toBe("280px");
-    expect(window.localStorage.getItem("storydex.composerMaxHeight")).toBe("280");
-    expect(document.body.classList.contains("is-resizing-composer")).toBe(true);
-
-    utils.finishComposerResize({ pointerId: 7 } as any);
-    expect(document.body.classList.contains("is-resizing-composer")).toBe(false);
+    Object.defineProperty(input, "scrollHeight", { configurable: true, value: 600 });
+    utils.resizeComposer();
+    expect(input.style.height).toBe("180px");
+    expect(window.localStorage.getItem("storydex.composerMaxHeight")).toBeNull();
     wrapper.unmount();
   });
 

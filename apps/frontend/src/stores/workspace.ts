@@ -543,6 +543,8 @@ export const useWorkspaceStore = defineStore("workspace", {
           maxSegmentsPerChapter: patch.maxSegmentsPerChapter ?? this.storySettings.maxSegmentsPerChapter,
           storyFragmentCount: patch.storyFragmentCount ?? this.storySettings.storyFragmentCount,
           storyFragmentWordCount: patch.storyFragmentWordCount ?? this.storySettings.storyFragmentWordCount,
+          storyChapterTemplateId:
+            patch.storyChapterTemplateId ?? this.storySettings.storyChapterTemplateId,
           autoUpdateVariables: patch.autoUpdateVariables ?? this.storySettings.autoUpdateVariables,
           autoUpdateWiki: patch.autoUpdateWiki ?? this.storySettings.autoUpdateWiki,
           agentCommitPromptEnabled:
@@ -1383,6 +1385,8 @@ export const useWorkspaceStore = defineStore("workspace", {
         story_fragment_count: payload.storyFragmentCount,
         storyFragmentWordCount: payload.storyFragmentWordCount,
         story_fragment_word_count: payload.storyFragmentWordCount,
+        storyChapterTemplateId: payload.storyChapterTemplateId,
+        story_chapter_template_id: payload.storyChapterTemplateId,
         autoUpdateVariables: payload.autoUpdateVariables,
         auto_update_variables: payload.autoUpdateVariables,
         autoUpdateWiki: payload.autoUpdateWiki,
@@ -1781,6 +1785,7 @@ function defaultStoryProjectSettings(settingsPath = ".storydex/config/project-se
       maxSegmentsPerChapter: 3,
       storyFragmentCount: 1,
       storyFragmentWordCount: 2000,
+      storyChapterTemplateId: "default_chapter_directory",
       autoUpdateVariables: false,
       autoUpdateWiki: false,
       autoUpdateVariablesNote: "自动更新变量需要较多耗时，建议每次仅生成单条剧情片段。",
@@ -1812,6 +1817,9 @@ function normalizeStorySettingsPayload(
   const maxSegmentsPerChapter = normalizeStoryMaxSegmentsPerChapter(payload.maxSegmentsPerChapter);
   const storyFragmentCount = normalizeStoryFragmentCount(payload.storyFragmentCount);
   const storyFragmentWordCount = normalizeStoryFragmentWordCount(payload.storyFragmentWordCount);
+  const storyChapterTemplateId = normalizeStoryChapterTemplateId(
+    payload.storyChapterTemplateId ?? payload.story_chapter_template_id
+  );
   const autoUpdateVariables = normalizeBooleanFlag(payload.autoUpdateVariables, false);
   const autoUpdateWiki = normalizeBooleanFlag(payload.autoUpdateWiki, false);
   const agentCommitPromptEnabled = normalizeBooleanFlag(payload.agentCommitPromptEnabled, true);
@@ -1833,6 +1841,8 @@ function normalizeStorySettingsPayload(
     story_fragment_count: storyFragmentCount,
     storyFragmentWordCount,
     story_fragment_word_count: storyFragmentWordCount,
+    storyChapterTemplateId,
+    story_chapter_template_id: storyChapterTemplateId,
     autoUpdateVariables,
     auto_update_variables: autoUpdateVariables,
     autoUpdateWiki,
@@ -1896,6 +1906,12 @@ function normalizeStorySettingsResponse(
           ?? payload.story_fragment_word_count
           ?? fallbackSettings?.storyFragmentWordCount
           ?? currentSettings?.storyFragmentWordCount
+      ),
+      storyChapterTemplateId: normalizeStoryChapterTemplateId(
+        payload.storyChapterTemplateId
+          ?? payload.story_chapter_template_id
+          ?? fallbackSettings?.storyChapterTemplateId
+          ?? currentSettings?.storyChapterTemplateId
       ),
       autoUpdateVariables: normalizeBooleanFlag(
         payload.autoUpdateVariables
@@ -2009,6 +2025,10 @@ function normalizeStorySettingsFromProjectFile(
         storySettings.storyFragmentWordCount
           ?? storySettings.story_fragment_word_count
       ),
+      storyChapterTemplateId: normalizeStoryChapterTemplateId(
+        storySettings.storyChapterTemplateId
+          ?? storySettings.story_chapter_template_id
+      ),
       autoUpdateVariables: normalizeBooleanFlag(
         storySettings.autoUpdateVariables
           ?? storySettings.auto_update_variables,
@@ -2086,7 +2106,12 @@ function normalizeStoryFragmentCount(value: unknown): number {
   if (!Number.isFinite(parsed)) {
     return 1;
   }
-  return Math.max(1, Math.min(20, parsed));
+  return Math.max(1, parsed);
+}
+
+function normalizeStoryChapterTemplateId(value: unknown): string {
+  const normalized = String(value ?? "").trim();
+  return normalized || "default_chapter_directory";
 }
 
 function normalizeStoryFragmentWordCount(value: unknown): number {
@@ -2183,6 +2208,8 @@ function hasExtendedStorySettingsPayload(payload: StoryProjectSettingsResponse):
         || payload.story_fragment_count !== undefined
         || payload.storyFragmentWordCount !== undefined
         || payload.story_fragment_word_count !== undefined
+        || payload.storyChapterTemplateId !== undefined
+        || payload.story_chapter_template_id !== undefined
         || payload.autoUpdateVariables !== undefined
         || payload.auto_update_variables !== undefined
         || payload.autoUpdateWiki !== undefined
@@ -2544,6 +2571,7 @@ export const __workspaceStoreTestUtils = import.meta.env.MODE === "test" ? {
   normalizeStoryMaxSegmentsPerChapter,
   normalizeStoryFragmentCount,
   normalizeStoryFragmentWordCount,
+  normalizeStoryChapterTemplateId,
   normalizeStoryCallCount,
   normalizeStoryContextTokens,
   normalizeStoryAutoNameChapterDirectories,

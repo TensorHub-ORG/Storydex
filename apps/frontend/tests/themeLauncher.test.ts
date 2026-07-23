@@ -23,11 +23,15 @@ describe("theme and project launcher composables", () => {
     expect(setTitleBarTheme).toHaveBeenCalledWith({ color: "#808080", symbolColor: "#f8fafc" });
     theme.applyTheme("default");
     expect(document.documentElement.hasAttribute("data-theme")).toBe(false);
-    theme.applyTypography({ fileFontSize: 2, playerFontSize: 100 });
-    expect(document.documentElement.style.getPropertyValue("--ui-file-font-size")).toBe("12px");
-    expect(document.documentElement.style.getPropertyValue("--ui-player-font-size")).toBe("28px");
-    theme.applyTypography({ fileFontSize: Number.NaN });
-    expect(document.documentElement.style.getPropertyValue("--ui-file-font-size")).toBe("16px");
+    theme.applyPaneFontScale(2);
+    expect(document.documentElement.style.getPropertyValue("--ui-pane-font-scale")).toBe("0.75");
+    expect(document.documentElement.style.getPropertyValue("--ui-pane-scaled-px-16")).toBe("12px");
+    theme.applyPaneFontScale(200);
+    expect(document.documentElement.style.getPropertyValue("--ui-pane-font-scale")).toBe("1.5");
+    expect(document.documentElement.style.getPropertyValue("--ui-pane-scaled-px-16")).toBe("24px");
+    theme.applyPaneFontScale(Number.NaN);
+    expect(document.documentElement.style.getPropertyValue("--ui-pane-font-scale")).toBe("1");
+    expect(document.documentElement.style.getPropertyValue("--ui-pane-scaled-px-16")).toBe("16px");
 
     for (const [primary, fallback] of [["", ""], ["bad", "rgb(10,20,30)"], ["#fff", "bad"], ["#ffffff80", "#000"], ["rgb(300,-2,50)", "#000"], ["rgba(0%,100%,0%,2)", "#000"]]) {
       style.mockReturnValue({ getPropertyValue: (name: string) => name === "--bg-header" ? primary : fallback } as CSSStyleDeclaration);

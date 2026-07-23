@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { shallowMount } from "@vue/test-utils";
+import { flushPromises, shallowMount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { createMemoryHistory, createRouter } from "vue-router";
 import { nextTick } from "vue";
@@ -55,6 +55,7 @@ import TracePanel from "@/components/TracePanel.vue";
 import UpdateNotification from "@/components/UpdateNotification.vue";
 import WorkspaceStartPage from "@/components/WelcomeStartPage.vue";
 import WorkbenchLayout from "@/layouts/WorkbenchLayout.vue";
+import { useUiStore } from "@/stores/ui";
 import FilePreviewView from "@/views/FilePreviewView.vue";
 import WorkbenchView from "@/views/WorkbenchView.vue";
 
@@ -127,4 +128,43 @@ describe("frontend component inventory", () => {
       wrapper.unmount();
     }
   );
+
+  it("renders three independent pane font scale controls", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const wrapper = shallowMount(SettingsWindow, {
+      props: { visible: true },
+      global: { plugins: [pinia] }
+    });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("左侧栏字体倍率");
+    expect(wrapper.text()).toContain("中间栏字体倍率");
+    expect(wrapper.text()).toContain("右侧栏字体倍率");
+    const controls = wrapper.findAll('input[type="range"]');
+    expect(controls).toHaveLength(3);
+    expect(controls.every((control) => control.attributes("min") === "75")).toBe(true);
+    expect(controls.every((control) => control.attributes("max") === "150")).toBe(true);
+    expect(controls.every((control) => control.attributes("step") === "5")).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("updates the center file pane pixel scale reactively", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const uiStore = useUiStore();
+    const wrapper = shallowMount(WorkbenchLayout, {
+      global: { plugins: [pinia] }
+    });
+
+    const editorPane = wrapper.findComponent(EditorPane);
+    expect((editorPane.element as HTMLElement).style.getPropertyValue("--ui-pane-scaled-px-16")).toBe("16px");
+
+    uiStore.centerPaneFontScale = 150;
+    await nextTick();
+
+    expect((editorPane.element as HTMLElement).style.getPropertyValue("--ui-pane-scaled-px-16")).toBe("24px");
+    expect((editorPane.element as HTMLElement).style.getPropertyValue("--ui-pane-scaled-px-14")).toBe("21px");
+    wrapper.unmount();
+  });
 });

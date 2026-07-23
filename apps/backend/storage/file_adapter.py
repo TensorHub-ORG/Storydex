@@ -14,6 +14,8 @@ from core.exceptions import AtomicWriteError, InvalidWorkspacePathError
 PROTECTED_STORYDEX_DIRECTORIES = frozenset(
     {
         ".storydex",
+        ".storydex/.agent",
+        ".storydex/.agent/logs",
         ".storydex/characters",
         ".storydex/file-history",
         ".storydex/logs",

@@ -121,7 +121,7 @@ class HooksService:
     def _append_hook_log(self, results: List[Dict[str, Any]]) -> None:
         if not results:
             return
-        log_dir = self.project_service.storydex_root / "logs"
+        log_dir = self.project_service.agent_root / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / "hooks.jsonl"
         with log_path.open("a", encoding="utf-8") as handle:

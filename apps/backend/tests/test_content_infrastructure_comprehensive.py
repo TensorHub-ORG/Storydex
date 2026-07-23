@@ -8,7 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from services import character_models, file_history_service, help_guide_service, hooks_service, index_service, media_reader, memory_reader, narrative_models
+from services import character_models, file_history_service, help_guide_service, hooks_service, index_service, media_reader, memory_reader, narrative_models, storydex_manifest
+from storage.file_adapter import FileAdapter, PROTECTED_STORYDEX_DIRECTORIES
 
 
 class Flags:
@@ -17,6 +18,14 @@ class Flags:
 
     def get_bool(self, name):
         return bool(self.values.get(name, False))
+
+
+def test_agent_log_directory_is_manifested_and_protected(tmp_path):
+    storydex_manifest.ensure_manifest(tmp_path)
+    assert ".storydex/.agent/logs" in storydex_manifest.manifest_paths()
+    assert ".storydex/.agent/logs" not in storydex_manifest.manifest_paths(only_create_on_init=True)
+    assert ".storydex/.agent/logs" in PROTECTED_STORYDEX_DIRECTORIES
+    assert FileAdapter._is_forbidden_delete_target(".storydex/.agent/logs") is True
 
 
 def test_character_narrative_models_and_legacy_split():
@@ -142,7 +151,11 @@ def test_help_guide_read_search_snippets_fallback_and_mtime(monkeypatch, tmp_pat
 
 def test_hooks_sync_async_spawn_timeout_config_and_logs(monkeypatch, tmp_path):
     service = hooks_service.HooksService()
-    service.project_service = types.SimpleNamespace(workspace_root=tmp_path, storydex_root=tmp_path / ".storydex")
+    service.project_service = types.SimpleNamespace(
+        workspace_root=tmp_path,
+        storydex_root=tmp_path / ".storydex",
+        agent_root=tmp_path / ".storydex" / ".agent",
+    )
     hooks_path = service.project_service.storydex_root / "hooks.json"
     hooks_path.parent.mkdir(parents=True)
     hooks_path.write_text(json.dumps({
@@ -160,7 +173,7 @@ def test_hooks_sync_async_spawn_timeout_config_and_logs(monkeypatch, tmp_path):
     monkeypatch.setattr(hooks_service.subprocess, "Popen", lambda *args, **kwargs: object())
     results = service.run("event", {"x": 1}, timeout_seconds=1)
     assert [item["status"] for item in results] == ["ok", "error", "timeout", "fire_and_forget"]
-    assert (service.project_service.storydex_root / "logs/hooks.jsonl").is_file()
+    assert (service.project_service.agent_root / "logs/hooks.jsonl").is_file()
     assert service.run("missing", {}) == []
     service._append_hook_log([])
     hooks_path.write_text("[]", encoding="utf-8")
@@ -204,7 +217,13 @@ def test_media_reader_notebook_pdf_images_and_dimension_helpers(tmp_path):
 
 
 def test_index_search_candidates_hybrid_ripgrep_bm25_and_snippets(monkeypatch, tmp_path):
-    for rel in (".storydex/memory/a.md", "chapters/1.md", "docs/info.json", ".storydex/logs/skip.md"):
+    for rel in (
+        ".storydex/memory/a.md",
+        "chapters/1.md",
+        "docs/info.json",
+        ".storydex/logs/legacy-skip.md",
+        ".storydex/.agent/logs/runtime-skip.md",
+    ):
         path = tmp_path / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("dragon story text", encoding="utf-8")

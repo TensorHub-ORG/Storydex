@@ -1,11 +1,5 @@
 import type { ThemeCode } from "@/constants/themes";
-
-const DEFAULT_FILE_FONT_SIZE = 16;
-const DEFAULT_PLAYER_FONT_SIZE = 14;
-const MIN_FILE_FONT_SIZE = 12;
-const MAX_FILE_FONT_SIZE = 24;
-const MIN_PLAYER_FONT_SIZE = 12;
-const MAX_PLAYER_FONT_SIZE = 28;
+import { paneFontScaleStyle } from "@/utils/paneFontScale";
 
 export function useTheme() {
   function applyTheme(theme: ThemeCode): void {
@@ -19,20 +13,15 @@ export function useTheme() {
     syncDesktopTitleBar();
   }
 
-  function applyTypography(options: { fileFontSize?: number; playerFontSize?: number }): void {
-    document.documentElement.style.setProperty(
-      "--ui-file-font-size",
-      `${clampSize(options.fileFontSize, DEFAULT_FILE_FONT_SIZE, MIN_FILE_FONT_SIZE, MAX_FILE_FONT_SIZE)}px`
-    );
-    document.documentElement.style.setProperty(
-      "--ui-player-font-size",
-      `${clampSize(options.playerFontSize, DEFAULT_PLAYER_FONT_SIZE, MIN_PLAYER_FONT_SIZE, MAX_PLAYER_FONT_SIZE)}px`
-    );
+  function applyPaneFontScale(fontScale?: number): void {
+    for (const [property, value] of Object.entries(paneFontScaleStyle(fontScale))) {
+      document.documentElement.style.setProperty(property, value);
+    }
   }
 
   return {
     applyTheme,
-    applyTypography
+    applyPaneFontScale
   };
 }
 
@@ -169,12 +158,4 @@ function toHex(color: { r: number; g: number; b: number; a?: number } | null): s
   return `#${[color.r, color.g, color.b]
     .map((channel) => clampChannel(channel).toString(16).padStart(2, "0"))
     .join("")}`;
-}
-
-function clampSize(value: unknown, fallback: number, minimum: number, maximum: number): number {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) {
-    return fallback;
-  }
-  return Math.min(Math.max(Math.round(parsed), minimum), maximum);
 }

@@ -21,7 +21,7 @@ const transport = vi.hoisted(() => {
 vi.mock("axios", () => ({ default: { create: () => transport, isAxiosError: () => false } }));
 
 const previewApi = vi.hoisted(() => ({
-  fetchUiPreferences: vi.fn().mockResolvedValue({ data: { theme: "default", fileFontSize: 16, playerFontSize: 14 }, trace: null, audit: [] }),
+  fetchUiPreferences: vi.fn().mockResolvedValue({ data: { theme: "default", leftPaneFontScale: 100, centerPaneFontScale: 100, rightPaneFontScale: 100 }, trace: null, audit: [] }),
   readWorkspaceFile: vi.fn().mockResolvedValue({ data: { relativePath: "chapters/a.md", content: "hello", size: 5, extension: ".md", title: "a.md", media: {} }, trace: null, audit: [] }),
   writeWorkspaceFile: vi.fn().mockResolvedValue({ data: { content: "changed", size: 7, updatedAt: "now" }, trace: null, audit: [] })
 }));

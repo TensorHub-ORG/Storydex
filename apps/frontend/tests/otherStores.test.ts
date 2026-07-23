@@ -121,11 +121,25 @@ describe("story and UI stores", () => {
 
   it("applies/clamps UI state, toggles controls and persists debounced settings", async () => {
     const store = useUiStore();
-    store.applyPersistedState({ theme: "invalid", activeActivity: "bad", sidebarWidth: 1, agentWidth: 9999, fileFontSize: 100, playerFontSize: Number.NaN } as any);
+    store.applyPersistedState({
+      theme: "invalid",
+      activeActivity: "bad",
+      sidebarWidth: 1,
+      agentWidth: 9999,
+      leftPaneFontScale: 1,
+      rightPaneFontScale: 999,
+      fileFontSize: 24
+    } as any);
     expect(store.sidebarWidth).toBe(220); expect(store.agentWidth).toBe(760);
+    expect(store.leftPaneFontScale).toBe(75); expect(store.centerPaneFontScale).toBe(150); expect(store.rightPaneFontScale).toBe(150);
     store.setTheme("white"); store.setActivity("search"); store.setActivity("bad"); store.setWorkbenchMode("storydex");
     store.setSidebarWidth(400); store.setSidebarCollapsed(true); store.toggleSidebarCollapsed(); store.setAgentCollapsed(true); store.toggleAgentCollapsed();
-    store.setAgentWidth(500); store.setFileFontSize(18); store.setPlayerFontSize(16); store.setSystemSettingsOpen(true);
+    store.setAgentWidth(500); store.setLeftPaneFontScale(90); store.setCenterPaneFontScale(115); store.setRightPaneFontScale(130); store.setSystemSettingsOpen(true);
     vi.advanceTimersByTime(200); await vi.runAllTimersAsync(); expect(systemApi.updateUiPreferences).toHaveBeenCalled(); await store.flushPersistedState();
+    expect(systemApi.updateUiPreferences).toHaveBeenLastCalledWith(expect.objectContaining({
+      leftPaneFontScale: 90,
+      centerPaneFontScale: 115,
+      rightPaneFontScale: 130
+    }));
   });
 });

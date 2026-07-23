@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import contextvars
 import copy
 import json
 import logging
 import re
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,6 +25,7 @@ from services.coomi_agent_service import get_storydex_coomi_agent_service
 from services.context_policy import ContextPolicy
 from services.context_trace_service import merge_llm_metrics, summarize_context_trace
 from services.execution_log_service import ExecutionLogSession, create_execution_log_session
+from services.followup_mailbox_service import FollowupMailboxError, get_followup_mailbox_service
 from services.execution_coordinator import (
     ExecutionFinalizationContext,
     ExecutionHandle,
@@ -48,9 +52,15 @@ storydex_intent_service = get_storydex_intent_service()
 git_service = get_git_service()
 story_project_service = get_story_project_service()
 execution_coordinator = get_execution_coordinator()
+followup_mailbox_service = get_followup_mailbox_service()
 
 _PHASE_HEARTBEAT_SECONDS = 0.6
 _COMMIT_MESSAGE_TIMEOUT_SECONDS = 2.0
+# Keep headroom below the externally observable two-second acceptance bound;
+# asyncio timeout wake-up and SSE serialization still consume a few milliseconds.
+_INTENT_STAGE_TIMEOUT_SECONDS = 1.8
+_PLANNER_TIMEOUT_SECONDS = 3.0
+_STORY_GENERATION_MAX_CORRECTIONS = 2
 _LOGGER = logging.getLogger(__name__)
 _BACKGROUND_EXECUTION_TASKS: set[asyncio.Task[Any]] = set()
 
@@ -83,7 +93,48 @@ class _CancellationToken:
 
 
 async def _classify_intent_without_blocking_event_loop(**kwargs: Any) -> Dict[str, Any]:
-    return await execution_coordinator.classify_intent(storydex_intent_service, **kwargs)
+    result: concurrent.futures.Future[Dict[str, Any]] = concurrent.futures.Future()
+    context = contextvars.copy_context()
+
+    def classify_on_isolated_loop() -> Dict[str, Any]:
+        return context.run(
+            lambda: asyncio.run(storydex_intent_service.classify_intent(**kwargs))
+        )
+
+    def run() -> None:
+        try:
+            value = classify_on_isolated_loop()
+        except BaseException as exc:
+            if not result.done():
+                result.set_exception(exc)
+        else:
+            if not result.done():
+                result.set_result(value)
+
+    # A timed-out provider import/request must not occupy a shared executor
+    # worker or delay the next intent classification.  The isolated daemon
+    # thread may finish cleanup in the background without holding any queue.
+    threading.Thread(
+        target=run,
+        name=f"storydex-intent-{uuid4().hex[:8]}",
+        daemon=True,
+    ).start()
+    try:
+        return await asyncio.wait_for(
+            asyncio.wrap_future(result),
+            timeout=_INTENT_STAGE_TIMEOUT_SECONDS,
+        )
+    except (asyncio.TimeoutError, TimeoutError):
+        from services.storydex_intent_service import heuristic_intent_frame
+
+        frame = heuristic_intent_frame(
+            prompt=str(kwargs.get("prompt") or ""),
+            active_file=str(kwargs.get("active_file") or ""),
+        )
+        frame["method"] = "heuristic_deadline_fallback"
+        frame.setdefault("assetTargets", [])
+        frame.setdefault("matchedSkills", [])
+        return frame
 
 
 class AgentChatRequest(BaseModel):
@@ -92,6 +143,9 @@ class AgentChatRequest(BaseModel):
     workspace_root: str = Field(default="", alias="workspaceRoot")
     story_generation: Dict[str, Any] = Field(default_factory=dict, alias="storyGeneration")
     confirm_no_snapshot: bool = Field(default=False, alias="confirmNoSnapshot")
+    replace_latest_trace_id: str = Field(default="", alias="replaceLatestTraceId")
+    source_followup_message_id: str = Field(default="", alias="sourceFollowupMessageId")
+    source_followup_expected_trace_id: str = Field(default="", alias="sourceFollowupExpectedTraceId")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -201,6 +255,45 @@ class AgentSessionDeleteRequest(BaseModel):
 
 class AgentExecutionRollbackRequest(BaseModel):
     session_id: str = Field(alias="sessionId")
+    expected_trace_id: str = Field(default="", alias="expectedTraceId")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AgentFollowupRequest(BaseModel):
+    message_id: str = Field(alias="messageId", min_length=1, max_length=160)
+    session_id: str = Field(alias="sessionId")
+    active_trace_id: str = Field(default="", alias="activeTraceId")
+    expected_trace_id: str = Field(default="", alias="expectedTraceId")
+    workspace_root: str = Field(default="", alias="workspaceRoot")
+    content: str = Field(min_length=1, max_length=12000)
+    mode: str = "queued"
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AgentFollowupUpdateRequest(BaseModel):
+    session_id: str = Field(alias="sessionId")
+    expected_trace_id: str = Field(default="", alias="expectedTraceId")
+    workspace_root: str = Field(default="", alias="workspaceRoot")
+    content: Optional[str] = Field(default=None, max_length=12000)
+    mode: Optional[str] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AgentFollowupActionRequest(BaseModel):
+    session_id: str = Field(alias="sessionId")
+    expected_trace_id: str = Field(default="", alias="expectedTraceId")
+    workspace_root: str = Field(default="", alias="workspaceRoot")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AgentExecutionStopRequest(BaseModel):
+    session_id: str = Field(alias="sessionId")
+    expected_trace_id: str = Field(default="", alias="expectedTraceId")
+    workspace_root: str = Field(default="", alias="workspaceRoot")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -219,6 +312,162 @@ class AgentCommitDecisionRequest(BaseModel):
     session_id: str = Field(default="", alias="sessionId")
 
     model_config = ConfigDict(populate_by_name=True)
+
+
+class _LatestExecutionReplacement:
+    """Reversible dialogue-only replacement transaction for the latest turn."""
+
+    def __init__(
+        self,
+        *,
+        session_id: str,
+        expected_trace_id: str,
+        replacement_trace_id: str,
+        workspace_root: Path,
+        replacement_prompt: str,
+    ) -> None:
+        self.session_id = str(session_id or "default").strip() or "default"
+        self.expected_trace_id = str(expected_trace_id or "").strip()
+        self.replacement_trace_id = str(replacement_trace_id or "").strip()
+        self.workspace_root = Path(workspace_root).resolve()
+        self.replacement_prompt = str(replacement_prompt or "")
+        self.original_record: Dict[str, Any] | None = None
+        self.session_snapshot: Dict[str, Any] | None = None
+        self.prepared = False
+        self.accepted = False
+        self.restored = False
+
+    def prepare(self) -> None:
+        records = trace_history_service.list_records(session_id=self.session_id, limit=1)
+        latest = records[0] if records else None
+        latest_trace_id = str(latest.get("traceId") or "").strip() if isinstance(latest, dict) else ""
+        if not isinstance(latest, dict) or not latest_trace_id:
+            raise StorydexError(
+                "There is no completed execution to replace.",
+                code="replacement_target_missing",
+                status_code=409,
+            )
+        if self.expected_trace_id and latest_trace_id != self.expected_trace_id:
+            raise StorydexError(
+                "The latest execution changed before replacement was confirmed.",
+                code="stale_trace",
+                status_code=409,
+                details={"expectedTraceId": self.expected_trace_id, "latestTraceId": latest_trace_id},
+            )
+        if str(latest.get("status") or "").strip() == "running":
+            raise StorydexError(
+                "A running execution cannot be edited.",
+                code="replacement_target_running",
+                status_code=409,
+            )
+
+        record_workspace = str(latest.get("workspaceRoot") or "").strip()
+        if record_workspace:
+            try:
+                if Path(record_workspace).resolve() != self.workspace_root:
+                    raise StorydexError(
+                        "The replacement target belongs to another workspace.",
+                        code="replacement_workspace_mismatch",
+                        status_code=409,
+                    )
+            except OSError as exc:
+                raise StorydexError(
+                    "The replacement target workspace is unavailable.",
+                    code="replacement_workspace_mismatch",
+                    status_code=409,
+                ) from exc
+
+        self.original_record = copy.deepcopy(latest)
+        coomi_service = get_storydex_coomi_agent_service()
+        self.session_snapshot = coomi_service.snapshot_session_history(
+            self.session_id,
+            workspace_root=self.workspace_root,
+        )
+        pending_record = copy.deepcopy(latest)
+        pending_record.update(
+            {
+                "status": "superseded",
+                "superseded": True,
+                "supersededByTraceId": self.replacement_trace_id,
+                "replacement": {
+                    "status": "pending",
+                    "replacementTraceId": self.replacement_trace_id,
+                    "expectedTraceId": latest_trace_id,
+                    "replacementPrompt": self.replacement_prompt,
+                    "preparedAt": _now_iso(),
+                    "dialogueOnly": True,
+                    "fileChangesReverted": False,
+                },
+                "updatedAt": _now_iso(),
+            }
+        )
+        _persist_execution_trace(self.workspace_root, pending_record, self.session_id)
+        try:
+            rollback = coomi_service.rollback_last_turn(
+                self.session_id,
+                workspace_root=self.workspace_root,
+            )
+            if bool((self.session_snapshot or {}).get("available")) and not bool(rollback.get("rolledBack")):
+                raise StorydexError(
+                    "Unable to withdraw the latest Coomi turn for replacement.",
+                    code="replacement_context_unavailable",
+                    status_code=409,
+                )
+        except Exception:
+            self.restore(reason="prepare_failed")
+            raise
+        storydex_intent_service.clear_session(session_id=self.session_id, workspace_root=self.workspace_root)
+        self.prepared = True
+
+    def accept(self) -> None:
+        if not self.prepared or self.accepted or self.original_record is None:
+            return
+        superseded_record = copy.deepcopy(self.original_record)
+        superseded_record.update(
+            {
+                "status": "superseded",
+                "superseded": True,
+                "supersededByTraceId": self.replacement_trace_id,
+                "replacement": {
+                    "status": "accepted",
+                    "replacementTraceId": self.replacement_trace_id,
+                    "expectedTraceId": str(self.original_record.get("traceId") or ""),
+                    "acceptedAt": _now_iso(),
+                    "dialogueOnly": True,
+                    "fileChangesReverted": False,
+                },
+                "updatedAt": _now_iso(),
+            }
+        )
+        _persist_execution_trace(self.workspace_root, superseded_record, self.session_id)
+        self.accepted = True
+
+    def restore(self, *, reason: str) -> None:
+        if self.restored or self.accepted or self.original_record is None:
+            return
+        try:
+            if self.session_snapshot is not None:
+                get_storydex_coomi_agent_service().restore_session_history(self.session_snapshot)
+        finally:
+            restored_record = copy.deepcopy(self.original_record)
+            restored_record.update(
+                {
+                    "superseded": False,
+                    "supersededByTraceId": "",
+                    "replacement": {
+                        "status": "restored",
+                        "replacementTraceId": self.replacement_trace_id,
+                        "restoredAt": _now_iso(),
+                        "reason": str(reason or "replacement_failed"),
+                        "dialogueOnly": True,
+                        "fileChangesReverted": False,
+                    },
+                    "updatedAt": _now_iso(),
+                }
+            )
+            _persist_execution_trace(self.workspace_root, restored_record, self.session_id)
+            storydex_intent_service.clear_session(session_id=self.session_id, workspace_root=self.workspace_root)
+            self.restored = True
 
 
 def _resolve_agent_trace_id(request: Request, fallback_trace_id: str = "") -> str:
@@ -241,6 +490,89 @@ def _resolve_agent_workspace_root(payload: AgentChatRequest) -> Path:
     return project_service.workspace_root
 
 
+def _resolve_followup_workspace_root(*, session_id: str, workspace_root: str = "") -> Path:
+    active = execution_coordinator.active_handle(session_id=str(session_id or "").strip())
+    if active is not None:
+        return active.workspace_root
+    raw_root = str(workspace_root or "").strip()
+    if raw_root:
+        candidate = Path(raw_root).expanduser()
+        if candidate.exists() and candidate.is_dir():
+            return candidate.resolve()
+    return project_service.workspace_root
+
+
+def _raise_followup_error(exc: FollowupMailboxError) -> None:
+    status_code = 404 if exc.code == "followup_not_found" else 409 if exc.code in {
+        "message_id_conflict",
+        "followup_not_editable",
+        "invalid_followup_transition",
+        "followup_dispatch_in_progress",
+        "followup_mailbox_paused",
+        "stale_trace",
+        "no_active_execution",
+    } else 400
+    raise StorydexError(
+        str(exc),
+        code=exc.code,
+        status_code=status_code,
+        details=exc.details,
+    ) from exc
+
+
+def _latest_session_trace_id(session_id: str) -> str:
+    records = trace_history_service.list_records(session_id=str(session_id or "default"), limit=1)
+    latest = records[0] if records else None
+    return str(latest.get("traceId") or "").strip() if isinstance(latest, dict) else ""
+
+
+def _claim_initial_followup_dispatch(
+    *,
+    payload: AgentChatRequest,
+    workspace_root: Path,
+    session_id: str,
+    trace_id: str,
+) -> tuple[AgentChatRequest, Dict[str, Any] | None]:
+    message_id = str(payload.source_followup_message_id or "").strip()
+    if not message_id:
+        return payload, None
+    if payload.replace_latest_trace_id:
+        raise StorydexError(
+            "A replacement request cannot also dispatch a queued follow-up.",
+            code="invalid_followup_transition",
+            status_code=409,
+        )
+    if payload.confirm_no_snapshot:
+        state = followup_mailbox_service.list_mailbox(
+            workspace_root=workspace_root,
+            session_id=session_id,
+        )
+        if str(state.get("pauseReason") or "") == "snapshot_confirmation":
+            followup_mailbox_service.resume(
+                workspace_root=workspace_root,
+                session_id=session_id,
+            )
+    previous_trace_id = _latest_session_trace_id(session_id)
+    try:
+        message = followup_mailbox_service.claim_queued_by_id(
+            workspace_root=workspace_root,
+            session_id=session_id,
+            message_id=message_id,
+            previous_trace_id=previous_trace_id,
+            next_trace_id=trace_id,
+            expected_trace_id=payload.source_followup_expected_trace_id,
+        )
+    except FollowupMailboxError as exc:
+        _raise_followup_error(exc)
+    authoritative_payload = payload.model_copy(
+        update={
+            "prompt": str(message.get("content") or ""),
+            "source_followup_message_id": message_id,
+        }
+    )
+    return authoritative_payload, message
+
+
 def _create_agent_execution_log_session(
     *,
     trace_id: str,
@@ -260,11 +592,9 @@ def _create_agent_execution_log_session(
 
 def _normalize_story_generation_options(value: Dict[str, Any] | None) -> Dict[str, Any]:
     payload = value if isinstance(value, dict) else {}
-    fragment_count = _bounded_int(
+    fragment_count = _positive_int(
         payload.get("fragmentCount", payload.get("fragment_count", payload.get("segmentCount"))),
         default=1,
-        minimum=1,
-        maximum=20,
     )
     fragment_word_count = _bounded_int(
         payload.get("fragmentWordCount", payload.get("fragment_word_count", payload.get("segmentWords"))),
@@ -299,6 +629,13 @@ def _apply_turn_contract_story_generation_defaults(
         return story_generation
 
     next_story_generation = dict(story_generation)
+    next_story_generation["fragmentCount"] = _positive_int(turn_plan.get("fragmentCount"), default=1)
+    next_story_generation["fragmentWordCount"] = _bounded_int(
+        turn_plan.get("fragmentWordCount"),
+        default=2000,
+        minimum=100,
+        maximum=20000,
+    )
     next_story_generation["chapterTemplateId"] = selected_template
     next_story_generation["chapterTemplate"] = selected_template
     return next_story_generation
@@ -310,6 +647,14 @@ def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int
     except (TypeError, ValueError):
         parsed = default
     return max(minimum, min(maximum, parsed))
+
+
+def _positive_int(value: Any, *, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(1, parsed)
 
 
 def _try_acquire_agent_generation_slot() -> bool:
@@ -382,13 +727,13 @@ def _now_iso() -> str:
 def _phase_for_event(event_name: str) -> str:
     if event_name.startswith("Tool"):
         return "tool"
-    if event_name in {"TextChunk", "ReasoningChunk"}:
+    if event_name in {"TextChunk", "ReasoningChunk", "ConnectionRetry"}:
         return "model"
     if event_name in {"GitAutoCommit", "GitCommitPrompt", "GitCommitResult"}:
         return "version_control"
     if event_name.startswith("Task"):
         return "planning"
-    if event_name == "TurnContract":
+    if event_name in {"TurnContract", "StoryGenerationValidation"}:
         return "orchestration"
     if event_name in {"RunAccepted", "UsageUpdate", "CompressionEvent", "TurnPhase"}:
         return "runtime"
@@ -414,8 +759,12 @@ def _status_for_event(event_name: str, payload: Dict[str, Any]) -> str:
         return str(payload.get("status") or ("success" if payload.get("created") else "info"))
     if event_name == "TurnContract":
         return "warning" if str(payload.get("status") or "") == "needs_user_input" else "info"
+    if event_name == "StoryGenerationValidation":
+        return "success" if bool(payload.get("passed")) else "error"
     if event_name == "RunAccepted":
         return "running"
+    if event_name == "ConnectionRetry":
+        return "warning"
     if event_name in {"AgentCompleted", "ToolDone"}:
         return "success"
     if event_name == "AgentCancelled":
@@ -430,6 +779,11 @@ def _detail_for_event(event_name: str, payload: Dict[str, Any]) -> str:
         return str(payload.get("tool_name") or event_name)
     if event_name in {"TextChunk", "ReasoningChunk"}:
         return str(payload.get("content") or "")[:240]
+    if event_name == "ConnectionRetry":
+        attempt = int(payload.get("attempt") or 1)
+        max_attempts = int(payload.get("maxAttempts") or payload.get("max_attempts") or attempt)
+        message = str(payload.get("message") or "Model connection interrupted; retrying.")
+        return f"{message} ({attempt}/{max_attempts})"
     if event_name in {"GitAutoCommit", "GitCommitPrompt", "GitCommitResult"}:
         commit = payload.get("commit") if isinstance(payload.get("commit"), dict) else {}
         subject = str(commit.get("subject") or "").strip()
@@ -446,6 +800,8 @@ def _detail_for_event(event_name: str, payload: Dict[str, Any]) -> str:
         if turn_plan.get("requiresChapterTemplateSelection"):
             return "全新故事需要先选择章节目录模板"
         return str(intent.get("primary") or "Storydex turn contract")
+    if event_name == "StoryGenerationValidation":
+        return str(payload.get("message") or "Storydex 正文客观验收")
     return event_name
 
 
@@ -638,6 +994,45 @@ def _build_audit(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "toolCount": int(tool_registry.get("toolCount") or 0),
                     "contextBlockCount": int(context_budget.get("blockCount") or 0),
                     "contextTotalChars": int(context_budget.get("totalChars") or 0),
+                }
+            )
+        elif item.get("event") == "StoryGenerationValidation":
+            fragments = data.get("fragments") if isinstance(data.get("fragments"), list) else []
+            audit.append(
+                {
+                    "action": "story_generation_validation",
+                    "version": int(data.get("_version") or 1),
+                    "passed": bool(data.get("passed")),
+                    "algorithm": str(data.get("algorithm") or ""),
+                    "exact": bool(data.get("exact")),
+                    "fragmentCount": int(data.get("fragmentCount") or len(fragments)),
+                    "targetWordCount": int(data.get("targetWordCount") or 0),
+                    "chapterContentMode": str(data.get("chapterContentMode") or ""),
+                    "structurePassed": bool(data.get("structurePassed")),
+                    "writeToolApplied": bool(data.get("writeToolApplied")),
+                    "correctionAttempt": int(data.get("correctionAttempt") or 0),
+                    "fragments": fragments,
+                }
+            )
+        elif item.get("event") in {
+            "FollowupQueued",
+            "FollowupUpdated",
+            "SteerRequested",
+            "SteerApplied",
+            "ContinuationStarted",
+        }:
+            audit.append(
+                {
+                    "action": "agent_followup",
+                    "event": str(item.get("event") or ""),
+                    "version": int(data.get("_version") or 1),
+                    "messageId": str(data.get("messageId") or ""),
+                    "sessionId": str(data.get("sessionId") or ""),
+                    "activeTraceId": str(data.get("activeTraceId") or ""),
+                    "traceId": str(data.get("traceId") or ""),
+                    "mode": str(data.get("mode") or "queued"),
+                    "status": str(data.get("status") or "pending"),
+                    "segmentId": str(data.get("segmentId") or ""),
                 }
             )
     return audit
@@ -850,6 +1245,58 @@ def _turn_contract_waiting_packet(turn_contract: Dict[str, Any]) -> Dict[str, An
     }
 
 
+def _story_generation_correction_prompt(
+    validation: Dict[str, Any],
+    *,
+    correction_attempt: int,
+) -> str:
+    fragments = validation.get("fragments") if isinstance(validation.get("fragments"), list) else []
+    failures = [
+        {
+            "order": int(item.get("order") or index + 1),
+            "path": str(item.get("path") or ""),
+            "exists": bool(item.get("exists")),
+            "writeMode": str(item.get("writeMode") or "replace"),
+            "baselineWordCount": int(item.get("baselineWordCount") or 0),
+            "generatedWordCount": int(item.get("generatedWordCount") or 0),
+            "targetWordCount": int(item.get("targetWordCount") or 0),
+            "difference": int(item.get("difference") or 0),
+        }
+        for index, item in enumerate(fragments)
+        if isinstance(item, dict) and str(item.get("status") or "") != "passed"
+    ]
+    correction = {
+        "correctionAttempt": correction_attempt,
+        "maximumCorrectionAttempts": _STORY_GENERATION_MAX_CORRECTIONS,
+        "algorithm": str(validation.get("algorithm") or "storydex_visible_characters_v1"),
+        "countingRule": str(validation.get("countingRule") or "count every non-whitespace Unicode character"),
+        "exact": True,
+        "chapterContentMode": str(validation.get("chapterContentMode") or ""),
+        "structurePassed": bool(validation.get("structurePassed")),
+        "writeToolApplied": bool(validation.get("writeToolApplied")),
+        "failures": failures,
+    }
+    return (
+        "Storydex 的落盘后客观验收未通过。不要自行估算字数，也不要宣布完成。"
+        "请依据下方校验结果修订全部失败片段，并再次调用 StorydexApplyStoryIncrement。"
+        "每个片段必须按 Storydex 内置规则（忽略所有空白后逐个 Unicode 字符计数）精确达到目标字数；"
+        "章节路径、文件数量和写入模式必须完全遵守当前 TurnContract。"
+        "禁止使用普通 Write/Edit 工具写 chapters/ 正文。\n"
+        f"STORYDEX_OBJECTIVE_VALIDATION={json.dumps(correction, ensure_ascii=False, separators=(',', ':'))}"
+    )
+
+
+def _has_successful_story_generation_write(events: List[Dict[str, Any]]) -> bool:
+    for item in events:
+        if item.get("event") != "ToolDone":
+            continue
+        data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        tool_name = str(data.get("tool_name") or data.get("toolName") or "").strip().lower()
+        if tool_name == "storydexapplystoryincrement" and not bool(data.get("is_error")):
+            return True
+    return False
+
+
 async def _create_agent_task_plan(
     *,
     prompt: str,
@@ -860,17 +1307,23 @@ async def _create_agent_task_plan(
     story_generation: Dict[str, Any],
     turn_contract: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
+    intent_frame = turn_contract.get("intentFrame") if isinstance(turn_contract.get("intentFrame"), dict) else {}
+    if intent_frame and str(intent_frame.get("primary") or "general").strip() == "general":
+        return []
     planner = getattr(get_storydex_coomi_agent_service(), "create_task_plan", None)
     if callable(planner):
         try:
-            tasks = await planner(
-                prompt=prompt,
-                trace_id=trace_id,
-                session_id=session_id,
-                workspace_root=workspace_root,
-                active_file=active_file,
-                story_generation=story_generation,
-                turn_contract=turn_contract,
+            tasks = await asyncio.wait_for(
+                planner(
+                    prompt=prompt,
+                    trace_id=trace_id,
+                    session_id=session_id,
+                    workspace_root=workspace_root,
+                    active_file=active_file,
+                    story_generation=story_generation,
+                    turn_contract=turn_contract,
+                ),
+                timeout=_PLANNER_TIMEOUT_SECONDS,
             )
             normalized = _normalize_task_plan(tasks, trace_id=trace_id)
             if normalized:
@@ -1112,6 +1565,9 @@ async def _collect_coomi_run(
         if request is not None and await request.is_disconnected():
             cancellation_token.cancel()
             break
+        if event_name == "ReasoningChunk":
+            # Provider hidden reasoning is neither user-visible nor trace data.
+            continue
         packet = dict(payload)
         if event_name == "TextChunk":
             packet["content"] = _strip_visible_tool_text(str(packet.get("content") or ""))
@@ -1142,6 +1598,7 @@ async def _stream_coomi_sse_worker(
     cancellation_token: _CancellationToken,
     execution_handle: ExecutionHandle,
     execution_log_session: ExecutionLogSession | None = None,
+    replacement: _LatestExecutionReplacement | None = None,
 ) -> AsyncIterator[str]:
     started = time.perf_counter()
     reply_chunks: List[str] = []
@@ -1153,6 +1610,8 @@ async def _stream_coomi_sse_worker(
     runtime_tasks_finalized = False
     terminal_event: tuple[str, Dict[str, Any]] | None = None
     finalization_packets: List[str] = []
+    planning_task: asyncio.Task[List[Dict[str, Any]]] | None = None
+    planning_started = 0.0
 
     def finish_git_turn() -> Dict[str, Any]:
         nonlocal git_finished
@@ -1179,9 +1638,13 @@ async def _stream_coomi_sse_worker(
                     phase_started=planning_started,
                 ),
             )
-            planning_task = asyncio.create_task(
-                execution_coordinator.run_serialized_preparation(
-                    lambda: _create_agent_task_plan(
+            intent_frame = turn_contract.get("intentFrame") if isinstance(turn_contract.get("intentFrame"), dict) else {}
+            intent_primary = str(intent_frame.get("primary") or "general").strip()
+            if intent_primary == "general":
+                task_plan: List[Dict[str, Any]] = []
+            else:
+                planning_task = asyncio.create_task(
+                    _create_agent_task_plan(
                         prompt=prompt,
                         trace_id=trace_id,
                         session_id=session_id,
@@ -1189,57 +1652,54 @@ async def _stream_coomi_sse_worker(
                         active_file=active_file,
                         story_generation=story_generation,
                         turn_contract=turn_contract,
-                    )
+                    ),
+                    name=f"storydex-planner-{trace_id}",
                 )
-            )
-            while not planning_task.done():
-                done, _ = await asyncio.wait({planning_task}, timeout=_PHASE_HEARTBEAT_SECONDS)
-                if done:
-                    break
+                await asyncio.sleep(0)
+                task_plan = await planning_task if planning_task.done() else []
+                if planning_task.done():
+                    planning_task = None
+            if intent_primary == "general" or planning_task is None:
                 yield _encode_sse(
                     "TurnPhase",
                     _turn_phase_packet(
                         trace_id=trace_id,
                         session_id=session_id,
                         phase="task_planning",
-                        label="正在规划执行步骤",
-                        status="running",
+                        label="执行步骤规划完成",
+                        status="success",
                         phase_started=planning_started,
-                        heartbeat=True,
+                        detail=("无需生成执行步骤" if intent_primary == "general" else f"已生成 {len(task_plan)} 个执行步骤"),
                     ),
                 )
-            task_plan = await planning_task
-            yield _encode_sse(
-                "TurnPhase",
-                _turn_phase_packet(
-                    trace_id=trace_id,
-                    session_id=session_id,
-                    phase="task_planning",
-                    label="执行步骤规划完成",
-                    status="success",
-                    phase_started=planning_started,
-                    detail=f"已生成 {len(task_plan)} 个执行步骤",
-                ),
-            )
-            tracker = _TaskRunTracker(task_plan, trace_id=trace_id, session_id=session_id)
-            plan_payload = tracker.plan_created_payload()
-            events.append(_event_to_trace_event("TaskPlanCreated", plan_payload, len(events) + 1))
-            yield _encode_sse("TaskPlanCreated", plan_payload)
-            for task_event_name, task_payload in tracker.start_next():
-                events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
-                yield _encode_sse(task_event_name, task_payload)
+                tracker = _TaskRunTracker(task_plan, trace_id=trace_id, session_id=session_id)
+                plan_payload = tracker.plan_created_payload()
+                events.append(_event_to_trace_event("TaskPlanCreated", plan_payload, len(events) + 1))
+                yield _encode_sse("TaskPlanCreated", plan_payload)
+                for task_event_name, task_payload in tracker.start_next():
+                    events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
+                    yield _encode_sse(task_event_name, task_payload)
 
             should_run_coomi = True
             if turn_contract:
                 events.append(_event_to_trace_event("TurnContract", turn_contract, len(events) + 1))
                 yield _encode_sse("TurnContract", turn_contract)
-                for task_event_name, task_payload in tracker.complete_current():
-                    events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
-                    yield _encode_sse(task_event_name, task_payload)
-                if _turn_contract_needs_user_input(turn_contract):
-                    for task_event_name, task_payload in tracker.skip_remaining_execution(reason="needs_user_input"):
+                if tracker is not None:
+                    for task_event_name, task_payload in tracker.complete_current():
                         events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
                         yield _encode_sse(task_event_name, task_payload)
+                if _turn_contract_needs_user_input(turn_contract):
+                    if replacement is not None and not replacement.accepted:
+                        await asyncio.to_thread(replacement.accept)
+                    followup_mailbox_service.pause(
+                        workspace_root=workspace_root,
+                        session_id=session_id,
+                        reason="needs_user_input",
+                    )
+                    if tracker is not None:
+                        for task_event_name, task_payload in tracker.skip_remaining_execution(reason="needs_user_input"):
+                            events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
+                            yield _encode_sse(task_event_name, task_payload)
                     runtime_tasks_finalized = True
                     packet = _turn_contract_waiting_packet(turn_contract)
                     completed = True
@@ -1248,9 +1708,10 @@ async def _stream_coomi_sse_worker(
                     should_run_coomi = False
 
             if should_run_coomi and not execution_handle.is_cancelled:
-                for task_event_name, task_payload in tracker.start_next():
-                    events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
-                    yield _encode_sse(task_event_name, task_payload)
+                if tracker is not None:
+                    for task_event_name, task_payload in tracker.start_next():
+                        events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
+                        yield _encode_sse(task_event_name, task_payload)
                 model_started = time.perf_counter()
                 yield _encode_sse(
                     "TurnPhase",
@@ -1263,86 +1724,359 @@ async def _stream_coomi_sse_worker(
                         phase_started=model_started,
                     ),
                 )
-                runtime_events = get_storydex_coomi_agent_service().stream_events(
-                    prompt=prompt,
-                    trace_id=trace_id,
-                    session_id=session_id,
-                    workspace_root=workspace_root,
-                    active_file=active_file,
-                    story_generation=story_generation,
-                    turn_contract=turn_contract,
-                    cancellation_token=cancellation_token,
-                ).__aiter__()
                 model_output_started = False
-                while True:
-                    next_event = asyncio.create_task(runtime_events.__anext__())
-                    while not next_event.done():
-                        done, _ = await asyncio.wait({next_event}, timeout=_PHASE_HEARTBEAT_SECONDS)
-                        if done:
-                            break
-                        yield _encode_sse(
-                            "TurnPhase",
-                            _turn_phase_packet(
-                                trace_id=trace_id,
-                                session_id=session_id,
-                                phase="model_execution",
-                                label="正在等待模型输出",
-                                status="running",
-                                phase_started=model_started,
-                                heartbeat=True,
-                            ),
-                        )
+                segment_prompt = prompt
+                segment_index = 0
+                story_correction_attempts = 0
+                while not execution_handle.is_cancelled and not cancellation_token.is_cancelled():
+                    segment_id = f"{trace_id}-segment-{segment_index + 1}"
+                    pending_steer: Dict[str, Any] | None = None
+                    segment_completed = False
+                    segment_cancelled = False
+                    runtime_events = get_storydex_coomi_agent_service().stream_events(
+                        prompt=segment_prompt,
+                        trace_id=trace_id,
+                        session_id=session_id,
+                        workspace_root=workspace_root,
+                        active_file=active_file,
+                        story_generation=story_generation,
+                        turn_contract=turn_contract,
+                        cancellation_token=cancellation_token,
+                    ).__aiter__()
                     try:
-                        event_name, payload = await next_event
-                    except StopAsyncIteration:
-                        break
-                    if not model_output_started and event_name not in {"AgentStarted", "UsageUpdate"}:
-                        model_output_started = True
-                        yield _encode_sse(
-                            "TurnPhase",
-                            _turn_phase_packet(
-                                trace_id=trace_id,
-                                session_id=session_id,
-                                phase="model_execution",
-                                label="模型已开始输出",
-                                status="success",
-                                phase_started=model_started,
-                            ),
+                        while True:
+                            next_event = asyncio.create_task(runtime_events.__anext__())
+                            while not next_event.done():
+                                waiters: set[asyncio.Task[Any]] = {next_event}
+                                if planning_task is not None:
+                                    waiters.add(planning_task)
+                                done, _ = await asyncio.wait(
+                                    waiters,
+                                    timeout=_PHASE_HEARTBEAT_SECONDS,
+                                    return_when=asyncio.FIRST_COMPLETED,
+                                )
+                                if planning_task is not None and planning_task in done:
+                                    task_plan = await planning_task
+                                    planning_task = None
+                                    yield _encode_sse(
+                                        "TurnPhase",
+                                        _turn_phase_packet(
+                                            trace_id=trace_id,
+                                            session_id=session_id,
+                                            phase="task_planning",
+                                            label="执行步骤规划完成",
+                                            status="success",
+                                            phase_started=planning_started,
+                                            detail=f"已生成 {len(task_plan)} 个执行步骤",
+                                        ),
+                                    )
+                                    tracker = _TaskRunTracker(task_plan, trace_id=trace_id, session_id=session_id)
+                                    plan_payload = tracker.plan_created_payload()
+                                    events.append(_event_to_trace_event("TaskPlanCreated", plan_payload, len(events) + 1))
+                                    yield _encode_sse("TaskPlanCreated", plan_payload)
+                                    for task_event_name, task_payload in tracker.start_next():
+                                        events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
+                                        yield _encode_sse(task_event_name, task_payload)
+                                if next_event in done:
+                                    break
+                                if planning_task is not None:
+                                    yield _encode_sse(
+                                        "TurnPhase",
+                                        _turn_phase_packet(
+                                            trace_id=trace_id,
+                                            session_id=session_id,
+                                            phase="task_planning",
+                                            label="正在后台规划执行步骤",
+                                            status="running",
+                                            phase_started=planning_started,
+                                            heartbeat=True,
+                                        ),
+                                    )
+                                if pending_steer is None and not execution_handle.is_cancelled:
+                                    pending_steer = followup_mailbox_service.claim_steer(
+                                        workspace_root=workspace_root,
+                                        session_id=session_id,
+                                        trace_id=trace_id,
+                                    )
+                                    if pending_steer is not None:
+                                        requested = get_storydex_coomi_agent_service().request_steer(
+                                            session_id=session_id,
+                                            workspace_root=workspace_root,
+                                        )
+                                        if not requested:
+                                            followup_mailbox_service.release_steer_claim(
+                                                workspace_root=workspace_root,
+                                                session_id=session_id,
+                                                message_id=str(pending_steer.get("messageId") or ""),
+                                            )
+                                            pending_steer = None
+                                yield _encode_sse(
+                                    "TurnPhase",
+                                    _turn_phase_packet(
+                                        trace_id=trace_id,
+                                        session_id=session_id,
+                                        phase="model_execution",
+                                        label=("等待安全中断点" if pending_steer is not None else "正在等待模型输出"),
+                                        status="running",
+                                        phase_started=model_started,
+                                        heartbeat=True,
+                                    ),
+                                )
+                            try:
+                                event_name, payload = await next_event
+                            except StopAsyncIteration:
+                                break
+                            if event_name == "ReasoningChunk":
+                                # Never expose or persist provider chain-of-thought.
+                                continue
+                            if (
+                                replacement is not None
+                                and not replacement.accepted
+                                and event_name
+                                not in {
+                                    "AgentStarted",
+                                    "UsageUpdate",
+                                    "ConnectionRetry",
+                                    "AgentError",
+                                    "AgentCancelled",
+                                }
+                            ):
+                                # Runtime/provider setup is not considered accepted
+                                # until Coomi produces a substantive event.  This
+                                # lets an immediate startup failure restore the
+                                # original dialogue and session snapshot.
+                                await asyncio.to_thread(replacement.accept)
+                            if not model_output_started and event_name not in {
+                                "AgentStarted",
+                                "UsageUpdate",
+                                "ConnectionRetry",
+                            }:
+                                model_output_started = True
+                                yield _encode_sse(
+                                    "TurnPhase",
+                                    _turn_phase_packet(
+                                        trace_id=trace_id,
+                                        session_id=session_id,
+                                        phase="model_execution",
+                                        label="模型已开始输出",
+                                        status="success",
+                                        phase_started=model_started,
+                                    ),
+                                )
+                            packet = dict(payload)
+                            if event_name == "TextChunk":
+                                packet["content"] = _strip_visible_tool_text(str(packet.get("content") or ""))
+                                if not packet["content"]:
+                                    continue
+                            if event_name == "TextChunk":
+                                reply_chunks.append(str(packet.get("content") or ""))
+                            elif event_name == "AgentCompleted":
+                                segment_completed = True
+                                terminal_event = (event_name, packet)
+                                continue
+                            elif event_name == "AgentCancelled":
+                                if pending_steer is None and not execution_handle.is_cancelled:
+                                    pending_steer = followup_mailbox_service.claim_steer(
+                                        workspace_root=workspace_root,
+                                        session_id=session_id,
+                                        trace_id=trace_id,
+                                    )
+                                if pending_steer is not None and not cancellation_token.is_cancelled():
+                                    segment_cancelled = True
+                                    terminal_event = None
+                                    break
+                                execution_handle.cancel(str(packet.get("reason") or "coomi_cancelled"))
+                                terminal_event = (event_name, packet)
+                                continue
+                            elif event_name == "PermissionRequest":
+                                followup_mailbox_service.pause(
+                                    workspace_root=workspace_root,
+                                    session_id=session_id,
+                                    reason="permission_request",
+                                )
+                            elif event_name == "AgentError":
+                                error_message = str(packet.get("message") or "Coomi Agent error")
+                                followup_mailbox_service.pause(
+                                    workspace_root=workspace_root,
+                                    session_id=session_id,
+                                    reason="execution_error",
+                                )
+                            events.append(_event_to_trace_event(event_name, packet, len(events) + 1))
+                            yield _encode_sse(event_name, packet)
+                            if tracker is not None:
+                                for task_event_name, task_payload in tracker.advance_after_runtime_event(event_name):
+                                    events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
+                                    yield _encode_sse(task_event_name, task_payload)
+                    finally:
+                        close_runtime = getattr(runtime_events, "aclose", None)
+                        if callable(close_runtime):
+                            await close_runtime()
+
+                    if pending_steer is None and not execution_handle.is_cancelled and not error_message:
+                        # Covers the race where completion and SteerRequested are
+                        # committed at the same time.
+                        pending_steer = followup_mailbox_service.claim_steer(
+                            workspace_root=workspace_root,
+                            session_id=session_id,
+                            trace_id=trace_id,
                         )
-                    packet = dict(payload)
-                    if event_name == "TextChunk":
-                        packet["content"] = _strip_visible_tool_text(str(packet.get("content") or ""))
-                        if not packet["content"]:
-                            continue
-                    if event_name == "TextChunk":
-                        reply_chunks.append(str(packet.get("content") or ""))
-                    elif event_name == "AgentCompleted":
-                        completed = True
-                        terminal_event = (event_name, packet)
+                    if pending_steer is not None and not execution_handle.is_cancelled and not error_message:
+                        segment_index += 1
+                        next_segment_id = f"{trace_id}-segment-{segment_index + 1}"
+                        applied = followup_mailbox_service.apply_steer(
+                            workspace_root=workspace_root,
+                            session_id=session_id,
+                            message_id=str(pending_steer.get("messageId") or ""),
+                            trace_id=trace_id,
+                            segment_id=next_segment_id,
+                        )
+                        steer_packet = {
+                            "_type": "SteerApplied",
+                            "_version": 1,
+                            **applied,
+                            "traceId": trace_id,
+                            "segmentId": next_segment_id,
+                            "previousSegmentId": segment_id,
+                        }
+                        events.append(_event_to_trace_event("SteerApplied", steer_packet, len(events) + 1))
+                        yield _encode_sse("SteerApplied", steer_packet)
+                        continuation_packet = {
+                            "_type": "ContinuationStarted",
+                            "_version": 1,
+                            **applied,
+                            "traceId": trace_id,
+                            "segmentId": next_segment_id,
+                            "previousSegmentId": segment_id,
+                            "continuationMode": "steer",
+                        }
+                        events.append(_event_to_trace_event("ContinuationStarted", continuation_packet, len(events) + 1))
+                        yield _encode_sse("ContinuationStarted", continuation_packet)
+                        segment_prompt = str(applied.get("content") or "")
+                        completed = False
+                        terminal_event = None
                         continue
-                    elif event_name == "AgentCancelled":
-                        execution_handle.cancel(str(packet.get("reason") or "coomi_cancelled"))
-                        terminal_event = (event_name, packet)
-                        continue
-                    elif event_name == "AgentError":
-                        error_message = str(packet.get("message") or "Coomi Agent error")
-                    events.append(_event_to_trace_event(event_name, packet, len(events) + 1))
-                    yield _encode_sse(event_name, packet)
-                    for task_event_name, task_payload in tracker.advance_after_runtime_event(event_name):
-                        events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
-                        yield _encode_sse(task_event_name, task_payload)
+                    if pending_steer is not None:
+                        followup_mailbox_service.release_steer_claim(
+                            workspace_root=workspace_root,
+                            session_id=session_id,
+                            message_id=str(pending_steer.get("messageId") or ""),
+                            error="当前执行已停止，信息仍保留在邮箱中",
+                        )
+                    if (
+                        segment_completed
+                        and not execution_handle.is_cancelled
+                        and not cancellation_token.is_cancelled()
+                        and not error_message
+                    ):
+                        validation_packet = story_project_service.validate_story_generation_turn(
+                            workspace_root,
+                            turn_contract,
+                        )
+                        if bool(validation_packet.get("applicable")):
+                            write_tool_applied = _has_successful_story_generation_write(events)
+                            validation_passed = bool(validation_packet.get("passed")) and write_tool_applied
+                            validation_message = str(validation_packet.get("message") or "")
+                            if not write_tool_applied:
+                                validation_message = (
+                                    "本轮没有成功调用 StorydexApplyStoryIncrement，"
+                                    "不能把磁盘上的既有正文误判为本轮生成结果。"
+                                )
+                            validation_packet = {
+                                **validation_packet,
+                                "passed": validation_passed,
+                                "status": "success" if validation_passed else "error",
+                                "message": validation_message,
+                                "writeToolApplied": write_tool_applied,
+                                "traceId": trace_id,
+                                "sessionId": session_id,
+                                "segmentId": segment_id,
+                                "correctionAttempt": story_correction_attempts,
+                                "maximumCorrectionAttempts": _STORY_GENERATION_MAX_CORRECTIONS,
+                            }
+                            events.append(
+                                _event_to_trace_event(
+                                    "StoryGenerationValidation",
+                                    validation_packet,
+                                    len(events) + 1,
+                                )
+                            )
+                            yield _encode_sse("StoryGenerationValidation", validation_packet)
+                            if not bool(validation_packet.get("passed")):
+                                if story_correction_attempts < _STORY_GENERATION_MAX_CORRECTIONS:
+                                    story_correction_attempts += 1
+                                    segment_index += 1
+                                    next_segment_id = f"{trace_id}-segment-{segment_index + 1}"
+                                    continuation_packet = {
+                                        "_type": "ContinuationStarted",
+                                        "_version": 1,
+                                        "traceId": trace_id,
+                                        "sessionId": session_id,
+                                        "segmentId": next_segment_id,
+                                        "previousSegmentId": segment_id,
+                                        "continuationMode": "story_generation_correction",
+                                        "correctionAttempt": story_correction_attempts,
+                                        "maximumCorrectionAttempts": _STORY_GENERATION_MAX_CORRECTIONS,
+                                        "validation": validation_packet,
+                                    }
+                                    events.append(
+                                        _event_to_trace_event(
+                                            "ContinuationStarted",
+                                            continuation_packet,
+                                            len(events) + 1,
+                                        )
+                                    )
+                                    yield _encode_sse("ContinuationStarted", continuation_packet)
+                                    segment_prompt = _story_generation_correction_prompt(
+                                        validation_packet,
+                                        correction_attempt=story_correction_attempts,
+                                    )
+                                    completed = False
+                                    terminal_event = None
+                                    continue
+
+                                error_message = (
+                                    "正文经过 "
+                                    f"{_STORY_GENERATION_MAX_CORRECTIONS} 次自动修订后仍未通过 Storydex "
+                                    "客观字数或章节结构校验。"
+                                )
+                                completed = False
+                                terminal_event = None
+                                followup_mailbox_service.pause(
+                                    workspace_root=workspace_root,
+                                    session_id=session_id,
+                                    reason="story_generation_validation_failed",
+                                )
+                                error_packet = {
+                                    "_type": "AgentError",
+                                    "_version": 1,
+                                    "error_type": "StoryGenerationValidationFailed",
+                                    "message": error_message,
+                                    "details": {
+                                        "runtime": "storydex_validation",
+                                        "validation": validation_packet,
+                                    },
+                                }
+                                events.append(_event_to_trace_event("AgentError", error_packet, len(events) + 1))
+                                yield _encode_sse("AgentError", error_packet)
+                                break
+                    completed = segment_completed
+                    if segment_cancelled and not execution_handle.is_cancelled:
+                        completed = False
+                    break
 
             if error_message:
-                for task_event_name, task_payload in tracker.fail_current(error_message):
-                    events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
-                    yield _encode_sse(task_event_name, task_payload)
-                for task_event_name, task_payload in tracker.skip_remaining_execution(reason="execution_failed"):
-                    events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
-                    yield _encode_sse(task_event_name, task_payload)
+                if tracker is not None:
+                    for task_event_name, task_payload in tracker.fail_current(error_message):
+                        events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
+                        yield _encode_sse(task_event_name, task_payload)
+                    for task_event_name, task_payload in tracker.skip_remaining_execution(reason="execution_failed"):
+                        events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
+                        yield _encode_sse(task_event_name, task_payload)
             elif completed and not runtime_tasks_finalized:
-                for task_event_name, task_payload in tracker.complete_through_execution():
-                    events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
-                    yield _encode_sse(task_event_name, task_payload)
+                if tracker is not None:
+                    for task_event_name, task_payload in tracker.complete_through_execution():
+                        events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
+                        yield _encode_sse(task_event_name, task_payload)
         except Exception as exc:
             error_message = str(exc)
             packet = {
@@ -1362,6 +2096,78 @@ async def _stream_coomi_sse_worker(
                     events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
                     yield _encode_sse(task_event_name, task_payload)
 
+        if planning_task is not None:
+            if planning_task.done() and not planning_task.cancelled():
+                try:
+                    task_plan = planning_task.result()
+                except Exception:
+                    task_plan = []
+                yield _encode_sse(
+                    "TurnPhase",
+                    _turn_phase_packet(
+                        trace_id=trace_id,
+                        session_id=session_id,
+                        phase="task_planning",
+                        label="执行步骤规划完成",
+                        status="success",
+                        phase_started=planning_started,
+                        detail=f"已生成 {len(task_plan)} 个执行步骤（未阻塞模型启动）",
+                    ),
+                )
+            else:
+                planning_task.cancel()
+                _retain_background_execution_task(planning_task)
+                task_plan = []
+                yield _encode_sse(
+                    "TurnPhase",
+                    _turn_phase_packet(
+                        trace_id=trace_id,
+                        session_id=session_id,
+                        phase="task_planning",
+                        label="执行已先于规划继续",
+                        status="warning",
+                        phase_started=planning_started,
+                        detail="规划未阻塞正式 Agent 启动",
+                    ),
+                )
+            planning_task = None
+            if tracker is None:
+                tracker = _TaskRunTracker(task_plan, trace_id=trace_id, session_id=session_id)
+                plan_payload = tracker.plan_created_payload()
+                events.append(_event_to_trace_event("TaskPlanCreated", plan_payload, len(events) + 1))
+                yield _encode_sse("TaskPlanCreated", plan_payload)
+                if error_message:
+                    for task_event_name, task_payload in tracker.fail_current(error_message):
+                        events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
+                        yield _encode_sse(task_event_name, task_payload)
+                elif completed:
+                    for task_event_name, task_payload in tracker.complete_through_execution():
+                        events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
+                        yield _encode_sse(task_event_name, task_payload)
+
+        mailbox_events = followup_mailbox_service.events_for_trace(
+            workspace_root=workspace_root,
+            session_id=session_id,
+            trace_id=trace_id,
+            event_types={
+                "FollowupQueued",
+                "FollowupUpdated",
+                "SteerRequested",
+                "SteerApplied",
+                "ContinuationStarted",
+            },
+        )
+        existing_mailbox_event_ids = {
+            str((item.get("data") or {}).get("eventId") or "")
+            for item in events
+            if isinstance(item, dict) and isinstance(item.get("data"), dict)
+        }
+        for mailbox_event in mailbox_events:
+            if str(mailbox_event.get("eventId") or "") in existing_mailbox_event_ids:
+                continue
+            event_name = str(mailbox_event.get("_type") or "FollowupUpdated")
+            events.append(_event_to_trace_event(event_name, mailbox_event, len(events) + 1))
+
         if tracker is not None:
             for task_event_name, task_payload in tracker.start_version_task():
                 events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
@@ -1371,6 +2177,12 @@ async def _stream_coomi_sse_worker(
             git_payload["traceId"] = trace_id
             git_payload["sessionId"] = session_id
             git_event_name = _git_event_name(git_payload)
+            if git_event_name == "GitCommitPrompt":
+                followup_mailbox_service.pause(
+                    workspace_root=workspace_root,
+                    session_id=session_id,
+                    reason="git_commit_prompt",
+                )
             events.append(_event_to_trace_event(git_event_name, git_payload, len(events) + 1))
             finalization_packets.append(_encode_sse(git_event_name, git_payload))
             if tracker is not None:
@@ -1471,11 +2283,18 @@ async def _stream_coomi_sse_worker(
             write_timing=write_timing,
         )
         await execution_handle.finalize(observation, context)
+        if replacement is not None and not replacement.accepted:
+            await asyncio.to_thread(replacement.restore, reason="replacement_start_failed")
         reset_llm_metrics(trace_id)
         for packet in finalization_packets:
             yield packet
         yield _encode_sse("done", {"type": "done"})
     except Exception as exc:
+        if replacement is not None and not replacement.accepted:
+            try:
+                await asyncio.to_thread(replacement.restore, reason="replacement_execution_failed")
+            except Exception:
+                _LOGGER.exception("Unable to restore replacement target %s", replacement.expected_trace_id)
         reset_llm_metrics(trace_id)
         packet = {
             "_type": "AgentError",
@@ -1486,6 +2305,12 @@ async def _stream_coomi_sse_worker(
         }
         yield _encode_sse("AgentError", packet)
         yield _encode_sse("done", {"type": "done"})
+    finally:
+        if replacement is not None and not replacement.accepted and not replacement.restored:
+            try:
+                await asyncio.to_thread(replacement.restore, reason="replacement_worker_stopped")
+            except Exception:
+                _LOGGER.exception("Unable to restore replacement target %s", replacement.expected_trace_id)
 
 
 async def _stream_coomi_sse(
@@ -1502,6 +2327,7 @@ async def _stream_coomi_sse(
     cancellation_token: _CancellationToken,
     execution_handle: ExecutionHandle | None = None,
     execution_log_session: ExecutionLogSession | None = None,
+    replacement: _LatestExecutionReplacement | None = None,
 ) -> AsyncIterator[str]:
     """Transport-only wrapper around the independent execution worker."""
     handle = execution_handle or execution_coordinator.adopt_reservation_or_begin(
@@ -1523,6 +2349,14 @@ async def _stream_coomi_sse(
             )
         )
 
+    if await request.is_disconnected():
+        handle.cancel("client_disconnected")
+        followup_mailbox_service.pause(
+            workspace_root=workspace_root,
+            session_id=session_id,
+            reason="client_disconnected",
+        )
+
     queue: asyncio.Queue[str | None] = asyncio.Queue()
 
     async def pump() -> None:
@@ -1539,6 +2373,7 @@ async def _stream_coomi_sse(
                 cancellation_token=cancellation_token,
                 execution_handle=handle,
                 execution_log_session=execution_log_session,
+                replacement=replacement,
             ):
                 await queue.put(chunk)
         except asyncio.CancelledError:
@@ -1570,6 +2405,11 @@ async def _stream_coomi_sse(
             except asyncio.TimeoutError:
                 if await request.is_disconnected():
                     handle.cancel("client_disconnected")
+                    followup_mailbox_service.pause(
+                        workspace_root=workspace_root,
+                        session_id=session_id,
+                        reason="client_disconnected",
+                    )
                     return
                 continue
             if chunk is None:
@@ -1577,11 +2417,21 @@ async def _stream_coomi_sse(
             yield chunk
             if await request.is_disconnected():
                 handle.cancel("client_disconnected")
+                followup_mailbox_service.pause(
+                    workspace_root=workspace_root,
+                    session_id=session_id,
+                    reason="client_disconnected",
+                )
                 return
         await asyncio.shield(worker)
     finally:
         if not worker.done():
             handle.cancel("client_disconnected")
+            followup_mailbox_service.pause(
+                workspace_root=workspace_root,
+                session_id=session_id,
+                reason="client_disconnected",
+            )
 
 
 @router.get("/agent/sessions", response_model=ApiEnvelope)
@@ -1889,6 +2739,228 @@ def agent_history(
     )
 
 
+@router.get("/agent/followups", response_model=ApiEnvelope)
+def agent_followups(
+    request: Request,
+    session_id_query: Optional[str] = Query(default=None, alias="sessionId"),
+    workspace_root_query: Optional[str] = Query(default=None, alias="workspaceRoot"),
+) -> ApiEnvelope:
+    started = time.perf_counter()
+    api_trace_id = str(uuid4())
+    session_id = str(session_id_query or "").strip() or _resolve_agent_session_id(request)
+    workspace_root = _resolve_followup_workspace_root(
+        session_id=session_id,
+        workspace_root=str(workspace_root_query or ""),
+    )
+    state = followup_mailbox_service.list_mailbox(
+        workspace_root=workspace_root,
+        session_id=session_id,
+    )
+    return success_response(
+        data=state,
+        trace=ApiTrace(traceId=api_trace_id, durationMs=int((time.perf_counter() - started) * 1000), toolCalls=1),
+        audit=[{"action": "read_agent_followups", "sessionId": session_id, "revision": state.get("revision")}],
+    )
+
+
+@router.post("/agent/followups", response_model=ApiEnvelope)
+def agent_enqueue_followup(payload: AgentFollowupRequest, request: Request) -> ApiEnvelope:
+    del request
+    started = time.perf_counter()
+    api_trace_id = str(uuid4())
+    session_id = str(payload.session_id or "default").strip() or "default"
+    workspace_root = _resolve_followup_workspace_root(
+        session_id=session_id,
+        workspace_root=payload.workspace_root,
+    )
+    try:
+        message = followup_mailbox_service.enqueue(
+            workspace_root=workspace_root,
+            session_id=session_id,
+            message_id=payload.message_id,
+            content=payload.content,
+            mode=payload.mode,
+            expected_trace_id=payload.expected_trace_id or payload.active_trace_id,
+        )
+    except FollowupMailboxError as exc:
+        _raise_followup_error(exc)
+    steer_requested = False
+    if str(message.get("mode") or "") == "steer":
+        steer_requested = get_storydex_coomi_agent_service().request_steer(
+            session_id=session_id,
+            workspace_root=workspace_root,
+        )
+    return success_response(
+        data={"message": message, "steerRequested": steer_requested},
+        trace=ApiTrace(traceId=api_trace_id, durationMs=int((time.perf_counter() - started) * 1000), toolCalls=1),
+        audit=[
+            {
+                "action": "enqueue_agent_followup",
+                "messageId": payload.message_id,
+                "sessionId": session_id,
+                "mode": message.get("mode"),
+                "status": message.get("status"),
+                "activeTraceId": message.get("activeTraceId"),
+            }
+        ],
+    )
+
+
+@router.patch("/agent/followups/{message_id}", response_model=ApiEnvelope)
+def agent_update_followup(
+    message_id: str,
+    payload: AgentFollowupUpdateRequest,
+    request: Request,
+) -> ApiEnvelope:
+    del request
+    started = time.perf_counter()
+    api_trace_id = str(uuid4())
+    session_id = str(payload.session_id or "default").strip() or "default"
+    workspace_root = _resolve_followup_workspace_root(
+        session_id=session_id,
+        workspace_root=payload.workspace_root,
+    )
+    try:
+        message = followup_mailbox_service.update_message(
+            workspace_root=workspace_root,
+            session_id=session_id,
+            message_id=message_id,
+            content=payload.content,
+            mode=payload.mode,
+            expected_trace_id=payload.expected_trace_id,
+        )
+    except FollowupMailboxError as exc:
+        _raise_followup_error(exc)
+    steer_requested = False
+    if str(message.get("mode") or "") == "steer":
+        steer_requested = get_storydex_coomi_agent_service().request_steer(
+            session_id=session_id,
+            workspace_root=workspace_root,
+        )
+    return success_response(
+        data={"message": message, "steerRequested": steer_requested},
+        trace=ApiTrace(traceId=api_trace_id, durationMs=int((time.perf_counter() - started) * 1000), toolCalls=1),
+        audit=[{"action": "update_agent_followup", "messageId": message_id, "status": message.get("status")}],
+    )
+
+
+@router.delete("/agent/followups/{message_id}", response_model=ApiEnvelope)
+def agent_delete_followup(
+    message_id: str,
+    request: Request,
+    session_id_query: Optional[str] = Query(default=None, alias="sessionId"),
+    workspace_root_query: Optional[str] = Query(default=None, alias="workspaceRoot"),
+) -> ApiEnvelope:
+    started = time.perf_counter()
+    api_trace_id = str(uuid4())
+    session_id = str(session_id_query or "").strip() or _resolve_agent_session_id(request)
+    workspace_root = _resolve_followup_workspace_root(
+        session_id=session_id,
+        workspace_root=str(workspace_root_query or ""),
+    )
+    try:
+        message = followup_mailbox_service.cancel_message(
+            workspace_root=workspace_root,
+            session_id=session_id,
+            message_id=message_id,
+        )
+    except FollowupMailboxError as exc:
+        _raise_followup_error(exc)
+    return success_response(
+        data={"message": message},
+        trace=ApiTrace(traceId=api_trace_id, durationMs=int((time.perf_counter() - started) * 1000), toolCalls=1),
+        audit=[{"action": "delete_agent_followup", "messageId": message_id, "status": message.get("status")}],
+    )
+
+
+@router.post("/agent/followups/{message_id}/steer", response_model=ApiEnvelope)
+def agent_steer_followup(
+    message_id: str,
+    payload: AgentFollowupActionRequest,
+    request: Request,
+) -> ApiEnvelope:
+    del request
+    started = time.perf_counter()
+    api_trace_id = str(uuid4())
+    session_id = str(payload.session_id or "default").strip() or "default"
+    workspace_root = _resolve_followup_workspace_root(
+        session_id=session_id,
+        workspace_root=payload.workspace_root,
+    )
+    try:
+        message = followup_mailbox_service.update_message(
+            workspace_root=workspace_root,
+            session_id=session_id,
+            message_id=message_id,
+            mode="steer",
+            expected_trace_id=payload.expected_trace_id,
+        )
+    except FollowupMailboxError as exc:
+        _raise_followup_error(exc)
+    steer_requested = get_storydex_coomi_agent_service().request_steer(
+        session_id=session_id,
+        workspace_root=workspace_root,
+    )
+    return success_response(
+        data={"message": message, "steerRequested": steer_requested},
+        trace=ApiTrace(traceId=api_trace_id, durationMs=int((time.perf_counter() - started) * 1000), toolCalls=1),
+        audit=[{"action": "steer_agent_followup", "messageId": message_id, "activeTraceId": message.get("activeTraceId")}],
+    )
+
+
+@router.post("/agent/followups/resume", response_model=ApiEnvelope)
+def agent_resume_followups(payload: AgentFollowupActionRequest, request: Request) -> ApiEnvelope:
+    del request
+    started = time.perf_counter()
+    api_trace_id = str(uuid4())
+    session_id = str(payload.session_id or "default").strip() or "default"
+    workspace_root = _resolve_followup_workspace_root(
+        session_id=session_id,
+        workspace_root=payload.workspace_root,
+    )
+    state = followup_mailbox_service.resume(workspace_root=workspace_root, session_id=session_id)
+    return success_response(
+        data=state,
+        trace=ApiTrace(traceId=api_trace_id, durationMs=int((time.perf_counter() - started) * 1000), toolCalls=1),
+        audit=[{"action": "resume_agent_followups", "sessionId": session_id}],
+    )
+
+
+@router.post("/agent/executions/stop", response_model=ApiEnvelope)
+def agent_stop_execution(payload: AgentExecutionStopRequest, request: Request) -> ApiEnvelope:
+    del request
+    started = time.perf_counter()
+    api_trace_id = str(uuid4())
+    session_id = str(payload.session_id or "default").strip() or "default"
+    workspace_root = _resolve_followup_workspace_root(
+        session_id=session_id,
+        workspace_root=payload.workspace_root,
+    )
+    result = execution_coordinator.cancel_active(
+        session_id=session_id,
+        expected_trace_id=payload.expected_trace_id,
+        workspace_root=workspace_root,
+        reason="manual_stop",
+    )
+    if str(result.get("reason") or "") == "stale_trace":
+        raise StorydexError(
+            "The active execution changed before the stop request was applied.",
+            code="stale_trace",
+            status_code=409,
+            details=result,
+        )
+    state = followup_mailbox_service.pause(
+        workspace_root=workspace_root,
+        session_id=session_id,
+        reason="manual_stop",
+    )
+    return success_response(
+        data={**result, "mailboxPaused": bool(state.get("paused")), "pauseReason": state.get("pauseReason")},
+        trace=ApiTrace(traceId=api_trace_id, durationMs=int((time.perf_counter() - started) * 1000), toolCalls=1),
+        audit=[{"action": "stop_agent_execution", "sessionId": session_id, "activeTraceId": result.get("activeTraceId")}],
+    )
+
+
 @router.post("/agent/executions/rollback-latest", response_model=ApiEnvelope)
 def agent_rollback_latest_execution(
     payload: AgentExecutionRollbackRequest,
@@ -1910,17 +2982,32 @@ def agent_rollback_latest_execution(
         if isinstance(latest, dict):
             trace_id = str(latest.get("traceId") or "").strip()
             prompt = str(latest.get("prompt") or "")
+            if payload.expected_trace_id and trace_id != str(payload.expected_trace_id or "").strip():
+                raise StorydexError(
+                    "The latest execution changed before deletion was confirmed.",
+                    code="stale_trace",
+                    status_code=409,
+                    details={"expectedTraceId": payload.expected_trace_id, "latestTraceId": trace_id},
+                )
+            if str(latest.get("status") or "") == "running":
+                raise StorydexError(
+                    "A running execution cannot be deleted.",
+                    code="execution_running",
+                    status_code=409,
+                )
             if trace_id:
+                record_workspace = str(latest.get("workspaceRoot") or "").strip()
+                rollback_workspace = Path(record_workspace).resolve() if record_workspace else project_service.workspace_root
                 rollback = get_storydex_coomi_agent_service().rollback_last_turn(
                     session_id,
-                    workspace_root=project_service.workspace_root,
+                    workspace_root=rollback_workspace,
                 )
                 rolled_back = bool(rollback.get("rolledBack"))
                 if rolled_back:
                     trace_history_service.delete_record(trace_id, session_id)
                     storydex_intent_service.clear_session(
                         session_id=session_id,
-                        workspace_root=project_service.workspace_root,
+                        workspace_root=rollback_workspace,
                     )
                     removed_trace_id = trace_id
 
@@ -2383,8 +3470,24 @@ async def agent_chat(
     if not _try_acquire_agent_generation_slot():
         raise _agent_busy_error(trace_id=trace_id, session_id=session_id)
     execution_handle: ExecutionHandle | None = None
+    replacement: _LatestExecutionReplacement | None = None
     try:
         workspace_root = _resolve_agent_workspace_root(payload)
+        if payload.source_followup_message_id:
+            raise StorydexError(
+                "Queued follow-ups must be dispatched through the streaming endpoint.",
+                code="followup_stream_required",
+                status_code=400,
+            )
+        if payload.replace_latest_trace_id:
+            replacement = _LatestExecutionReplacement(
+                session_id=session_id,
+                expected_trace_id=payload.replace_latest_trace_id,
+                replacement_trace_id=trace_id,
+                workspace_root=workspace_root,
+                replacement_prompt=payload.prompt,
+            )
+            await asyncio.to_thread(replacement.prepare)
         execution_handle = execution_coordinator.adopt_reservation_or_begin(
             workspace_root,
             session_id,
@@ -2400,6 +3503,7 @@ async def agent_chat(
             execution_handle=execution_handle,
             resolved_workspace_root=workspace_root,
             raise_preflight_errors=True,
+            replacement=replacement,
         ):
             pass
         result = await execution_handle.wait_finalized()
@@ -2418,6 +3522,8 @@ async def agent_chat(
         )
     finally:
         if execution_handle is None:
+            if replacement is not None:
+                replacement.restore(reason="execution_start_failed")
             _release_agent_generation_slot()
 
 
@@ -2570,6 +3676,7 @@ async def _stream_agent_chat_request_sse(
     execution_handle: ExecutionHandle | None = None,
     resolved_workspace_root: Path | None = None,
     raise_preflight_errors: bool = False,
+    replacement: _LatestExecutionReplacement | None = None,
 ) -> AsyncIterator[str]:
     reset_llm_metrics(trace_id)
     request_started = time.perf_counter()
@@ -2581,6 +3688,18 @@ async def _stream_agent_chat_request_sse(
             trace_id,
         )
     execution_handle.bind_cancellation(lambda _reason: cancellation_token.cancel())
+    followup_mailbox_service.set_active_trace(
+        workspace_root=workspace_root,
+        session_id=session_id,
+        trace_id=trace_id,
+    )
+    if payload.confirm_no_snapshot:
+        mailbox_state = followup_mailbox_service.list_mailbox(
+            workspace_root=workspace_root,
+            session_id=session_id,
+        )
+        if str(mailbox_state.get("pauseReason") or "") == "snapshot_confirmation":
+            followup_mailbox_service.resume(workspace_root=workspace_root, session_id=session_id)
     accepted = {
         "_type": "RunAccepted",
         "_version": 1,
@@ -2776,6 +3895,16 @@ async def _stream_agent_chat_request_sse(
             },
         )
 
+        if replacement is not None:
+            turn_contract = {
+                **turn_contract,
+                "replacement": {
+                    "replacesTraceId": replacement.expected_trace_id,
+                    "replacementTraceId": trace_id,
+                    "dialogueOnly": True,
+                    "fileChangesReverted": False,
+                },
+            }
         delegated = True
         async for chunk in _stream_coomi_sse(
             prompt=payload.prompt,
@@ -2790,10 +3919,16 @@ async def _stream_agent_chat_request_sse(
             cancellation_token=cancellation_token,
             execution_handle=execution_handle,
             execution_log_session=execution_log_session,
+            replacement=replacement,
         ):
             yield chunk
     except SnapshotConfirmationRequired as exc:
         preflight_rejected = True
+        followup_mailbox_service.pause(
+            workspace_root=workspace_root,
+            session_id=session_id,
+            reason="snapshot_confirmation",
+        )
         execution_handle.reject_preflight(exc.code, str(exc))
         details = {
             **exc.details,
@@ -2821,6 +3956,11 @@ async def _stream_agent_chat_request_sse(
         yield _encode_sse("done", {"type": "done"})
     except Exception as exc:
         preflight_rejected = True
+        followup_mailbox_service.pause(
+            workspace_root=workspace_root,
+            session_id=session_id,
+            reason="preflight_error",
+        )
         execution_handle.reject_preflight(type(exc).__name__, str(exc))
         if raise_preflight_errors:
             raise
@@ -2836,7 +3976,14 @@ async def _stream_agent_chat_request_sse(
         yield _encode_sse("AgentError", packet)
         yield _encode_sse("done", {"type": "done"})
     finally:
+        followup_mailbox_service.clear_active_trace(
+            workspace_root=workspace_root,
+            session_id=session_id,
+            expected_trace_id=trace_id,
+        )
         if not delegated:
+            if replacement is not None:
+                replacement.restore(reason="preflight_not_accepted")
             if preflight_rejected:
                 for task in (intent_task, contract_task, git_task):
                     if task is not None and not task.done():
@@ -2853,6 +4000,11 @@ async def _stream_agent_chat_request_sse(
                 reset_llm_metrics(trace_id)
             else:
                 execution_handle.cancel("client_disconnected")
+                followup_mailbox_service.pause(
+                    workspace_root=workspace_root,
+                    session_id=session_id,
+                    reason="client_disconnected",
+                )
                 _retain_background_execution_task(
                     asyncio.create_task(
                         _finalize_cancelled_preflight_execution(
@@ -2874,6 +4026,158 @@ async def _stream_agent_chat_request_sse(
                 )
 
 
+def _decode_sse_packet(chunk: str) -> Dict[str, Any]:
+    for line in str(chunk or "").splitlines():
+        if not line.startswith("data:"):
+            continue
+        try:
+            payload = json.loads(line.removeprefix("data:").strip())
+        except (ValueError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+    return {}
+
+
+async def _stream_agent_chat_with_followups_sse(
+    *,
+    payload: AgentChatRequest,
+    request: Request,
+    trace_id: str,
+    session_id: str,
+    cancellation_token: _CancellationToken,
+    replacement: _LatestExecutionReplacement | None = None,
+    initial_source_message: Dict[str, Any] | None = None,
+) -> AsyncIterator[str]:
+    """Run one accepted request and drain durable FIFO follow-ups in-band."""
+
+    current_payload = payload
+    current_trace_id = trace_id
+    current_token = cancellation_token
+    source_message: Dict[str, Any] | None = initial_source_message
+    current_replacement = replacement
+    workspace_root = _resolve_agent_workspace_root(payload)
+    final_done = _encode_sse("done", {"type": "done"})
+
+    while True:
+        saw_error = False
+        saw_cancel = False
+        source_marked_sent = source_message is None
+        async for chunk in _stream_agent_chat_request_sse(
+            payload=current_payload,
+            request=request,
+            trace_id=current_trace_id,
+            session_id=session_id,
+            cancellation_token=current_token,
+            resolved_workspace_root=workspace_root,
+            replacement=current_replacement,
+        ):
+            packet = _decode_sse_packet(chunk)
+            event_name = str(packet.get("_type") or packet.get("type") or "")
+            if event_name == "done":
+                continue
+            if event_name == "AgentError":
+                saw_error = True
+            elif event_name == "AgentCancelled":
+                saw_cancel = True
+            if source_message is not None and not source_marked_sent:
+                if event_name in {"TaskPlanCreated", "TurnContract", "AgentStarted"} or (
+                    event_name == "TurnPhase" and str(packet.get("phase") or "") == "task_planning"
+                ):
+                    try:
+                        followup_mailbox_service.mark_dispatch_sent(
+                            workspace_root=workspace_root,
+                            session_id=session_id,
+                            message_id=str(source_message.get("messageId") or ""),
+                            trace_id=current_trace_id,
+                        )
+                        source_marked_sent = True
+                    except FollowupMailboxError:
+                        pass
+            yield chunk
+
+        if source_message is not None and not source_marked_sent:
+            try:
+                followup_mailbox_service.mark_dispatch_failed(
+                    workspace_root=workspace_root,
+                    session_id=session_id,
+                    message_id=str(source_message.get("messageId") or ""),
+                    trace_id=current_trace_id,
+                    error="Continuation preprocessing failed before model execution.",
+                    # No acceptance event means the queued turn never reached
+                    # task planning/model execution.  Keep it pending so a
+                    # snapshot confirmation, repaired config, or reconnect can
+                    # retry the same idempotency key.
+                    retryable=True,
+                )
+            except FollowupMailboxError:
+                pass
+
+        state = followup_mailbox_service.list_mailbox(
+            workspace_root=workspace_root,
+            session_id=session_id,
+        )
+        if saw_error and not bool(state.get("paused")):
+            followup_mailbox_service.pause(
+                workspace_root=workspace_root,
+                session_id=session_id,
+                reason="execution_error",
+            )
+        elif saw_cancel and not bool(state.get("paused")):
+            followup_mailbox_service.pause(
+                workspace_root=workspace_root,
+                session_id=session_id,
+                reason="execution_stopped",
+            )
+
+        state = followup_mailbox_service.list_mailbox(
+            workspace_root=workspace_root,
+            session_id=session_id,
+        )
+        if saw_error or saw_cancel or bool(state.get("paused")):
+            break
+
+        # Reserve before claiming so an unrelated user request cannot create an
+        # agent_busy race between current finalization and FIFO continuation.
+        if not _try_acquire_agent_generation_slot():
+            break
+        next_trace_id = str(uuid4())
+        try:
+            next_message = followup_mailbox_service.claim_next_queued(
+                workspace_root=workspace_root,
+                session_id=session_id,
+                previous_trace_id=current_trace_id,
+                next_trace_id=next_trace_id,
+            )
+        except Exception:
+            _release_agent_generation_slot()
+            raise
+        if next_message is None:
+            _release_agent_generation_slot()
+            break
+
+        continuation_packet = {
+            "_type": "ContinuationStarted",
+            "_version": 1,
+            **next_message,
+            "traceId": next_trace_id,
+            "previousTraceId": current_trace_id,
+            "continuationMode": "queued",
+        }
+        yield _encode_sse("ContinuationStarted", continuation_packet)
+        current_payload = AgentChatRequest(
+            prompt=str(next_message.get("content") or ""),
+            activeFile=current_payload.active_file,
+            workspaceRoot=workspace_root.as_posix(),
+            storyGeneration=dict(current_payload.story_generation),
+        )
+        current_trace_id = next_trace_id
+        current_token = _CancellationToken()
+        source_message = next_message
+        current_replacement = None
+
+    yield final_done
+
+
 @router.post("/agent/chat/stream")
 async def agent_chat_stream(
     payload: AgentChatRequest,
@@ -2884,14 +4188,38 @@ async def agent_chat_stream(
     session_id = str(session_id_query or "").strip() or _resolve_agent_session_id(request)
     if not _try_acquire_agent_generation_slot():
         raise _agent_busy_error(trace_id=trace_id, session_id=session_id)
+    workspace_root = _resolve_agent_workspace_root(payload)
+    replacement: _LatestExecutionReplacement | None = None
+    source_message: Dict[str, Any] | None = None
+    try:
+        payload, source_message = _claim_initial_followup_dispatch(
+            payload=payload,
+            workspace_root=workspace_root,
+            session_id=session_id,
+            trace_id=trace_id,
+        )
+        if payload.replace_latest_trace_id:
+            replacement = _LatestExecutionReplacement(
+                session_id=session_id,
+                expected_trace_id=payload.replace_latest_trace_id,
+                replacement_trace_id=trace_id,
+                workspace_root=workspace_root,
+                replacement_prompt=payload.prompt,
+            )
+            await asyncio.to_thread(replacement.prepare)
+    except Exception:
+        _release_agent_generation_slot()
+        raise
     cancellation_token = _CancellationToken()
     return StreamingResponse(
-        _stream_agent_chat_request_sse(
+        _stream_agent_chat_with_followups_sse(
             payload=payload,
             request=request,
             trace_id=trace_id,
             session_id=session_id,
             cancellation_token=cancellation_token,
+            replacement=replacement,
+            initial_source_message=source_message,
         ),
         media_type="text/event-stream",
         headers={

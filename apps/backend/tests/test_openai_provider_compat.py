@@ -9,7 +9,7 @@ from openai import AsyncOpenAI
 
 from coomi.services.llm.config import ProviderConfig
 from coomi.services.llm.generic import GenericOpenAIProvider
-from coomi.services.llm.openai import OpenAIProvider
+from coomi.services.llm.openai import OpenAIResponsesProvider
 from services.llm_replay import get_replayable_llm_provider
 
 
@@ -126,8 +126,7 @@ def _tool_call_stream() -> bytes:
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("provider_type", [GenericOpenAIProvider, OpenAIProvider])
-async def test_default_openai_sdk_user_agent_is_replaced_for_realistic_agent_stream(provider_type):
+async def test_default_openai_sdk_user_agent_is_replaced_for_realistic_agent_stream():
     requests: list[httpx.Request] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -163,7 +162,7 @@ async def test_default_openai_sdk_user_agent_is_replaced_for_realistic_agent_str
         model="agent-model",
         tool_protocol="native",
     )
-    provider = provider_type(config)
+    provider = GenericOpenAIProvider(config)
     await provider.client.close()
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
     provider.client = AsyncOpenAI(
@@ -202,6 +201,110 @@ async def test_default_openai_sdk_user_agent_is_replaced_for_realistic_agent_str
         },
     ]
     assert chunks[2]["type"] == "usage"
+    assert chunks[2]["data"]["inputTokens"] == 3_280
+    assert chunks[2]["data"]["outputTokens"] == 18
+    assert chunks[2]["data"]["totalTokens"] == 3_298
+    assert chunks[2]["data"]["protocol"] == "openai_chat"
+
+
+@pytest.mark.integration
+async def test_openai_responses_provider_uses_responses_contract_and_storydex_usage():
+    captured: dict[str, Any] = {}
+
+    class EventStream:
+        def __init__(self, events: list[dict[str, Any]]) -> None:
+            self._events = iter(events)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._events)
+            except StopIteration as exc:
+                raise StopAsyncIteration from exc
+
+    class Responses:
+        async def create(self, **params):
+            captured.update(params)
+            tool_item = {
+                "id": "fc-read-readme",
+                "type": "function_call",
+                "call_id": "call-read-readme",
+                "name": "Read",
+                "arguments": '{"file_path":"README.md"}',
+            }
+            return EventStream(
+                [
+                    {
+                        "type": "response.output_item.added",
+                        "output_index": 0,
+                        "item": {**tool_item, "arguments": ""},
+                    },
+                    {
+                        "type": "response.function_call_arguments.done",
+                        "output_index": 0,
+                        "name": "Read",
+                        "arguments": tool_item["arguments"],
+                    },
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "output": [tool_item],
+                            "usage": {
+                                "input_tokens": 3_280,
+                                "output_tokens": 18,
+                                "total_tokens": 3_298,
+                            },
+                        },
+                    },
+                ]
+            )
+
+    config = ProviderConfig(
+        id="official-openai",
+        type="openai_responses",
+        display="OpenAI Responses",
+        api_key="test-key",
+        base_url="https://api.openai.test/v1",
+        model="gpt-5-mini",
+        tool_protocol="native",
+    )
+    provider = OpenAIResponsesProvider(config)
+    await provider.client.close()
+    replayable = get_replayable_llm_provider(provider)
+    assert replayable.client.default_headers["User-Agent"].startswith("Storydex-Coomi/")
+    replayable.client = type("FakeClient", (), {"responses": Responses()})()
+
+    chunks = [
+        chunk
+        async for chunk in replayable.chat_stream_with_tools(
+            _agent_messages(),
+            tools=_agent_tools(),
+        )
+    ]
+
+    assert captured["model"] == "gpt-5-mini"
+    assert captured["stream"] is True
+    assert len(captured["instructions"]) >= 12_000
+    assert captured["input"][0]["role"] == "user"
+    assert [tool["name"] for tool in captured["tools"]] == ["Read", "Grep"]
+    assert chunks[:2] == [
+        {"type": "tool_call_start", "tool_name": "Read", "index": 0},
+        {
+            "type": "tool_call",
+            "data": {
+                "id": "call-read-readme",
+                "name": "Read",
+                "arguments": {"file_path": "README.md"},
+                "raw_arguments": '{"file_path":"README.md"}',
+                "parse_error": None,
+            },
+        },
+    ]
+    assert chunks[2]["type"] == "usage"
+    assert chunks[2]["data"]["source"] == "provider_response"
+    assert chunks[2]["data"]["protocol"] == "openai_responses"
     assert chunks[2]["data"]["inputTokens"] == 3_280
     assert chunks[2]["data"]["outputTokens"] == 18
     assert chunks[2]["data"]["totalTokens"] == 3_298

@@ -291,6 +291,7 @@ export interface StoryProjectSettings {
   maxSegmentsPerChapter: number;
   storyFragmentCount: number;
   storyFragmentWordCount: number;
+  storyChapterTemplateId: string;
   autoUpdateVariables: boolean;
   autoUpdateWiki: boolean;
   autoUpdateVariablesNote: string;
@@ -317,6 +318,8 @@ export interface StoryProjectSettingsResponse {
   story_fragment_count?: number | string;
   storyFragmentWordCount?: number | string;
   story_fragment_word_count?: number | string;
+  storyChapterTemplateId?: string;
+  story_chapter_template_id?: string;
   autoUpdateVariables?: boolean | string;
   auto_update_variables?: boolean | string;
   autoUpdateWiki?: boolean | string;
@@ -356,6 +359,8 @@ export interface StoryProjectSettingsUpdateRequest {
   story_fragment_count?: number;
   storyFragmentWordCount?: number;
   story_fragment_word_count?: number;
+  storyChapterTemplateId?: string;
+  story_chapter_template_id?: string;
   autoUpdateVariables?: boolean;
   auto_update_variables?: boolean;
   autoUpdateWiki?: boolean;
@@ -403,6 +408,7 @@ export interface StoryChapterTemplate {
   relativePath: string;
   description: string;
   chapterMode: string;
+  contentMode: "multi_fragment" | "single_file" | string;
   chapterNamePattern: string;
   segmentNaming: string;
 }

@@ -39,6 +39,10 @@ class ProjectService:
         inspection = self.inspect_project(self.workspace_root)
         return Path(inspection["storydexRoot"])
 
+    @property
+    def agent_root(self) -> Path:
+        return self.story_project_service.agent_root(self.workspace_root)
+
     def current_project(self) -> Dict[str, Any]:
         return self.describe_project(self.workspace_root, opened_at=self._opened_at)
 

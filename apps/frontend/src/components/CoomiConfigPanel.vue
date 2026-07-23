@@ -1,7 +1,7 @@
 <template>
   <section
     v-if="visible"
-    class="llm-cfg"
+    class="llm-cfg coomi-config-panel"
     @keydown.ctrl.s.prevent="() => saveConfig()"
     @keydown.meta.s.prevent="() => saveConfig()"
   >
@@ -23,7 +23,7 @@
     <main class="llm-cfg__body">
       <template v-if="hasProviders">
         <!-- 提供方选择 -->
-        <div class="llm-picker">
+        <div class="llm-picker coomi-provider-picker">
           <div class="llm-select-wrap llm-picker__select">
             <select
               class="llm-input"
@@ -62,17 +62,85 @@
           <h3 class="llm-section__title">基础信息</h3>
           <div class="llm-fields">
             <div class="llm-row">
-              <label class="llm-field">
-                <span class="llm-field__label">类型</span>
-                <div class="llm-select-wrap">
-                  <select class="llm-input" v-model="form.type" :disabled="loading || saving" @change="syncProviderFields">
-                    <option value="generic">generic</option>
-                    <option value="openai">openai</option>
-                    <option value="anthropic">anthropic</option>
-                  </select>
-                  <span class="material-symbols-rounded llm-select-caret">expand_more</span>
+              <div class="llm-field">
+                <div class="llm-field__label-row">
+                  <label class="llm-field__label" for="coomi-provider-type">类型</label>
+                  <span
+                    class="llm-field-help"
+                    @mouseenter="providerTypeHelpHovered = true"
+                    @mouseleave="providerTypeHelpHovered = false"
+                  >
+                    <button
+                      class="llm-field-help__trigger"
+                      type="button"
+                      aria-label="查看 Provider 类型说明"
+                      aria-controls="coomi-provider-type-help"
+                      :aria-expanded="providerTypeHelpVisible"
+                      @click.stop="providerTypeHelpPinned = !providerTypeHelpPinned"
+                      @keydown.esc.stop.prevent="providerTypeHelpPinned = false"
+                    >
+                      !
+                    </button>
+                    <span
+                      v-if="providerTypeHelpVisible"
+                      id="coomi-provider-type-help"
+                      class="llm-field-help__tooltip"
+                      role="tooltip"
+                    >
+                      旧 generic/openai/anthropic 配置会在保存时转换为 Coomi 1.2.1 的标准类型。
+                    </span>
+                  </span>
                 </div>
-              </label>
+                <div
+                  class="llm-combobox coomi-provider-type-combobox"
+                  @focusout="handleProviderTypeFocusout"
+                >
+                  <button
+                    id="coomi-provider-type"
+                    class="llm-input llm-combobox__control coomi-provider-type-trigger"
+                    type="button"
+                    role="combobox"
+                    aria-haspopup="listbox"
+                    aria-controls="coomi-provider-type-options"
+                    :aria-expanded="providerTypeDropdownOpen"
+                    :aria-activedescendant="providerTypeActiveDescendant"
+                    :disabled="loading || saving"
+                    @click="toggleProviderTypeDropdown"
+                    @keydown="handleProviderTypeKeydown"
+                  >
+                    <span class="llm-combobox__value">{{ selectedProviderTypeLabel }}</span>
+                    <span
+                      class="material-symbols-rounded llm-combobox__caret"
+                      :class="{ 'is-open': providerTypeDropdownOpen }"
+                    >
+                      expand_more
+                    </span>
+                  </button>
+                  <div
+                    v-if="providerTypeDropdownOpen"
+                    id="coomi-provider-type-options"
+                    class="llm-options-menu llm-options-menu--provider"
+                    role="listbox"
+                    aria-label="Provider 类型"
+                  >
+                    <button
+                      v-for="(option, index) in availableProviderTypeOptions"
+                      :id="providerTypeOptionId(option.value)"
+                      :key="option.value"
+                      class="llm-option llm-provider-type-option"
+                      :class="{ 'is-highlighted': providerTypeHighlightedIndex === index }"
+                      type="button"
+                      role="option"
+                      aria-selected="false"
+                      @mouseenter="providerTypeHighlightedIndex = index"
+                      @mousedown.prevent
+                      @click="selectProviderType(option.value)"
+                    >
+                      {{ option.label }}
+                    </button>
+                  </div>
+                </div>
+              </div>
 
               <label class="llm-field">
                 <span class="llm-field__label">工具协议</span>
@@ -145,7 +213,7 @@
               />
             </label>
 
-            <div class="llm-fetch">
+            <div class="llm-fetch coomi-model-fetch-row">
               <button
                 class="llm-btn llm-btn--ghost"
                 type="button"
@@ -166,38 +234,154 @@
         <section class="llm-section">
           <h3 class="llm-section__title">模型</h3>
           <div class="llm-fields">
-            <label class="llm-field">
-              <span class="llm-field__label">标准模型</span>
-              <input
-                v-model="form.model"
-                class="llm-input"
-                :disabled="loading || saving"
-                list="coomi-standard-model-options"
-                spellcheck="false"
-                placeholder="输入模型名，或从已获取列表中选择"
-                @input="syncProviderFields"
-              />
-              <datalist id="coomi-standard-model-options">
-                <option v-for="model in modelOptions" :key="model" :value="model"></option>
-              </datalist>
-            </label>
+            <div class="llm-field">
+              <label class="llm-field__label" for="coomi-standard-model">标准模型</label>
+              <div
+                class="llm-combobox llm-model-combobox"
+                @focusout="handleModelFocusout($event, 'model')"
+              >
+                <input
+                  id="coomi-standard-model"
+                  v-model="form.model"
+                  class="llm-input coomi-model-input"
+                  :disabled="loading || saving"
+                  spellcheck="false"
+                  placeholder="输入模型名，或从已获取列表中选择"
+                  role="combobox"
+                  aria-autocomplete="list"
+                  aria-haspopup="listbox"
+                  aria-controls="coomi-standard-model-options"
+                  :aria-expanded="activeModelDropdown === 'model'"
+                  :aria-activedescendant="modelActiveDescendant('model')"
+                  @focus="openModelOptions('model')"
+                  @input="handleModelInput('model')"
+                  @keydown="handleModelKeydown($event, 'model')"
+                />
+                <button
+                  v-if="modelOptions.length"
+                  class="llm-model-combobox__toggle"
+                  type="button"
+                  :disabled="loading || saving"
+                  :aria-label="activeModelDropdown === 'model' ? '收起标准模型列表' : '展开标准模型列表'"
+                  :aria-expanded="activeModelDropdown === 'model'"
+                  aria-controls="coomi-standard-model-options"
+                  @mousedown.prevent
+                  @click="toggleModelOptions('model')"
+                >
+                  <span
+                    class="material-symbols-rounded llm-combobox__caret"
+                    :class="{ 'is-open': activeModelDropdown === 'model' }"
+                  >
+                    expand_more
+                  </span>
+                </button>
+                <div
+                  v-if="activeModelDropdown === 'model' && modelOptions.length"
+                  id="coomi-standard-model-options"
+                  class="llm-options-menu llm-options-menu--models coomi-standard-model-options"
+                  role="listbox"
+                  aria-label="标准模型候选"
+                >
+                  <button
+                    v-for="(model, index) in filteredModelOptions('model')"
+                    :id="modelOptionId('model', index)"
+                    :key="model"
+                    class="llm-option llm-model-option"
+                    :class="{
+                      'is-highlighted': modelOptionHighlightedIndex === index,
+                      'is-selected': form.model === model
+                    }"
+                    type="button"
+                    role="option"
+                    :aria-selected="form.model === model"
+                    @mouseenter="modelOptionHighlightedIndex = index"
+                    @mousedown.prevent
+                    @click="selectModelOption('model', model)"
+                  >
+                    <span>{{ model }}</span>
+                    <span v-if="form.model === model" class="material-symbols-rounded">check</span>
+                  </button>
+                  <div v-if="!filteredModelOptions('model').length" class="llm-options-menu__empty">
+                    没有匹配项，可继续使用当前输入的模型名。
+                  </div>
+                </div>
+              </div>
+            </div>
 
-            <label class="llm-field">
-              <span class="llm-field__label">快速模型</span>
-              <input
-                v-model="form.fastModel"
-                class="llm-input"
-                :disabled="loading || saving"
-                list="coomi-fast-model-options"
-                spellcheck="false"
-                placeholder="留空跟随标准模型"
-                @input="syncProviderFields"
-              />
-              <datalist id="coomi-fast-model-options">
-                <option v-for="model in modelOptions" :key="model" :value="model"></option>
-              </datalist>
+            <div class="llm-field">
+              <label class="llm-field__label" for="coomi-fast-model">快速模型</label>
+              <div
+                class="llm-combobox llm-model-combobox"
+                @focusout="handleModelFocusout($event, 'fastModel')"
+              >
+                <input
+                  id="coomi-fast-model"
+                  v-model="form.fastModel"
+                  class="llm-input coomi-fast-model-input"
+                  :disabled="loading || saving"
+                  spellcheck="false"
+                  placeholder="留空跟随标准模型"
+                  role="combobox"
+                  aria-autocomplete="list"
+                  aria-haspopup="listbox"
+                  aria-controls="coomi-fast-model-options"
+                  :aria-expanded="activeModelDropdown === 'fastModel'"
+                  :aria-activedescendant="modelActiveDescendant('fastModel')"
+                  @focus="openModelOptions('fastModel')"
+                  @input="handleModelInput('fastModel')"
+                  @keydown="handleModelKeydown($event, 'fastModel')"
+                />
+                <button
+                  v-if="modelOptions.length"
+                  class="llm-model-combobox__toggle"
+                  type="button"
+                  :disabled="loading || saving"
+                  :aria-label="activeModelDropdown === 'fastModel' ? '收起快速模型列表' : '展开快速模型列表'"
+                  :aria-expanded="activeModelDropdown === 'fastModel'"
+                  aria-controls="coomi-fast-model-options"
+                  @mousedown.prevent
+                  @click="toggleModelOptions('fastModel')"
+                >
+                  <span
+                    class="material-symbols-rounded llm-combobox__caret"
+                    :class="{ 'is-open': activeModelDropdown === 'fastModel' }"
+                  >
+                    expand_more
+                  </span>
+                </button>
+                <div
+                  v-if="activeModelDropdown === 'fastModel' && modelOptions.length"
+                  id="coomi-fast-model-options"
+                  class="llm-options-menu llm-options-menu--models coomi-fast-model-options"
+                  role="listbox"
+                  aria-label="快速模型候选"
+                >
+                  <button
+                    v-for="(model, index) in filteredModelOptions('fastModel')"
+                    :id="modelOptionId('fastModel', index)"
+                    :key="model"
+                    class="llm-option llm-model-option"
+                    :class="{
+                      'is-highlighted': modelOptionHighlightedIndex === index,
+                      'is-selected': form.fastModel === model
+                    }"
+                    type="button"
+                    role="option"
+                    :aria-selected="form.fastModel === model"
+                    @mouseenter="modelOptionHighlightedIndex = index"
+                    @mousedown.prevent
+                    @click="selectModelOption('fastModel', model)"
+                  >
+                    <span>{{ model }}</span>
+                    <span v-if="form.fastModel === model" class="material-symbols-rounded">check</span>
+                  </button>
+                  <div v-if="!filteredModelOptions('fastModel').length" class="llm-options-menu__empty">
+                    没有匹配项，可继续使用当前输入的模型名。
+                  </div>
+                </div>
+              </div>
               <span class="llm-field__hint">用于摘要、命名等轻量任务，留空则复用标准模型。</span>
-            </label>
+            </div>
 
             <label class="llm-field">
               <span class="llm-field__label">上下文窗口（tokens）</span>
@@ -226,7 +410,7 @@
       </section>
     </main>
 
-    <footer class="llm-cfg__footer">
+    <footer class="llm-cfg__footer coomi-config-footer">
       <div class="llm-cfg__path" :title="configPath">
         <span class="material-symbols-rounded">description</span>
         <code>{{ configPath }}</code>
@@ -238,7 +422,7 @@
         </span>
         <div class="llm-cfg__actions">
           <button
-            class="llm-btn llm-btn--ghost"
+            class="llm-btn llm-btn--ghost coomi-config-action"
             type="button"
             title="只写入配置文件，不切换当前使用的提供方"
             :disabled="loading || saving"
@@ -248,7 +432,7 @@
             <span>保存</span>
           </button>
           <button
-            class="llm-btn llm-btn--primary"
+            class="llm-btn llm-btn--primary coomi-config-action"
             type="button"
             title="保存配置，并切换为当前正在编辑的提供方"
             :disabled="loading || saving"
@@ -264,12 +448,18 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { fetchAgentCoomiConfig, fetchAgentCoomiModels, updateAgentCoomiConfig } from "@/api/agent";
 import { useAgentStore } from "@/stores/agent";
 
-type ProviderType = "generic" | "openai" | "anthropic";
+type ProviderType = "openai_compatible" | "openai_responses" | "anthropic_messages";
 type ToolProtocol = "auto" | "native" | "structured" | "mimo" | "disabled";
+type ModelField = "model" | "fastModel";
+
+interface ProviderTypeOption {
+  value: ProviderType;
+  label: string;
+}
 
 interface ProviderForm {
   id: string;
@@ -290,6 +480,12 @@ interface ProviderOption {
   isActive: boolean;
 }
 
+const providerTypeOptions: ProviderTypeOption[] = [
+  { value: "openai_compatible", label: "OpenAI Compatible" },
+  { value: "openai_responses", label: "OpenAI Responses" },
+  { value: "anthropic_messages", label: "Anthropic Messages" }
+];
+
 const props = defineProps<{ visible: boolean }>();
 const emit = defineEmits<{
   close: [];
@@ -309,6 +505,13 @@ const configData = ref<Record<string, unknown>>(emptyConfig());
 const selectedProviderId = ref("");
 const formProviderId = ref("");
 const dirty = ref(false);
+const providerTypeHelpPinned = ref(false);
+const providerTypeHelpHovered = ref(false);
+const providerTypeDropdownOpen = ref(false);
+const providerTypeHighlightedIndex = ref(0);
+const activeModelDropdown = ref<ModelField | null>(null);
+const modelOptionHighlightedIndex = ref(-1);
+const modelFilterText = ref("");
 const form = reactive<ProviderForm>(emptyForm());
 
 const activeProviderId = computed(() => asString(configData.value.active) || "");
@@ -329,6 +532,20 @@ const providerOptions = computed<ProviderOption[]>(() => {
 });
 
 const hasProviders = computed(() => providerOptions.value.length > 0);
+const providerTypeHelpVisible = computed(() => providerTypeHelpPinned.value || providerTypeHelpHovered.value);
+const selectedProviderTypeLabel = computed(
+  () => providerTypeOptions.find((option) => option.value === form.type)?.label || "OpenAI Compatible"
+);
+const availableProviderTypeOptions = computed(() =>
+  providerTypeOptions.filter((option) => option.value !== form.type)
+);
+const providerTypeActiveDescendant = computed(() => {
+  if (!providerTypeDropdownOpen.value) {
+    return undefined;
+  }
+  const option = availableProviderTypeOptions.value[providerTypeHighlightedIndex.value];
+  return option ? providerTypeOptionId(option.value) : undefined;
+});
 
 const modelFetchDisabled = computed(
   () => loading.value || saving.value || fetchingModels.value || !form.baseUrl.trim() || !form.apiKey.trim()
@@ -346,10 +563,31 @@ watch(
   (visible) => {
     if (visible) {
       void loadConfig();
+      return;
     }
+    providerTypeHelpPinned.value = false;
+    providerTypeHelpHovered.value = false;
+    closeProviderTypeDropdown();
+    closeModelOptions();
   },
   { immediate: true }
 );
+
+onMounted(() => document.addEventListener("pointerdown", handleDocumentPointerDown));
+onBeforeUnmount(() => document.removeEventListener("pointerdown", handleDocumentPointerDown));
+
+function handleDocumentPointerDown(event: PointerEvent): void {
+  const target = event.target;
+  if (!(target instanceof Element)) {
+    return;
+  }
+  if (!target.closest(".coomi-provider-type-combobox")) {
+    closeProviderTypeDropdown();
+  }
+  if (!target.closest(".llm-model-combobox")) {
+    closeModelOptions();
+  }
+}
 
 async function loadConfig(): Promise<void> {
   if (!props.visible) {
@@ -426,11 +664,108 @@ function handleProviderSelect(event: Event): void {
   }
 }
 
+function providerTypeOptionId(value: ProviderType): string {
+  return `coomi-provider-type-option-${value}`;
+}
+
+function openProviderTypeDropdown(): void {
+  if (loading.value || saving.value || !availableProviderTypeOptions.value.length) {
+    return;
+  }
+  closeModelOptions();
+  providerTypeHighlightedIndex.value = 0;
+  providerTypeDropdownOpen.value = true;
+}
+
+function closeProviderTypeDropdown(): void {
+  providerTypeDropdownOpen.value = false;
+  providerTypeHighlightedIndex.value = 0;
+}
+
+function toggleProviderTypeDropdown(): void {
+  if (providerTypeDropdownOpen.value) {
+    closeProviderTypeDropdown();
+    return;
+  }
+  openProviderTypeDropdown();
+}
+
+function selectProviderType(value: ProviderType): void {
+  if (value === form.type) {
+    closeProviderTypeDropdown();
+    return;
+  }
+  form.type = value;
+  syncProviderFields();
+  closeProviderTypeDropdown();
+}
+
+function handleProviderTypeKeydown(event: KeyboardEvent): void {
+  const options = availableProviderTypeOptions.value;
+  if (event.key === "Escape") {
+    if (providerTypeDropdownOpen.value) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeProviderTypeDropdown();
+    }
+    return;
+  }
+  if (event.key === "Tab") {
+    closeProviderTypeDropdown();
+    return;
+  }
+  if (!options.length) {
+    return;
+  }
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    if (!providerTypeDropdownOpen.value) {
+      openProviderTypeDropdown();
+      providerTypeHighlightedIndex.value = event.key === "ArrowUp" ? options.length - 1 : 0;
+      return;
+    }
+    const delta = event.key === "ArrowDown" ? 1 : -1;
+    providerTypeHighlightedIndex.value =
+      (providerTypeHighlightedIndex.value + delta + options.length) % options.length;
+    return;
+  }
+  if (event.key === "Home" || event.key === "End") {
+    if (!providerTypeDropdownOpen.value) {
+      return;
+    }
+    event.preventDefault();
+    providerTypeHighlightedIndex.value = event.key === "Home" ? 0 : options.length - 1;
+    return;
+  }
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    if (!providerTypeDropdownOpen.value) {
+      openProviderTypeDropdown();
+      return;
+    }
+    const option = options[providerTypeHighlightedIndex.value];
+    if (option) {
+      selectProviderType(option.value);
+    }
+  }
+}
+
+function handleProviderTypeFocusout(event: FocusEvent): void {
+  const container = event.currentTarget;
+  const nextTarget = event.relatedTarget;
+  if (
+    container instanceof HTMLElement &&
+    (!(nextTarget instanceof HTMLElement) || !container.contains(nextTarget))
+  ) {
+    closeProviderTypeDropdown();
+  }
+}
+
 function createProvider(): void {
   const providers = getProviders();
   const id = nextProviderId(providers);
   providers[id] = {
-    type: "generic",
+    type: "openai_compatible",
     display: "",
     api_key: "",
     base_url: "",
@@ -478,6 +813,158 @@ function handleProviderConnectionInput(): void {
   syncProviderFields();
 }
 
+function filteredModelOptions(field: ModelField): string[] {
+  const query = activeModelDropdown.value === field ? modelFilterText.value.trim().toLowerCase() : "";
+  if (!query) {
+    return modelOptions.value;
+  }
+  return modelOptions.value.filter((model) => model.toLowerCase().includes(query));
+}
+
+function modelOptionId(field: ModelField, index: number): string {
+  return `coomi-${field === "model" ? "standard" : "fast"}-model-option-${index}`;
+}
+
+function modelActiveDescendant(field: ModelField): string | undefined {
+  if (activeModelDropdown.value !== field || modelOptionHighlightedIndex.value < 0) {
+    return undefined;
+  }
+  const options = filteredModelOptions(field);
+  return options[modelOptionHighlightedIndex.value]
+    ? modelOptionId(field, modelOptionHighlightedIndex.value)
+    : undefined;
+}
+
+function openModelOptions(field: ModelField): void {
+  if (loading.value || saving.value || !modelOptions.value.length) {
+    return;
+  }
+  closeProviderTypeDropdown();
+  activeModelDropdown.value = field;
+  modelFilterText.value = "";
+  const options = filteredModelOptions(field);
+  const selectedIndex = options.indexOf(form[field]);
+  modelOptionHighlightedIndex.value = selectedIndex >= 0 ? selectedIndex : options.length ? 0 : -1;
+  ensureHighlightedModelVisible(field);
+}
+
+function closeModelOptions(field?: ModelField): void {
+  if (field && activeModelDropdown.value !== field) {
+    return;
+  }
+  activeModelDropdown.value = null;
+  modelOptionHighlightedIndex.value = -1;
+  modelFilterText.value = "";
+}
+
+function toggleModelOptions(field: ModelField): void {
+  if (activeModelDropdown.value === field) {
+    closeModelOptions(field);
+    return;
+  }
+  openModelOptions(field);
+}
+
+function handleModelInput(field: ModelField): void {
+  syncProviderFields();
+  if (!modelOptions.value.length) {
+    closeModelOptions();
+    return;
+  }
+  closeProviderTypeDropdown();
+  activeModelDropdown.value = field;
+  modelFilterText.value = form[field];
+  modelOptionHighlightedIndex.value = filteredModelOptions(field).length ? 0 : -1;
+  ensureHighlightedModelVisible(field);
+}
+
+function selectModelOption(field: ModelField, model: string): void {
+  form[field] = model;
+  syncProviderFields();
+  closeModelOptions(field);
+}
+
+function handleModelKeydown(event: KeyboardEvent, field: ModelField): void {
+  if (event.key === "Escape") {
+    if (activeModelDropdown.value === field) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeModelOptions(field);
+    }
+    return;
+  }
+  if (event.key === "Tab") {
+    closeModelOptions(field);
+    return;
+  }
+  if (!modelOptions.value.length) {
+    return;
+  }
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    if (activeModelDropdown.value !== field) {
+      openModelOptions(field);
+      const initialOptions = filteredModelOptions(field);
+      if (event.key === "ArrowUp" && initialOptions.length) {
+        modelOptionHighlightedIndex.value = initialOptions.length - 1;
+      }
+      ensureHighlightedModelVisible(field);
+      return;
+    }
+    const options = filteredModelOptions(field);
+    if (!options.length) {
+      return;
+    }
+    const delta = event.key === "ArrowDown" ? 1 : -1;
+    const currentIndex = modelOptionHighlightedIndex.value < 0 ? 0 : modelOptionHighlightedIndex.value;
+    modelOptionHighlightedIndex.value = (currentIndex + delta + options.length) % options.length;
+    ensureHighlightedModelVisible(field);
+    return;
+  }
+  if (event.key === "Home" || event.key === "End") {
+    if (activeModelDropdown.value !== field) {
+      return;
+    }
+    const options = filteredModelOptions(field);
+    if (!options.length) {
+      return;
+    }
+    event.preventDefault();
+    modelOptionHighlightedIndex.value = event.key === "Home" ? 0 : options.length - 1;
+    ensureHighlightedModelVisible(field);
+    return;
+  }
+  if (event.key === "Enter" && activeModelDropdown.value === field) {
+    const options = filteredModelOptions(field);
+    const option = options[modelOptionHighlightedIndex.value];
+    if (option) {
+      event.preventDefault();
+      selectModelOption(field, option);
+    }
+  }
+}
+
+function handleModelFocusout(event: FocusEvent, field: ModelField): void {
+  const container = event.currentTarget;
+  const nextTarget = event.relatedTarget;
+  if (
+    container instanceof HTMLElement &&
+    (!(nextTarget instanceof HTMLElement) || !container.contains(nextTarget))
+  ) {
+    closeModelOptions(field);
+  }
+}
+
+function ensureHighlightedModelVisible(field: ModelField): void {
+  void nextTick(() => {
+    const activeId = modelActiveDescendant(field);
+    if (!activeId) {
+      return;
+    }
+    document.getElementById(activeId)?.scrollIntoView?.({ block: "nearest" });
+  });
+}
+
 async function fetchModels(): Promise<void> {
   const baseUrl = form.baseUrl.trim();
   const apiKey = form.apiKey.trim();
@@ -496,7 +983,8 @@ async function fetchModels(): Promise<void> {
       modelFetchMessage.value = "未获取到模型列表，可继续保留当前模型。";
       return;
     }
-    modelFetchMessage.value = `已获取 ${modelOptions.value.length} 个模型，可从输入建议中选择。`;
+    modelFetchMessage.value = `已获取 ${modelOptions.value.length} 个模型，可从下拉列表中选择。`;
+    openModelOptions("model");
   } catch (error: unknown) {
     modelFetchMessage.value = error instanceof Error ? error.message : "获取模型失败。";
   } finally {
@@ -519,6 +1007,7 @@ function normalizeModelOptions(values: string[]): string[] {
 }
 
 function resetModelOptions(): void {
+  closeModelOptions();
   modelOptions.value = [];
   modelFetchMessage.value = "";
 }
@@ -643,8 +1132,16 @@ function normalizeConfig(content: string): Record<string, unknown> {
     if (!parsed) {
       return emptyConfig();
     }
-    if (!asRecord(parsed.providers)) {
+    const providers = asRecord(parsed.providers);
+    if (!providers) {
       parsed.providers = {};
+    } else {
+      for (const value of Object.values(providers)) {
+        const provider = asRecord(value);
+        if (provider) {
+          provider.type = normalizeProviderType(provider.type);
+        }
+      }
     }
     if (typeof parsed.version !== "number") {
       parsed.version = 1;
@@ -665,7 +1162,7 @@ function emptyConfig(): Record<string, unknown> {
 function emptyForm(): ProviderForm {
   return {
     id: "",
-    type: "generic",
+    type: "openai_compatible",
     toolProtocol: "auto",
     display: "",
     apiKey: "",
@@ -691,11 +1188,14 @@ function normalizeProviderId(value: string): string {
 }
 
 function normalizeProviderType(value: unknown): ProviderType {
-  const normalized = String(value || "generic").trim().toLowerCase();
-  if (normalized === "openai" || normalized === "anthropic") {
-    return normalized;
+  const normalized = String(value || "openai_compatible").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (["openai", "responses", "response", "openai_response", "openai_responses"].includes(normalized)) {
+    return "openai_responses";
   }
-  return "generic";
+  if (["anthropic", "anthropic_message", "anthropic_messages", "messages"].includes(normalized)) {
+    return "anthropic_messages";
+  }
+  return "openai_compatible";
 }
 
 function normalizeToolProtocol(value: unknown): ToolProtocol {
@@ -876,6 +1376,63 @@ function formatDate(value: string): string {
   line-height: 1.3;
 }
 
+.llm-field__label-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 16px;
+}
+
+.llm-field-help {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.llm-field-help__trigger {
+  width: 13px;
+  height: 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--text-muted) 76%, transparent);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: help;
+}
+
+.llm-field-help__trigger:hover,
+.llm-field-help__trigger:focus-visible,
+.llm-field-help__trigger[aria-expanded="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+  outline: none;
+}
+
+.llm-field-help__tooltip {
+  position: absolute;
+  top: calc(100% + 7px);
+  left: -28px;
+  z-index: 30;
+  width: min(276px, calc(100vw - 48px));
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  box-shadow: 0 8px 24px color-mix(in srgb, #000 16%, transparent);
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.5;
+  white-space: normal;
+}
+
 .llm-field__hint {
   color: var(--text-faint);
   font-size: 11px;
@@ -937,6 +1494,169 @@ function formatDate(value: string): string {
   pointer-events: none;
   font-size: 18px;
   color: var(--text-muted);
+}
+
+/* ── 可控下拉列表 ─────────────────────── */
+.llm-combobox {
+  position: relative;
+  min-width: 0;
+}
+
+.llm-combobox__control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-right: 7px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.llm-combobox__value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llm-combobox__caret {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-size: 18px;
+  transition: transform 120ms ease;
+}
+
+.llm-combobox__caret.is-open {
+  transform: rotate(180deg);
+}
+
+.llm-options-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  left: 0;
+  z-index: 50;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  box-shadow: 0 10px 28px color-mix(in srgb, #000 18%, transparent);
+}
+
+.llm-option {
+  width: 100%;
+  min-height: 31px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: max(2px, calc(var(--radius-sm) - 2px));
+  background: transparent;
+  color: var(--text-main);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: left;
+  cursor: pointer;
+}
+
+.llm-option:hover,
+.llm-option.is-highlighted {
+  background: var(--bg-hover);
+}
+
+.llm-provider-type-option {
+  white-space: nowrap;
+}
+
+.llm-model-combobox .llm-input {
+  padding-right: 34px;
+}
+
+.llm-model-combobox__toggle {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 0 calc(var(--radius-sm) - 1px) calc(var(--radius-sm) - 1px) 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.llm-model-combobox__toggle:hover:not(:disabled),
+.llm-model-combobox__toggle:focus-visible {
+  background: var(--bg-hover);
+  color: var(--text-main);
+  outline: none;
+}
+
+.llm-model-combobox__toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.llm-options-menu--models {
+  max-height: min(232px, calc(100vh - 160px));
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: color-mix(in srgb, var(--text-muted) 48%, transparent) transparent;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+
+.llm-options-menu--models::-webkit-scrollbar {
+  width: 8px;
+}
+
+.llm-options-menu--models::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.llm-options-menu--models::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-muted) 48%, transparent);
+  background-clip: padding-box;
+}
+
+.llm-options-menu--models::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--text-muted) 70%, transparent);
+  background-clip: padding-box;
+}
+
+.llm-model-option > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 550;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llm-model-option > .material-symbols-rounded {
+  flex-shrink: 0;
+  color: var(--accent);
+  font-size: 15px;
+}
+
+.llm-model-option.is-selected {
+  color: var(--accent-strong);
+}
+
+.llm-options-menu__empty {
+  padding: 10px 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 /* ── 获取模型行 ───────────────────────── */

@@ -104,6 +104,7 @@ import { isThemeCode } from "@/constants/themes";
 import { useTheme } from "@/composables/useTheme";
 import { readCachedThemeCode, writeCachedThemeCode } from "@/utils/appearance";
 import { createMarkdownRenderer } from "@/utils/markdown";
+import { legacyFileFontSizeToPaneScale } from "@/utils/paneFontScale";
 import {
   findMarkdownLinkAnchor,
   isExternalMarkdownHref,
@@ -136,7 +137,7 @@ interface PreviewTab {
 const markdown = createMarkdownRenderer();
 
 const route = useRoute();
-const { applyTheme, applyTypography } = useTheme();
+const { applyTheme, applyPaneFontScale } = useTheme();
 
 const tabs = ref<PreviewTab[]>([]);
 const activeRelativePath = ref("");
@@ -220,10 +221,9 @@ async function applyPersistedAppearance(): Promise<void> {
   try {
     const result = await fetchUiPreferences();
     const theme = result.data.theme;
-    applyTypography({
-      fileFontSize: result.data.fileFontSize,
-      playerFontSize: result.data.playerFontSize
-    });
+    applyPaneFontScale(
+      result.data.centerPaneFontScale ?? legacyFileFontSizeToPaneScale(result.data.fileFontSize)
+    );
     if (isThemeCode(theme)) {
       applyTheme(theme);
       writeCachedThemeCode(theme);
@@ -233,7 +233,7 @@ async function applyPersistedAppearance(): Promise<void> {
     // Ignore appearance bootstrap errors for preview windows.
   }
   applyTheme(cachedTheme || "default");
-  applyTypography({});
+  applyPaneFontScale();
 }
 
 function handleWindowFocus(): void {
@@ -803,14 +803,14 @@ defineExpose({
   background: transparent;
   color: var(--text-main);
   font-family: var(--font-prose);
-  font-size: var(--ui-file-font-size);
+  font-size: 16px;
   line-height: 1.9;
 }
 
 .preview-window-markdown {
   max-width: 1120px;
   color: var(--text-main);
-  font-size: var(--ui-file-font-size);
+  font-size: 16px;
 }
 
 .preview-window-code {
@@ -820,7 +820,7 @@ defineExpose({
   color: var(--text-main);
   white-space: pre-wrap;
   word-break: break-word;
-  font-size: var(--ui-file-font-size);
+  font-size: 16px;
   line-height: 1.75;
 }
 

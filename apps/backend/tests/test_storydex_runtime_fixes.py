@@ -841,7 +841,7 @@ def test_coomi_runtime_permissions_and_cancellation_are_workspace_isolated(monke
     monkeypatch.setattr(
         coomi_agent_service,
         "_create_storydex_tool_registry",
-        lambda workspace_root, _policy=None: FakeRegistry(workspace_root),
+            lambda workspace_root, _policy=None, _turn_contract=None: FakeRegistry(workspace_root),
     )
     monkeypatch.setattr(coomi_agent_service, "_restore_bound_coomi_session", lambda **_kwargs: None)
     monkeypatch.setattr(

@@ -45,7 +45,7 @@ _COOMI_SESSION_PATH_RE = re.compile(
     r"(?i)([\\/]\.coomi[\\/]sessions[\\/])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 )
 _STORYDEX_RUNTIME_LOG_PATH_RE = re.compile(
-    r"(?i)((?:[\\/]|(?<![A-Za-z0-9_.-]))\.storydex[\\/]logs[\\/])"
+    r"(?i)((?:[\\/]|(?<![A-Za-z0-9_.-]))\.storydex[\\/](?:\.agent[\\/])?logs[\\/])"
     r"\d{4}-\d{4}-\d{2}-\d{2}-\d{2}\.jsonl"
 )
 _STORYDEX_AGENT_SESSION_PATH_RE = re.compile(
@@ -110,6 +110,21 @@ def reset_llm_metrics(trace_id: str | None = None) -> None:
             _COUNTERS.clear()
         else:
             _COUNTERS.pop(str(trace_id or "default"), None)
+
+
+def normalize_llm_usage(
+    value: Any,
+    *,
+    source: str = "",
+    protocol: str = "unknown",
+) -> dict[str, Any] | None:
+    """Return Storydex's versioned usage payload independent of Coomi exports."""
+
+    return _normalize_usage_snapshot(
+        value,
+        default_source=source,
+        default_protocol=protocol,
+    )
 
 
 def reset_llm_fixture_state(fixture_dir: str | Path | None = None) -> None:
@@ -383,9 +398,39 @@ def _apply_storydex_openai_user_agent(provider: Any) -> Any:
     return provider
 
 
+def _provider_usage_protocol(provider: Any) -> str:
+    """Map Coomi 1.2.x provider modes to Storydex's canonical usage protocol."""
+
+    config = getattr(provider, "config", None)
+    raw_type = str(getattr(config, "type", "") or "").strip().lower()
+    normalized = raw_type.replace("-", "_").replace(" ", "_")
+    if normalized in {"openai", "responses", "response", "openai_response", "openai_responses"}:
+        return "openai_responses"
+    if normalized in {"anthropic", "anthropic_message", "anthropic_messages", "messages"}:
+        return "anthropic_messages"
+    if normalized in {
+        "generic",
+        "deepseek",
+        "openai_compatible",
+        "openai_compat",
+        "chat_completions",
+    }:
+        return "openai_chat"
+
+    class_name = type(provider).__name__.lower()
+    if "responses" in class_name:
+        return "openai_responses"
+    if "anthropic" in class_name:
+        return "anthropic_messages"
+    if "openai" in class_name or "deepseek" in class_name:
+        return "openai_chat"
+    return "unknown"
+
+
 class ReplayableLLMProvider:
     def __init__(self, provider: Any) -> None:
         object.__setattr__(self, "_provider", provider)
+        object.__setattr__(self, "_usage_protocol", _provider_usage_protocol(provider))
         mode = str(os.getenv(_MODE_ENV, "off") or "off").strip().lower()
         if mode not in {"off", "record", "replay"}:
             raise ReplayError(f"Unsupported {_MODE_ENV} value: {mode!r}")
@@ -423,6 +468,7 @@ class ReplayableLLMProvider:
                 _usage_from_chat_response(
                     response,
                     requested_model=str(request.get("model") or ""),
+                    default_protocol=self._usage_protocol,
                 ),
             )
         else:
@@ -442,6 +488,7 @@ class ReplayableLLMProvider:
                 _usage_from_chat_response(
                     response,
                     requested_model=str(request.get("model") or ""),
+                    default_protocol=self._usage_protocol,
                 ),
             )
             if self._mode == "record":
@@ -495,10 +542,16 @@ class ReplayableLLMProvider:
         if self._mode == "replay":
             record = self._next_record(request)
             values = [_sanitize(chunk) for chunk in record.get("response") or []]
-            normalized = _collapse_stream_usage(values)
+            normalized = _collapse_stream_usage(
+                values,
+                default_protocol=self._usage_protocol,
+            )
             usage_seen = False
             for value in normalized:
-                usage = _usage_from_stream_chunk(value)
+                usage = _usage_from_stream_chunk(
+                    value,
+                    default_protocol=self._usage_protocol,
+                )
                 if usage is None:
                     yield value
                     continue
@@ -522,7 +575,10 @@ class ReplayableLLMProvider:
                 recorder=lambda **details: self._record_provider_attempt(call_ref, **details),
             ):
                 value = _sanitize(chunk)
-                usage = _usage_from_stream_chunk(value)
+                usage = _usage_from_stream_chunk(
+                    value,
+                    default_protocol=self._usage_protocol,
+                )
                 if usage is not None:
                     latest_usage = _prefer_usage_snapshot(latest_usage, usage)
                     usage_snapshot_count += _usage_snapshot_increment(usage)
@@ -1198,9 +1254,14 @@ def _usage_from_chat_response(
     response: Any,
     *,
     requested_model: str = "",
+    default_protocol: str = "unknown",
 ) -> dict[str, Any]:
     usage = getattr(response, "usage", None)
-    normalized = _normalize_usage_snapshot(usage)
+    normalized = _normalize_usage_snapshot(
+        usage,
+        default_source=("provider_response" if default_protocol != "unknown" else ""),
+        default_protocol=default_protocol,
+    )
     if normalized is None:
         return _missing_usage(requested_model=requested_model)
     if not str(normalized.get("requestedModel") or ""):
@@ -1208,31 +1269,31 @@ def _usage_from_chat_response(
     return normalized
 
 
-def _usage_from_stream_chunk(chunk: Any) -> dict[str, Any] | None:
+def _usage_from_stream_chunk(
+    chunk: Any,
+    *,
+    default_protocol: str = "unknown",
+) -> dict[str, Any] | None:
     if not isinstance(chunk, dict) or chunk.get("type") != "usage":
         return None
     usage = chunk.get("data")
-    return _normalize_usage_snapshot(usage)
+    return _normalize_usage_snapshot(
+        usage,
+        default_source=("provider_response" if default_protocol != "unknown" else ""),
+        default_protocol=default_protocol,
+    )
 
 
-def _normalize_usage_snapshot(value: Any) -> dict[str, Any] | None:
+def _normalize_usage_snapshot(
+    value: Any,
+    *,
+    default_source: str = "",
+    default_protocol: str = "unknown",
+) -> dict[str, Any] | None:
     payload = _sanitize(value)
     if not isinstance(payload, dict):
         return None
 
-    raw_source = str(payload.get("source") or "legacy_unknown").strip().lower()
-    source = (
-        raw_source
-        if raw_source
-        in {"provider_response", "provider_query", "missing", "legacy_unknown"}
-        else "legacy_unknown"
-    )
-    raw_protocol = str(payload.get("protocol") or "unknown").strip().lower()
-    protocol = (
-        raw_protocol
-        if raw_protocol in {"openai_chat", "anthropic_messages", "unknown"}
-        else "unknown"
-    )
     input_tokens = _usage_int(
         payload,
         "inputTokens",
@@ -1259,6 +1320,33 @@ def _normalize_usage_snapshot(value: Any) -> dict[str, Any] | None:
         "cache_creation_input_tokens",
     )
     reasoning_tokens = _usage_int(payload, "reasoningTokens", "reasoning_tokens")
+    raw_source = str(payload.get("source") or "").strip().lower()
+    normalized_default_source = str(default_source or "").strip().lower()
+    valid_sources = {"provider_response", "provider_query", "missing", "legacy_unknown"}
+    if raw_source in valid_sources:
+        source = raw_source
+    elif normalized_default_source == "missing":
+        source = "missing"
+    elif normalized_default_source in valid_sources and any(
+        value is not None
+        for value in (
+            input_tokens,
+            output_tokens,
+            total_tokens,
+            cache_read_input_tokens,
+            cache_creation_input_tokens,
+            reasoning_tokens,
+        )
+    ):
+        source = normalized_default_source
+    else:
+        source = "legacy_unknown"
+    raw_protocol = str(payload.get("protocol") or default_protocol or "unknown").strip().lower()
+    protocol = (
+        raw_protocol
+        if raw_protocol in {"openai_chat", "openai_responses", "anthropic_messages", "unknown"}
+        else "unknown"
+    )
     total_derived = bool(payload.get("totalDerived") or payload.get("total_derived"))
     if source == "missing":
         input_tokens = None
@@ -1389,12 +1477,19 @@ def _usage_snapshot_increment(usage: dict[str, Any]) -> int:
     return 0 if str(usage.get("source") or "") == "missing" else 1
 
 
-def _collapse_stream_usage(chunks: list[Any]) -> list[Any]:
+def _collapse_stream_usage(
+    chunks: list[Any],
+    *,
+    default_protocol: str = "unknown",
+) -> list[Any]:
     normalized: list[Any] = []
     latest_usage: dict[str, Any] | None = None
     usage_snapshot_count = 0
     for chunk in chunks:
-        usage = _usage_from_stream_chunk(chunk)
+        usage = _usage_from_stream_chunk(
+            chunk,
+            default_protocol=default_protocol,
+        )
         if usage is not None:
             latest_usage = _prefer_usage_snapshot(latest_usage, usage)
             usage_snapshot_count += _usage_snapshot_increment(usage)

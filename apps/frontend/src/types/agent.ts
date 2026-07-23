@@ -6,6 +6,9 @@ export interface AgentChatRequest {
   workspaceRoot?: string;
   storyGeneration?: AgentStoryGenerationOptions;
   confirmNoSnapshot?: boolean;
+  replaceLatestTraceId?: string;
+  sourceFollowupMessageId?: string;
+  sourceFollowupExpectedTraceId?: string;
 }
 
 export interface AgentPendingSnapshotConfirmation {
@@ -51,6 +54,41 @@ export interface AgentExecutionRollbackResponse {
   sessionId: string;
   removedTraceId: string;
   prompt: string;
+}
+
+export type AgentFollowupMode = "queued" | "steer";
+export type AgentFollowupStatus = "pending" | "steering" | "dispatching" | "sent" | "cancelled" | "failed";
+
+export interface AgentFollowupMessage {
+  messageId: string;
+  sessionId: string;
+  activeTraceId: string;
+  expectedTraceId?: string;
+  content: string;
+  mode: AgentFollowupMode;
+  status: AgentFollowupStatus;
+  statusDetail?: string;
+  createdAt: string;
+  updatedAt: string;
+  sequence?: number;
+  dispatchTraceId?: string;
+  segmentId?: string;
+  error?: string;
+}
+
+export interface AgentFollowupMailboxResponse {
+  _type: "FollowupMailbox" | string;
+  _version: number;
+  revision: number;
+  workspaceRoot: string;
+  sessionId: string;
+  activeTraceId: string;
+  paused: boolean;
+  pauseReason: string;
+  messages: AgentFollowupMessage[];
+  events?: Record<string, unknown>[];
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface AgentSessionSummary {
@@ -118,6 +156,7 @@ export type AgentStreamPacketType =
   | "TextChunk"
   | "TextReset"
   | "ReasoningChunk"
+  | "ConnectionRetry"
   | "ToolStart"
   | "ToolRunning"
   | "ToolDone"
@@ -135,12 +174,18 @@ export type AgentStreamPacketType =
   | "TaskSkipped"
   | "TaskPlanUpdated"
   | "TurnContract"
+  | "StoryGenerationValidation"
   | "TurnPhase"
   | "StageOutput"
   | "AgentStarted"
   | "AgentCompleted"
   | "AgentError"
-  | "AgentCancelled";
+  | "AgentCancelled"
+  | "FollowupQueued"
+  | "FollowupUpdated"
+  | "SteerRequested"
+  | "SteerApplied"
+  | "ContinuationStarted";
 
 export interface AgentStreamPacket {
   type: AgentStreamPacketType | string;
@@ -220,6 +265,19 @@ export interface AgentStreamPacket {
   updatedAt?: string;
   session_id?: string;
   sessionId?: string;
+  messageId?: string;
+  activeTraceId?: string;
+  expectedTraceId?: string;
+  previousTraceId?: string;
+  segmentId?: string;
+  previousSegmentId?: string;
+  continuationMode?: AgentFollowupMode | string;
+  statusDetail?: string;
+  attempt?: number;
+  max_attempts?: number;
+  maxAttempts?: number;
+  delay?: number;
+  delaySeconds?: number;
   mode?: string;
   query?: string;
   error_type?: string;
@@ -245,6 +303,19 @@ export interface AgentStreamPacket {
   intentFrame?: Record<string, unknown>;
   executionPolicy?: Record<string, unknown>;
   turnPlan?: Record<string, unknown>;
+  passed?: boolean;
+  algorithm?: string;
+  exact?: boolean;
+  countingRule?: string;
+  fragmentCount?: number;
+  targetWordCount?: number;
+  chapterContentMode?: string;
+  structurePassed?: boolean;
+  writeToolApplied?: boolean;
+  correctionAttempt?: number;
+  maximumCorrectionAttempts?: number;
+  fragments?: Record<string, unknown>[];
+  validation?: Record<string, unknown>;
   assetTargets?: Record<string, unknown>;
   contextPolicy?: Record<string, unknown>;
   skillRegistry?: Record<string, unknown>;
@@ -307,7 +378,8 @@ export type AgentRunStatus =
   | "discarded"
   | "failed"
   | "cancelled"
-  | "stopped";
+  | "stopped"
+  | "superseded";
 export type AgentTaskStatus = "pending" | "running" | "completed" | "failed" | "skipped";
 
 export interface AgentTaskItem {

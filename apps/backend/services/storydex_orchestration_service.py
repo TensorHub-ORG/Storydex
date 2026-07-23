@@ -9,10 +9,12 @@ from services.context_policy import ContextPolicy
 from services.global_config_service import GlobalConfigService, get_global_config_service
 from services.storydex_context_assembler_service import StorydexContextAssemblerService, get_storydex_context_assembler_service
 from services.storydex_intent_service import heuristic_intent_frame, is_valid_intent_frame
-from services.story_project_service import StoryProjectService, get_story_project_service
-
-
-DEFAULT_CHAPTER_TEMPLATE_ID = "default_chapter_directory"
+from services.story_project_service import (
+    DEFAULT_CHAPTER_TEMPLATE_ID,
+    SINGLE_FILE_CONTENT_MODE,
+    StoryProjectService,
+    get_story_project_service,
+)
 
 
 @dataclass(frozen=True)
@@ -44,7 +46,9 @@ class StorydexOrchestrationService:
             intent_frame=intent_frame,
         )
         chapter_templates = self._list_chapter_templates(root)
-        requested_template = self._selected_chapter_template(story_generation)
+        requested_template = self._selected_chapter_template(story_generation) or str(
+            settings.get("storyChapterTemplateId") or DEFAULT_CHAPTER_TEMPLATE_ID
+        ).strip()
         selected_template = self._resolve_template(
             chapter_templates,
             requested_template or DEFAULT_CHAPTER_TEMPLATE_ID,
@@ -53,33 +57,47 @@ class StorydexOrchestrationService:
             selected_template = chapter_templates[0]
         is_new_story = intent["primary"] == "story_generation" and len(chapters) == 0
         invalid_template = bool(requested_template and selected_template is None)
-        requires_template = is_new_story and invalid_template
+        requires_template = intent["primary"] == "story_generation" and invalid_template
 
-        fragment_count = self._bounded_int(story_generation.get("fragmentCount"), default=1, minimum=1, maximum=20)
+        requested_fragment_count = self._positive_int(story_generation.get("fragmentCount"), default=1)
         fragment_word_count = self._bounded_int(
             story_generation.get("fragmentWordCount"),
             default=2000,
             minimum=100,
             maximum=20000,
         )
+        chapter_content_mode = str((selected_template or {}).get("contentMode") or "multi_fragment")
+        fragment_count = 1 if chapter_content_mode == SINGLE_FILE_CONTENT_MODE else requested_fragment_count
         next_segment_path = ""
+        fragment_targets: List[Dict[str, Any]] = []
         if intent["primary"] == "story_generation" and not requires_template:
-            if is_new_story and selected_template:
-                next_segment_path = self.story_project_service.initial_segment_path_from_chapter_template(selected_template)
-            else:
-                next_segment_path = self.story_project_service.compute_next_segment_path(
-                    root,
-                    active_file=active_file,
-                    prompt=prompt,
-                )
+            fragment_targets = self.story_project_service.plan_story_generation_targets(
+                root,
+                template=selected_template or self.story_project_service.default_chapter_directory_template(),
+                fragment_count=fragment_count,
+                active_file=active_file,
+                prompt=prompt,
+                is_new_story=is_new_story,
+            )
+            next_segment_path = str(fragment_targets[0].get("path") or "") if fragment_targets else ""
 
         turn_plan = {
+            "requestedFragmentCount": requested_fragment_count,
             "fragmentCount": fragment_count,
             "fragmentWordCount": fragment_word_count,
+            "wordCountPolicy": {
+                "algorithm": "storydex_visible_characters_v1",
+                "countingRule": "count every non-whitespace Unicode character",
+                "mode": "exact",
+                "minimum": fragment_word_count,
+                "maximum": fragment_word_count,
+            },
             "isNewStory": is_new_story,
             "requiresChapterTemplateSelection": requires_template,
             "selectedChapterTemplate": str(selected_template.get("id") or "") if selected_template else "",
             "selectedChapterTemplateDetail": self._template_detail(selected_template),
+            "chapterContentMode": chapter_content_mode,
+            "fragmentTargets": fragment_targets,
             "invalidChapterTemplate": requested_template if invalid_template else "",
             "availableChapterTemplates": chapter_templates,
             "nextSegmentPath": next_segment_path,
@@ -203,8 +221,12 @@ class StorydexOrchestrationService:
             "chapterMode": str(template.get("chapterMode") or "directory"),
             "chapterNamePattern": str(template.get("chapterNamePattern") or ""),
             "segmentNaming": str(template.get("segmentNaming") or "001.md"),
+            "contentMode": str(template.get("contentMode") or "multi_fragment"),
             "initialChapterDirectory": str(first_initial.get("directory") or ""),
             "initialChapterFirstSegment": str(first_initial.get("firstSegment") or ""),
+            "rules": [str(item) for item in template.get("rules", []) if str(item).strip()]
+            if isinstance(template.get("rules"), list)
+            else [],
         }
 
     @staticmethod
@@ -241,6 +263,14 @@ class StorydexOrchestrationService:
         except (TypeError, ValueError):
             parsed = default
         return max(minimum, min(maximum, parsed))
+
+    @staticmethod
+    def _positive_int(value: Any, *, default: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = default
+        return max(1, parsed)
 
     def _skill_registry(self, workspace_root: Path) -> Dict[str, Any]:
         payload = self.story_project_service.read_agent_skill_registry(workspace_root)
@@ -297,6 +327,11 @@ class StorydexOrchestrationService:
                 "name": "StorydexSyncWiki",
                 "access": "write",
                 "purpose": "sync WIKI and knowledge graph from project files",
+            },
+            {
+                "name": "StorydexWordCount",
+                "access": "read_only",
+                "purpose": "read the same objective non-whitespace character count shown by the Storydex editor",
             },
             {
                 "name": "StorydexApplyStoryIncrement",

@@ -5,6 +5,13 @@ import { applyCachedThemeSnapshot, applyThemeSnapshot, readCachedThemeCode, THEM
 import { openFilePreviewWindow } from "@/utils/filePreview";
 import { computeForceLayout } from "@/utils/forceLayout";
 import { compactText } from "@/utils/format";
+import {
+  isMaterialSymbolSelector,
+  legacyFileFontSizeToPaneScale,
+  normalizePaneFontScale,
+  paneFontScaleStyle,
+  transformPaneRelativePixelValue
+} from "@/utils/paneFontScale";
 import { buildPendingWriteChecklistItem, buildTurnPhaseChecklistItem } from "@/utils/turnPhaseChecklist";
 import { findMarkdownLinkAnchor, isExternalMarkdownHref, resolveMarkdownWorkspaceHref } from "@/utils/workspaceLinks";
 import router from "@/router";
@@ -26,6 +33,32 @@ describe("frontend deterministic utilities", () => {
     expect(shouldShowLiveTurnPhase({ runStatus: "preview", phaseStatus: "waiting_approval" })).toBe(true);
     expect(shouldShowLiveTurnPhase({ runStatus: "preview", phase: "planning" })).toBe(false);
     expect(shouldShowLiveTurnPhase({ runStatus: "running" })).toBe(true);
+  });
+
+  it("normalizes pane font scales and preserves relative CSS font sizes", () => {
+    expect(normalizePaneFontScale(60)).toBe(75);
+    expect(normalizePaneFontScale(180)).toBe(150);
+    expect(normalizePaneFontScale(Number.NaN)).toBe(100);
+    expect(normalizePaneFontScale(null)).toBe(100);
+    expect(legacyFileFontSizeToPaneScale(12)).toBe(75);
+    expect(legacyFileFontSizeToPaneScale(18)).toBe(115);
+    expect(legacyFileFontSizeToPaneScale(24)).toBe(150);
+    expect(paneFontScaleStyle(125)).toMatchObject({
+      "--ui-pane-font-scale": "1.25",
+      "--ui-pane-scaled-px-9-5": "11.875px",
+      "--ui-pane-scaled-px-12": "15px",
+      "--ui-pane-scaled-px-16": "20px"
+    });
+    expect(transformPaneRelativePixelValue("12px")).toBe("var(--ui-pane-scaled-px-12, 12px)");
+    expect(transformPaneRelativePixelValue("clamp(28px, 3vw, 40px)")).toBe(
+      "clamp(var(--ui-pane-scaled-px-28, 28px), 3vw, var(--ui-pane-scaled-px-40, 40px))"
+    );
+    expect(transformPaneRelativePixelValue("1.5")).toBe("1.5");
+    expect(transformPaneRelativePixelValue("var(--ui-pane-scaled-px-12, 12px)")).toBe(
+      "var(--ui-pane-scaled-px-12, 12px)"
+    );
+    expect(transformPaneRelativePixelValue("21px")).toBe("21px");
+    expect(isMaterialSymbolSelector(".material-symbols-rounded")).toBe(true);
   });
 
   it("repairs fragmented streamed text without damaging structured markdown", () => {

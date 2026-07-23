@@ -58,7 +58,7 @@ def test_request_workspace_story_options_lock_git_and_sse_helpers(monkeypatch, t
     normalized = routes._normalize_story_generation_options(
         {"segmentCount": 99, "segmentWords": "bad", "chapter_template": "serial"}
     )
-    assert normalized == {"fragmentCount": 20, "fragmentWordCount": 2000, "chapterTemplateId": "serial"}
+    assert normalized == {"fragmentCount": 99, "fragmentWordCount": 2000, "chapterTemplateId": "serial"}
     assert routes._apply_turn_contract_story_generation_defaults(normalized, {"turnPlan": {}}) is normalized
     applied = routes._apply_turn_contract_story_generation_defaults(normalized, {"turnPlan": {"selectedChapterTemplate": "book"}})
     assert applied["chapterTemplateId"] == "book" and normalized["chapterTemplateId"] == "serial"
@@ -84,7 +84,8 @@ def test_request_workspace_story_options_lock_git_and_sse_helpers(monkeypatch, t
 def test_phase_status_detail_and_text_sanitization_helpers():
     phase_cases = {
         "ToolDone": "tool", "TextChunk": "model", "GitCommitResult": "version_control",
-        "TaskStarted": "planning", "TurnContract": "orchestration", "RunAccepted": "runtime",
+        "TaskStarted": "planning", "TurnContract": "orchestration",
+        "StoryGenerationValidation": "orchestration", "RunAccepted": "runtime",
         "AgentCompleted": "agent", "Other": "runtime",
     }
     for event, expected in phase_cases.items():
@@ -96,6 +97,8 @@ def test_phase_status_detail_and_text_sanitization_helpers():
         ("TaskFailed", {}, "error"), ("TaskSkipped", {}, "warning"),
         ("TaskPlanCreated", {}, "success"), ("GitAutoCommit", {"created": True}, "success"),
         ("TurnContract", {"status": "needs_user_input"}, "warning"), ("RunAccepted", {}, "running"),
+        ("StoryGenerationValidation", {"passed": False}, "error"),
+        ("StoryGenerationValidation", {"passed": True}, "success"),
         ("AgentCompleted", {}, "success"), ("AgentCancelled", {}, "warning"), ("Other", {}, "info"),
     ]
     for event, payload, expected in status_cases:
@@ -109,6 +112,7 @@ def test_phase_status_detail_and_text_sanitization_helpers():
         ("AgentError", {"message": "bad"}, "bad"), ("RunAccepted", {"label": "accepted"}, "accepted"),
         ("TurnContract", {"turnPlan": {"requiresChapterTemplateSelection": True}}, "全新故事需要先选择章节目录模板"),
         ("TurnContract", {"intentFrame": {"primary": "wiki_work"}}, "wiki_work"),
+        ("StoryGenerationValidation", {"message": "objective result"}, "objective result"),
         ("Other", {}, "Other"),
     ]
     for event, payload, expected in detail_cases:

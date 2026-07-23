@@ -7,8 +7,7 @@
   --font-ui: "IBM Plex Sans", "PingFang SC", "Microsoft YaHei UI", "Segoe UI", sans-serif;
   --font-prose: "Source Han Serif SC", "Noto Serif SC", "Songti SC", serif;
   --font-mono: "Cascadia Mono", "IBM Plex Mono", "Consolas", monospace;
-  --ui-file-font-size: 16px;
-  --ui-player-font-size: 14px;
+  --ui-pane-font-scale: 1;
 
   --bg-app: #eef2f7;
   --bg-header: rgba(250, 252, 255, 0.92);
@@ -231,11 +230,6 @@ body::before {
 
 body.is-resizing-panels {
   cursor: col-resize;
-  user-select: none;
-}
-
-body.is-resizing-composer {
-  cursor: ns-resize;
   user-select: none;
 }
 
@@ -1349,7 +1343,7 @@ body.is-resizing-panels .workspace-splitter::before {
   color: var(--text-main);
   padding: 26px 24px 32px;
   font-family: var(--font-prose);
-  font-size: var(--ui-file-font-size);
+  font-size: 16px;
   line-height: 1.9;
 }
 
@@ -1397,7 +1391,7 @@ body.is-resizing-panels .workspace-splitter::before {
 .doc-preview {
   margin: 0;
   padding: 26px 24px 32px;
-  font-size: var(--ui-file-font-size);
+  font-size: 16px;
   line-height: 1.75;
   color: var(--text-main);
   white-space: pre-wrap;
@@ -1410,7 +1404,7 @@ body.is-resizing-panels .workspace-splitter::before {
   overflow: auto;
   padding: 26px 24px 32px;
   font-family: var(--font-prose);
-  font-size: var(--ui-file-font-size);
+  font-size: 16px;
   line-height: 1.9;
   color: var(--text-main);
 }

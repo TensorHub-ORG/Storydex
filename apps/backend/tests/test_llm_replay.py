@@ -226,6 +226,45 @@ def test_off_mode_proxies_attributes_and_behavior(monkeypatch):
     assert provider.calls == 1
 
 
+@pytest.mark.parametrize(
+    ("provider_type", "expected_protocol"),
+    [
+        ("openai_compatible", "openai_chat"),
+        ("openai_responses", "openai_responses"),
+        ("anthropic_messages", "anthropic_messages"),
+    ],
+)
+def test_coomi_121_plain_usage_is_canonicalized_by_provider_mode(
+    monkeypatch,
+    provider_type,
+    expected_protocol,
+):
+    class Coomi121Provider(FakeProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.config = type("Config", (), {"type": provider_type})()
+
+        async def chat(self, messages, tools=None, **kwargs):
+            return FakeResponse(
+                content="ok",
+                usage={"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10},
+            )
+
+    monkeypatch.setenv("STORYDEX_LLM_MODE", "off")
+    trace_id = f"coomi-121-{provider_type}"
+    reset_llm_metrics(trace_id)
+    provider = get_replayable_llm_provider(Coomi121Provider())
+    with llm_trace(trace_id), llm_purpose("chat"):
+        asyncio.run(provider.chat([{"role": "user", "content": "usage"}]))
+
+    request = get_llm_metrics(trace_id)["providerRequests"][0]
+    assert request["usageSource"] == "provider_response"
+    assert request["protocol"] == expected_protocol
+    assert request["providerReportedInputTokens"] == 7
+    assert request["providerReportedOutputTokens"] == 3
+    assert request["providerReportedTotalTokens"] == 10
+
+
 def test_model_catalog_mismatch_retries_once_before_failing(monkeypatch):
     monkeypatch.delenv("STORYDEX_LLM_MODE", raising=False)
     reset_llm_metrics("retry-observation")
@@ -787,13 +826,13 @@ def test_replay_normalizes_nondeterministic_windows_find_diagnostic(monkeypatch,
 
 def test_replay_normalizes_storydex_runtime_log_filenames(monkeypatch, tmp_path):
     recorded = (
-        "C:/book/.storydex/logs/2026-0717-04-00-16.jsonl\n"
-        "C:/book/.storydex/logs/2026-0717-04-01-17.jsonl\n"
+        "C:/book/.storydex/.agent/logs/2026-0717-04-00-16.jsonl\n"
+        "C:/book/.storydex/.agent/logs/2026-0717-04-01-17.jsonl\n"
         "C:/book/.storydex/wiki/WIKI.md"
     )
     replayed = (
-        "C:/book/.storydex/logs/2026-0717-04-13-24.jsonl\n"
-        "C:/book/.storydex/logs/2026-0717-04-13-27.jsonl\n"
+        "C:/book/.storydex/.agent/logs/2026-0717-04-13-24.jsonl\n"
+        "C:/book/.storydex/.agent/logs/2026-0717-04-13-27.jsonl\n"
         "C:/book/.storydex/wiki/WIKI.md"
     )
     block_content = "stable assembled context"

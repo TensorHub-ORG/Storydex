@@ -31,12 +31,33 @@ from coomi.tools.web import WebFetchTool, WebSearchTool
 
 
 class _WorkspaceBoundMixin:
-    def __init__(self, *, workspace_root: Path) -> None:
+    def __init__(self, *, workspace_root: Path, turn_contract: Dict[str, Any] | None = None) -> None:
         super().__init__()
         self.workspace_root = Path(workspace_root).resolve()
+        self.turn_contract = dict(turn_contract) if isinstance(turn_contract, dict) else {}
 
     def set_workspace_root(self, workspace_root: Path) -> None:
         self.workspace_root = Path(workspace_root).resolve()
+
+    def _strict_story_generation_turn(self) -> bool:
+        intent = self.turn_contract.get("intentFrame") if isinstance(self.turn_contract.get("intentFrame"), dict) else {}
+        return str(intent.get("primary") or "") == "story_generation"
+
+    def _targets_chapter_file(self, arguments: Dict[str, Any]) -> bool:
+        for key in _PATH_ARGUMENT_KEYS:
+            raw = str((arguments or {}).get(key) or "").strip()
+            if not raw:
+                continue
+            candidate = Path(raw)
+            if not candidate.is_absolute():
+                candidate = self.workspace_root / candidate
+            try:
+                relative = candidate.resolve().relative_to(self.workspace_root).as_posix()
+            except ValueError:
+                continue
+            if relative.startswith("chapters/"):
+                return True
+        return False
 
 
 _PATH_ARGUMENT_KEYS = ("file_path", "path", "directory")
@@ -66,11 +87,31 @@ class StorydexReadTool(_WorkspacePathNormalizerMixin, ReadTool):
 
 
 class StorydexWriteTool(_WorkspacePathNormalizerMixin, WriteTool):
-    pass
+    def run(self, arguments: Dict[str, Any]) -> ToolResult:
+        if self._strict_story_generation_turn() and self._targets_chapter_file(arguments):
+            return ToolResult(
+                success=False,
+                output="",
+                error=(
+                    "Story chapter writes for this turn must use StorydexApplyStoryIncrement. "
+                    "That tool enforces the selected chapter template and Storydex's objective word count."
+                ),
+            )
+        return super().run(arguments)
 
 
 class StorydexEditTool(_WorkspacePathNormalizerMixin, EditTool):
-    pass
+    def run(self, arguments: Dict[str, Any]) -> ToolResult:
+        if self._strict_story_generation_turn() and self._targets_chapter_file(arguments):
+            return ToolResult(
+                success=False,
+                output="",
+                error=(
+                    "Story chapter edits for this turn must use StorydexApplyStoryIncrement. "
+                    "That tool enforces the selected chapter template and Storydex's objective word count."
+                ),
+            )
+        return super().run(arguments)
 
 
 class StorydexGlobTool(_WorkspacePathNormalizerMixin, GlobTool):
@@ -238,16 +279,19 @@ class StorydexWebFetchTool(_ReplayableExternalToolMixin, WebFetchTool):
     pass
 
 
-def create_workspace_bound_tool_overrides(workspace_root: Path) -> List[Any]:
+def create_workspace_bound_tool_overrides(
+    workspace_root: Path,
+    turn_contract: Dict[str, Any] | None = None,
+) -> List[Any]:
     root = Path(workspace_root).resolve()
     return [
-        StorydexReadTool(workspace_root=root),
-        StorydexWriteTool(workspace_root=root),
-        StorydexEditTool(workspace_root=root),
-        StorydexGlobTool(workspace_root=root),
-        StorydexGrepTool(workspace_root=root),
-        StorydexBashTool(workspace_root=root),
-        StorydexPowerShellTool(workspace_root=root),
+        StorydexReadTool(workspace_root=root, turn_contract=turn_contract),
+        StorydexWriteTool(workspace_root=root, turn_contract=turn_contract),
+        StorydexEditTool(workspace_root=root, turn_contract=turn_contract),
+        StorydexGlobTool(workspace_root=root, turn_contract=turn_contract),
+        StorydexGrepTool(workspace_root=root, turn_contract=turn_contract),
+        StorydexBashTool(workspace_root=root, turn_contract=turn_contract),
+        StorydexPowerShellTool(workspace_root=root, turn_contract=turn_contract),
     ]
 
 
