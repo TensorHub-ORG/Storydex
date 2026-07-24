@@ -1142,3 +1142,325 @@ def test_agent_run_diff_missing_present_commit_worktree_and_errors(monkeypatch, 
     git.read_diff = lambda *args, **kwargs: (_ for _ in ()).throw(GitServiceError("diff failed"))
     failed_present = routes.agent_run_diff("trace", request, session_id_query=None, changed_files_query=None, commit_hash_query=None)
     assert failed_present.data["error"]["message"] == "diff failed"
+
+
+def test_merge_changed_file_lists_dedupes_and_normalizes():
+    merged = routes._merge_changed_file_lists(
+        ["a\\b.md", "a/b.md", "", "c.md"],
+        ["c.md", "d.md", ""],
+    )
+    assert merged == ["a/b.md", "c.md", "d.md"]
+    assert routes._merge_changed_file_lists("not-a-list", ["only.md"]) == ["only.md"]
+
+
+def test_include_missing_agent_snapshot_diffs_merges_present_files(monkeypatch, tmp_path):
+    (tmp_path / "present.md").write_text("hi", encoding="utf-8")
+    (tmp_path / "extra.md").write_text("yo", encoding="utf-8")
+
+    class Git:
+        def build_file_snapshot_diff(self, root, *, paths, status):
+            return {"files": [{"relativePath": paths[0], "added": 4, "removed": 0}]}
+
+    monkeypatch.setattr(routes, "git_service", Git())
+
+    data = {"files": [{"relativePath": "present.md", "added": 1, "removed": 0}]}
+    merged = routes._include_missing_agent_snapshot_diffs(
+        data, tmp_path, ["present.md", "extra.md", "../escape.md", "missing.md"]
+    )
+    assert merged["totals"]["files"] == 2
+    assert merged["totals"]["added"] == 5
+    assert {item["relativePath"] for item in merged["files"]} == {"present.md", "extra.md"}
+
+    # No missing paths -> original object returned unchanged.
+    assert routes._include_missing_agent_snapshot_diffs(data, tmp_path, ["present.md"]) is data
+
+
+def test_include_missing_agent_snapshot_diffs_empty_snapshot_returns_original(monkeypatch, tmp_path):
+    (tmp_path / "extra.md").write_text("yo", encoding="utf-8")
+
+    class Git:
+        def build_file_snapshot_diff(self, root, *, paths, status):
+            return {"files": []}
+
+    monkeypatch.setattr(routes, "git_service", Git())
+    data = {"files": []}
+    assert routes._include_missing_agent_snapshot_diffs(data, tmp_path, ["extra.md"]) is data
+
+
+def test_agent_stop_execution_pauses_mailbox_and_reports_stale(monkeypatch, tmp_path):
+    monkeypatch.setattr(routes, "project_service", types.SimpleNamespace(workspace_root=tmp_path))
+    monkeypatch.setattr(
+        routes.execution_coordinator,
+        "active_handle",
+        lambda *, session_id: None,
+    )
+
+    class Coordinator:
+        def __init__(self):
+            self.reason = "cancelled"
+
+        def cancel_active(self, *, session_id, expected_trace_id, workspace_root, reason):
+            return {"reason": self.reason, "activeTraceId": "trace-1"}
+
+    coordinator = Coordinator()
+    monkeypatch.setattr(routes.execution_coordinator, "cancel_active", coordinator.cancel_active)
+
+    paused = {}
+
+    def fake_pause(*, workspace_root, session_id, reason):
+        paused["reason"] = reason
+        return {"paused": True, "pauseReason": reason}
+
+    monkeypatch.setattr(routes.followup_mailbox_service, "pause", fake_pause)
+
+    request = FakeRequest({"x-session-id": "s"})
+    payload = routes.AgentExecutionStopRequest(sessionId="s", workspaceRoot=str(tmp_path))
+    result = routes.agent_stop_execution(payload, request)
+    assert result.data["mailboxPaused"] is True
+    assert result.data["pauseReason"] == "manual_stop"
+    assert paused["reason"] == "manual_stop"
+
+    coordinator.reason = "stale_trace"
+    with pytest.raises(routes.StorydexError) as excinfo:
+        routes.agent_stop_execution(payload, request)
+    assert excinfo.value.code == "stale_trace"
+
+
+class _FakeFollowupMailbox:
+    """Records calls and returns canned messages for the followup endpoints."""
+
+    def __init__(self):
+        self.calls = []
+        self.enqueue_error = None
+        self.update_error = None
+        self.cancel_error = None
+        self.message = {"messageId": "m1", "mode": "queued", "status": "queued", "activeTraceId": ""}
+        self.state = {"revision": 7, "paused": False, "pauseReason": ""}
+
+    def list_mailbox(self, *, workspace_root, session_id):
+        self.calls.append(("list_mailbox", session_id))
+        return dict(self.state)
+
+    def enqueue(self, **kwargs):
+        self.calls.append(("enqueue", kwargs))
+        if self.enqueue_error is not None:
+            raise self.enqueue_error
+        return dict(self.message)
+
+    def update_message(self, **kwargs):
+        self.calls.append(("update_message", kwargs))
+        if self.update_error is not None:
+            raise self.update_error
+        return dict(self.message)
+
+    def cancel_message(self, **kwargs):
+        self.calls.append(("cancel_message", kwargs))
+        if self.cancel_error is not None:
+            raise self.cancel_error
+        return {"messageId": kwargs.get("message_id"), "status": "cancelled"}
+
+    def resume(self, *, workspace_root, session_id):
+        self.calls.append(("resume", session_id))
+        return dict(self.state)
+
+    def pause(self, *, workspace_root, session_id, reason):
+        self.calls.append(("pause", session_id, reason))
+        return {"paused": True, "pauseReason": reason}
+
+
+def test_resolve_followup_workspace_root_active_raw_and_fallback(monkeypatch, tmp_path):
+    active_root = tmp_path / "active"
+    active_root.mkdir()
+    handle = types.SimpleNamespace(workspace_root=active_root)
+    monkeypatch.setattr(
+        routes.execution_coordinator,
+        "active_handle",
+        lambda *, session_id: handle if session_id == "live" else None,
+    )
+    monkeypatch.setattr(routes, "project_service", types.SimpleNamespace(workspace_root=tmp_path / "fallback"))
+
+    assert routes._resolve_followup_workspace_root(session_id="live", workspace_root="") == active_root
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    assert routes._resolve_followup_workspace_root(session_id="idle", workspace_root=str(raw)) == raw.resolve()
+
+    fallback = routes._resolve_followup_workspace_root(session_id="idle", workspace_root=str(tmp_path / "missing"))
+    assert fallback == tmp_path / "fallback"
+
+
+def test_raise_followup_error_maps_status_codes():
+    import pytest as _pytest
+    from services.followup_mailbox_service import FollowupMailboxError
+
+    with _pytest.raises(routes.StorydexError) as not_found:
+        routes._raise_followup_error(FollowupMailboxError("followup_not_found", "missing"))
+    assert not_found.value.status_code == 404
+
+    with _pytest.raises(routes.StorydexError) as conflict:
+        routes._raise_followup_error(FollowupMailboxError("stale_trace", "stale", details={"x": 1}))
+    assert conflict.value.status_code == 409 and conflict.value.details == {"x": 1}
+
+    with _pytest.raises(routes.StorydexError) as bad_request:
+        routes._raise_followup_error(FollowupMailboxError("something_else", "bad"))
+    assert bad_request.value.status_code == 400
+
+
+def test_latest_session_trace_id(monkeypatch):
+    monkeypatch.setattr(
+        routes.trace_history_service, "list_records", lambda *, session_id, limit: [{"traceId": " t-9 "}]
+    )
+    assert routes._latest_session_trace_id("s") == "t-9"
+    monkeypatch.setattr(routes.trace_history_service, "list_records", lambda *, session_id, limit: [])
+    assert routes._latest_session_trace_id("s") == ""
+
+
+def test_followup_endpoints_list_enqueue_update_delete_steer_resume(monkeypatch, tmp_path):
+    import pytest as _pytest
+    from services.followup_mailbox_service import FollowupMailboxError
+
+    mailbox = _FakeFollowupMailbox()
+    monkeypatch.setattr(routes, "followup_mailbox_service", mailbox)
+    monkeypatch.setattr(routes, "_resolve_followup_workspace_root", lambda *, session_id, workspace_root="": tmp_path)
+
+    steer_calls = []
+    fake_agent = types.SimpleNamespace(
+        request_steer=lambda *, session_id, workspace_root: steer_calls.append(session_id) or True
+    )
+    monkeypatch.setattr(routes, "get_storydex_coomi_agent_service", lambda: fake_agent)
+
+    request = FakeRequest({"x-session-id": "sess"})
+
+    listed = routes.agent_followups(request, session_id_query=" sess ", workspace_root_query=None)
+    assert listed.data["revision"] == 7
+
+    enqueue_payload = routes.AgentFollowupRequest(messageId="m1", sessionId="sess", content="hello")
+    enqueued = routes.agent_enqueue_followup(enqueue_payload, request)
+    assert enqueued.data["steerRequested"] is False and enqueued.data["message"]["messageId"] == "m1"
+
+    mailbox.message = {"messageId": "m1", "mode": "steer", "status": "queued", "activeTraceId": "t"}
+    steer_enqueue = routes.AgentFollowupRequest(messageId="m2", sessionId="sess", content="steer me", mode="steer")
+    enqueued_steer = routes.agent_enqueue_followup(steer_enqueue, request)
+    assert enqueued_steer.data["steerRequested"] is True and steer_calls == ["sess"]
+
+    mailbox.enqueue_error = FollowupMailboxError("message_id_conflict", "dup")
+    with _pytest.raises(routes.StorydexError):
+        routes.agent_enqueue_followup(enqueue_payload, request)
+    mailbox.enqueue_error = None
+
+    mailbox.message = {"messageId": "m1", "mode": "queued", "status": "queued", "activeTraceId": ""}
+    update_payload = routes.AgentFollowupUpdateRequest(sessionId="sess", content="edited")
+    updated = routes.agent_update_followup("m1", update_payload, request)
+    assert updated.data["message"]["status"] == "queued"
+
+    mailbox.message = {"messageId": "m1", "mode": "steer", "status": "queued", "activeTraceId": ""}
+    steer_calls.clear()
+    updated_steer = routes.agent_update_followup("m1", routes.AgentFollowupUpdateRequest(sessionId="sess", mode="steer"), request)
+    assert updated_steer.data["steerRequested"] is True and steer_calls == ["sess"]
+
+    mailbox.update_error = FollowupMailboxError("followup_not_found", "gone")
+    with _pytest.raises(routes.StorydexError):
+        routes.agent_update_followup("m1", update_payload, request)
+    mailbox.update_error = None
+
+    deleted = routes.agent_delete_followup("m1", request, session_id_query="sess", workspace_root_query=None)
+    assert deleted.data["message"]["status"] == "cancelled"
+
+    mailbox.cancel_error = FollowupMailboxError("followup_not_found", "gone")
+    with _pytest.raises(routes.StorydexError):
+        routes.agent_delete_followup("m1", request, session_id_query="sess", workspace_root_query=None)
+    mailbox.cancel_error = None
+
+    steer_calls.clear()
+    mailbox.message = {"messageId": "m1", "mode": "steer", "status": "queued", "activeTraceId": "t"}
+    steered = routes.agent_steer_followup("m1", routes.AgentFollowupActionRequest(sessionId="sess"), request)
+    assert steered.data["steerRequested"] is True and steer_calls == ["sess"]
+
+    mailbox.update_error = FollowupMailboxError("invalid_followup_transition", "no")
+    with _pytest.raises(routes.StorydexError):
+        routes.agent_steer_followup("m1", routes.AgentFollowupActionRequest(sessionId="sess"), request)
+    mailbox.update_error = None
+
+    resumed = routes.agent_resume_followups(routes.AgentFollowupActionRequest(sessionId="sess"), request)
+    assert resumed.data["revision"] == 7
+
+
+def test_resolve_story_word_count_range_variants():
+    # Explicit range keys are honored and swapped when min > max.
+    assert routes._resolve_story_word_count_range(
+        {"fragmentWordCountMin": 3000, "fragmentWordCountMax": 1500}
+    ) == (1500, 3000)
+    assert routes._resolve_story_word_count_range(
+        {"fragment_word_count_min": 800, "fragment_word_count_max": 1200}
+    ) == (800, 1200)
+
+    # Legacy single value collapses to min == max.
+    assert routes._resolve_story_word_count_range({"fragmentWordCount": 1800}) == (1800, 1800)
+    assert routes._resolve_story_word_count_range({"segmentWords": 900}) == (900, 900)
+
+    # No hints at all falls back to the default 2000-2500 band.
+    assert routes._resolve_story_word_count_range({}) == (2000, 2500)
+
+
+def test_normalize_story_generation_options_reads_snake_and_camel():
+    normalized = routes._normalize_story_generation_options(
+        {
+            "fragment_count": 4,
+            "fragmentWordCountMin": 1000,
+            "fragmentWordCountMax": 2000,
+            "chapter_template": "serial",
+        }
+    )
+    assert normalized == {
+        "fragmentCount": 4,
+        "fragmentWordCount": 2000,
+        "fragmentWordCountMin": 1000,
+        "fragmentWordCountMax": 2000,
+        "chapterTemplateId": "serial",
+    }
+    # None payload uses defaults.
+    assert routes._normalize_story_generation_options(None)["fragmentCount"] == 1
+
+
+def test_status_for_event_covers_event_families():
+    assert routes._status_for_event("TaskFailed", {}) == "error"
+    assert routes._status_for_event("TaskSkipped", {}) == "warning"
+    assert routes._status_for_event("TaskPlanCreated", {}) == "success"
+    assert routes._status_for_event("GitAutoCommit", {"created": True}) == "success"
+    assert routes._status_for_event("GitCommitResult", {"status": "error"}) == "error"
+    assert routes._status_for_event("TurnContract", {"status": "needs_user_input"}) == "warning"
+    assert routes._status_for_event("TurnContract", {}) == "info"
+    assert routes._status_for_event("StoryGenerationValidation", {"passed": True}) == "success"
+    assert routes._status_for_event("StoryGenerationValidation", {"passed": False}) == "error"
+    assert routes._status_for_event("RunAccepted", {}) == "running"
+    assert routes._status_for_event("ConnectionRetry", {}) == "warning"
+    assert routes._status_for_event("AgentCompleted", {}) == "success"
+    assert routes._status_for_event("AgentCancelled", {}) == "warning"
+    assert routes._status_for_event("Unknown", {"status": "custom"}) == "custom"
+
+
+def test_detail_for_event_covers_event_families():
+    assert routes._detail_for_event("TaskStarted", {"title": "t"}) == "t"
+    assert routes._detail_for_event("ToolStart", {"tool_name": "read"}) == "read"
+    assert routes._detail_for_event("TextChunk", {"content": "abc"}) == "abc"
+    retry = routes._detail_for_event("ConnectionRetry", {"attempt": 2, "maxAttempts": 5, "message": "boom"})
+    assert retry == "boom (2/5)"
+    assert routes._detail_for_event("GitCommitResult", {"commit": {"subject": "feat: x"}}) == "feat: x"
+    assert routes._detail_for_event("GitCommitResult", {"message": "no commit"}) == "no commit"
+    assert routes._detail_for_event("AgentError", {"message": "bad"}) == "bad"
+    assert routes._detail_for_event("RunAccepted", {"detail": "d"}) == "d"
+    assert (
+        routes._detail_for_event("TurnContract", {"turnPlan": {"requiresChapterTemplateSelection": True}})
+        == "全新故事需要先选择章节目录模板"
+    )
+    assert routes._detail_for_event("TurnContract", {"intentFrame": {"primary": "p"}}) == "p"
+    assert routes._detail_for_event("StoryGenerationValidation", {"message": "v"}) == "v"
+    assert routes._detail_for_event("Other", {}) == "Other"
+
+
+def test_create_agent_execution_log_session_handles_oserror(monkeypatch):
+    def boom(**kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(routes, "create_execution_log_session", boom)
+    assert routes._create_agent_execution_log_session(trace_id="t", session_id="s") is None

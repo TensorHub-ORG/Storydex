@@ -1,7 +1,24 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 const BACKEND_HOST = process.env.STORYDEX_BACKEND_HOST || "127.0.0.1";
-const BACKEND_PORT = Number(process.env.STORYDEX_BACKEND_PORT || 18081);
+// 端口优先从主进程透传的 additionalArguments 读取（动态端口场景），
+// 其次读环境变量，最后回退到默认端口。这样渲染进程始终连到后端实际监听的端口。
+function resolveBackendPort() {
+  const argv = Array.isArray(process.argv) ? process.argv : [];
+  const fromArg = argv.find((arg) => typeof arg === "string" && arg.startsWith("--storydex-backend-port="));
+  if (fromArg) {
+    const value = Number(fromArg.split("=")[1]);
+    if (Number.isInteger(value) && value > 0) {
+      return value;
+    }
+  }
+  const fromEnv = Number(process.env.STORYDEX_BACKEND_PORT);
+  if (Number.isInteger(fromEnv) && fromEnv > 0) {
+    return fromEnv;
+  }
+  return 18081;
+}
+const BACKEND_PORT = resolveBackendPort();
 const BACKEND_BASE_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}/api/v1`;
 const DEFAULT_TITLEBAR_HEIGHT = 42;
 const WINDOWS_CONTROL_BUTTON_WIDTH = 138;

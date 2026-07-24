@@ -133,6 +133,7 @@
                     v-html="renderMarkdown(entry.item.content)"
                   ></div>
                   <div v-else-if="entry.item.type === 'reasoning'" class="coomi-reasoning-text">{{ entry.item.content }}</div>
+                  <div v-else-if="entry.item.type === 'notice'" class="coomi-notice-text">{{ entry.item.content }}</div>
                   <div v-else-if="entry.item.type === 'error'" class="coomi-error-text">{{ entry.item.content }}</div>
                   <div v-else-if="entry.item.type === 'phase'" class="coomi-phase-text" aria-live="polite">
                     {{ entry.item.content }}
@@ -557,7 +558,7 @@
         </div>
       </section>
       <section
-        v-if="agentStore.followupPaused || visibleFollowups.length"
+        v-if="visibleFollowups.length"
         class="coomi-followup-mailbox"
         aria-label="待发送信息"
       >
@@ -596,7 +597,7 @@
             rows="2"
             @keydown.stop
           ></textarea>
-          <p v-else class="coomi-followup-content">{{ message.content }}</p>
+          <p v-else class="coomi-followup-content" :title="message.content">{{ message.content }}</p>
           <div class="coomi-followup-actions">
             <template v-if="editingFollowupId === message.messageId">
               <button type="button" @click="cancelFollowupEdit">取消</button>
@@ -1983,6 +1984,7 @@ function formatItemType(type: CoomiWaterfallItemType): string {
     compression: "压缩",
     phase: "阶段",
     system: "系统",
+    notice: "提示",
     error: "错误"
   };
   return labels[type] || type;
@@ -2662,6 +2664,16 @@ defineExpose({
 
 .coomi-error-text {
   color: var(--danger);
+}
+
+.coomi-notice-text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--warning);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.72;
 }
 
 .coomi-phase-text {
@@ -3615,8 +3627,8 @@ defineExpose({
 .coomi-followup-mailbox {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 9px 10px;
+  gap: 6px;
+  padding: 7px 9px;
   border: 1px solid var(--border-subtle);
   border-radius: 6px;
   background: color-mix(in srgb, var(--bg-input) 94%, transparent);
@@ -3699,7 +3711,7 @@ defineExpose({
 }
 
 .coomi-followup-mailbox {
-  max-height: 180px;
+  max-height: 148px;
   overflow-y: auto;
 }
 
@@ -3747,11 +3759,15 @@ defineExpose({
 
 .coomi-followup-content {
   margin: 0;
+  overflow: hidden;
   overflow-wrap: anywhere;
-  white-space: pre-wrap;
   color: var(--text-soft);
   font-size: 12px;
   line-height: 1.45;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
 }
 
 .coomi-followup-editor {

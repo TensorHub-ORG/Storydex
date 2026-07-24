@@ -211,6 +211,11 @@ export const useAgentStore = defineStore("agent", {
       const workspaceStore = useWorkspaceStore();
       this.isStopping = true;
       this.lastError = "";
+      // 立即中断本地 SSE 流：不等后端往返，点下终止就停止接收后续事件。
+      // 已落地的会话记录保持不变，运行态由 streamAgentPrompt 的 catch 分支收敛为 "stopped"。
+      if (activeStreamAbortController) {
+        activeStreamAbortController.abort();
+      }
       try {
         const result = await stopAgentExecution({
           sessionId: this.currentSessionId || "default",
@@ -1561,7 +1566,8 @@ function streamPacketToWaterfallItem(
     const status = statusForPacket(eventName, packet);
     return createWaterfallItem({
       id: `${traceId}-story-generation-validation`,
-      type: status === "error" ? "error" : "system",
+      // 通过=系统提示，未通过=黄色"提示"，一律不再走红色 error 分支。
+      type: status === "warning" ? "notice" : "system",
       status,
       title: "Storydex 正文客观验收",
       content: summarizeStoryGenerationValidationPacket(packet),
@@ -1699,7 +1705,8 @@ function statusForPacket(eventName: string, packet: AgentStreamPacket): CoomiWat
     return String(packet.status || "") === "needs_user_input" ? "warning" : "info";
   }
   if (eventName === "StoryGenerationValidation") {
-    return packet.passed ? "success" : "error";
+    // 未通过是"待复核提示"而非硬错误：降级为 warning，避免渲染成红色报错。
+    return packet.passed ? "success" : "warning";
   }
   if (eventName === "ConnectionRetry") return "warning";
   if (eventName === "AgentCancelled") return "warning";
@@ -1834,23 +1841,34 @@ function summarizeTurnContractPacket(packet: AgentStreamPacket): string {
 
 function summarizeStoryGenerationValidationPacket(packet: AgentStreamPacket): string {
   const fragments = Array.isArray(packet.fragments) ? packet.fragments : [];
+  // 目标区间来自 packet.targetWordCountMin/Max（旧字段 targetWordCount 仅为兼容回退）。
+  const packetTargetMin = Number(packet.targetWordCountMin ?? packet.targetWordCount ?? 0);
+  const packetTargetMax = Number(packet.targetWordCountMax ?? packet.targetWordCount ?? 0);
   const summaries = fragments.slice(0, 6).map((value, index) => {
     const fragment = toRecord(value) || {};
     const path = firstString(fragment, ["path"]) || `片段 ${index + 1}`;
     const actual = firstNumber(fragment, ["generatedWordCount", "actualWordCount", "fileWordCount"]) ?? 0;
-    const target = firstNumber(fragment, ["targetWordCount"]) ?? Number(packet.targetWordCount || 0);
-    const difference = firstNumber(fragment, ["difference"]) ?? actual - target;
+    const targetMin = firstNumber(fragment, ["targetWordCountMin"]) ?? packetTargetMin;
+    const targetMax = firstNumber(fragment, ["targetWordCountMax"]) ?? packetTargetMax;
+    const targetLabel = targetMin && targetMax
+      ? targetMin === targetMax
+        ? `${targetMin}`
+        : `${targetMin}-${targetMax}`
+      : "";
+    const difference = firstNumber(fragment, ["difference"]) ?? 0;
     const differenceLabel = difference === 0 ? "" : `，差 ${difference > 0 ? "+" : ""}${difference}`;
-    return `${path}：${actual}/${target} 字${differenceLabel}`;
+    return targetLabel
+      ? `${path}：${actual} 字（目标 ${targetLabel}）${differenceLabel}`
+      : `${path}：${actual} 字${differenceLabel}`;
   });
   if (fragments.length > summaries.length) {
     summaries.push(`另有 ${fragments.length - summaries.length} 个片段`);
   }
-  const result = packet.passed ? "通过" : "未通过";
-  const structure = packet.structurePassed === false ? "；章节结构不符合模板" : "";
+  const result = packet.passed ? "已通过" : "待复核";
+  const structure = packet.structurePassed === false ? "；章节结构与模板不一致" : "";
   const writeTool = packet.writeToolApplied === false ? "；本轮未成功执行受约束正文写入" : "";
   const detail = summaries.length ? `；${summaries.join("；")}` : "";
-  return `${result}：按 Storydex 非空白字符统计精确验收${structure}${writeTool}${detail}`;
+  return `${result}：Storydex 非空白字符统计验收${structure}${writeTool}${detail}`;
 }
 
 function summarizePresetCompileFailures(contextAssembly: Record<string, unknown>): string {
