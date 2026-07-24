@@ -221,23 +221,31 @@ class StorydexProjectSearchTool(_StorydexWorkspaceToolMixin, BaseTool):
         except (TypeError, ValueError):
             max_results = 5
         path_prefix = str(payload.get("pathPrefix") or "").strip().replace("\\", "/") or None
-        from services.retrieval_service import get_retrieval_service
+        from services.retrieval_service import RECALL_CANDIDATE_LIMIT, get_retrieval_service
 
         service = get_retrieval_service(workspace_root)
         service.watch_files()
-        hits = service.search(query, top_k=max_results, path_prefix=path_prefix)
+        hits, candidate_paths = service.search_with_candidates(
+            query,
+            top_k=max_results,
+            candidate_limit=RECALL_CANDIDATE_LIMIT,
+            path_prefix=path_prefix,
+        )
         result = {
             "ok": True,
             "workspaceRoot": workspace_root.as_posix(),
             "query": query,
             "resultCount": len(hits),
+            "candidateCount": len(candidate_paths),
+            "candidatePaths": candidate_paths,
             "results": [
                 {"path": path, "score": round(float(score), 4), "snippet": snippet}
                 for path, score, snippet in hits
             ],
             "note": (
                 "Snippets are short excerpts around the first match; read the file for full context. "
-                "Lower score = more relevant (FTS5 bm25)."
+                "Lower score = more relevant (FTS5 bm25). Candidate paths include lower-ranked matches "
+                "without excerpts; read selectively before concluding evidence is absent."
             ),
         }
         return ToolResult(success=True, output=json.dumps(result, ensure_ascii=False, indent=2), error=None)

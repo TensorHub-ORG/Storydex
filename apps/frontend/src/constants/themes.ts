@@ -9,16 +9,16 @@ export interface ThemeOption {
 
 export const themeOptions: ThemeOption[] = [
   {
-    code: "default",
-    label: "现代浅色",
-    description: "保留 Storydex 默认的清爽浅色工作台，适合长时间编辑。",
-    preview: "linear-gradient(135deg, #f7f8fb 0%, #dce6ff 100%)"
-  },
-  {
     code: "white",
     label: "纯白工作台",
     description: "接近纯白画布的克制界面，减少背景干扰并保留暖橙强调色。",
     preview: "linear-gradient(135deg, #ffffff 0%, #f3f4f6 100%)"
+  },
+  {
+    code: "default",
+    label: "现代浅色",
+    description: "保留 Storydex 默认的清爽浅色工作台，适合长时间编辑。",
+    preview: "linear-gradient(135deg, #f7f8fb 0%, #dce6ff 100%)"
   },
   {
     code: "snow",

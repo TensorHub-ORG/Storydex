@@ -28,9 +28,11 @@ from services.coomi_agent_service import (
     _write_coomi_session_binding,
     _write_paths_escape_workspace,
 )
+from services.context_policy import ContextPolicy
 from services.retrieval_service import get_retrieval_service, reset_retrieval_cache
 from services.story_project_service import get_story_project_service
 from services.storydex_context_assembler_service import StorydexContextAssemblerService
+from services.storydex_orchestration_service import StorydexOrchestrationService
 
 
 class _FakeLevel:
@@ -285,6 +287,93 @@ def test_retrieval_service_supports_chinese_bigram_search(tmp_path):
     assert hits[0][2], "命中结果应带可读摘录"
 
 
+def test_retrieval_service_keeps_lower_ranked_candidate_paths(tmp_path):
+    chapters = tmp_path / "chapters"
+    chapters.mkdir(parents=True)
+    (chapters / "001.md").write_text("云桥的第一处证据。", encoding="utf-8")
+    (chapters / "002.md").write_text("云桥的第二处证据。", encoding="utf-8")
+    reset_retrieval_cache()
+    service = get_retrieval_service(tmp_path)
+    assert service.build_index() == 2
+
+    visible = service.search("云桥", top_k=1)
+    hits, candidate_paths = service.search_with_candidates("云桥", top_k=1, candidate_limit=5)
+
+    assert hits == visible
+    assert len(hits) == 1
+    assert candidate_paths == ["chapters/001.md", "chapters/002.md"]
+
+
+def test_retrieval_snippet_keeps_complete_query_dense_logical_line(tmp_path):
+    chapters = tmp_path / "chapters"
+    chapters.mkdir(parents=True)
+    weak_line = "苟才只在这里被顺带提及。"
+    evidence_line = (
+        "苟才接下制造局差事后赶赴南京，"
+        + "这一段是需要作为完整逻辑行返回的可核验经过。" * 24
+    )
+    assert 320 < len(evidence_line) <= 800
+    (chapters / "001.md").write_text(
+        "第一回\n" + weak_line + "\n" + evidence_line + "\n",
+        encoding="utf-8",
+    )
+    reset_retrieval_cache()
+    service = get_retrieval_service(tmp_path)
+    assert service.build_index() == 1
+
+    hits = service.search("苟才 制造局 差事 南京", top_k=1)
+
+    assert hits and hits[0][0] == "chapters/001.md"
+    assert hits[0][2] == evidence_line
+
+
+def test_retrieval_snippet_does_not_fallback_to_unrelated_preview_head(tmp_path):
+    chapters = tmp_path / "chapters"
+    chapters.mkdir(parents=True)
+    unrelated_head = "无关的文件开头。" * 600
+    (chapters / "001.md").write_text(
+        unrelated_head + "\n沈青最终抵达云桥藏经阁。\n",
+        encoding="utf-8",
+    )
+    reset_retrieval_cache()
+    service = get_retrieval_service(tmp_path)
+    assert service.build_index() == 1
+
+    hits = service.search("云桥 藏经阁", top_k=1)
+
+    assert hits and hits[0][0] == "chapters/001.md"
+    assert hits[0][2] == ""
+
+
+def test_retrieval_snippet_preserves_short_matching_line(tmp_path):
+    chapters = tmp_path / "chapters"
+    chapters.mkdir(parents=True)
+    matching_line = "沈青抵达云桥，在藏经阁外驻足。"
+    (chapters / "001.md").write_text(matching_line + "\n", encoding="utf-8")
+    reset_retrieval_cache()
+    service = get_retrieval_service(tmp_path)
+    assert service.build_index() == 1
+
+    hits = service.search("云桥 藏经阁", top_k=1)
+
+    assert hits and hits[0][2] == matching_line
+
+
+def test_retrieval_snippet_keeps_long_matching_line_bounded(tmp_path):
+    chapters = tmp_path / "chapters"
+    chapters.mkdir(parents=True)
+    long_line = "沈青抵达云桥。" + "沿途细节。" * 300
+    (chapters / "001.md").write_text(long_line + "\n", encoding="utf-8")
+    reset_retrieval_cache()
+    service = get_retrieval_service(tmp_path)
+    assert service.build_index() == 1
+
+    hits = service.search("沈青 云桥", top_k=1)
+
+    assert hits and hits[0][2]
+    assert len(hits[0][2]) <= 800
+
+
 def test_assembler_orders_recent_segments_before_memory_blocks(tmp_path):
     service = get_story_project_service()
     service.ensure_project_structure(tmp_path)
@@ -309,11 +398,12 @@ def test_context_trace_records_complete_sources_and_cross_kind_duplicates(tmp_pa
     service = get_story_project_service()
     service.ensure_project_structure(tmp_path)
     shared_paragraph = "沈青在云桥留下同一条可核验的证据。"
+    candidate_paths = [f"chapters/{index:03d}.md" for index in range(1, 31)]
 
     monkeypatch.setattr(
         StorydexContextAssemblerService,
         "_render_related_passages",
-        lambda self, *args, **kwargs: (shared_paragraph, ["chapters/001.md"]),
+        lambda self, *args, **kwargs: (shared_paragraph, candidate_paths),
     )
     monkeypatch.setattr(
         StorydexContextAssemblerService,
@@ -349,7 +439,10 @@ def test_context_trace_records_complete_sources_and_cross_kind_duplicates(tmp_pa
     by_kind = {source["kind"]: source for source in trace["sources"]}
     assert by_kind["related_passages"]["candidateChars"] == len(shared_paragraph)
     assert by_kind["related_passages"]["chars"] == len(shared_paragraph)
+    assert by_kind["related_passages"]["paths"] == candidate_paths
     assert by_kind["wiki_reference"]["included"] is True
+    related_block = next(block for block in assembly["promptBlocks"] if block["id"] == "related_passages")
+    assert related_block["sourcePaths"] == candidate_paths
     duplicate = next(item for item in trace["duplicates"] if "related_passages" in item["kinds"])
     assert set(duplicate["kinds"]) == {"related_passages", "wiki_reference"}
     assert trace["totals"]["contextChars"] == sum(source["chars"] for source in trace["sources"])
@@ -490,12 +583,188 @@ def test_related_passage_query_extracts_quoted_terms():
     assert terms == ["青萝", "山河图"]
 
 
+@pytest.mark.parametrize(
+    ("occurrence_id", "active_file", "active_text", "prompt", "evidence_files"),
+    [
+        (
+            "P017-B-2",
+            "chapters/108.txt",
+            "第一百零八回\n符弥轩、金秀英与龙光出场。\n",
+            "请用读书会主持人的语气，结合第一百零六至一百零八回聊聊结尾阶段的节奏、人物命运与"
+            "未完全收束的线索。回答不少于600字，事实不确定时明确说不确定，可以查项目原文；本回合"
+            "不执行任何写入。",
+            {
+                "chapters/101.txt": "第一百零一回\n旧事在本回留下证据。\n",
+                "chapters/105.txt": "第一百零五回\n另一条旧事在本回留下证据。\n",
+            },
+        ),
+        (
+            "P051-A-1",
+            "chapters/030.txt",
+            "第三十回\n符弥轩、苟才、金秀英与龙光出场。\n",
+            "请只读盘点当前108回的章节组织方式，并围绕第三十回附近的主要人物、地点和未完线索设计一份"
+            "可执行的资料整理方案。需要先查看目录并读取有代表性的原文，输出不少于700字，包含目录结构、"
+            "索引字段、证据链接规则和人工复核点；不要创建或修改文件。",
+            {"chapters/032.txt": "第三十二回\n附近章节在本回留下证据。\n"},
+        ),
+    ],
+)
+def test_passive_retrieval_recalls_unquoted_chapter_scope(
+    tmp_path, occurrence_id, active_file, active_text, prompt, evidence_files
+):
+    service = get_story_project_service()
+    service.ensure_project_structure(tmp_path)
+    for name in ("符弥轩", "苟才", "金秀英", "龙光"):
+        (tmp_path / ".storydex" / "characters" / f"{name}.md").write_text(
+            f"# {name}\n", encoding="utf-8"
+        )
+    for relative_path, content in {active_file: active_text, **evidence_files}.items():
+        path = tmp_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    reset_retrieval_cache()
+
+    assembly = StorydexContextAssemblerService(service).assemble(
+        tmp_path,
+        prompt=prompt,
+        active_file=active_file,
+        policy=ContextPolicy(
+            base_story_context=False,
+            story_structured_memory=False,
+            passive_fts=True,
+            wiki_context=False,
+            coomi_memory=False,
+            active_retrieval_tools=False,
+        ),
+    )
+
+    related_source = next(
+        source for source in assembly["contextTrace"]["sources"] if source["kind"] == "related_passages"
+    )
+    assert set(evidence_files) <= set(related_source["paths"]), occurrence_id
+
+
 def test_related_passages_skipped_without_entities_or_quotes(tmp_path):
     service = StorydexContextAssemblerService(get_story_project_service())
     content, paths = service._render_related_passages(  # noqa: SLF001
         tmp_path, prompt="继续写下一段", active_entities=(), exclude_paths=set()
     )
     assert content == "" and paths == [], "无高置信度检索词时必须跳过被动检索块"
+
+
+def test_related_passages_expose_lower_ranked_candidate_paths(tmp_path, monkeypatch):
+    class _CandidateService:
+        def watch_files(self):
+            return 0
+
+        def search_with_candidates(self, query, *, top_k, candidate_limit):
+            assert query == "沈青"
+            assert top_k == 8
+            assert candidate_limit >= 30
+            return (
+                [("chapters/001.md", -1.0, "沈青的高排名摘录。")],
+                ["chapters/001.md", "chapters/104.md", "chapters/105.md"],
+            )
+
+    monkeypatch.setattr(
+        "core.feature_flags.get_flags",
+        lambda: SimpleNamespace(get_bool=lambda _name: True),
+    )
+    monkeypatch.setattr(
+        "services.retrieval_service.get_retrieval_service",
+        lambda _root: _CandidateService(),
+    )
+    service = StorydexContextAssemblerService(get_story_project_service())
+
+    content, paths = service._render_related_passages(  # noqa: SLF001
+        tmp_path,
+        prompt="核对沈青的后续",
+        active_entities=["沈青"],
+        exclude_paths=set(),
+    )
+
+    assert "chapters/104.md" in content
+    assert "chapters/105.md" in content
+    assert paths == ["chapters/001.md", "chapters/104.md", "chapters/105.md"]
+
+
+_PROJECT_ORGANIZATION_PROMPT = (
+    "请只读盘点当前108回的章节组织方式，并围绕第三十回附近的主要人物、地点和未完线索设计一份"
+    "可执行的资料整理方案。需要先查看目录并读取有代表性的原文，输出不少于700字，包含目录结构、"
+    "索引字段、证据链接规则和人工复核点；不要创建或修改文件。"
+)
+
+
+def _build_project_organization_contract(tmp_path: Path):
+    service = get_story_project_service()
+    return StorydexOrchestrationService(service).build_turn_contract(
+        tmp_path,
+        prompt=_PROJECT_ORGANIZATION_PROMPT,
+        active_file="chapters/030.txt",
+        context_policy=ContextPolicy(),
+    )
+
+
+def test_project_organization_inventory_recalls_full_chapter_title_paths(tmp_path):
+    chapters = tmp_path / "chapters"
+    chapters.mkdir(parents=True)
+    for number in range(1, 109):
+        (chapters / f"{number:03d}.txt").write_text(
+            f"第{number}回 标题{number}\n正文占位。\n",
+            encoding="utf-8",
+        )
+
+    contract = _build_project_organization_contract(tmp_path)
+
+    assert contract["intentFrame"]["primary"] == "project_organization"
+    assembly = contract["contextAssembly"]
+    source = next(item for item in assembly["contextTrace"]["sources"] if item["kind"] == "project_organization_inventory")
+    block = next(item for item in assembly["promptBlocks"] if item["id"] == "project_organization_inventory")
+    required_paths = {"chapters/004.txt", "chapters/074.txt", "chapters/087.txt"}
+    assert required_paths <= set(source["paths"])
+    assert required_paths <= set(block["sourcePaths"])
+    assert "第4回 标题4" in block["content"]
+    assert "第74回 标题74" in block["content"]
+    assert "第87回 标题87" in block["content"]
+
+
+def test_project_organization_inventory_indexes_character_occurrence_paths(tmp_path):
+    chapters = tmp_path / "chapters"
+    chapters.mkdir(parents=True)
+    for number in range(1, 109):
+        text = f"第{number}回 标题{number}\n正文占位。\n"
+        if number in {30, 50, 64}:
+            text += "方佚廬在此处出现。\n"
+        if number in {73, 74}:
+            text += "符彌軒在此处出现。\n"
+        (chapters / f"{number:03d}.txt").write_text(text, encoding="utf-8")
+    entity_path = tmp_path / ".storydex" / "memory" / "current" / "entities.json"
+    entity_path.parent.mkdir(parents=True)
+    entity_path.write_text(
+        json.dumps(
+            {
+                "entities": [
+                    {"name": "方佚廬"},
+                    {"name": "符彌軒"},
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    contract = _build_project_organization_contract(tmp_path)
+
+    assembly = contract["contextAssembly"]
+    source = next(item for item in assembly["contextTrace"]["sources"] if item["kind"] == "project_organization_inventory")
+    block = next(item for item in assembly["promptBlocks"] if item["id"] == "project_organization_inventory")
+    required_paths = {"chapters/050.txt", "chapters/064.txt", "chapters/073.txt"}
+    assert required_paths <= set(source["paths"])
+    assert required_paths <= set(block["sourcePaths"])
+    assert "方佚廬" in block["content"]
+    assert "符彌軒" in block["content"]
+    assert "方佚廬 | first=chapters/030.txt | last=chapters/064.txt" in block["content"]
+    assert "符彌軒 | first=chapters/073.txt | last=chapters/074.txt" in block["content"]
 
 
 # ─────────────────── 7. WIKI 参考块 ───────────────────
@@ -722,6 +991,46 @@ def test_project_search_tool_returns_ranked_hits(tmp_path):
     assert payload["ok"] and payload["resultCount"] >= 1
     assert payload["results"][0]["path"] == "chapters/001.md"
     assert payload["results"][0]["snippet"], "命中必须带可读摘录"
+
+
+def test_project_search_tool_exposes_lower_ranked_candidate_paths(tmp_path, monkeypatch):
+    pytest.importorskip("coomi")
+    from services.storydex_agent_tools import StorydexProjectSearchTool
+
+    class _CandidateService:
+        def watch_files(self):
+            return 0
+
+        def search_with_candidates(self, query, *, top_k, candidate_limit, path_prefix):
+            assert query == "苟才 银元局"
+            assert top_k == 1
+            assert candidate_limit >= 30
+            assert path_prefix == "chapters/"
+            return (
+                [("chapters/095.txt", -4.0, "银元局经历。")],
+                ["chapters/095.txt", "chapters/101.txt", "chapters/104.txt", "chapters/105.txt"],
+            )
+
+    monkeypatch.setattr(
+        "services.retrieval_service.get_retrieval_service",
+        lambda _root: _CandidateService(),
+    )
+    tool = StorydexProjectSearchTool(workspace_root=tmp_path)
+
+    result = tool.run(
+        {"query": "苟才 银元局", "maxResults": 1, "pathPrefix": "chapters/"}
+    )
+
+    assert result.success
+    payload = json.loads(result.output)
+    assert [item["path"] for item in payload["results"]] == ["chapters/095.txt"]
+    assert payload["candidateCount"] == 4
+    assert payload["candidatePaths"] == [
+        "chapters/095.txt",
+        "chapters/101.txt",
+        "chapters/104.txt",
+        "chapters/105.txt",
+    ]
 
 
 def test_project_search_tool_requires_query(tmp_path):

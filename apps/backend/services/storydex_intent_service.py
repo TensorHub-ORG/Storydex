@@ -110,7 +110,10 @@ _CHARACTER_INTENT_RE = re.compile(r"(角色|人物|character|cast)", re.IGNORECA
 _WORLDBOOK_INTENT_RE = re.compile(r"(世界书|世界观|设定集|worldbook|lorebook|lore)", re.IGNORECASE)
 _SCRIPT_INTENT_RE = re.compile(r"(剧本|分镜|台词|大纲|screenplay|script)", re.IGNORECASE)
 _WIKI_INTENT_RE = re.compile(r"(wiki|知识图谱|知识库|整理设定|整理关系)", re.IGNORECASE)
-_PROJECT_ORGANIZE_RE = re.compile(r"(整理目录|项目目录|整理项目|organize)", re.IGNORECASE)
+_PROJECT_ORGANIZE_RE = re.compile(
+    r"(整理目录|项目目录|整理项目|目录结构|组织方式|资料整理|盘点.*(?:章节|目录)|organize)",
+    re.IGNORECASE,
+)
 
 
 def build_intent_catalog(
@@ -170,7 +173,10 @@ def heuristic_intent_frame(*, prompt: str, active_file: str) -> Dict[str, Any]:
     text = str(prompt or "")
     signals: List[str] = []
     primary = "general"
-    if _STORY_INTENT_RE.search(text):
+    if _PROJECT_ORGANIZE_RE.search(text):
+        primary = "project_organization"
+        signals.append("project_organization_keywords")
+    elif _STORY_INTENT_RE.search(text):
         primary = "story_generation"
         signals.append("story_keywords")
     elif _CHARACTER_INTENT_RE.search(text):
@@ -185,9 +191,6 @@ def heuristic_intent_frame(*, prompt: str, active_file: str) -> Dict[str, Any]:
     elif _WIKI_INTENT_RE.search(text):
         primary = "wiki_work"
         signals.append("wiki_keywords")
-    elif _PROJECT_ORGANIZE_RE.search(text):
-        primary = "project_organization"
-        signals.append("project_organization_keywords")
     if active_file.startswith("chapters/") and primary == "general":
         primary = "story_generation"
         signals.append("active_chapter_file")

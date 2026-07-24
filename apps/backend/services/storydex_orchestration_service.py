@@ -109,6 +109,7 @@ class StorydexOrchestrationService:
             root,
             prompt=prompt,
             active_file=active_file,
+            intent_primary=str(intent.get("primary") or ""),
             turn_plan=turn_plan,
             policy=effective_context_policy,
         )
