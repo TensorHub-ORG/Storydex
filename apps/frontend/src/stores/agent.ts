@@ -3087,5 +3087,7 @@ export const __agentStoreTestUtils = import.meta.env.MODE === "test" ? {
   asString,
   asBoolean,
   asNumber,
-  clampInteger
+  clampInteger,
+  normalizePositiveInteger,
+  normalizeFollowupPacket
 } : null;
