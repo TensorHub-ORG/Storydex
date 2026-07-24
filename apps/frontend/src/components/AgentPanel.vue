@@ -303,14 +303,27 @@
               />
             </label>
             <label class="coomi-story-field">
-              <span>片段字数</span>
+              <span>最小字数</span>
               <input
                 type="number"
                 min="100"
                 max="20000"
                 step="100"
-                :value="agentStore.storyFragmentWordCount"
-                @input="updateStoryFragmentWordCount"
+                :value="agentStore.storyFragmentWordCountMin"
+                title="每个片段的最小字数（Storydex 非空白字符统计）"
+                @input="updateStoryFragmentWordCountMin"
+              />
+            </label>
+            <label class="coomi-story-field">
+              <span>最大字数</span>
+              <input
+                type="number"
+                min="100"
+                max="20000"
+                step="100"
+                :value="agentStore.storyFragmentWordCountMax"
+                title="每个片段的最大字数（Storydex 非空白字符统计）"
+                @input="updateStoryFragmentWordCountMax"
               />
             </label>
             <label class="coomi-story-field coomi-story-template-field">
@@ -339,7 +352,7 @@
               {{ storyChapterTemplateErrorMessage }}
             </small>
             <small class="coomi-story-template-hint">
-              片段字数由 Storydex 内置统计精确验收：忽略空白后，每个 Unicode 字符计 1 字。
+              每个片段的字数需落在设定区间内，由 Storydex 内置统计验收：忽略空白后，每个 Unicode 字符计 1 字。
             </small>
           </div>
         </div>
@@ -906,7 +919,7 @@ const selectedReasoningOption = computed(
 );
 const reasoningLabel = computed(() => `推理：${selectedReasoningOption.value.shortLabel}`);
 const storyOptionsLabel = computed(
-  () => `${agentStore.storyFragmentCount}段/${agentStore.storyFragmentWordCount}字`
+  () => `${agentStore.storyFragmentCount}段/${agentStore.storyFragmentWordCountMin}-${agentStore.storyFragmentWordCountMax}字`
 );
 const selectedChapterTemplate = computed(() =>
   agentStore.storyChapterTemplates.find((template) => template.id === agentStore.storyChapterTemplateId) || null
@@ -1175,7 +1188,8 @@ watch(
   () => [
     workspaceStore.currentProject?.workspaceRoot || "",
     workspaceStore.storySettings.storyFragmentCount,
-    workspaceStore.storySettings.storyFragmentWordCount,
+    workspaceStore.storySettings.storyFragmentWordCountMin,
+    workspaceStore.storySettings.storyFragmentWordCountMax,
     workspaceStore.storySettings.storyChapterTemplateId
   ],
   () => {
@@ -1307,9 +1321,14 @@ function updateStoryFragmentCount(event: Event): void {
   void persistStoryGenerationOptions({ fragmentCount: Number(target?.value || 1) });
 }
 
-function updateStoryFragmentWordCount(event: Event): void {
+function updateStoryFragmentWordCountMin(event: Event): void {
   const target = event.target as HTMLInputElement | null;
-  void persistStoryGenerationOptions({ fragmentWordCount: Number(target?.value || 2000) });
+  void persistStoryGenerationOptions({ fragmentWordCountMin: Number(target?.value || 2000) });
+}
+
+function updateStoryFragmentWordCountMax(event: Event): void {
+  const target = event.target as HTMLInputElement | null;
+  void persistStoryGenerationOptions({ fragmentWordCountMax: Number(target?.value || 2500) });
 }
 
 function updateStoryChapterTemplate(event: Event): void {
@@ -1325,14 +1344,16 @@ function syncStoryGenerationOptionsFromProjectSettings(): void {
   }
   agentStore.setStoryGenerationOptions({
     fragmentCount: workspaceStore.storySettings.storyFragmentCount,
-    fragmentWordCount: workspaceStore.storySettings.storyFragmentWordCount,
+    fragmentWordCountMin: workspaceStore.storySettings.storyFragmentWordCountMin,
+    fragmentWordCountMax: workspaceStore.storySettings.storyFragmentWordCountMax,
     chapterTemplateId: workspaceStore.storySettings.storyChapterTemplateId || "default_chapter_directory"
   });
 }
 
 async function persistStoryGenerationOptions(options: {
   fragmentCount?: number;
-  fragmentWordCount?: number;
+  fragmentWordCountMin?: number;
+  fragmentWordCountMax?: number;
   chapterTemplateId?: string;
 }): Promise<void> {
   agentStore.setStoryGenerationOptions(options);
@@ -1342,7 +1363,8 @@ async function persistStoryGenerationOptions(options: {
   try {
     await workspaceStore.updateStorySettings({
       storyFragmentCount: agentStore.storyFragmentCount,
-      storyFragmentWordCount: agentStore.storyFragmentWordCount,
+      storyFragmentWordCountMin: agentStore.storyFragmentWordCountMin,
+      storyFragmentWordCountMax: agentStore.storyFragmentWordCountMax,
       storyChapterTemplateId: agentStore.storyChapterTemplateId
     });
   } catch (error: unknown) {
@@ -2119,7 +2141,8 @@ defineExpose({
     toggleStoryOptions,
     handleDocumentPointerDown,
     updateStoryFragmentCount,
-    updateStoryFragmentWordCount,
+    updateStoryFragmentWordCountMin,
+    updateStoryFragmentWordCountMax,
     updateStoryChapterTemplate,
     syncStoryGenerationOptionsFromProjectSettings,
     persistStoryGenerationOptions,

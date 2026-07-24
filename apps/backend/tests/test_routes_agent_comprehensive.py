@@ -53,12 +53,22 @@ def test_request_workspace_story_options_lock_git_and_sse_helpers(monkeypatch, t
     assert fallback == fake_project.workspace_root
 
     assert routes._normalize_story_generation_options(None) == {
-        "fragmentCount": 1, "fragmentWordCount": 2000, "chapterTemplateId": ""
+        "fragmentCount": 1,
+        "fragmentWordCount": 2500,
+        "fragmentWordCountMin": 2000,
+        "fragmentWordCountMax": 2500,
+        "chapterTemplateId": "",
     }
     normalized = routes._normalize_story_generation_options(
         {"segmentCount": 99, "segmentWords": "bad", "chapter_template": "serial"}
     )
-    assert normalized == {"fragmentCount": 99, "fragmentWordCount": 2000, "chapterTemplateId": "serial"}
+    assert normalized == {
+        "fragmentCount": 99,
+        "fragmentWordCount": 2500,
+        "fragmentWordCountMin": 2500,
+        "fragmentWordCountMax": 2500,
+        "chapterTemplateId": "serial",
+    }
     assert routes._apply_turn_contract_story_generation_defaults(normalized, {"turnPlan": {}}) is normalized
     applied = routes._apply_turn_contract_story_generation_defaults(normalized, {"turnPlan": {"selectedChapterTemplate": "book"}})
     assert applied["chapterTemplateId"] == "book" and normalized["chapterTemplateId"] == "serial"
@@ -220,11 +230,25 @@ def test_task_planner_normalization_tracker_and_event_helpers(monkeypatch, tmp_p
             ]
 
     monkeypatch.setattr(routes, "get_storydex_coomi_agent_service", lambda: Planner())
+    # 清单只对复杂任务规划：intentFrame 需带 complexity=complex。
+    complex_contract = {"intentFrame": {"primary": "story_generation", "complexity": "complex"}}
     planned = asyncio.run(routes._create_agent_task_plan(
         prompt="p", trace_id="t", session_id="s", workspace_root=tmp_path,
-        active_file="", story_generation={}, turn_contract={}
+        active_file="", story_generation={}, turn_contract=complex_contract
     ))
     assert len(planned) == 2 and planned[1]["status"] == "completed"
+
+    # 简单任务（无 complexity）不规划清单。
+    assert asyncio.run(routes._create_agent_task_plan(
+        prompt="p", trace_id="t", session_id="s", workspace_root=tmp_path,
+        active_file="", story_generation={}, turn_contract={"intentFrame": {"primary": "story_generation"}}
+    )) == []
+    # 问候/问询即便被标记 complex 也不建清单。
+    assert asyncio.run(routes._create_agent_task_plan(
+        prompt="hi", trace_id="t", session_id="s", workspace_root=tmp_path,
+        active_file="", story_generation={},
+        turn_contract={"intentFrame": {"primary": "general", "operationType": "greeting", "complexity": "complex"}}
+    )) == []
 
     class BrokenPlanner:
         async def create_task_plan(self, **kwargs):
@@ -233,7 +257,7 @@ def test_task_planner_normalization_tracker_and_event_helpers(monkeypatch, tmp_p
     monkeypatch.setattr(routes, "get_storydex_coomi_agent_service", lambda: BrokenPlanner())
     assert asyncio.run(routes._create_agent_task_plan(
         prompt="p", trace_id="t", session_id="s", workspace_root=tmp_path,
-        active_file="", story_generation={}, turn_contract={}
+        active_file="", story_generation={}, turn_contract=complex_contract
     )) == []
     assert routes._normalize_task_plan(None, trace_id="t") == []
     assert routes._is_generic_route_task_title("执行本轮请求") is True
@@ -266,6 +290,37 @@ def test_task_planner_normalization_tracker_and_event_helpers(monkeypatch, tmp_p
     collected = []
     routes._append_task_events(collected, [("TaskStarted", {"title": "x"})])
     assert collected[0]["event"] == "TaskStarted"
+
+
+def test_should_create_task_checklist_gates_on_complexity():
+    # 仅复杂任务建清单；简单任务/缺失复杂度/问候/问询都不建。
+    assert routes._should_create_task_checklist({"complexity": "complex", "operationType": "modify_existing"}) is True
+    assert routes._should_create_task_checklist({"complexity": "simple", "operationType": "create_new"}) is False
+    assert routes._should_create_task_checklist({"operationType": "create_new"}) is False
+    # 问候/理解性问询即便被误标复杂，也不建清单。
+    assert routes._should_create_task_checklist({"complexity": "complex", "operationType": "greeting"}) is False
+    assert routes._should_create_task_checklist({"complexity": "complex", "operationType": "inquiry"}) is False
+    assert routes._should_create_task_checklist({}) is False
+
+
+def test_intent_phase_detail_renders_operation_and_complexity():
+    detail = routes._intent_phase_detail(
+        {
+            "primary": "story_generation",
+            "operationType": "modify_existing",
+            "complexity": "complex",
+            "method": "llm",
+            "reason": "重构现有片段",
+        }
+    )
+    assert "意图：story_generation" in detail
+    assert "修改现有文件" in detail
+    assert "复杂" in detail
+    assert "重构现有片段" in detail
+    # 缺失字段时优雅降级。
+    minimal = routes._intent_phase_detail({"primary": "general", "method": "deterministic"})
+    assert "意图：general" in minimal
+    assert "来源：deterministic" in minimal
 
 
 def test_collect_coomi_run_filters_tools_permissions_errors_and_disconnect(monkeypatch, tmp_path):
@@ -340,6 +395,21 @@ def test_stream_coomi_sse_success_needs_input_and_runtime_error(monkeypatch, tmp
     names = [name for name, _ in success]
     assert "TextChunk" in names and "ToolDone" in names and names[-1] == "done"
     assert not any(data.get("content") == "" for name, data in success if name == "TextChunk")
+
+    # 复杂任务：intentFrame.complexity=complex 触发任务清单规划路径，
+    # 计划任务同步完成后应发出 TaskPlanCreated 与逐条 TaskStarted。
+    complex_success = asyncio.run(
+        collect({"status": "ready", "intentFrame": {"primary": "story_generation", "complexity": "complex"}})
+    )
+    complex_names = [name for name, _ in complex_success]
+    assert "TaskPlanCreated" in complex_names
+    assert "TaskStarted" in complex_names
+    planning_success = [
+        data
+        for name, data in complex_success
+        if name == "TurnPhase" and data.get("phase") == "task_planning" and data.get("status") == "success"
+    ]
+    assert planning_success and "已生成 3 个执行步骤" in str(planning_success[-1].get("detail") or "")
 
     waiting = asyncio.run(collect({"status": "needs_user_input", "requiredQuestions": [{"message": "choose"}]}))
     assert any(name == "AgentCompleted" and data.get("status") == "needs_user_input" for name, data in waiting)

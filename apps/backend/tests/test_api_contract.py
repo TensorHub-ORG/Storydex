@@ -247,6 +247,8 @@ def test_agent_event_and_generation_helpers_cover_boundaries():
     assert routes_agent._normalize_story_generation_options({"segmentCount": 2, "segmentWords": 800}) == {
         "fragmentCount": 2,
         "fragmentWordCount": 800,
+        "fragmentWordCountMin": 800,
+        "fragmentWordCountMax": 800,
         "chapterTemplateId": "",
     }
     assert routes_agent._phase_for_event("ToolDone") == "tool"

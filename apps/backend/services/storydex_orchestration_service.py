@@ -8,7 +8,14 @@ from typing import Any, Dict, List
 from services.context_policy import ContextPolicy
 from services.global_config_service import GlobalConfigService, get_global_config_service
 from services.storydex_context_assembler_service import StorydexContextAssemblerService, get_storydex_context_assembler_service
-from services.storydex_intent_service import heuristic_intent_frame, is_valid_intent_frame
+from services.storydex_intent_service import (
+    _COMPLEXITY_LEVELS,
+    _OPERATION_TYPES,
+    _heuristic_complexity,
+    _heuristic_operation_type,
+    heuristic_intent_frame,
+    is_valid_intent_frame,
+)
 from services.story_project_service import (
     DEFAULT_CHAPTER_TEMPLATE_ID,
     SINGLE_FILE_CONTENT_MODE,
@@ -55,22 +62,24 @@ class StorydexOrchestrationService:
         )
         if not requested_template and selected_template is None and chapter_templates:
             selected_template = chapter_templates[0]
-        is_new_story = intent["primary"] == "story_generation" and len(chapters) == 0
+        # operationType 门控：只有"新建内容"才规划新片段目标。"修改现有文件"
+        # （重构/整理/调整）绝不规划 fragmentTargets，否则 Agent 会不断生成新片段
+        # 而不去读/改既有文件——这正是用户报告的核心 bug。
+        operation_type = str(intent.get("operationType") or "").strip().lower()
+        is_story_creation = intent["primary"] == "story_generation" and operation_type != "modify_existing"
+        is_new_story = is_story_creation and len(chapters) == 0
         invalid_template = bool(requested_template and selected_template is None)
-        requires_template = intent["primary"] == "story_generation" and invalid_template
+        requires_template = is_story_creation and invalid_template
 
         requested_fragment_count = self._positive_int(story_generation.get("fragmentCount"), default=1)
-        fragment_word_count = self._bounded_int(
-            story_generation.get("fragmentWordCount"),
-            default=2000,
-            minimum=100,
-            maximum=20000,
-        )
+        fragment_word_count_min, fragment_word_count_max = self._resolve_story_word_count_range(story_generation)
+        # 保留旧字段以向后兼容：等于区间上界
+        fragment_word_count = fragment_word_count_max
         chapter_content_mode = str((selected_template or {}).get("contentMode") or "multi_fragment")
         fragment_count = 1 if chapter_content_mode == SINGLE_FILE_CONTENT_MODE else requested_fragment_count
         next_segment_path = ""
         fragment_targets: List[Dict[str, Any]] = []
-        if intent["primary"] == "story_generation" and not requires_template:
+        if is_story_creation and not requires_template:
             fragment_targets = self.story_project_service.plan_story_generation_targets(
                 root,
                 template=selected_template or self.story_project_service.default_chapter_directory_template(),
@@ -85,13 +94,17 @@ class StorydexOrchestrationService:
             "requestedFragmentCount": requested_fragment_count,
             "fragmentCount": fragment_count,
             "fragmentWordCount": fragment_word_count,
+            "fragmentWordCountMin": fragment_word_count_min,
+            "fragmentWordCountMax": fragment_word_count_max,
             "wordCountPolicy": {
                 "algorithm": "storydex_visible_characters_v1",
                 "countingRule": "count every non-whitespace Unicode character",
-                "mode": "exact",
-                "minimum": fragment_word_count,
-                "maximum": fragment_word_count,
+                "mode": "range",
+                "minimum": fragment_word_count_min,
+                "maximum": fragment_word_count_max,
             },
+            "operationType": operation_type or "other",
+            "complexity": str(intent.get("complexity") or "simple"),
             "isNewStory": is_new_story,
             "requiresChapterTemplateSelection": requires_template,
             "selectedChapterTemplate": str(selected_template.get("id") or "") if selected_template else "",
@@ -187,6 +200,16 @@ class StorydexOrchestrationService:
         frame["primary"] = str(frame.get("primary") or "general")
         frame["confidence"] = str(frame.get("confidence") or "low")
         frame["signals"] = list(frame.get("signals") if isinstance(frame.get("signals"), list) else [])
+        # operationType / complexity 透传给下游门控与前端。旧注入帧（无这两字段）
+        # 用启发式兜底，保证契约始终携带这两个维度。
+        operation_type = str(frame.get("operationType") or "").strip().lower()
+        if operation_type not in _OPERATION_TYPES:
+            operation_type = _heuristic_operation_type(prompt, primary=frame["primary"])
+        frame["operationType"] = operation_type
+        complexity = str(frame.get("complexity") or "").strip().lower()
+        if complexity not in _COMPLEXITY_LEVELS:
+            complexity = _heuristic_complexity(prompt)
+        frame["complexity"] = complexity
         frame["existingChapterCount"] = chapter_count
         return frame
 
@@ -272,6 +295,29 @@ class StorydexOrchestrationService:
         except (TypeError, ValueError):
             parsed = default
         return max(1, parsed)
+
+    def _resolve_story_word_count_range(self, story_generation: Dict[str, Any]) -> tuple[int, int]:
+        """Resolve the [min, max] fragment word-count range from turn options.
+
+        Prefers the explicit min/max fields. Falls back to the legacy single
+        ``fragmentWordCount`` (min == max) when the range fields are absent so
+        older clients keep working.
+        """
+        raw_min = story_generation.get("fragmentWordCountMin")
+        raw_max = story_generation.get("fragmentWordCountMax")
+        if raw_min is None and raw_max is None:
+            legacy = self._bounded_int(
+                story_generation.get("fragmentWordCount"),
+                default=2500,
+                minimum=100,
+                maximum=20000,
+            )
+            return legacy, legacy
+        min_value = self._bounded_int(raw_min, default=2000, minimum=100, maximum=20000)
+        max_value = self._bounded_int(raw_max, default=2500, minimum=100, maximum=20000)
+        if min_value > max_value:
+            min_value, max_value = max_value, min_value
+        return min_value, max_value
 
     def _skill_registry(self, workspace_root: Path) -> Dict[str, Any]:
         payload = self.story_project_service.read_agent_skill_registry(workspace_root)

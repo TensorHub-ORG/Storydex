@@ -596,12 +596,7 @@ def _normalize_story_generation_options(value: Dict[str, Any] | None) -> Dict[st
         payload.get("fragmentCount", payload.get("fragment_count", payload.get("segmentCount"))),
         default=1,
     )
-    fragment_word_count = _bounded_int(
-        payload.get("fragmentWordCount", payload.get("fragment_word_count", payload.get("segmentWords"))),
-        default=2000,
-        minimum=100,
-        maximum=20000,
-    )
+    fragment_word_count_min, fragment_word_count_max = _resolve_story_word_count_range(payload)
     chapter_template_id = str(
         payload.get(
             "chapterTemplateId",
@@ -614,9 +609,35 @@ def _normalize_story_generation_options(value: Dict[str, Any] | None) -> Dict[st
     ).strip()
     return {
         "fragmentCount": fragment_count,
-        "fragmentWordCount": fragment_word_count,
+        # 保留旧字段以向后兼容：等于区间上界
+        "fragmentWordCount": fragment_word_count_max,
+        "fragmentWordCountMin": fragment_word_count_min,
+        "fragmentWordCountMax": fragment_word_count_max,
         "chapterTemplateId": chapter_template_id,
     }
+
+
+def _resolve_story_word_count_range(payload: Dict[str, Any]) -> tuple[int, int]:
+    """Resolve the [min, max] fragment word-count range from a request payload.
+
+    Falls back to the legacy single ``fragmentWordCount`` (min == max) when the
+    range keys are absent, keeping older clients working.
+    """
+    raw_min = payload.get("fragmentWordCountMin", payload.get("fragment_word_count_min"))
+    raw_max = payload.get("fragmentWordCountMax", payload.get("fragment_word_count_max"))
+    if raw_min is None and raw_max is None:
+        legacy = payload.get(
+            "fragmentWordCount", payload.get("fragment_word_count", payload.get("segmentWords"))
+        )
+        if legacy is None:
+            return 2000, 2500
+        value = _bounded_int(legacy, default=2500, minimum=100, maximum=20000)
+        return value, value
+    min_value = _bounded_int(raw_min, default=2000, minimum=100, maximum=20000)
+    max_value = _bounded_int(raw_max, default=2500, minimum=100, maximum=20000)
+    if min_value > max_value:
+        min_value, max_value = max_value, min_value
+    return min_value, max_value
 
 
 def _apply_turn_contract_story_generation_defaults(
@@ -630,12 +651,19 @@ def _apply_turn_contract_story_generation_defaults(
 
     next_story_generation = dict(story_generation)
     next_story_generation["fragmentCount"] = _positive_int(turn_plan.get("fragmentCount"), default=1)
-    next_story_generation["fragmentWordCount"] = _bounded_int(
-        turn_plan.get("fragmentWordCount"),
-        default=2000,
-        minimum=100,
-        maximum=20000,
-    )
+    raw_min = turn_plan.get("fragmentWordCountMin")
+    raw_max = turn_plan.get("fragmentWordCountMax")
+    if raw_min is None and raw_max is None:
+        legacy = _bounded_int(turn_plan.get("fragmentWordCount"), default=2500, minimum=100, maximum=20000)
+        min_value, max_value = legacy, legacy
+    else:
+        min_value = _bounded_int(raw_min, default=2000, minimum=100, maximum=20000)
+        max_value = _bounded_int(raw_max, default=2500, minimum=100, maximum=20000)
+        if min_value > max_value:
+            min_value, max_value = max_value, min_value
+    next_story_generation["fragmentWordCountMin"] = min_value
+    next_story_generation["fragmentWordCountMax"] = max_value
+    next_story_generation["fragmentWordCount"] = max_value
     next_story_generation["chapterTemplateId"] = selected_template
     next_story_generation["chapterTemplate"] = selected_template
     return next_story_generation
@@ -718,6 +746,36 @@ def _turn_phase_packet(
         "elapsedMs": elapsed_ms,
         "heartbeat": heartbeat,
     }
+
+
+_INTENT_OPERATION_LABELS = {
+    "create_new": "生成新内容",
+    "modify_existing": "修改现有文件",
+    "inquiry": "理解性问询",
+    "greeting": "问候",
+    "other": "其他",
+}
+_INTENT_COMPLEXITY_LABELS = {"simple": "简单", "complex": "复杂"}
+
+
+def _intent_phase_detail(intent_frame: Dict[str, Any]) -> str:
+    """把意图帧渲染成可读中文串，实时推送到瀑布流面板。"""
+    frame = intent_frame if isinstance(intent_frame, dict) else {}
+    primary = str(frame.get("primary") or "general")
+    operation_type = str(frame.get("operationType") or "").strip().lower()
+    complexity = str(frame.get("complexity") or "").strip().lower()
+    method = str(frame.get("method") or "unknown")
+    reason = str(frame.get("reason") or "").strip()
+    parts = [f"意图：{primary}"]
+    if operation_type:
+        parts.append(f"操作：{_INTENT_OPERATION_LABELS.get(operation_type, operation_type)}")
+    if complexity:
+        parts.append(f"复杂度：{_INTENT_COMPLEXITY_LABELS.get(complexity, complexity)}")
+    parts.append(f"来源：{method}")
+    detail = " · ".join(parts)
+    if reason:
+        detail += f"（{reason[:60]}）"
+    return detail
 
 
 def _now_iso() -> str:
@@ -990,6 +1048,8 @@ def _build_audit(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "requiresChapterTemplateSelection": bool(turn_plan.get("requiresChapterTemplateSelection")),
                     "fragmentCount": int(turn_plan.get("fragmentCount") or 0),
                     "fragmentWordCount": int(turn_plan.get("fragmentWordCount") or 0),
+                    "fragmentWordCountMin": int(turn_plan.get("fragmentWordCountMin") or 0),
+                    "fragmentWordCountMax": int(turn_plan.get("fragmentWordCountMax") or 0),
                     "skillCount": int(skill_registry.get("skillCount") or 0),
                     "toolCount": int(tool_registry.get("toolCount") or 0),
                     "contextBlockCount": int(context_budget.get("blockCount") or 0),
@@ -1006,7 +1066,8 @@ def _build_audit(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "algorithm": str(data.get("algorithm") or ""),
                     "exact": bool(data.get("exact")),
                     "fragmentCount": int(data.get("fragmentCount") or len(fragments)),
-                    "targetWordCount": int(data.get("targetWordCount") or 0),
+                    "targetWordCountMin": int(data.get("targetWordCountMin") or 0),
+                    "targetWordCountMax": int(data.get("targetWordCountMax") or 0),
                     "chapterContentMode": str(data.get("chapterContentMode") or ""),
                     "structurePassed": bool(data.get("structurePassed")),
                     "writeToolApplied": bool(data.get("writeToolApplied")),
@@ -1251,6 +1312,8 @@ def _story_generation_correction_prompt(
     correction_attempt: int,
 ) -> str:
     fragments = validation.get("fragments") if isinstance(validation.get("fragments"), list) else []
+    target_min = int(validation.get("targetWordCountMin") or 0)
+    target_max = int(validation.get("targetWordCountMax") or 0)
     failures = [
         {
             "order": int(item.get("order") or index + 1),
@@ -1259,7 +1322,8 @@ def _story_generation_correction_prompt(
             "writeMode": str(item.get("writeMode") or "replace"),
             "baselineWordCount": int(item.get("baselineWordCount") or 0),
             "generatedWordCount": int(item.get("generatedWordCount") or 0),
-            "targetWordCount": int(item.get("targetWordCount") or 0),
+            "targetWordCountMin": int(item.get("targetWordCountMin") or target_min),
+            "targetWordCountMax": int(item.get("targetWordCountMax") or target_max),
             "difference": int(item.get("difference") or 0),
         }
         for index, item in enumerate(fragments)
@@ -1270,16 +1334,21 @@ def _story_generation_correction_prompt(
         "maximumCorrectionAttempts": _STORY_GENERATION_MAX_CORRECTIONS,
         "algorithm": str(validation.get("algorithm") or "storydex_visible_characters_v1"),
         "countingRule": str(validation.get("countingRule") or "count every non-whitespace Unicode character"),
-        "exact": True,
+        "exact": False,
+        "targetWordCountMin": target_min,
+        "targetWordCountMax": target_max,
         "chapterContentMode": str(validation.get("chapterContentMode") or ""),
         "structurePassed": bool(validation.get("structurePassed")),
         "writeToolApplied": bool(validation.get("writeToolApplied")),
         "failures": failures,
     }
+    range_hint = (
+        f"{target_min}-{target_max}" if target_min or target_max else "目标区间"
+    )
     return (
         "Storydex 的落盘后客观验收未通过。不要自行估算字数，也不要宣布完成。"
         "请依据下方校验结果修订全部失败片段，并再次调用 StorydexApplyStoryIncrement。"
-        "每个片段必须按 Storydex 内置规则（忽略所有空白后逐个 Unicode 字符计数）精确达到目标字数；"
+        f"每个片段必须按 Storydex 内置规则（忽略所有空白后逐个 Unicode 字符计数）落在 {range_hint} 字区间内；"
         "章节路径、文件数量和写入模式必须完全遵守当前 TurnContract。"
         "禁止使用普通 Write/Edit 工具写 chapters/ 正文。\n"
         f"STORYDEX_OBJECTIVE_VALIDATION={json.dumps(correction, ensure_ascii=False, separators=(',', ':'))}"
@@ -1297,6 +1366,20 @@ def _has_successful_story_generation_write(events: List[Dict[str, Any]]) -> bool
     return False
 
 
+def _should_create_task_checklist(intent_frame: Dict[str, Any]) -> bool:
+    """仅复杂任务才创建任务清单。
+
+    门控依据意图帧的 ``complexity``：``complex`` 才建清单。缺失时保守地不建，
+    避免给问候/简单问询/单步编辑套上多余的清单流程。纯问候/理解性问询即便被
+    误标为复杂，也不建清单。
+    """
+    frame = intent_frame if isinstance(intent_frame, dict) else {}
+    operation_type = str(frame.get("operationType") or "").strip().lower()
+    if operation_type in {"greeting", "inquiry"}:
+        return False
+    return str(frame.get("complexity") or "").strip().lower() == "complex"
+
+
 async def _create_agent_task_plan(
     *,
     prompt: str,
@@ -1308,7 +1391,9 @@ async def _create_agent_task_plan(
     turn_contract: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
     intent_frame = turn_contract.get("intentFrame") if isinstance(turn_contract.get("intentFrame"), dict) else {}
-    if intent_frame and str(intent_frame.get("primary") or "general").strip() == "general":
+    # 任务清单按"复杂度"门控，而非意图类别：只有复杂任务（多步骤，需读文件、
+    # 重构、再更新变量/WIKI、清理等）才建清单。简单任务/闲聊不建清单。
+    if not _should_create_task_checklist(intent_frame):
         return []
     planner = getattr(get_storydex_coomi_agent_service(), "create_task_plan", None)
     if callable(planner):
@@ -1639,8 +1724,9 @@ async def _stream_coomi_sse_worker(
                 ),
             )
             intent_frame = turn_contract.get("intentFrame") if isinstance(turn_contract.get("intentFrame"), dict) else {}
-            intent_primary = str(intent_frame.get("primary") or "general").strip()
-            if intent_primary == "general":
+            # 清单门控改为按复杂度：只有复杂任务才规划任务清单，简单任务/闲聊/问询不建清单。
+            should_plan = _should_create_task_checklist(intent_frame)
+            if not should_plan:
                 task_plan: List[Dict[str, Any]] = []
             else:
                 planning_task = asyncio.create_task(
@@ -1659,7 +1745,7 @@ async def _stream_coomi_sse_worker(
                 task_plan = await planning_task if planning_task.done() else []
                 if planning_task.done():
                     planning_task = None
-            if intent_primary == "general" or planning_task is None:
+            if not should_plan or planning_task is None:
                 yield _encode_sse(
                     "TurnPhase",
                     _turn_phase_packet(
@@ -1669,7 +1755,7 @@ async def _stream_coomi_sse_worker(
                         label="执行步骤规划完成",
                         status="success",
                         phase_started=planning_started,
-                        detail=("无需生成执行步骤" if intent_primary == "general" else f"已生成 {len(task_plan)} 个执行步骤"),
+                        detail=("无需生成执行步骤" if not should_plan else f"已生成 {len(task_plan)} 个执行步骤"),
                     ),
                 )
                 tracker = _TaskRunTracker(task_plan, trace_id=trace_id, session_id=session_id)
@@ -3783,10 +3869,7 @@ async def _stream_agent_chat_request_sse(
                 label="执行意图识别完成",
                 status="success",
                 phase_started=intent_started,
-                detail=(
-                    f"{str(intent_frame.get('primary') or 'general')}"
-                    f" · {str(intent_frame.get('method') or 'unknown')}"
-                ),
+                detail=_intent_phase_detail(intent_frame),
             ),
         )
 

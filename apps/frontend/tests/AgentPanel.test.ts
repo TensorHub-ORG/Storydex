@@ -417,10 +417,13 @@ describe("AgentPanel", () => {
     await utils.handleConfigSaved(); expect(api.fetchAgentCoomiStatus).toHaveBeenCalled();
 
     utils.updateStoryFragmentCount({ target: { value: "3" } } as any);
-    utils.updateStoryFragmentWordCount({ target: { value: "1500" } } as any);
+    utils.updateStoryFragmentWordCountMin({ target: { value: "1500" } } as any);
+    utils.updateStoryFragmentWordCountMax({ target: { value: "1800" } } as any);
     utils.updateStoryChapterTemplate({ target: { value: "custom" } } as any);
-    expect(store.storyFragmentCount).toBe(3); expect(store.storyFragmentWordCount).toBe(1500);
-    workspace.storySettings = { storyFragmentCount: 4, storyFragmentWordCount: 1600 } as any;
+    expect(store.storyFragmentCount).toBe(3);
+    expect(store.storyFragmentWordCountMin).toBe(1500);
+    expect(store.storyFragmentWordCountMax).toBe(1800);
+    workspace.storySettings = { storyFragmentCount: 4, storyFragmentWordCountMin: 1600, storyFragmentWordCountMax: 1900 } as any;
     utils.syncStoryGenerationOptionsFromProjectSettings(); expect(store.storyFragmentCount).toBe(4);
     await utils.persistStoryGenerationOptions({ fragmentCount: 5 }); expect(workspace.updateStorySettings).toHaveBeenCalled();
 
@@ -526,7 +529,8 @@ describe("AgentPanel", () => {
     utils.handleDocumentPointerDown({ target: document.body } as any);
     utils.handleDocumentPointerDown({ target: "not-node" } as any);
     utils.updateStoryFragmentCount({ target: null } as any);
-    utils.updateStoryFragmentWordCount({ target: null } as any);
+    utils.updateStoryFragmentWordCountMin({ target: null } as any);
+    utils.updateStoryFragmentWordCountMax({ target: null } as any);
     utils.updateStoryChapterTemplate({ target: null } as any);
 
     store.storyChapterTemplates = [

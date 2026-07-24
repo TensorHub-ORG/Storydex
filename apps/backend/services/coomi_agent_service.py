@@ -1286,17 +1286,19 @@ def _task_planner_messages(
         "workspaceRoot": workspace_root.as_posix(),
         "activeFile": str(active_file or ""),
         "intent": str(intent.get("primary") or "general"),
+        "operationType": str(intent.get("operationType") or ""),
+        "complexity": str(intent.get("complexity") or ""),
         "turnStatus": str(contract.get("status") or "ready"),
         "fragmentCount": _positive_int(
             story_generation.get("fragmentCount") or turn_plan.get("fragmentCount"),
             default=1,
         ),
-        "fragmentWordCount": _bounded_int(
-            story_generation.get("fragmentWordCount") or turn_plan.get("fragmentWordCount"),
-            default=2000,
-            minimum=100,
-            maximum=20000,
-        ),
+        "fragmentWordCountMin": _resolve_word_count_range(
+            story_generation if story_generation else turn_plan
+        )[0],
+        "fragmentWordCountMax": _resolve_word_count_range(
+            story_generation if story_generation else turn_plan
+        )[1],
         "requiresChapterTemplateSelection": bool(turn_plan.get("requiresChapterTemplateSelection")),
         "nextSegmentPath": str(turn_plan.get("nextSegmentPath") or ""),
         "chapterCount": int(turn_plan.get("chapterCount") or 0),
@@ -1306,9 +1308,13 @@ def _task_planner_messages(
         "toolCount": int(tool_registry.get("toolCount") or 0),
     }
     system_prompt = (
-        "You are Storydex's execution task planner. Return only a JSON object with a `tasks` array. "
+        "You are Storydex's execution task planner for a complex, multi-step turn. Return only a JSON object with a `tasks` array. "
         "Do not include reasoning, markdown, comments, or chain-of-thought. "
-        "Create only concrete, non-generic execution tasks that are genuinely useful for this turn. "
+        "Plan from a GLOBAL understanding of the task: use the compact context (intent, operationType, activeFile, chapterCount, "
+        "assembled context) to ground the steps. When the turn restructures/reorganizes existing files (operationType=modify_existing), "
+        "the plan should reflect the real workflow: first READ and understand the relevant existing files, then restructure/rewrite them "
+        "in place, then update variables/memory and sync WIKI if the request asks, and finally clean up any superseded old files. "
+        "Create only concrete, non-generic execution tasks that are genuinely useful for this turn, in execution order. "
         "If there is no real multi-step plan, return an empty tasks array instead of padding the list. "
         "Each task must include `title` and optional `detail`. Avoid generic titles such as analysis, execute task, finish reply. "
         "Do not add a Git/version-recording task unless the user explicitly asks for it."
@@ -1806,7 +1812,11 @@ async def _build_coomi_system_prompt(
         enabled=context_policy.coomi_memory,
     )
     skills_dir = (workspace_root / ".storydex" / ".agent" / "skills").as_posix()
-    story_options = _render_story_generation_options(story_generation)
+    contract_intent = _dict_value(_dict_value(turn_contract).get("intentFrame"))
+    contract_operation_type = str(contract_intent.get("operationType") or "").strip().lower()
+    story_options = _render_story_generation_options(
+        story_generation, operation_type=contract_operation_type
+    )
     contract_options = _render_turn_contract(turn_contract)
     retrieval_tools_prompt = (
         "Storydex registers domain tools outside Coomi: `StorydexRuntimePresetStatus`, "
@@ -1874,15 +1884,26 @@ async def _build_coomi_system_prompt(
     return system_prompt + storydex_runtime_prompt
 
 
-def _render_story_generation_options(value: Dict[str, Any] | None) -> str:
+def _render_story_generation_options(
+    value: Dict[str, Any] | None, *, operation_type: str = ""
+) -> str:
     payload = value if isinstance(value, dict) else {}
     fragment_count = _positive_int(payload.get("fragmentCount"), default=1)
-    fragment_word_count = _bounded_int(payload.get("fragmentWordCount"), default=2000, minimum=100, maximum=20000)
+    word_count_min, word_count_max = _resolve_word_count_range(payload)
     chapter_template = str(payload.get("chapterTemplateId") or payload.get("chapterTemplate") or "").strip()
+    # 修改现有文件时，这些片段数/字数只是软参考，不是新建配额，避免重构被当成新建。
+    if str(operation_type or "").strip().lower() == "modify_existing":
+        return (
+            "\nStory generation turn options (modify_existing — soft reference only):\n"
+            + f"- fragmentCount: {fragment_count} (reference, NOT a mandate to create new fragments)\n"
+            + f"- fragmentWordCountRange: {word_count_min}-{word_count_max} (soft guide for edited content)\n"
+            + (f"- chapterTemplateId: {chapter_template}\n" if chapter_template else "")
+            + "This turn edits/restructures existing files; do not treat these values as new-fragment creation constraints.\n"
+        )
     return (
         "\nStory generation turn options:\n"
         + f"- fragmentCount: {fragment_count}\n"
-        + f"- fragmentWordCount: {fragment_word_count}\n"
+        + f"- fragmentWordCountRange: {word_count_min}-{word_count_max} (each fragment must land within this range)\n"
         + (f"- chapterTemplateId: {chapter_template}\n" if chapter_template else "")
         + "For story creation or continuation turns these values are mandatory, not estimates or suggestions.\n"
     )
@@ -1902,16 +1923,22 @@ def _render_turn_contract(value: Dict[str, Any] | None) -> str:
 
     primary = str(intent.get("primary") or "general")
     confidence = str(intent.get("confidence") or "low")
+    operation_type = str(intent.get("operationType") or "").strip().lower()
+    complexity = str(intent.get("complexity") or "").strip().lower()
     intent_targets = [str(item) for item in (intent.get("assetTargets") if isinstance(intent.get("assetTargets"), list) else []) if str(item)]
     intent_skills = [str(item) for item in (intent.get("matchedSkills") if isinstance(intent.get("matchedSkills"), list) else []) if str(item)]
     intent_line = f"- intent: {primary} (confidence: {confidence})"
+    if operation_type:
+        intent_line += f"; operationType: {operation_type}"
+    if complexity:
+        intent_line += f"; complexity: {complexity}"
     if intent_targets:
         intent_line += f"; write this intent's outputs under: {', '.join(intent_targets)}"
     if intent_skills:
         intent_line += f"; matching skills: {', '.join(intent_skills)}"
     status = str(contract.get("status") or "ready")
     fragment_count = _positive_int(turn_plan.get("fragmentCount"), default=1)
-    fragment_word_count = _bounded_int(turn_plan.get("fragmentWordCount"), default=2000, minimum=100, maximum=20000)
+    fragment_word_count_min, fragment_word_count_max = _resolve_word_count_range(turn_plan)
     requires_template = bool(turn_plan.get("requiresChapterTemplateSelection"))
     selected_template = str(turn_plan.get("selectedChapterTemplate") or "").strip()
     selected_template_detail = _dict_value(turn_plan.get("selectedChapterTemplateDetail"))
@@ -1931,7 +1958,7 @@ def _render_turn_contract(value: Dict[str, Any] | None) -> str:
             f"localGitAutoCommit={bool(execution.get('localGitAutoCommit', True))}, "
             f"remotePush={bool(execution.get('remotePush', False))}"
         ),
-        f"- storyFragments: count={fragment_count}, exactNonWhitespaceCharactersEach={fragment_word_count}",
+        f"- storyFragments: count={fragment_count}, nonWhitespaceCharactersEach in [{fragment_word_count_min}, {fragment_word_count_max}]",
         f"- chapterContentMode: {chapter_content_mode}",
     ]
 
@@ -1955,10 +1982,28 @@ def _render_turn_contract(value: Dict[str, Any] | None) -> str:
     target_paths = [str(item.get("path") or "") for item in fragment_targets if isinstance(item, dict) and str(item.get("path") or "")]
     if target_paths:
         lines.append(f"- authoritativeFragmentPaths: {', '.join(target_paths)}")
-    lines.append(
-        "- wordCountEnforcement: exact Storydex editor count (every non-whitespace Unicode character); "
-        "never estimate, and do not finish until Storydex validation passes."
-    )
+    # operationType 决定"新建 vs 修改"的执行纪律。这是修复"重构被当成新建、
+    # 不断生成新片段"的核心提示词约束。
+    if operation_type == "modify_existing":
+        lines.append(
+            "- operationDiscipline (modify_existing): the user wants to restructure/reorganize/rewrite/adjust "
+            "or clean up files that ALREADY exist. First READ and understand the relevant existing files "
+            "(use StorydexProjectSearch / reads) before changing anything. Edit those existing files in place; "
+            "when a file is superseded, delete or overwrite the old one — do NOT create parallel new fragments. "
+            "Do NOT treat fragmentCount/word-count as a mandate to generate N brand-new fragments. There are no "
+            "authoritative new fragment paths this turn; the word-count range is a soft guide for edited content, "
+            "not a hard new-fragment quota. StorydexApplyStoryIncrement's new-fragment validation is not enforced."
+        )
+    elif primary == "story_generation":
+        lines.append(
+            "- operationDiscipline (create_new): generate new story content into the authoritative fragment paths above. "
+            "The fragment count, word-count range, and chapter template are binding creation constraints."
+        )
+        lines.append(
+            f"- wordCountEnforcement: each fragment's Storydex editor count (every non-whitespace Unicode "
+            f"character) must fall within [{fragment_word_count_min}, {fragment_word_count_max}]; "
+            "never estimate, and do not finish until Storydex validation passes."
+        )
 
     lines.append(
         "- context: inject active or compiled-safe presets only; use recent active characters and relevant facts, "
@@ -2114,6 +2159,24 @@ def _positive_int(value: Any, *, default: int) -> int:
     except (TypeError, ValueError):
         parsed = default
     return max(1, parsed)
+
+
+def _resolve_word_count_range(payload: Dict[str, Any]) -> tuple[int, int]:
+    """Resolve the [min, max] fragment word-count range from a turn plan or options dict.
+
+    Falls back to the legacy single ``fragmentWordCount`` (min == max) when the
+    range fields are absent, keeping older contracts and clients working.
+    """
+    raw_min = payload.get("fragmentWordCountMin")
+    raw_max = payload.get("fragmentWordCountMax")
+    if raw_min is None and raw_max is None:
+        legacy = _bounded_int(payload.get("fragmentWordCount"), default=2500, minimum=100, maximum=20000)
+        return legacy, legacy
+    min_value = _bounded_int(raw_min, default=2000, minimum=100, maximum=20000)
+    max_value = _bounded_int(raw_max, default=2500, minimum=100, maximum=20000)
+    if min_value > max_value:
+        min_value, max_value = max_value, min_value
+    return min_value, max_value
 
 
 class _StorydexApprovalContext:

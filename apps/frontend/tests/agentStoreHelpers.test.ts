@@ -70,6 +70,12 @@ describe("agent store deterministic helpers", () => {
       contextAssembly: { budget: { blockCount: 4, totalChars: 500 }, sources: [{ kind: "chapter", count: 2 }, {}, null], notes: ["preset_compile_failed: demo", "other"] }
     });
     expect(u.summarizeTurnContractPacket(contract)).toContain("chapters/2.md");
+    const modifySummary = u.summarizeTurnContractPacket(packet({
+      status: "ready",
+      intentFrame: { primary: "story_generation", operationType: "modify_existing", complexity: "complex" }
+    }));
+    expect(modifySummary).toContain("修改现有文件");
+    expect(modifySummary).toContain("复杂度：复杂");
     expect(u.summarizeTurnContractPacket(packet({ turnPlan: { selectedChapterTemplate: "id", selectedChapterTemplateDetail: { name: "Template" } } }))).toContain("Template");
     expect(u.summarizeTurnContractPacket(packet({
       intentFrame: { primary: "story_generation" },

@@ -106,6 +106,7 @@ Thumbs.db
 # ----- Project Runtime State -----
 .storydex-project-state.json
 .storydex/
+.storydex/.cache/
 *.sqlite
 *.sqlite3
 *.db

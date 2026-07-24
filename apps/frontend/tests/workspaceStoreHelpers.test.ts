@@ -19,7 +19,7 @@ describe("workspace store deterministic helpers", () => {
     expect(payload).toMatchObject({ segmentExtension: ".txt", maxSegmentsPerChapter: 99, storyFragmentCount: 1, storyFragmentWordCount: 20000, storyChapterTemplateId: "single_file_chapter_directory", autoUpdateVariables: true, autoUpdateWiki: false, chapterDirectoryNamingMode: "auto", contextConcisionMaxCalls: 7 });
     const fallback = { ...u.defaultStoryProjectSettings(), storyFragmentCount: 4, autoUpdateWiki: true };
     const response = u.normalizeStorySettingsResponse({ storySegmentFormat: "txt", max_segments_per_chapter: 5, story_fragment_word_count: 1200, story_chapter_template_id: "single_file_chapter_directory", auto_name_chapter_title: "manual", updatedAt: " now " } as never, { source: "api", fallbackPath: "fallback.json", fallbackSettings: fallback, currentSettings: null });
-    expect(response).toMatchObject({ segmentExtension: ".txt", maxSegmentsPerChapter: 5, storyFragmentCount: 4, storyFragmentWordCount: 1200, storyChapterTemplateId: "single_file_chapter_directory", autoUpdateWiki: true, autoNameChapterDirectories: false, updatedAt: "now" });
+    expect(response).toMatchObject({ segmentExtension: ".txt", maxSegmentsPerChapter: 5, storyFragmentCount: 4, storyFragmentWordCountMin: 2000, storyFragmentWordCountMax: 2500, storyFragmentWordCount: 2500, storyChapterTemplateId: "single_file_chapter_directory", autoUpdateWiki: true, autoNameChapterDirectories: false, updatedAt: "now" });
     const fromFile = u.normalizeStorySettingsFromProjectFile({ story_settings: JSON.stringify({ storySegmentFormat: "txt", storyFragmentCount: 3, storyChapterTemplateId: "single_file_chapter_directory", auto_update_variables: "enabled", chapterNamingMode: "auto" }) }, "settings.json", { chapters: { "chapters/one": true }, updated_at: "date" });
     expect(fromFile).toMatchObject({ segmentExtension: ".txt", storyFragmentCount: 3, storyChapterTemplateId: "single_file_chapter_directory", autoUpdateVariables: true, autoNameChapterDirectories: true, source: "project_file" });
   });
@@ -30,6 +30,10 @@ describe("workspace store deterministic helpers", () => {
     expect(u.normalizeStoryFragmentCount("bad")).toBe(1); expect(u.normalizeStoryFragmentCount(99)).toBe(99);
     expect(u.normalizeStoryChapterTemplateId(" ")).toBe("default_chapter_directory");
     expect(u.normalizeStoryFragmentWordCount("bad")).toBe(2000); expect(u.normalizeStoryFragmentWordCount(1)).toBe(100);
+    expect(u.resolveStoryFragmentWordCountRange({})).toEqual({ min: 2000, max: 2500 });
+    expect(u.resolveStoryFragmentWordCountRange({ storyFragmentWordCount: 1800 })).toEqual({ min: 1800, max: 1800 });
+    expect(u.resolveStoryFragmentWordCountRange({ storyFragmentWordCountMin: 3000, storyFragmentWordCountMax: 1500 })).toEqual({ min: 1500, max: 3000 });
+    expect(u.resolveStoryFragmentWordCountRange({ storyFragmentWordCountMin: 50, storyFragmentWordCountMax: 99999 })).toEqual({ min: 100, max: 20000 });
     expect(u.normalizeStoryCallCount("bad", 2)).toBe(2); expect(u.normalizeStoryCallCount(99, 2)).toBe(8);
     expect(u.normalizeStoryContextTokens("bad", 5000)).toBe(5000); expect(u.normalizeStoryContextTokens(1, 5000)).toBe(4000);
     expect(u.normalizeStoryAutoNameChapterDirectories("auto")).toBe(true); expect(u.normalizeStoryAutoNameChapterDirectories("manual")).toBe(false);

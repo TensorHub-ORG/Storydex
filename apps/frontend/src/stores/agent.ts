@@ -87,6 +87,8 @@ interface AgentState {
   commitActionLabel: string;
   storyFragmentCount: number;
   storyFragmentWordCount: number;
+  storyFragmentWordCountMin: number;
+  storyFragmentWordCountMax: number;
   storyChapterTemplateId: string;
   storyChapterTemplates: StoryChapterTemplate[];
   storyChapterTemplatesLoading: boolean;
@@ -147,7 +149,9 @@ export const useAgentStore = defineStore("agent", {
     isCommittingGit: false,
     commitActionLabel: "",
     storyFragmentCount: 1,
-    storyFragmentWordCount: 2000,
+    storyFragmentWordCount: 2500,
+    storyFragmentWordCountMin: 2000,
+    storyFragmentWordCountMax: 2500,
     storyChapterTemplateId: DEFAULT_CHAPTER_TEMPLATE_ID,
     storyChapterTemplates: [],
     storyChapterTemplatesLoading: false,
@@ -429,7 +433,13 @@ export const useAgentStore = defineStore("agent", {
       }
     },
 
-    setStoryGenerationOptions(options: { fragmentCount?: number; fragmentWordCount?: number; chapterTemplateId?: string }): void {
+    setStoryGenerationOptions(options: {
+      fragmentCount?: number;
+      fragmentWordCount?: number;
+      fragmentWordCountMin?: number;
+      fragmentWordCountMax?: number;
+      chapterTemplateId?: string;
+    }): void {
       if (options.chapterTemplateId !== undefined) {
         this.storyChapterTemplateId = String(options.chapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID).trim();
       }
@@ -444,9 +454,29 @@ export const useAgentStore = defineStore("agent", {
       } else if (isSingleFileTemplate) {
         this.storyFragmentCount = 1;
       }
-      if (options.fragmentWordCount !== undefined) {
-        this.storyFragmentWordCount = clampInteger(options.fragmentWordCount, 100, 20000, 2000);
+      // 兼容旧的单值入参：等价于把区间上界设为该值
+      let nextMin = this.storyFragmentWordCountMin;
+      let nextMax = this.storyFragmentWordCountMax;
+      if (options.fragmentWordCountMin !== undefined) {
+        nextMin = clampInteger(options.fragmentWordCountMin, 100, 20000, 2000);
       }
+      if (options.fragmentWordCountMax !== undefined) {
+        nextMax = clampInteger(options.fragmentWordCountMax, 100, 20000, 2500);
+      }
+      if (
+        options.fragmentWordCountMin === undefined
+        && options.fragmentWordCountMax === undefined
+        && options.fragmentWordCount !== undefined
+      ) {
+        nextMax = clampInteger(options.fragmentWordCount, 100, 20000, 2500);
+      }
+      if (nextMin > nextMax) {
+        [nextMin, nextMax] = [nextMax, nextMin];
+      }
+      this.storyFragmentWordCountMin = nextMin;
+      this.storyFragmentWordCountMax = nextMax;
+      // 保留旧字段以向后兼容：等于区间上界
+      this.storyFragmentWordCount = nextMax;
     },
 
     async loadStoryChapterTemplates(options?: { force?: boolean }): Promise<void> {
@@ -711,6 +741,8 @@ export const useAgentStore = defineStore("agent", {
             storyGeneration: {
               fragmentCount: this.storyFragmentCount,
               fragmentWordCount: this.storyFragmentWordCount,
+              fragmentWordCountMin: this.storyFragmentWordCountMin,
+              fragmentWordCountMax: this.storyFragmentWordCountMax,
               chapterTemplateId: this.storyChapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID
             },
             sourceFollowupMessageId: next.messageId,
@@ -814,6 +846,8 @@ export const useAgentStore = defineStore("agent", {
         storyGeneration: {
           fragmentCount: this.storyFragmentCount,
           fragmentWordCount: this.storyFragmentWordCount,
+          fragmentWordCountMin: this.storyFragmentWordCountMin,
+          fragmentWordCountMax: this.storyFragmentWordCountMax,
           chapterTemplateId: this.storyChapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID
         },
         replaceLatestTraceId: expectedTraceId
@@ -936,6 +970,8 @@ export const useAgentStore = defineStore("agent", {
         storyGeneration: {
           fragmentCount: this.storyFragmentCount,
           fragmentWordCount: this.storyFragmentWordCount,
+          fragmentWordCountMin: this.storyFragmentWordCountMin,
+          fragmentWordCountMax: this.storyFragmentWordCountMax,
           chapterTemplateId: this.storyChapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID
         }
       };
@@ -1227,9 +1263,13 @@ export const useAgentStore = defineStore("agent", {
             action: "storydex_turn_contract",
             status: String(visiblePacket.status || ""),
             intent: String(intentFrame.primary || ""),
+            operationType: String(intentFrame.operationType || ""),
+            complexity: String(intentFrame.complexity || ""),
             requiresChapterTemplateSelection: Boolean(turnPlan.requiresChapterTemplateSelection),
             fragmentCount: Number(turnPlan.fragmentCount || 0),
             fragmentWordCount: Number(turnPlan.fragmentWordCount || 0),
+            fragmentWordCountMin: Number(turnPlan.fragmentWordCountMin || 0),
+            fragmentWordCountMax: Number(turnPlan.fragmentWordCountMax || 0),
             skillCount: Number(skillRegistry.skillCount || 0),
             toolCount: Number(toolRegistry.toolCount || 0),
             contextBlockCount: Number(contextBudget.blockCount || 0),
@@ -1716,8 +1756,15 @@ function summarizeTurnContractPacket(packet: AgentStreamPacket): string {
   const toolRegistry = toRecord(packet.toolRegistry) || {};
   const contextAssembly = toRecord(packet.contextAssembly) || {};
   const intent = firstString(intentFrame, ["primary"]) || "general";
+  const operationType = firstString(intentFrame, ["operationType"]);
+  const complexity = firstString(intentFrame, ["complexity"]);
   const fragmentCount = firstNumber(turnPlan, ["fragmentCount"]) ?? 1;
-  const fragmentWordCount = firstNumber(turnPlan, ["fragmentWordCount"]) ?? 2000;
+  const fragmentWordCountMax = firstNumber(turnPlan, ["fragmentWordCountMax", "fragmentWordCount"]) ?? 2500;
+  const fragmentWordCountMin = firstNumber(turnPlan, ["fragmentWordCountMin"]) ?? fragmentWordCountMax;
+  const fragmentWordCountLabel =
+    fragmentWordCountMin === fragmentWordCountMax
+      ? `${fragmentWordCountMax} 字`
+      : `${fragmentWordCountMin}-${fragmentWordCountMax} 字`;
   const requiresTemplate = Boolean(turnPlan.requiresChapterTemplateSelection);
   const selectedTemplate = firstString(turnPlan, ["selectedChapterTemplate"]);
   const selectedTemplateDetail = toRecord(turnPlan.selectedChapterTemplateDetail) || {};
@@ -1725,13 +1772,29 @@ function summarizeTurnContractPacket(packet: AgentStreamPacket): string {
   const invalidTemplate = firstString(turnPlan, ["invalidChapterTemplate"]);
   const nextSegmentPath = firstString(turnPlan, ["nextSegmentPath"]);
   const status = String(packet.status || "ready");
+  const operationTypeLabels: Record<string, string> = {
+    create_new: "生成新内容",
+    modify_existing: "修改现有文件",
+    inquiry: "理解性问询",
+    greeting: "问候",
+    other: "其他"
+  };
+  const complexityLabels: Record<string, string> = { simple: "简单", complex: "复杂" };
   const pieces = [
     `状态：${status}`,
-    `意图：${intent}`,
-    `片段：${fragmentCount} 条 x ${fragmentWordCount} 字`,
+    `意图：${intent}`
+  ];
+  if (operationType) {
+    pieces.push(`操作：${operationTypeLabels[operationType] || operationType}`);
+  }
+  if (complexity) {
+    pieces.push(`复杂度：${complexityLabels[complexity] || complexity}`);
+  }
+  pieces.push(
+    `片段：${fragmentCount} 条 x ${fragmentWordCountLabel}`,
     `直接写入：${Boolean(executionPolicy.directFileWrites) ? "开启" : "关闭"}`,
     `小说项目 Git：${Boolean(executionPolicy.localGitAutoCommit) ? "自动提交" : "未开启"}`
-  ];
+  );
   if (requiresTemplate) {
     pieces.push("需要先选择章节目录模板");
   }
