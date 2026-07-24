@@ -525,8 +525,14 @@ function sleep(ms) {
 
 async function isBackendHealthy() {
   try {
-    const response = await fetch(BACKEND_HEALTH_URL, { method: "GET" });
-    return response.ok;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    try {
+      const response = await fetch(BACKEND_HEALTH_URL, { method: "GET", signal: controller.signal });
+      return response.ok;
+    } finally {
+      clearTimeout(timeout);
+    }
   } catch {
     return false;
   }
@@ -1162,11 +1168,14 @@ async function killExternalBackendOnPort() {
 }
 
 async function startBackendKernel() {
-  if (!app.isPackaged) {
+  if (app.isPackaged) {
+    if (await isBackendHealthy()) {
+      console.log("[Storydex Desktop] Backend already active.");
+      return true;
+    }
     await killExternalBackendOnPort();
-  } else if (await isBackendHealthy()) {
-    console.log("[Storydex Desktop] Backend already active.");
-    return true;
+  } else {
+    await killExternalBackendOnPort();
   }
 
   const backendDirectory = resolveBackendDirectory();

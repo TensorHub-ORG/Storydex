@@ -22,6 +22,8 @@ export interface AgentPendingSnapshotConfirmation {
 export interface AgentStoryGenerationOptions {
   fragmentCount: number;
   fragmentWordCount: number;
+  fragmentWordCountMin?: number;
+  fragmentWordCountMax?: number;
   chapterTemplateId?: string;
   chapterTemplate?: string;
 }

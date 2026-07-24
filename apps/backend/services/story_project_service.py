@@ -739,7 +739,9 @@ class StoryProjectService:
             "segmentNamingMode": "auto",
             "maxSegmentsPerChapter": 3,
             "storyFragmentCount": 1,
-            "storyFragmentWordCount": 2000,
+            "storyFragmentWordCount": 2500,
+            "storyFragmentWordCountMin": 2000,
+            "storyFragmentWordCountMax": 2500,
             "storyChapterTemplateId": DEFAULT_CHAPTER_TEMPLATE_ID,
             "autoUpdateVariables": False,
             "autoUpdateWiki": False,
@@ -1275,9 +1277,15 @@ class StoryProjectService:
         turn_plan = contract.get("turnPlan") if isinstance(contract.get("turnPlan"), dict) else {}
         if str(intent.get("primary") or "") != "story_generation":
             return {"applicable": False, "passed": True}
+        # 修改现有文件（重构/整理）不新建片段，不施加"必须 N 段 × 字数区间"的硬校验，
+        # 否则重构请求会被字数校验反复打回。此时编排层已不规划 fragmentTargets。
+        if str(intent.get("operationType") or "").strip().lower() == "modify_existing":
+            return {"applicable": False, "passed": True}
 
         targets = turn_plan.get("fragmentTargets") if isinstance(turn_plan.get("fragmentTargets"), list) else []
-        target_word_count = self._normalize_story_fragment_word_count(turn_plan.get("fragmentWordCount"))
+        if not targets:
+            return {"applicable": False, "passed": True}
+        min_word_count, max_word_count = self._resolve_turn_plan_word_count_range(turn_plan)
         content_mode = self._normalize_chapter_content_mode(turn_plan.get("chapterContentMode"))
         root = Path(workspace_root).resolve()
         results: List[Dict[str, Any]] = []
@@ -1292,7 +1300,7 @@ class StoryProjectService:
             baseline = max(0, self._safe_int(target.get("baselineWordCount"), fallback=0, minimum=0, maximum=10**9))
             write_mode = str(target.get("writeMode") or "replace")
             generated_count = max(0, actual_file_count - baseline) if write_mode == "append" else actual_file_count
-            item_passed = exists and generated_count == target_word_count
+            item_passed = exists and min_word_count <= generated_count <= max_word_count
             passed = passed and item_passed
             results.append(
                 {
@@ -1303,8 +1311,11 @@ class StoryProjectService:
                     "baselineWordCount": baseline,
                     "fileWordCount": actual_file_count,
                     "generatedWordCount": generated_count,
-                    "targetWordCount": target_word_count,
-                    "difference": generated_count - target_word_count,
+                    "targetWordCountMin": min_word_count,
+                    "targetWordCountMax": max_word_count,
+                    "difference": self._word_count_range_difference(
+                        generated_count, min_word_count, max_word_count
+                    ),
                     "status": "passed" if item_passed else "failed",
                 }
             )
@@ -1319,16 +1330,17 @@ class StoryProjectService:
             "status": "success" if passed else "error",
             "algorithm": STORY_WORD_COUNT_ALGORITHM,
             "countingRule": "count every non-whitespace Unicode character",
-            "exact": True,
+            "exact": False,
             "fragmentCount": len(targets),
-            "targetWordCount": target_word_count,
+            "targetWordCountMin": min_word_count,
+            "targetWordCountMax": max_word_count,
             "chapterContentMode": content_mode,
             "structurePassed": structure_passed,
             "fragments": results,
             "message": (
                 "正文数量、章节结构和客观字数均已通过 Storydex 校验。"
                 if passed
-                else "正文尚未满足章节模板或精确字数约束，不能结束本轮。"
+                else f"正文尚未满足章节模板或字数区间约束（每片段需落在 {min_word_count}-{max_word_count} 字），不能结束本轮。"
             ),
         }
 
@@ -1539,7 +1551,7 @@ class StoryProjectService:
                 "segmentNamingMode": str(payload.get("segmentNamingMode") or "auto").strip() or "auto",
                 "maxSegmentsPerChapter": self._normalize_max_segments_per_chapter(payload.get("maxSegmentsPerChapter")),
                 "storyFragmentCount": self._normalize_story_fragment_count(payload.get("storyFragmentCount")),
-                "storyFragmentWordCount": self._normalize_story_fragment_word_count(payload.get("storyFragmentWordCount")),
+                **self._merge_story_fragment_word_count_range(payload),
                 "storyChapterTemplateId": self._normalize_story_chapter_template_id(
                     payload.get("storyChapterTemplateId", payload.get("story_chapter_template_id"))
                 ),
@@ -1579,8 +1591,8 @@ class StoryProjectService:
         current["storyFragmentCount"] = self._normalize_story_fragment_count(
             payload.get("storyFragmentCount", current.get("storyFragmentCount"))
         )
-        current["storyFragmentWordCount"] = self._normalize_story_fragment_word_count(
-            payload.get("storyFragmentWordCount", current.get("storyFragmentWordCount"))
+        current.update(
+            self._merge_story_fragment_word_count_range(payload, current=current)
         )
         current["storyChapterTemplateId"] = self._normalize_story_chapter_template_id(
             payload.get(
@@ -2432,7 +2444,7 @@ class StoryProjectService:
 
         targets = turn_plan.get("fragmentTargets") if isinstance(turn_plan.get("fragmentTargets"), list) else []
         expected_count = self._normalize_story_fragment_count(turn_plan.get("fragmentCount"))
-        target_word_count = self._normalize_story_fragment_word_count(turn_plan.get("fragmentWordCount"))
+        min_word_count, max_word_count = self._resolve_turn_plan_word_count_range(turn_plan)
         content_mode = self._normalize_chapter_content_mode(turn_plan.get("chapterContentMode"))
         actual_count = len(fragments)
         results: List[Dict[str, Any]] = []
@@ -2449,7 +2461,11 @@ class StoryProjectService:
             baseline = max(0, self._safe_int(target.get("baselineWordCount"), fallback=0, minimum=0, maximum=10**9))
             current_count = self.count_story_file_words(workspace_root / relative_path) if relative_path else 0
             baseline_matches = write_mode != "append" or current_count == baseline
-            item_passed = bool(relative_path and text) and actual_word_count == target_word_count and baseline_matches
+            item_passed = (
+                bool(relative_path and text)
+                and min_word_count <= actual_word_count <= max_word_count
+                and baseline_matches
+            )
             passed = passed and item_passed
             results.append(
                 {
@@ -2460,8 +2476,11 @@ class StoryProjectService:
                     "currentWordCount": current_count,
                     "baselineMatches": baseline_matches,
                     "actualWordCount": actual_word_count,
-                    "targetWordCount": target_word_count,
-                    "difference": actual_word_count - target_word_count,
+                    "targetWordCountMin": min_word_count,
+                    "targetWordCountMax": max_word_count,
+                    "difference": self._word_count_range_difference(
+                        actual_word_count, min_word_count, max_word_count
+                    ),
                     "status": "passed" if item_passed else "failed",
                 }
             )
@@ -2469,7 +2488,8 @@ class StoryProjectService:
                 fragment["path"] = relative_path
                 fragment["_storydexWriteMode"] = write_mode
                 fragment["_storydexBaselineWordCount"] = baseline
-                fragment["_storydexTargetWordCount"] = target_word_count
+                fragment["_storydexTargetWordCountMin"] = min_word_count
+                fragment["_storydexTargetWordCountMax"] = max_word_count
                 prepared.append(fragment)
 
         structure_passed = self._validate_planned_target_structure(targets, content_mode=content_mode)
@@ -2482,17 +2502,18 @@ class StoryProjectService:
             "status": "success" if passed else "error",
             "algorithm": STORY_WORD_COUNT_ALGORITHM,
             "countingRule": "count every non-whitespace Unicode character",
-            "exact": True,
+            "exact": False,
             "expectedFragmentCount": expected_count,
             "actualFragmentCount": actual_count,
-            "targetWordCount": target_word_count,
+            "targetWordCountMin": min_word_count,
+            "targetWordCountMax": max_word_count,
             "chapterContentMode": content_mode,
             "structurePassed": structure_passed,
             "fragments": results,
             "message": (
                 "正文已通过 Storydex 落盘前客观字数和章节结构校验。"
                 if passed
-                else "请按失败项修订正文：每个片段必须使用 Storydex 非空白字符统计精确达到目标字数，且数量和章节模板必须完全一致。"
+                else f"请按失败项修订正文：每个片段的 Storydex 非空白字符数需落在 {min_word_count}-{max_word_count} 字区间内，且数量和章节模板必须完全一致。"
             ),
         }
         if not passed:
@@ -2761,13 +2782,19 @@ class StoryProjectService:
                     "relationshipUpdateCount": len(stage2_output.get("relationship_updates", [])),
                     "wordCount": self.count_story_file_words(root / segment_relative_path),
                     "generatedWordCount": count_story_text_words(segment_text),
-                    "targetWordCount": int(fragment.get("_storydexTargetWordCount") or 0),
-                    "wordCountDifference": count_story_text_words(segment_text)
-                    - int(fragment.get("_storydexTargetWordCount") or 0),
+                    "targetWordCountMin": int(fragment.get("_storydexTargetWordCountMin") or 0),
+                    "targetWordCountMax": int(fragment.get("_storydexTargetWordCountMax") or 0),
+                    "wordCountDifference": self._word_count_range_difference(
+                        count_story_text_words(segment_text),
+                        int(fragment.get("_storydexTargetWordCountMin") or 0),
+                        int(fragment.get("_storydexTargetWordCountMax") or 0),
+                    ),
                     "wordCountStatus": (
                         "passed"
-                        if not fragment.get("_storydexTargetWordCount")
-                        or count_story_text_words(segment_text) == int(fragment.get("_storydexTargetWordCount") or 0)
+                        if not fragment.get("_storydexTargetWordCountMax")
+                        or int(fragment.get("_storydexTargetWordCountMin") or 0)
+                        <= count_story_text_words(segment_text)
+                        <= int(fragment.get("_storydexTargetWordCountMax") or 0)
                         else "failed"
                     ),
                     "wordCountAlgorithm": STORY_WORD_COUNT_ALGORITHM,
@@ -3501,6 +3528,82 @@ class StoryProjectService:
         except (TypeError, ValueError):
             normalized = 2000
         return max(100, min(20000, normalized))
+
+    @staticmethod
+    def _normalize_story_fragment_word_count_range(
+        minimum: Any,
+        maximum: Any,
+    ) -> tuple[int, int]:
+        def _clamp(value: Any, fallback: int) -> int:
+            try:
+                normalized = int(value)
+            except (TypeError, ValueError):
+                normalized = fallback
+            return max(100, min(20000, normalized))
+
+        min_value = _clamp(minimum, 2000)
+        max_value = _clamp(maximum, 2500)
+        if min_value > max_value:
+            min_value, max_value = max_value, min_value
+        return min_value, max_value
+
+    def _resolve_turn_plan_word_count_range(self, turn_plan: Dict[str, Any]) -> tuple[int, int]:
+        """Resolve the [min, max] fragment word-count range from a turn plan.
+
+        Falls back to the legacy single ``fragmentWordCount`` (min == max) when
+        the range fields are absent, keeping older turn contracts working.
+        """
+        raw_min = turn_plan.get("fragmentWordCountMin")
+        raw_max = turn_plan.get("fragmentWordCountMax")
+        if raw_min is None and raw_max is None:
+            legacy = self._normalize_story_fragment_word_count(turn_plan.get("fragmentWordCount"))
+            return legacy, legacy
+        return self._normalize_story_fragment_word_count_range(raw_min, raw_max)
+
+    @staticmethod
+    def _word_count_range_difference(count: int, minimum: int, maximum: int) -> int:
+        """Signed distance from the [min, max] band: negative below, positive above, 0 inside."""
+        if count < minimum:
+            return count - minimum
+        if count > maximum:
+            return count - maximum
+        return 0
+
+    def _merge_story_fragment_word_count_range(
+        self,
+        payload: Dict[str, Any],
+        *,
+        current: Dict[str, Any] | None = None,
+    ) -> Dict[str, int]:
+        """Resolve the fragment word-count range from a settings payload.
+
+        Old projects that only stored ``storyFragmentWordCount`` are migrated to
+        the new default range [2000, 2500] rather than collapsing to an exact
+        value. When explicit min/max keys are present they take precedence; on a
+        partial write (``current`` provided) any absent key falls back to the
+        stored value instead of resetting to the default.
+        """
+        fallback = current if isinstance(current, dict) else {}
+        raw_min = payload.get(
+            "storyFragmentWordCountMin",
+            payload.get(
+                "story_fragment_word_count_min",
+                fallback.get("storyFragmentWordCountMin"),
+            ),
+        )
+        raw_max = payload.get(
+            "storyFragmentWordCountMax",
+            payload.get(
+                "story_fragment_word_count_max",
+                fallback.get("storyFragmentWordCountMax"),
+            ),
+        )
+        min_value, max_value = self._normalize_story_fragment_word_count_range(raw_min, raw_max)
+        return {
+            "storyFragmentWordCountMin": min_value,
+            "storyFragmentWordCountMax": max_value,
+            "storyFragmentWordCount": max_value,
+        }
 
     @staticmethod
     def _normalize_story_chapter_template_id(value: Any) -> str:

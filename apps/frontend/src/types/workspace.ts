@@ -291,6 +291,8 @@ export interface StoryProjectSettings {
   maxSegmentsPerChapter: number;
   storyFragmentCount: number;
   storyFragmentWordCount: number;
+  storyFragmentWordCountMin: number;
+  storyFragmentWordCountMax: number;
   storyChapterTemplateId: string;
   autoUpdateVariables: boolean;
   autoUpdateWiki: boolean;
@@ -318,6 +320,10 @@ export interface StoryProjectSettingsResponse {
   story_fragment_count?: number | string;
   storyFragmentWordCount?: number | string;
   story_fragment_word_count?: number | string;
+  storyFragmentWordCountMin?: number | string;
+  story_fragment_word_count_min?: number | string;
+  storyFragmentWordCountMax?: number | string;
+  story_fragment_word_count_max?: number | string;
   storyChapterTemplateId?: string;
   story_chapter_template_id?: string;
   autoUpdateVariables?: boolean | string;
@@ -359,6 +365,10 @@ export interface StoryProjectSettingsUpdateRequest {
   story_fragment_count?: number;
   storyFragmentWordCount?: number;
   story_fragment_word_count?: number;
+  storyFragmentWordCountMin?: number;
+  story_fragment_word_count_min?: number;
+  storyFragmentWordCountMax?: number;
+  story_fragment_word_count_max?: number;
   storyChapterTemplateId?: string;
   story_chapter_template_id?: string;
   autoUpdateVariables?: boolean;
