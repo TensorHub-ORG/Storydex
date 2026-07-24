@@ -142,7 +142,7 @@ def test_retrieval_tokenization_bm25_hybrid_errors_snippets_and_external_path(mo
     assert len(results) == 1 and results[0]["doc_id"] == "a.md" and results[0]["metadata"]["snippet"]
     hybrid = storydex_retrieval.hybrid_search("Bob", [a, b], tmp_path)
     assert hybrid[0]["engine"] == "storydex_bm25"
-    assert storydex_retrieval._build_snippet("plain text", ["missing"]) == "plain text"
+    assert storydex_retrieval._build_snippet("plain text", ["missing"]) == ""
     assert "Alice" in storydex_retrieval._build_snippet("x" * 150 + "Alice" + "y" * 300, ["alice"])
     monkeypatch.setattr(storydex_retrieval, "read_text_limited", lambda *args, **kwargs: (_ for _ in ()).throw(OSError()))
     assert storydex_retrieval.bm25_search("Alice", [a], tmp_path) == []

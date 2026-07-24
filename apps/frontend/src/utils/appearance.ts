@@ -33,7 +33,7 @@ export function applyThemeSnapshot(theme: ThemeCode | null | undefined): void {
     return;
   }
 
-  const resolvedTheme: ThemeCode = isThemeCode(theme) ? theme : "default";
+  const resolvedTheme: ThemeCode = isThemeCode(theme) ? theme : "white";
   if (resolvedTheme === "default") {
     document.documentElement.removeAttribute("data-theme");
   } else {
@@ -43,7 +43,7 @@ export function applyThemeSnapshot(theme: ThemeCode | null | undefined): void {
 }
 
 export function applyCachedThemeSnapshot(): ThemeCode {
-  const cachedTheme = readCachedThemeCode() || "default";
+  const cachedTheme = readCachedThemeCode() || "white";
   applyThemeSnapshot(cachedTheme);
   return cachedTheme;
 }

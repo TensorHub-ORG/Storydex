@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Sequence, Set, Tuple
 
 from core.bounded_text_io import read_text_preview as read_bounded_text_preview
 from services.context_trace_service import (
+    MAX_CONTEXT_SOURCE_PATHS,
     build_context_trace,
     create_context_source,
     finalize_context_source,
@@ -23,6 +24,9 @@ from services.story_project_service import StoryProjectService, get_story_projec
 _HEADER_RE = re.compile(r"^###\s+(.+?)\s*$", re.MULTILINE)
 _VARIABLE_SNAPSHOT_PATH = ".storydex/memory/current-state/\u5168\u90e8\u53d8\u91cf.json"
 _WIKI_GRAPH_PATH = ".storydex/wiki/knowledge_graph.json"
+_CHAPTER_DIGITS = "零〇一二两三四五六七八九十百千万亿0123456789"
+_PROJECT_ORGANIZATION_SOURCE_PATH_LIMIT = 512
+_PROJECT_ORGANIZATION_MAX_CHARS = 12000
 
 
 @dataclass(frozen=True)
@@ -35,6 +39,7 @@ class StorydexContextAssemblerService:
         *,
         prompt: str = "",
         active_file: str = "",
+        intent_primary: str = "",
         turn_plan: Dict[str, Any] | None = None,
         policy: ContextPolicy | None = None,
     ) -> Dict[str, Any]:
@@ -48,10 +53,22 @@ class StorydexContextAssemblerService:
             prompt=prompt,
         )
         active_entities = self._infer_active_entities(root, prompt=prompt, active_file=active_file)
+        is_project_organization = str(intent_primary or "").strip() == "project_organization"
+        project_inventory_started = time.perf_counter()
+        project_inventory, project_inventory_paths = (
+            self._render_project_organization_inventory(
+                root,
+                generation_context=generation_context,
+                entity_names=self._project_organization_entity_names(root, active_entities),
+            )
+            if is_project_organization
+            else ("", [])
+        )
+        project_inventory_elapsed_ms = (time.perf_counter() - project_inventory_started) * 1000
         blocks: List[Dict[str, Any]] = []
         sources: List[Dict[str, Any]] = []
         notes: List[str] = []
-        max_total_chars = 10000
+        max_total_chars = 10000 + min(len(project_inventory), _PROJECT_ORGANIZATION_MAX_CHARS)
 
         source_started = time.perf_counter()
         preset_paths = self._runtime_preset_paths(root) if effective_policy.base_story_context else []
@@ -106,6 +123,32 @@ class StorydexContextAssemblerService:
             notes=notes,
             trace_source=sources[-1],
         )
+
+        if is_project_organization:
+            sources.append(
+                self._source(
+                    "project_organization_inventory",
+                    project_inventory_paths,
+                    candidate=project_inventory,
+                    policy="read_only_full_chapter_catalog",
+                    elapsed_ms=project_inventory_elapsed_ms,
+                    max_paths=_PROJECT_ORGANIZATION_SOURCE_PATH_LIMIT,
+                )
+            )
+            self._append_policy_block(
+                blocks,
+                enabled=True,
+                block_id="project_organization_inventory",
+                title="Read-only project organization inventory",
+                kind="project_inventory",
+                content=project_inventory,
+                source_paths=project_inventory_paths,
+                max_chars=_PROJECT_ORGANIZATION_MAX_CHARS,
+                max_total_chars=max_total_chars,
+                notes=notes,
+                trace_source=sources[-1],
+                max_source_paths=_PROJECT_ORGANIZATION_SOURCE_PATH_LIMIT,
+            )
 
         # 最近正文片段紧随预设：续写时上文是第一上下文，
         # 不能被后续硬约束/记忆块把预算挤占殆尽。
@@ -378,7 +421,7 @@ class StorydexContextAssemblerService:
             kind="retrieval",
             content=related_passages,
             source_paths=related_paths,
-            max_chars=1000,
+            max_chars=1600,
             max_total_chars=max_total_chars,
             notes=notes,
             trace_source=sources[-1],
@@ -530,6 +573,92 @@ class StorydexContextAssemblerService:
                 continue
         return paths
 
+    def _render_project_organization_inventory(
+        self,
+        root: Path,
+        *,
+        generation_context: Dict[str, Any],
+        entity_names: Sequence[str],
+    ) -> Tuple[str, List[str]]:
+        chapter_states = (
+            generation_context.get("chapterStates")
+            if isinstance(generation_context.get("chapterStates"), list)
+            else []
+        )
+        rows: List[Tuple[str, str]] = []
+        source_paths: List[str] = []
+        chapter_texts: List[Tuple[str, str]] = []
+        for raw_state in chapter_states:
+            state = raw_state if isinstance(raw_state, dict) else {}
+            relative = str(state.get("relativePath") or "").strip().replace("\\", "/")
+            if not relative:
+                continue
+            chapter_path = self._safe_workspace_file(root, relative)
+            if chapter_path is None:
+                continue
+            if chapter_path.is_file():
+                title_source = chapter_path
+                files = [chapter_path]
+            elif chapter_path.is_dir():
+                files = [
+                    candidate
+                    for candidate in sorted(chapter_path.rglob("*"), key=lambda item: item.as_posix())
+                    if candidate.is_file() and candidate.suffix.lower() in {".md", ".txt"}
+                ]
+                title_source = files[0] if files else None
+            else:
+                title_source = None
+                files = []
+            if title_source is None:
+                continue
+            try:
+                title_relative = title_source.relative_to(root).as_posix()
+                if entity_names:
+                    file_texts = [
+                        (file_path.relative_to(root).as_posix(), file_path.read_text(encoding="utf-8"))
+                        for file_path in files
+                    ]
+                    title_text = next((text for path, text in file_texts if path == title_relative), "")
+                    chapter_texts.extend(file_texts)
+                else:
+                    title_text = read_bounded_text_preview(title_source, max_chars=1000)
+            except Exception:
+                continue
+            title = next((line.strip() for line in title_text.splitlines() if line.strip()), "")
+            if not title:
+                title = str(state.get("displayName") or Path(relative).stem).strip()
+            source_relative = title_source.relative_to(root).as_posix()
+            for file_path in files:
+                relative_file = file_path.relative_to(root).as_posix()
+                source_paths.append(relative_file)
+            rows.append((source_relative, title))
+        if not rows:
+            return "", []
+        lines = [
+            "[Project Organization Inventory]",
+            "Read-only chapter catalog derived from the first non-empty line of each chapter source.",
+        ]
+        lines.extend(f"- {path} | {title}" for path, title in rows)
+        occurrence_rows: List[str] = []
+        for name in entity_names:
+            matches = [relative_file for relative_file, text in chapter_texts if name in text]
+            if matches:
+                occurrence_rows.append(
+                    f"- {name} | first={matches[0]} | last={matches[-1]} | chapters={','.join(matches)}"
+                )
+        if occurrence_rows:
+            lines.extend(["", "[Character occurrence index]", *occurrence_rows])
+        return "\n".join(lines), list(dict.fromkeys(source_paths))
+
+    def _project_organization_entity_names(
+        self,
+        root: Path,
+        active_entities: Sequence[str],
+    ) -> List[str]:
+        names = [str(item).strip() for item in active_entities if str(item).strip()]
+        names.extend(str(item).strip() for item in self._fallback_entity_names(root) if str(item).strip())
+        return [name for name in dict.fromkeys(names) if 2 <= len(name) <= 32][:64]
+
     @staticmethod
     def _build_preset_runtime_context(
         generation_context: Dict[str, Any],
@@ -584,15 +713,29 @@ class StorydexContextAssemblerService:
 
             if not get_flags().get_bool("CONTEXT_PIPELINE_FTS5"):
                 return "", []
-            from services.retrieval_service import get_retrieval_service
+            from services.retrieval_service import RECALL_CANDIDATE_LIMIT, get_retrieval_service
 
             service = get_retrieval_service(root)
             service.watch_files()
-            hits = service.search(query, top_k=8)
+            hits, candidate_paths = service.search_with_candidates(
+                query,
+                top_k=8,
+                candidate_limit=RECALL_CANDIDATE_LIMIT,
+            )
         except Exception:
             return "", []
 
         normalized_excludes = {str(path).replace("\\", "/") for path in exclude_paths if str(path).strip()}
+        normalized_candidates: List[str] = []
+        for path in candidate_paths:
+            normalized = str(path).replace("\\", "/")
+            if normalized in normalized_excludes:
+                continue
+            if not self._is_retrievable_content_path(normalized):
+                continue
+            normalized_candidates.append(normalized)
+        normalized_candidates = list(dict.fromkeys(normalized_candidates))
+
         selected: List[Tuple[str, str]] = []
         for path, _score, snippet in hits:
             normalized = str(path).replace("\\", "/")
@@ -605,15 +748,17 @@ class StorydexContextAssemblerService:
             selected.append((normalized, snippet.strip()))
             if len(selected) >= 3:
                 break
-        if not selected:
+        if not normalized_candidates:
             return "", []
         lines = [
             "[Related Project Passages]",
             "Retrieval hits for this turn only; treat as reference excerpts, not full documents.",
+            "Candidate paths include lower-ranked matches; read selectively before concluding evidence is absent.",
+            ", ".join(normalized_candidates),
         ]
         for path, snippet in selected:
             lines.extend(["", f"### {path}", snippet])
-        return "\n".join(lines).strip(), [path for path, _snippet in selected]
+        return "\n".join(lines).strip(), normalized_candidates
 
     _RETRIEVABLE_CONTENT_PREFIXES = (
         "chapters/",
@@ -624,15 +769,35 @@ class StorydexContextAssemblerService:
     )
 
     _QUOTED_TERM_RE = re.compile(r"[「『《“‘]([^「」『』《》“”‘’]{2,24})[」』》”’]")
+    _CHAPTER_REF_RE = re.compile(
+        rf"第(?P<start>[{_CHAPTER_DIGITS}]+)(?P<start_unit>[回章节])?"
+        rf"(?:(?:至|到|[-~～])第?(?P<end>[{_CHAPTER_DIGITS}]+)(?P<end_unit>[回章节])?"
+        rf"|(?P<single_unit>[回章节]))"
+    )
 
     @classmethod
     def _related_passage_query_terms(cls, prompt: str, active_entities: Sequence[str]) -> List[str]:
-        """被动检索的查询词：活跃实体正名 + prompt 中引号/书名号括起的短语。"""
+        """被动检索的查询词：活跃实体、引号短语和 prompt 中的章节范围。"""
         terms = [str(item).strip() for item in active_entities if str(item).strip()]
         for match in cls._QUOTED_TERM_RE.finditer(str(prompt or "")):
             value = match.group(1).strip()
             if value:
                 terms.append(value)
+        for match in cls._CHAPTER_REF_RE.finditer(str(prompt or "")):
+            end = str(match.group("end") or "").strip()
+            if not end:
+                terms.append(match.group(0))
+                continue
+            start = str(match.group("start") or "").strip()
+            common_prefix = ""
+            for left, right in zip(start, end):
+                if left != right:
+                    break
+                common_prefix += left
+            if common_prefix:
+                terms.append(f"第{common_prefix}")
+            else:
+                terms.extend((f"第{start}", f"第{end}"))
         return list(dict.fromkeys(terms))
 
     @staticmethod
@@ -963,6 +1128,7 @@ class StorydexContextAssemblerService:
         count: int | None = None,
         policy: str = "",
         elapsed_ms: float = 0.0,
+        max_paths: int = MAX_CONTEXT_SOURCE_PATHS,
     ) -> Dict[str, Any]:
         return create_context_source(
             kind,
@@ -971,6 +1137,7 @@ class StorydexContextAssemblerService:
             count=count,
             policy=policy,
             elapsed_ms=elapsed_ms,
+            max_paths=max_paths,
         )
 
     @staticmethod
@@ -987,6 +1154,7 @@ class StorydexContextAssemblerService:
         max_total_chars: int,
         notes: List[str],
         trace_source: Dict[str, Any] | None = None,
+        max_source_paths: int = MAX_CONTEXT_SOURCE_PATHS,
     ) -> None:
         if not enabled:
             finalize_context_source(
@@ -1007,6 +1175,7 @@ class StorydexContextAssemblerService:
             max_total_chars=max_total_chars,
             notes=notes,
             trace_source=trace_source,
+            max_source_paths=max_source_paths,
         )
 
     @staticmethod
@@ -1022,6 +1191,7 @@ class StorydexContextAssemblerService:
         max_total_chars: int,
         notes: List[str],
         trace_source: Dict[str, Any] | None = None,
+        max_source_paths: int = MAX_CONTEXT_SOURCE_PATHS,
     ) -> None:
         text = str(content or "").strip()
         if not text:
@@ -1051,7 +1221,11 @@ class StorydexContextAssemblerService:
                 "id": block_id,
                 "kind": kind,
                 "title": title,
-                "sourcePaths": [str(path).strip().replace("\\", "/") for path in source_paths if str(path).strip()][:12],
+                "sourcePaths": [
+                    str(path).strip().replace("\\", "/")
+                    for path in source_paths
+                    if str(path).strip()
+                ][: max(0, int(max_source_paths))],
                 "charCount": len(truncated),
                 "content": truncated,
             }

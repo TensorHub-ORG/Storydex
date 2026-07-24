@@ -9,6 +9,7 @@ from core.bounded_text_io import read_text_limited, read_text_preview
 
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_]{2,}|[\u4e00-\u9fff]+")
+SNIPPET_MAX_CHARS = 800
 
 
 def tokenize(text: str) -> List[str]:
@@ -99,14 +100,46 @@ def hybrid_search(query: str, file_paths: List[Path], workspace_root: Path, limi
 
 
 def _build_snippet(content: str, keywords: List[str]) -> str:
-    lowered = content.lower()
-    first_index = -1
-    for token in keywords:
-        first_index = lowered.find(token.lower())
-        if first_index >= 0:
-            break
-    if first_index < 0:
-        return " ".join(content[:220].split())
-    start = max(0, first_index - 100)
-    end = min(len(content), first_index + 220)
-    return " ".join(content[start:end].split())
+    candidates: List[tuple[tuple[int, int, int, int], str, List[str]]] = []
+    for line_index, raw_line in enumerate(str(content or "").splitlines()):
+        line = " ".join(raw_line.split())
+        if not line:
+            continue
+        lowered = line.lower()
+        matched = list(
+            dict.fromkeys(
+                token
+                for token in keywords
+                if str(token).strip() and str(token).lower() in lowered
+            )
+        )
+        if not matched:
+            continue
+        score = (
+            len(matched),
+            sum(len(token) for token in matched),
+            sum(lowered.count(token.lower()) for token in matched),
+            -line_index,
+        )
+        candidates.append((score, line, matched))
+    if not candidates:
+        return ""
+
+    _score, selected, matched = max(candidates, key=lambda item: item[0])
+    if len(selected) <= SNIPPET_MAX_CHARS:
+        return selected
+    lowered = selected.lower()
+    positions = [
+        lowered.find(token.lower())
+        for token in matched
+        if lowered.find(token.lower()) >= 0
+    ]
+    anchor = min(positions) if positions else 0
+    start = max(
+        0,
+        min(
+            anchor - SNIPPET_MAX_CHARS // 3,
+            len(selected) - SNIPPET_MAX_CHARS,
+        ),
+    )
+    return selected[start : start + SNIPPET_MAX_CHARS]

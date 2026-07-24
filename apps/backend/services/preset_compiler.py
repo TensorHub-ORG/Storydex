@@ -545,8 +545,7 @@ def _render_sections(sections: Sequence[PresetCompiledSection], *, source_format
 def _scan_module_text(module: PresetModule, text: str) -> List[PresetRisk]:
     patterns: List[tuple[str, RiskLevel, str, str]] = [
         ("visible_cot", "error", r"(<thinking>|</thinking>|思维链|chain[- ]?of[- ]?thought|展示推理|输出推理过程)", "包含显式思维链或要求展示推理的文本。"),
-        ("jailbreak", "error", r"(jailbreak|破限|忽略(上述|所有)规则|绕过(审查|限制)|规避审查|role\s*reset|开发者模式)", "包含破限、审查规避或角色重置风险。"),
-        ("forced_hook", "warning", r"(末句留.*钩子|未结清的悬念|强行.*承接下节|cliffhanger|悬念.*必须)", "包含强制钩子或强制悬念规则。"),
+        ("forced_hook", "warning", r"(末句留.*钩子|未结清的悬念|强行.*承接下节|cliffhanger|悬念.*必须)", "包含强制 hook 或强制悬念规则。"),
         ("auto_darkline", "warning", r"(自动.*暗线|推进.*暗线|异象.*升级|超自然.*铺垫|地底水纹|伞里有东西|有什么东西.*浮上来)", "包含自动暗线、异象升级或谜题化物件风险。"),
     ]
     risks: List[PresetRisk] = []

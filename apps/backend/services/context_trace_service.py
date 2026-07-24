@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, Sequence
 _TOKEN_ENCODING = "cl100k_base"
 _PARAGRAPH_BREAK_RE = re.compile(r"(?:\r?\n\s*){2,}")
 _WHITESPACE_RE = re.compile(r"\s+")
+MAX_CONTEXT_SOURCE_PATHS = 32
 
 
 @lru_cache(maxsize=1)
@@ -42,13 +43,15 @@ def create_context_source(
     count: int | None = None,
     policy: str = "",
     elapsed_ms: float = 0.0,
+    max_paths: int = MAX_CONTEXT_SOURCE_PATHS,
 ) -> Dict[str, Any]:
     clean_paths = [str(path).strip().replace("\\", "/") for path in paths if str(path).strip()]
     candidate_text = str(candidate or "").strip()
+    path_limit = max(0, int(max_paths))
     return {
         "kind": str(kind or "unknown"),
         "count": len(clean_paths) if count is None else max(0, int(count or 0)),
-        "paths": clean_paths[:12],
+        "paths": clean_paths[:path_limit],
         "candidateChars": len(candidate_text),
         "candidateEstTokens": estimate_tokens(candidate_text),
         "chars": 0,

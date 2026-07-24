@@ -32,6 +32,7 @@ INDEXABLE_SUFFIXES = {".md", ".txt", ".json", ".yaml", ".yml"}
 DEFAULT_INDEX_REL = ".storydex/.cache/retrieval.fts5.v2.db"
 FTS5_INDEX_CHAR_LIMIT = 120_000
 MAX_QUERY_TOKENS = 24
+RECALL_CANDIDATE_LIMIT = 30
 
 _SCHEMA = """
 CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(tokens, path UNINDEXED, tokenize='unicode61');
@@ -160,13 +161,21 @@ class RetrievalService:
         mtime = float(getattr(file_stat, "st_mtime", 0.0) or 0.0)
         return read.text, size, mtime
 
-    def search(self, query: str, *, top_k: int = 20, path_prefix: Optional[str] = None) -> List[Tuple[str, float, str]]:
-        """返回 (path, score, snippet)。score 越小越相关（FTS5 bm25）。"""
+    def _ranked_matches(
+        self,
+        query: str,
+        *,
+        limit: int,
+        path_prefix: Optional[str] = None,
+    ) -> Tuple[List[str], List[Tuple[str, float]]]:
         if not query or not query.strip():
-            return []
+            return [], []
         query_tokens = tokenize(query)[:MAX_QUERY_TOKENS]
         if not query_tokens:
-            return []
+            return [], []
+        result_limit = int(limit)
+        if result_limit <= 0:
+            return query_tokens, []
         match_expr = " OR ".join(f'"{token}"' for token in query_tokens)
         with self._lock, self._connect() as conn:
             sql = "SELECT path, bm25(docs) AS score FROM docs WHERE docs MATCH ?"
@@ -175,25 +184,56 @@ class RetrievalService:
                 sql += " AND path LIKE ?"
                 params.append(f"{path_prefix}%")
             sql += " ORDER BY score LIMIT ?"
-            params.append(int(top_k))
+            params.append(result_limit)
             try:
                 rows = conn.execute(sql, params).fetchall()
             except sqlite3.OperationalError as exc:
                 logger.warning("FTS5 query failed: %s", exc)
-                return []
-        results: List[Tuple[str, float, str]] = []
+                return query_tokens, []
+        matches: List[Tuple[str, float]] = []
         for row in rows:
             path = str(row["path"] or "")
             if self._is_runtime_path(tuple(Path(path).parts)):
                 continue
+            matches.append((path, float(row["score"] or 0.0)))
+        return query_tokens, matches
+
+    def _materialize_hits(
+        self,
+        matches: Iterable[Tuple[str, float]],
+        query_tokens: List[str],
+    ) -> List[Tuple[str, float, str]]:
+        results: List[Tuple[str, float, str]] = []
+        for path, score in matches:
             # tokens 列是 bigram 流，FTS5 自带 snippet 不可读；从原文生成摘录。
             snippet = ""
             try:
                 snippet = _build_snippet(read_text_preview(self.project_root / path, max_chars=4000), query_tokens)
             except Exception:
                 snippet = ""
-            results.append((path, float(row["score"] or 0.0), snippet))
+            results.append((path, score, snippet))
         return results
+
+    def search(self, query: str, *, top_k: int = 20, path_prefix: Optional[str] = None) -> List[Tuple[str, float, str]]:
+        """返回 (path, score, snippet)。score 越小越相关（FTS5 bm25）。"""
+        query_tokens, matches = self._ranked_matches(query, limit=top_k, path_prefix=path_prefix)
+        return self._materialize_hits(matches, query_tokens)
+
+    def search_with_candidates(
+        self,
+        query: str,
+        *,
+        top_k: int = 20,
+        candidate_limit: int = RECALL_CANDIDATE_LIMIT,
+        path_prefix: Optional[str] = None,
+    ) -> Tuple[List[Tuple[str, float, str]], List[str]]:
+        """返回可见摘录和更宽的候选路径，候选路径不额外读取文件内容。"""
+        visible_limit = max(0, int(top_k))
+        bounded_candidate_limit = max(0, min(int(candidate_limit), RECALL_CANDIDATE_LIMIT))
+        ranked_limit = max(visible_limit, bounded_candidate_limit)
+        query_tokens, matches = self._ranked_matches(query, limit=ranked_limit, path_prefix=path_prefix)
+        visible_matches = matches[:visible_limit]
+        return self._materialize_hits(visible_matches, query_tokens), [path for path, _score in matches]
 
     @staticmethod
     def _is_runtime_path(relative_parts: Tuple[str, ...]) -> bool:

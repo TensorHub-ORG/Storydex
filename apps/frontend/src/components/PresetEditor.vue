@@ -1,20 +1,20 @@
 <template>
   <section class="preset-editor">
-    <header class="preset-editor-header">
-      <div>
-        <h2 class="preset-editor-title">{{ document.meta.name || "预设参数" }}</h2>
-        <p class="preset-editor-subtitle">{{ relativePath || "未选择预设" }}</p>
+    <header class="preset-editor-titlebar">
+      <span class="preset-editor-titlebar-icon material-symbols-rounded">tune</span>
+      <div class="preset-editor-titlebar-copy">
+        <span class="preset-editor-titlebar-text">{{ document.meta.name || "预设参数" }}</span>
+        <span class="preset-editor-titlebar-source">{{ relativePath || "未选择预设" }}</span>
       </div>
-      <div class="preset-editor-actions">
-        <button class="preset-editor-btn" type="button" :disabled="!presetStore.dirty || presetStore.saving" @click="handleSave">
-          {{ presetStore.saving ? "保存中…" : "保存" }}
-        </button>
-      </div>
+      <button
+        class="preset-editor-btn preset-editor-btn-sm"
+        type="button"
+        :disabled="!presetStore.dirty || presetStore.saving"
+        @click="handleSave"
+      >
+        {{ presetStore.saving ? "保存中…" : presetStore.dirty ? "保存" : "已保存" }}
+      </button>
     </header>
-
-    <p v-if="presetStore.errorMessage" class="preset-editor-error">{{ presetStore.errorMessage }}</p>
-    <p v-if="presetStore.warnings.length" class="preset-editor-warning">{{ presetStore.warnings.join("；") }}</p>
-    <p v-if="presetStore.compileError" class="preset-editor-error">{{ presetStore.compileError }}</p>
 
     <nav class="preset-editor-tabs" aria-label="预设编辑模式">
       <button
@@ -28,6 +28,10 @@
         {{ mode.label }}
       </button>
     </nav>
+
+    <p v-if="presetStore.errorMessage" class="preset-editor-error">{{ presetStore.errorMessage }}</p>
+    <p v-if="presetStore.warnings.length" class="preset-editor-warning">{{ presetStore.warnings.join("；") }}</p>
+    <p v-if="presetStore.compileError" class="preset-editor-error">{{ presetStore.compileError }}</p>
 
     <div v-if="activeMode === 'structured'" class="preset-editor-mode-panel">
     <details class="preset-editor-section" open>
@@ -443,7 +447,7 @@
           />
         </label>
         <div v-if="disabledModuleIds.length" class="preset-editor-chip-row">
-          <span class="preset-editor-chip-label">本轮禁用</span>
+          <span class="preset-editor-chip-label">预览中排除</span>
           <button
             v-for="moduleId in disabledModuleIds"
             :key="moduleId"
@@ -474,7 +478,7 @@
           <footer class="preset-module-card-footer">
             <span>{{ textLengthLabel(section.text) }}</span>
             <button class="preset-editor-ghost-btn" type="button" @click="toggleTurnDisabled(section.sourceModuleId)">
-              本轮禁用
+              预览中排除
             </button>
           </footer>
         </article>
@@ -503,7 +507,7 @@
       <section class="preset-editor-workbench-hero">
         <div>
           <h3>风险体检</h3>
-          <p>静态检查可见思维链、破限、强制钩子、自动暗线和“伞里有东西”这类偏题风险。</p>
+          <p>静态检查可见思维链、强制 hook、自动暗线和无关内容注入这类偏题风险。</p>
         </div>
         <button class="preset-editor-btn" type="button" :disabled="presetStore.compiling" @click="presetStore.riskCheckCurrentPreset">
           {{ presetStore.compiling ? "检查中…" : "重新体检" }}
@@ -862,90 +866,137 @@ function onRawJsonChange(text: string): void {
 .preset-editor {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 16px;
   background: var(--bg-sidebar);
   color: var(--text-main);
   height: 100%;
+  min-height: 0;
   overflow-y: auto;
+  font-size: 13px;
 }
 
-.preset-editor-header {
+/* ---- 标题栏（与导入预览同款面板头） ---- */
+.preset-editor-titlebar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  flex: 0 0 auto;
+  min-height: 36px;
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  padding-right: 40px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--border-ghost);
+  align-items: center;
+  gap: 8px;
+  padding: 0 40px 0 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-card-muted);
 }
 
-.preset-editor-title {
-  margin: 0;
-  font-size: 14px;
-  font-weight: 700;
-}
-
-.preset-editor-subtitle {
-  margin: 4px 0 0;
-  font-size: 12px;
+.preset-editor-titlebar-icon {
+  flex: 0 0 auto;
+  font-size: 16px;
   color: var(--text-muted);
 }
 
-.preset-editor-actions {
-  display: inline-flex;
+.preset-editor-titlebar-copy {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: baseline;
   gap: 8px;
 }
 
+.preset-editor-titlebar-text {
+  flex: 0 1 auto;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.preset-editor-titlebar-source {
+  min-width: 0;
+  flex: 1 1 auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- 模式标签栏（扁平底边线） ---- */
 .preset-editor-tabs {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 6px;
-  padding: 4px;
-  background: var(--bg-elevated, #fff);
-  border: 1px solid var(--border-ghost);
-  border-radius: 6px;
+  position: sticky;
+  top: 36px;
+  z-index: 2;
+  flex: 0 0 auto;
+  display: flex;
+  gap: 0;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-card-muted);
 }
 
 .preset-editor-tab {
+  position: relative;
   min-width: 0;
-  padding: 7px 8px;
+  padding: 8px 12px;
   border: 0;
-  border-radius: 4px;
   background: transparent;
   color: var(--text-muted);
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 600;
   cursor: pointer;
 }
 
 .preset-editor-tab:hover,
 .preset-editor-tab:focus-visible {
-  background: var(--bg-hover);
   color: var(--text-main);
   outline: none;
 }
 
 .preset-editor-tab.active {
-  background: var(--accent-strong);
-  color: var(--text-on-accent, #fff);
+  color: var(--text-main);
+}
+
+.preset-editor-tab.active::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: -1px;
+  height: 2px;
+  background: var(--accent);
 }
 
 .preset-editor-mode-panel {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
+  padding: 12px 16px 16px;
 }
 
 .preset-editor-btn {
-  padding: 6px 16px;
-  background: var(--accent-strong);
-  color: var(--text-on-accent, #fff);
-  border: 0;
-  border-radius: 4px;
+  height: 26px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: var(--accent);
+  color: var(--accent-contrast);
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
+}
+
+.preset-editor-btn:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+.preset-editor-btn-sm {
+  flex: 0 0 auto;
+  height: 22px;
+  padding: 0 10px;
+  font-size: 11px;
 }
 
 .preset-editor-btn:disabled {
@@ -954,49 +1005,91 @@ function onRawJsonChange(text: string): void {
 }
 
 .preset-editor-ghost-btn {
-  padding: 4px 8px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-muted);
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  background: var(--bg-card);
+  color: var(--text-soft);
   font-size: 11px;
   cursor: pointer;
 }
 
 .preset-editor-ghost-btn:hover {
   background: var(--bg-hover);
-  color: var(--accent-strong);
+  color: var(--text-main);
+}
+
+.preset-editor-error,
+.preset-editor-warning {
+  margin: 8px 16px 0;
+  padding: 7px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  background: var(--bg-card);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .preset-editor-error {
-  margin: 0;
-  padding: 8px 12px;
-  background: var(--bg-elevated, #fef2f2);
+  border-left: 2px solid var(--state-danger);
   color: var(--state-danger, #b91c1c);
-  border-radius: 4px;
-  font-size: 12px;
 }
 
 .preset-editor-warning {
-  margin: 0;
-  padding: 8px 12px;
-  background: var(--bg-elevated, #fffbeb);
+  border-left: 2px solid var(--state-warning);
   color: var(--state-warning, #b45309);
-  border-radius: 4px;
-  font-size: 12px;
 }
 
 .preset-editor-section {
   border: 1px solid var(--border-subtle);
-  border-radius: 4px;
-  padding: 8px 12px;
+  border-radius: 3px;
+  padding: 0;
+  background: var(--bg-card);
 }
 
-.preset-editor-section summary {
+.preset-editor-section > summary {
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 12px;
   cursor: pointer;
   font-size: 12px;
   font-weight: 600;
+  color: var(--text-soft);
+  user-select: none;
+  list-style: none;
+}
+
+.preset-editor-section > summary::-webkit-details-marker {
+  display: none;
+}
+
+.preset-editor-section > summary::before {
+  content: "chevron_right";
+  font-family: "Material Symbols Rounded", sans-serif;
+  font-size: 16px;
+  margin-right: 4px;
+  color: var(--text-faint);
+  transition: transform 0.12s ease;
+}
+
+.preset-editor-section[open] > summary {
+  border-bottom: 1px solid var(--border-ghost);
   color: var(--text-main);
+}
+
+.preset-editor-section[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.preset-editor-section > *:not(summary) {
+  margin-left: 12px;
+  margin-right: 12px;
+}
+
+.preset-editor-section > *:not(summary):last-child {
+  margin-bottom: 12px;
 }
 
 .preset-editor-grid {
@@ -1017,11 +1110,17 @@ function onRawJsonChange(text: string): void {
 .preset-editor-field input[type="number"],
 .preset-editor-field input[type="text"] {
   padding: 4px 8px;
-  background: var(--bg-elevated, #fff);
+  background: var(--bg-input);
   color: var(--text-main);
   border: 1px solid var(--border-subtle);
-  border-radius: 4px;
+  border-radius: 3px;
   font-size: 12px;
+  outline: none;
+}
+
+.preset-editor-field input[type="number"]:focus,
+.preset-editor-field input[type="text"]:focus {
+  border-color: var(--accent);
 }
 
 .preset-editor-field input[type="range"] {
@@ -1056,12 +1155,17 @@ function onRawJsonChange(text: string): void {
 .preset-editor-textarea {
   width: 100%;
   padding: 6px 8px;
-  background: var(--bg-elevated, #fff);
+  background: var(--bg-input);
   color: var(--text-main);
   border: 1px solid var(--border-subtle);
-  border-radius: 4px;
+  border-radius: 3px;
   font-size: 12px;
   resize: vertical;
+  outline: none;
+}
+
+.preset-editor-textarea:focus {
+  border-color: var(--accent);
 }
 
 .preset-editor-hint {
@@ -1081,8 +1185,8 @@ function onRawJsonChange(text: string): void {
   min-width: 0;
   padding: 7px 8px;
   border: 1px solid var(--border-ghost);
-  border-radius: 4px;
-  background: var(--bg-elevated, #fff);
+  border-radius: 3px;
+  background: var(--bg-card);
 }
 
 .preset-module-toggle-row[open] {
@@ -1152,32 +1256,36 @@ function onRawJsonChange(text: string): void {
   max-height: 280px;
 }
 
-.preset-editor-workbench-hero,
 .preset-editor-override,
 .preset-module-card,
 .preset-risk-group {
   border: 1px solid var(--border-subtle);
-  border-radius: 6px;
-  background: var(--bg-elevated, #fff);
+  border-radius: 3px;
+  background: var(--bg-card);
 }
 
 .preset-editor-workbench-hero {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 12px;
+  padding: 2px 0 10px;
+  border-bottom: 1px solid var(--border-ghost);
 }
 
 .preset-editor-workbench-hero h3 {
   margin: 0;
-  font-size: 13px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-soft);
 }
 
 .preset-editor-workbench-hero p {
   margin: 4px 0 0;
-  color: var(--text-muted);
-  font-size: 12px;
+  color: var(--text-faint);
+  font-size: 11px;
   line-height: 1.6;
 }
 
@@ -1205,8 +1313,8 @@ function onRawJsonChange(text: string): void {
 .preset-editor-chip,
 .preset-section-token {
   border: 1px solid var(--border-subtle);
-  border-radius: 4px;
-  background: var(--bg-sidebar);
+  border-radius: 3px;
+  background: var(--bg-code);
   color: var(--text-muted);
   font-size: 11px;
   font-weight: 700;
@@ -1224,7 +1332,7 @@ function onRawJsonChange(text: string): void {
 .preset-editor-empty {
   padding: 16px 12px;
   border: 1px dashed var(--border-subtle);
-  border-radius: 6px;
+  border-radius: 3px;
   color: var(--text-muted);
   font-size: 12px;
   line-height: 1.7;
@@ -1278,7 +1386,7 @@ function onRawJsonChange(text: string): void {
 .preset-risk-pill {
   flex: 0 0 auto;
   padding: 3px 7px;
-  border-radius: 4px;
+  border-radius: 3px;
   font-size: 10px;
   font-weight: 800;
   letter-spacing: 0.04em;
@@ -1310,8 +1418,8 @@ function onRawJsonChange(text: string): void {
   padding: 12px;
   overflow: auto;
   border: 1px solid var(--border-subtle);
-  border-radius: 6px;
-  background: var(--bg-elevated, #fff);
+  border-radius: 3px;
+  background: var(--bg-card);
   color: var(--text-main);
   font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
   font-size: 11px;
