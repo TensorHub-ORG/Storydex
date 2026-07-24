@@ -1,6 +1,8 @@
 const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
 const fs = require("fs");
 const path = require("path");
+const net = require("net");
+const http = require("http");
 const { pathToFileURL } = require("url");
 const { spawn } = require("child_process");
 const { launchUpdateHelper, readActiveInstallLock } = require("./update-installer.cjs");
@@ -25,8 +27,16 @@ const DESKTOP_APP_ID = String(DESKTOP_PACKAGE.build?.appId || "cn.tensorhub.stor
 const DESKTOP_PRODUCT_NAME = String(DESKTOP_PACKAGE.build?.productName || DESKTOP_PACKAGE.productName || "Storydex").trim();
 const FRONTEND_DEV_URL = process.env.STORYDEX_DESKTOP_URL || "http://127.0.0.1:5173";
 const BACKEND_HOST = process.env.STORYDEX_BACKEND_HOST || "127.0.0.1";
-const BACKEND_PORT = Number(process.env.STORYDEX_BACKEND_PORT || 18081);
-const BACKEND_HEALTH_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}/api/v1/sys/health`;
+const DEFAULT_BACKEND_PORT = Number(process.env.STORYDEX_BACKEND_PORT || 18081);
+// 实际端口在启动时确定：优先复用显式配置，否则动态挑选一个空闲端口，
+// 避免物理机上 18081 被占用导致后端永远无法监听（健康检查超时）。
+let backendPort = DEFAULT_BACKEND_PORT;
+function backendHealthUrl() {
+  return `http://${BACKEND_HOST}:${backendPort}/api/v1/sys/health`;
+}
+function backendBaseUrl() {
+  return `http://${BACKEND_HOST}:${backendPort}/api/v1`;
+}
 const DESKTOP_TITLEBAR_HEIGHT = 42;
 const DEFAULT_TITLEBAR_THEME = {
   color: "#f5f7fb",
@@ -363,6 +373,83 @@ function readProcessLogTail(processRef) {
     .slice(-4000);
 }
 
+// ---- 后端持久化日志 ----
+// 把后端的 stdout/stderr 与启动关键节点写入用户目录下的日志文件，方便在
+// 出问题的物理机上直接取证（不必依赖“崩溃时截尾”那点信息）。日志文件在
+// 每次启动时轮转：保留上一份为 *.prev.log，避免无限增长。
+let backendLogStream = null;
+let backendLogFilePath = "";
+
+function initBackendLogStream(logsDir) {
+  try {
+    fs.mkdirSync(logsDir, { recursive: true });
+    const current = path.join(logsDir, "backend.log");
+    const previous = path.join(logsDir, "backend.prev.log");
+    try {
+      if (fs.existsSync(current)) {
+        fs.rmSync(previous, { force: true });
+        fs.renameSync(current, previous);
+      }
+    } catch {
+      // 轮转失败不致命，继续以追加方式写入。
+    }
+    backendLogFilePath = current;
+    backendLogStream = fs.createWriteStream(current, { flags: "a", encoding: "utf8" });
+    backendLogStream.on("error", () => {
+      backendLogStream = null;
+    });
+    writeBackendLog(`==== Storydex backend log started ${new Date().toISOString()} ====`);
+    return current;
+  } catch {
+    backendLogStream = null;
+    backendLogFilePath = "";
+    return "";
+  }
+}
+
+// 支持两种调用方式：
+//   writeBackendLog("一行日志")                 —— 启动关键节点
+//   writeBackendLog(label, "stdout"|"stderr", chunk) —— 后端进程输出
+function writeBackendLog(...args) {
+  if (!backendLogStream) {
+    return;
+  }
+  let line = "";
+  if (args.length >= 3) {
+    const [label, stream, chunk] = args;
+    const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk || "");
+    if (!text) {
+      return;
+    }
+    line = text
+      .split(/\r?\n/)
+      .filter((item) => item.length > 0)
+      .map((item) => `[${label}:${stream}] ${item}`)
+      .join("\n");
+  } else {
+    line = String(args[0] || "");
+  }
+  if (!line) {
+    return;
+  }
+  try {
+    backendLogStream.write(line.endsWith("\n") ? line : `${line}\n`);
+  } catch {
+    // 忽略写入错误，不影响主流程。
+  }
+}
+
+function closeBackendLogStream() {
+  if (backendLogStream) {
+    try {
+      backendLogStream.end();
+    } catch {
+      // no-op
+    }
+    backendLogStream = null;
+  }
+}
+
 function buildPythonPathEntries(pythonRoot) {
   if (!pythonRoot) {
     return [];
@@ -523,19 +610,82 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function isBackendHealthy() {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);
-    try {
-      const response = await fetch(BACKEND_HEALTH_URL, { method: "GET", signal: controller.signal });
-      return response.ok;
-    } finally {
-      clearTimeout(timeout);
-    }
-  } catch {
-    return false;
+// 让操作系统分配一个空闲端口：bind 到 0 后读回实际端口再释放。
+// 存在竞态（释放到复用之间端口理论上可能被抢占），但配合 uvicorn 失败重试
+// 已足够健壮，远优于把端口写死。
+function pickAvailablePort(preferredPort) {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.unref();
+    server.on("error", () => {
+      // 首选端口被占用时回退到 OS 动态分配。
+      if (preferredPort) {
+        resolve(pickAvailablePort(0));
+      } else {
+        resolve(0);
+      }
+    });
+    server.listen({ host: BACKEND_HOST, port: preferredPort || 0 }, () => {
+      const address = server.address();
+      const chosen = address && typeof address === "object" ? address.port : 0;
+      server.close(() => resolve(chosen));
+    });
+  });
+}
+
+// 确定本次启动使用的后端端口：显式配置了 STORYDEX_BACKEND_PORT 就尊重它，
+// 否则优先尝试默认 18081，被占用时自动退回到任意空闲端口。
+async function resolveBackendPort() {
+  const explicit = String(process.env.STORYDEX_BACKEND_PORT || "").trim();
+  if (explicit && /^\d+$/.test(explicit)) {
+    backendPort = Number(explicit);
+    return backendPort;
   }
+  const chosen = await pickAvailablePort(DEFAULT_BACKEND_PORT);
+  backendPort = chosen || DEFAULT_BACKEND_PORT;
+  return backendPort;
+}
+
+function isBackendHealthy() {
+  // 用 Node 原生 http 直连 127.0.0.1，而不是 fetch()。fetch 走 Chromium/undici
+  // 网络栈，会受系统代理 / 全局 VPN（如未把 127.0.0.1 加入 NO_PROXY）影响，
+  // 导致本地健康检查被路由到代理而连不上后端。原生 http 请求不经过系统代理。
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve(value);
+    };
+
+    const request = http.request(
+      {
+        host: BACKEND_HOST,
+        port: backendPort,
+        path: "/api/v1/sys/health",
+        method: "GET",
+        // 显式禁用代理：不复用带 proxy 的全局 agent。
+        agent: false,
+        timeout: 3000
+      },
+      (response) => {
+        const ok = typeof response.statusCode === "number" && response.statusCode >= 200 && response.statusCode < 300;
+        // 必须消费掉响应体，否则连接不会释放。
+        response.resume();
+        response.on("end", () => finish(ok));
+        response.on("error", () => finish(false));
+      }
+    );
+
+    request.on("timeout", () => {
+      request.destroy();
+      finish(false);
+    });
+    request.on("error", () => finish(false));
+    request.end();
+  });
 }
 
 async function waitUntilBackendHealthy(maxAttempts = 80, intervalMs = 500, processRef = null) {
@@ -1058,11 +1208,13 @@ function attachBackendProcessLogging(processRef, candidateLabel) {
   processRef.stdout.on("data", (chunk) => {
     appendProcessLog(logState.stdout, chunk);
     process.stdout.write(`[Backend:${candidateLabel}] ${chunk}`);
+    writeBackendLog(candidateLabel, "stdout", chunk);
   });
 
   processRef.stderr.on("data", (chunk) => {
     appendProcessLog(logState.stderr, chunk);
     process.stderr.write(`[Backend:${candidateLabel}] ${chunk}`);
+    writeBackendLog(candidateLabel, "stderr", chunk);
   });
 
   processRef.on("error", async (error) => {
@@ -1115,8 +1267,12 @@ async function showBackendFailureMessage({ backendDirectory, candidates, failure
       `Python candidates: ${pythonTip}`,
       `Backend directory: ${backendDirectory}`,
       `Workspace root: ${runtimeEnvironment.workspaceRoot}`,
-      `Global config root: ${runtimeEnvironment.globalRoot}`
-    ].join("\n"),
+      `Global config root: ${runtimeEnvironment.globalRoot}`,
+      `Backend port: ${backendPort}`,
+      backendLogFilePath ? `Full backend log: ${backendLogFilePath}` : ""
+    ]
+      .filter((line) => !!line)
+      .join("\n"),
     detail
   });
 }
@@ -1126,7 +1282,7 @@ async function killExternalBackendOnPort() {
     return;
   }
   return new Promise((resolve) => {
-    const finder = spawn("cmd", ["/c", `netstat -ano | findstr :${BACKEND_PORT}`], {
+    const finder = spawn("cmd", ["/c", `netstat -ano | findstr :${backendPort}`], {
       windowsHide: true,
       stdio: ["ignore", "pipe", "ignore"]
     });
@@ -1168,9 +1324,20 @@ async function killExternalBackendOnPort() {
 }
 
 async function startBackendKernel() {
+  const backendDirectory = resolveBackendDirectory();
+  const runtimeEnvironment = resolveDesktopRuntimeEnvironment();
+  initBackendLogStream(runtimeEnvironment.logsDir);
+
+  // 先确定本次使用的端口（显式配置优先，否则动态挑选空闲端口）。
+  await resolveBackendPort();
+  // 让子进程与 preload 都能读到最终端口。
+  process.env.STORYDEX_BACKEND_PORT = String(backendPort);
+  writeBackendLog(`[Storydex Desktop] Resolved backend port: ${backendPort}`);
+
   if (app.isPackaged) {
     if (await isBackendHealthy()) {
       console.log("[Storydex Desktop] Backend already active.");
+      writeBackendLog("[Storydex Desktop] Backend already active on resolved port.");
       return true;
     }
     await killExternalBackendOnPort();
@@ -1178,8 +1345,6 @@ async function startBackendKernel() {
     await killExternalBackendOnPort();
   }
 
-  const backendDirectory = resolveBackendDirectory();
-  const runtimeEnvironment = resolveDesktopRuntimeEnvironment();
   const uvicornArgs = [
     "-m",
     "uvicorn",
@@ -1187,7 +1352,7 @@ async function startBackendKernel() {
     "--host",
     BACKEND_HOST,
     "--port",
-    String(BACKEND_PORT)
+    String(backendPort)
   ];
   if (!app.isPackaged) {
     uvicornArgs.push("--reload", "--reload-dir", backendDirectory);
@@ -1219,21 +1384,33 @@ async function startBackendKernel() {
     backendProcess = attempt.process;
     attachBackendProcessLogging(backendProcess, candidate.label);
 
-    const ready = await waitUntilBackendHealthy(40, 500, backendProcess);
+    // 冷启动预算放宽到 ~60 秒（120 × 500ms）。老机械盘 + 杀软逐文件扫描时，
+    // 嵌入式 Python 首启可能远超原来的 20 秒；waitUntilBackendHealthy 已能在
+    // 进程提前退出时立即返回，因此加长窗口不会拖慢“真失败”的报错。
+    const ready = await waitUntilBackendHealthy(120, 500, backendProcess);
     if (ready) {
+      writeBackendLog(`[desktop] backend healthy via ${candidate.label} on port ${backendPort}`);
       return true;
     }
 
+    const healthDetail =
+      readProcessLogTail(backendProcess) || `Backend started with ${candidate.label} but never became healthy.`;
+    writeBackendLog(`[desktop] health check failed for ${candidate.label} on port ${backendPort}\n${healthDetail}`);
     failures.push({
       label: candidate.label,
       phase: "health",
-      detail: readProcessLogTail(backendProcess) || `Backend started with ${candidate.label} but never became healthy.`
+      detail: healthDetail
     });
     stopBackendKernel(backendProcess);
     backendProcess = null;
     await sleep(250);
   }
 
+  writeBackendLog(
+    `[desktop] backend did not become ready. failures:\n${failures
+      .map((item) => `- ${item.label} (${item.phase}): ${String(item.detail || "").slice(-500)}`)
+      .join("\n")}`
+  );
   await showBackendFailureMessage({ backendDirectory, candidates, failures, runtimeEnvironment });
   return false;
 }
@@ -1390,7 +1567,10 @@ async function openPreviewWindow(relativePath) {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: false,
+      // 把最终确定的后端端口透传给渲染进程：运行时改 process.env 不保证
+      // 传到已创建的渲染进程，additionalArguments 是可靠通道，preload 会解析。
+      additionalArguments: [`--storydex-backend-port=${backendPort}`]
     }
   });
 
@@ -1421,7 +1601,10 @@ async function createMainWindow() {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: false,
+      // 把最终确定的后端端口透传给渲染进程：运行时改 process.env 不保证
+      // 传到已创建的渲染进程，additionalArguments 是可靠通道，preload 会解析。
+      additionalArguments: [`--storydex-backend-port=${backendPort}`]
     }
   });
 
@@ -1437,6 +1620,7 @@ async function createMainWindow() {
 app.on("before-quit", () => {
   quitting = true;
   stopBackendKernel();
+  closeBackendLogStream();
 });
 
 app.on("window-all-closed", () => {

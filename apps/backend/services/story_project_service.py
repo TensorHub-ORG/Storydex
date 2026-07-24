@@ -2445,6 +2445,7 @@ class StoryProjectService:
         targets = turn_plan.get("fragmentTargets") if isinstance(turn_plan.get("fragmentTargets"), list) else []
         expected_count = self._normalize_story_fragment_count(turn_plan.get("fragmentCount"))
         min_word_count, max_word_count = self._resolve_turn_plan_word_count_range(turn_plan)
+        accept_min, accept_max = self._story_word_count_acceptance_band(min_word_count, max_word_count)
         content_mode = self._normalize_chapter_content_mode(turn_plan.get("chapterContentMode"))
         actual_count = len(fragments)
         results: List[Dict[str, Any]] = []
@@ -2460,12 +2461,13 @@ class StoryProjectService:
             write_mode = str(target.get("writeMode") or "replace")
             baseline = max(0, self._safe_int(target.get("baselineWordCount"), fallback=0, minimum=0, maximum=10**9))
             current_count = self.count_story_file_words(workspace_root / relative_path) if relative_path else 0
+            # baseline_matches 仍是硬门槛：append 模式下磁盘现字数必须等于计划基线，
+            # 这是"同一章不被重复追加、正文翻倍"的安全保护，不能为了放宽字数一起拆掉。
             baseline_matches = write_mode != "append" or current_count == baseline
-            item_passed = (
-                bool(relative_path and text)
-                and min_word_count <= actual_word_count <= max_word_count
-                and baseline_matches
-            )
+            # 字数改为宽容带：只要落在放行区间即视为达标，避免模型为凑到目标区间
+            # 反复重写同一章导致"抠字数"死循环。目标区间仍作为建议展示给作者。
+            word_count_ok = accept_min <= actual_word_count <= accept_max
+            item_passed = bool(relative_path and text) and word_count_ok and baseline_matches
             passed = passed and item_passed
             results.append(
                 {
@@ -2478,6 +2480,8 @@ class StoryProjectService:
                     "actualWordCount": actual_word_count,
                     "targetWordCountMin": min_word_count,
                     "targetWordCountMax": max_word_count,
+                    "acceptWordCountMin": accept_min,
+                    "acceptWordCountMax": accept_max,
                     "difference": self._word_count_range_difference(
                         actual_word_count, min_word_count, max_word_count
                     ),
@@ -2499,7 +2503,7 @@ class StoryProjectService:
             "_version": 1,
             "applicable": True,
             "passed": passed,
-            "status": "success" if passed else "error",
+            "status": "success" if passed else "warning",
             "algorithm": STORY_WORD_COUNT_ALGORITHM,
             "countingRule": "count every non-whitespace Unicode character",
             "exact": False,
@@ -2507,13 +2511,15 @@ class StoryProjectService:
             "actualFragmentCount": actual_count,
             "targetWordCountMin": min_word_count,
             "targetWordCountMax": max_word_count,
+            "acceptWordCountMin": accept_min,
+            "acceptWordCountMax": accept_max,
             "chapterContentMode": content_mode,
             "structurePassed": structure_passed,
             "fragments": results,
             "message": (
                 "正文已通过 Storydex 落盘前客观字数和章节结构校验。"
                 if passed
-                else f"请按失败项修订正文：每个片段的 Storydex 非空白字符数需落在 {min_word_count}-{max_word_count} 字区间内，且数量和章节模板必须完全一致。"
+                else f"提示：请复核未通过的片段。每个片段的 Storydex 非空白字符数建议落在 {min_word_count}-{max_word_count} 字（放行区间 {accept_min}-{accept_max} 字），且片段数量与章节模板需一致。"
             ),
         }
         if not passed:
@@ -2789,13 +2795,10 @@ class StoryProjectService:
                         int(fragment.get("_storydexTargetWordCountMin") or 0),
                         int(fragment.get("_storydexTargetWordCountMax") or 0),
                     ),
-                    "wordCountStatus": (
-                        "passed"
-                        if not fragment.get("_storydexTargetWordCountMax")
-                        or int(fragment.get("_storydexTargetWordCountMin") or 0)
-                        <= count_story_text_words(segment_text)
-                        <= int(fragment.get("_storydexTargetWordCountMax") or 0)
-                        else "failed"
+                    "wordCountStatus": self._story_fragment_word_count_status(
+                        count_story_text_words(segment_text),
+                        int(fragment.get("_storydexTargetWordCountMin") or 0),
+                        int(fragment.get("_storydexTargetWordCountMax") or 0),
                     ),
                     "wordCountAlgorithm": STORY_WORD_COUNT_ALGORITHM,
                     "writeMode": str(fragment.get("_storydexWriteMode") or "replace"),
@@ -3568,6 +3571,39 @@ class StoryProjectService:
         if count > maximum:
             return count - maximum
         return 0
+
+    @staticmethod
+    def _story_word_count_acceptance_band(minimum: int, maximum: int) -> tuple[int, int]:
+        """Widen the target [min, max] into a tolerant acceptance band for落盘放行。
+
+        The planned range (default 2000-2500) is the *goal* shown to the author,
+        but enforcing it as a hard gate on every fragment pushes the model into a
+        "抠字数" loop where it rewrites the same chapter to shave a handful of
+        characters. We accept anything within ±40% of the band edges (floored at
+        a sane minimum) so a fragment that is clearly a full chapter passes even
+        when it slightly overshoots or undershoots the goal.
+        """
+        low = max(1, int(minimum))
+        high = max(low, int(maximum))
+        # 下限只做防空保护（50 字），不要用大的绝对下限，否则会把 100 字这种
+        # 小目标算出反向区间，反而把合法片段挡在外面。
+        accept_min = max(50, int(round(low * 0.6)))
+        accept_max = int(round(high * 1.4))
+        if accept_min > accept_max:
+            accept_min, accept_max = accept_max, accept_min
+        return accept_min, accept_max
+
+    def _story_fragment_word_count_status(self, count: int, minimum: int, maximum: int) -> str:
+        """Pass/fail a fragment against the tolerant acceptance band.
+
+        Mirrors the落盘放行 rule so post-write reporting agrees with the gate:
+        no target means always passed, otherwise the count must land inside the
+        widened band rather than the exact [min, max] goal.
+        """
+        if not maximum:
+            return "passed"
+        accept_min, accept_max = self._story_word_count_acceptance_band(minimum, maximum)
+        return "passed" if accept_min <= count <= accept_max else "failed"
 
     def _merge_story_fragment_word_count_range(
         self,

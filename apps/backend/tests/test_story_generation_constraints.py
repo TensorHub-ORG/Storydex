@@ -165,10 +165,32 @@ def test_single_file_contract_forces_one_file_and_persists_template_setting(tmp_
 
 
 @pytest.mark.parametrize("actual_word_count", [99, 101])
-def test_inexact_story_fragment_is_rejected_before_any_file_write(
+def test_near_target_story_fragment_is_accepted_within_tolerance(
     tmp_path: Path,
     actual_word_count: int,
 ) -> None:
+    # 字数校验改为宽容带后，紧挨目标（100 字）的片段应直接放行落盘，
+    # 避免模型为凑到精确字数反复重写导致的“抠字数”死循环。
+    service = get_story_project_service()
+    contract = _story_contract(tmp_path, fragment_word_count=100)
+    target_path = contract["turnPlan"]["fragmentTargets"][0]["path"]
+    result = service.apply_story_generation_increment(
+        tmp_path,
+        {"fragments": [{"text": "字" * actual_word_count}]},
+        generation_contract=contract,
+    )
+    assert result["ok"] is True
+    assert result["fragments"][0]["wordCountStatus"] == "passed"
+    assert (tmp_path / target_path).exists()
+
+
+@pytest.mark.parametrize("actual_word_count", [10, 500])
+def test_story_fragment_far_outside_band_is_rejected_before_any_file_write(
+    tmp_path: Path,
+    actual_word_count: int,
+) -> None:
+    # 只有远超放行带（目标 100，放行带约 60-140）的片段才拦截落盘，
+    # 保留“片段明显不是完整章节”这类硬性保护。
     service = get_story_project_service()
     contract = _story_contract(tmp_path, fragment_word_count=100)
     target_path = contract["turnPlan"]["fragmentTargets"][0]["path"]
@@ -179,7 +201,6 @@ def test_inexact_story_fragment_is_rejected_before_any_file_write(
     )
     assert result["ok"] is False
     assert result["code"] == "story_generation_constraints_not_met"
-    assert result["wordCountValidation"]["fragments"][0]["difference"] == actual_word_count - 100
     assert not (tmp_path / target_path).exists()
 
 
@@ -227,10 +248,31 @@ def test_story_fragment_within_range_is_accepted(
 
 
 @pytest.mark.parametrize("actual_word_count", [1999, 2501])
-def test_story_fragment_outside_range_is_rejected_before_any_file_write(
+def test_story_fragment_near_range_edges_is_accepted(
     tmp_path: Path,
     actual_word_count: int,
 ) -> None:
+    # 目标区间 2000-2500 只是建议值：贴着边缘（1999/2501）不应被当成失败反复重写，
+    # 落在宽容带内即视为达标并放行落盘。
+    service = get_story_project_service()
+    contract = _story_contract(tmp_path, fragment_word_count_min=2000, fragment_word_count_max=2500)
+    target_path = contract["turnPlan"]["fragmentTargets"][0]["path"]
+    result = service.apply_story_generation_increment(
+        tmp_path,
+        {"fragments": [{"text": "字" * actual_word_count}]},
+        generation_contract=contract,
+    )
+    assert result["ok"] is True
+    assert result["fragments"][0]["wordCountStatus"] == "passed"
+    assert (tmp_path / target_path).exists()
+
+
+@pytest.mark.parametrize("actual_word_count", [500, 5000])
+def test_story_fragment_far_outside_band_is_rejected_before_any_file_write(
+    tmp_path: Path,
+    actual_word_count: int,
+) -> None:
+    # 远离目标区间（明显不是一整章：过短 500 / 过长 5000）仍应在落盘前被拦下。
     service = get_story_project_service()
     contract = _story_contract(tmp_path, fragment_word_count_min=2000, fragment_word_count_max=2500)
     target_path = contract["turnPlan"]["fragmentTargets"][0]["path"]
