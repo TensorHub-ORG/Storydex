@@ -457,4 +457,8 @@ export interface AgentExecutionRun {
   items: CoomiWaterfallItem[];
   errorMessage: string;
   errorCode: string | null;
+  /** 本轮消耗的 token（AgentCompleted.total_tokens），与 session 级上下文占用无关 */
+  turnTokens: number | null;
+  /** 本轮耗时毫秒（AgentCompleted.duration_ms），收敛后固定 */
+  turnDurationMs: number | null;
 }

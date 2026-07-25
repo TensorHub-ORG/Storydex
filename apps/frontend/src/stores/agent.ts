@@ -1004,7 +1004,9 @@ export const useAgentStore = defineStore("agent", {
           })
         ],
         errorMessage: "",
-        errorCode: null
+        errorCode: null,
+        turnTokens: null,
+        turnDurationMs: null
       };
 
       this.pendingSnapshotConfirmation = null;
@@ -1135,7 +1137,9 @@ export const useAgentStore = defineStore("agent", {
             })
           ],
           errorMessage: "",
-          errorCode: null
+          errorCode: null,
+          turnTokens: null,
+          turnDurationMs: null
         };
         this.currentTraceId = traceId;
         this.selectedTraceId = "";
@@ -1344,10 +1348,23 @@ export const useAgentStore = defineStore("agent", {
       } else if (eventName === "AgentCompleted") {
         nextRun.status = "completed";
         nextRun.tasks = finalizeTaskStatuses(nextRun.tasks, "completed");
+        nextRun.turnTokens = firstNumber(visiblePacket as unknown as Record<string, unknown>, [
+          "total_tokens",
+          "totalTokens"
+        ]);
+        nextRun.turnDurationMs = firstNumber(visiblePacket as unknown as Record<string, unknown>, [
+          "duration_ms",
+          "durationMs",
+          "duration_ms_total"
+        ]);
         this.pendingApprovals = [];
       } else if (eventName === "AgentCancelled") {
         nextRun.status = "cancelled";
         nextRun.tasks = finalizeTaskStatuses(nextRun.tasks, "cancelled");
+        nextRun.turnDurationMs = firstNumber(visiblePacket as unknown as Record<string, unknown>, [
+          "duration_ms",
+          "durationMs"
+        ]);
         this.pendingApprovals = [];
       } else if (eventName === "AgentError") {
         nextRun.status = "failed";
@@ -1950,8 +1967,30 @@ function normalizeHistoryRun(value: unknown, fallbackSessionId: string): AgentEx
     changeLedger,
     items: buildHistoryWaterfallItems(traceId, prompt, reply, events),
     errorMessage: asString(record.errorMessage) || "",
-    errorCode: asString(record.errorCode)
+    errorCode: asString(record.errorCode),
+    turnTokens: historyTurnMetric(record, events, ["total_tokens", "totalTokens"]),
+    turnDurationMs: historyTurnMetric(record, events, ["duration_ms", "durationMs", "duration_ms_total"])
   };
+}
+
+/**
+ * 历史轮次的单轮指标：优先取持久化字段，否则回落到 AgentCompleted 事件里的原始数值。
+ */
+function historyTurnMetric(
+  record: Record<string, unknown>,
+  events: AgentTraceEvent[],
+  keys: string[]
+): number | null {
+  const direct = firstNumber(record, keys);
+  if (direct !== null && direct >= 0) {
+    return direct;
+  }
+  const completed = [...events].reverse().find((event) => event.event === "AgentCompleted");
+  if (!completed?.data) {
+    return null;
+  }
+  const value = firstNumber(completed.data, keys);
+  return value !== null && value >= 0 ? value : null;
 }
 
 function buildHistoryWaterfallItems(

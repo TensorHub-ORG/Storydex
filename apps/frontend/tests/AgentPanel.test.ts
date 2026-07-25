@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { shallowMount } from "@vue/test-utils";
+import { mount, shallowMount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { nextTick, unref } from "vue";
 
@@ -31,12 +31,37 @@ vi.mock("@/api/workspace", () => ({ fetchStoryChapterTemplates: vi.fn().mockReso
 vi.mock("@/api/client", () => ({ describeTransportError: (_error: unknown, fallback: string) => fallback }));
 
 import AgentPanel from "@/components/AgentPanel.vue";
+import CoomiClaudeTurn from "@/components/demo/CoomiClaudeTurn.vue";
 import { useAgentStore } from "@/stores/agent";
+import type { AgentExecutionRun } from "@/types/agent";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => { resolve = done; });
   return { promise, resolve };
+}
+
+/** 构造一个最小可渲染的执行轮次，供 CoomiClaudeTurn 的直挂测试使用。 */
+function makeRun(overrides: Record<string, unknown> = {}): any {
+  const now = new Date().toISOString();
+  const traceId = String(overrides.traceId || "trace-1");
+  return {
+    traceId, sessionId: "session-1", prompt: "hello", route: "coomi", agentMode: "coomi",
+    llmModel: "fake", llmProvider: "fake", status: "running", noRestorePoint: false,
+    createdAt: now, updatedAt: now, lastAction: "chat", reply: "", trace: null,
+    audit: [], events: [], tasks: [],
+    changeLedger: { traceId, sessionId: "session-1", changedFiles: [], changedFileCount: 0, added: 0, removed: 0, commitHash: "", shortHash: "", diffSource: "", updatedAt: "" },
+    items: [], errorMessage: "", errorCode: null, turnTokens: null, turnDurationMs: null,
+    ...overrides
+  };
+}
+
+/** 活动阶段提示项（RunAccepted / TurnPhase 归一化后的形态）。 */
+function phaseItem(content: string): any {
+  return {
+    id: "phase-1", type: "phase", status: "running", title: "意图识别", content,
+    timestamp: new Date().toISOString(), raw: {}
+  };
 }
 
 beforeEach(() => {
@@ -81,13 +106,15 @@ describe("AgentPanel", () => {
     const wrapper = shallowMount(AgentPanel, { attachTo: document.body });
     await nextTick();
 
-    expect(wrapper.findAll(".coomi-run-actions")).toHaveLength(1);
-    const buttons = wrapper.findAll(".coomi-run-action");
-    expect(buttons).toHaveLength(2);
-    expect(buttons[0].attributes("aria-label")).toBe("编辑最新消息");
-    expect(buttons[1].attributes("aria-label")).toBe("删除本轮");
+    // 回滚按钮已下移到 CoomiClaudeTurn；面板只负责判定可否回滚并接收 emit。
+    // conversationRuns 按 createdAt 升序，所以最后一个才是最新轮次。
+    const turns = wrapper.findAllComponents(CoomiClaudeTurn);
+    expect(turns).toHaveLength(2);
+    expect(turns[0].props("canRollback")).toBe(false);
+    expect(turns[1].props("canRollback")).toBe(true);
 
-    await buttons[0].trigger("click");
+    turns[1].vm.$emit("rollback-edit", store.executionHistory[0]);
+    await nextTick();
     expect(rollback).not.toHaveBeenCalled();
     expect(api.rollbackLatestExecution).not.toHaveBeenCalled();
     expect(store.editingTraceId).toBe("trace-latest");
@@ -99,14 +126,15 @@ describe("AgentPanel", () => {
     expect(store.promptInput).toBe("unsent draft");
     expect(store.executionHistory.map((run) => run.traceId)).toEqual(["trace-latest", "trace-previous"]);
 
-    const refreshedButtons = wrapper.findAll(".coomi-run-action");
-    await refreshedButtons[1].trigger("click");
+    await wrapper.findAllComponents(CoomiClaudeTurn)[1].vm.$emit("rollback-delete", store.executionHistory[0]);
+    await nextTick();
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining("不会回滚已产生的文件变更"));
     expect(rollback).toHaveBeenCalledWith({ refillComposer: false });
 
+    // 运行中不允许回滚：改为断言传给子组件的 canRollback
     store.isRunning = true;
     await nextTick();
-    expect(wrapper.find(".coomi-run-actions").exists()).toBe(false);
+    expect(wrapper.findAllComponents(CoomiClaudeTurn)[1].props("canRollback")).toBe(false);
     wrapper.unmount();
   });
 
@@ -198,7 +226,8 @@ describe("AgentPanel", () => {
     await nextTick();
 
     expect(wrapper.find('[role="dialog"]').text()).toContain("无法创建恢复点");
-    expect(wrapper.find(".coomi-no-restore-point").text()).toContain("无恢复点");
+    // 无恢复点标记随 run 传给 CoomiClaudeTurn，由其底部 meta 行渲染
+    expect((wrapper.findComponent(CoomiClaudeTurn).props("run") as AgentExecutionRun).noRestorePoint).toBe(true);
     const buttons = wrapper.findAll(".coomi-snapshot-modal-button");
     expect(buttons).toHaveLength(2);
     await buttons[1].trigger("click");
@@ -208,19 +237,49 @@ describe("AgentPanel", () => {
     wrapper.unmount();
   });
 
-  it("renders phase timing without exposing hidden reasoning text", async () => {
+  it("hands each run to the turn component with the props it needs", async () => {
     const store = useAgentStore();
-    store.executionHistory = [{
-      traceId: "trace-1", sessionId: "session-1", prompt: "hello", route: "coomi", agentMode: "coomi", llmModel: "fake", llmProvider: "fake",
-      status: "running", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastAction: "chat", reply: "", trace: null,
-      audit: [], events: [], tasks: [], changeLedger: { traceId: "trace-1", sessionId: "session-1", changedFiles: [], changedFileCount: 0, added: 0, removed: 0, commitHash: "", shortHash: "", diffSource: "", updatedAt: "" },
-      items: [{ id: "phase-1", type: "phase", status: "running", title: "意图识别", content: "意图识别 · 0.5s", timestamp: new Date().toISOString(), raw: {} }],
-      errorMessage: "", errorCode: null
-    }];
+    store.executionHistory = [makeRun({
+      traceId: "trace-1",
+      status: "running",
+      items: [phaseItem("意图识别 · 0.5s")]
+    })];
     const wrapper = shallowMount(AgentPanel);
     await nextTick();
-    expect(wrapper.find(".coomi-phase-text").text()).toContain("0.5s");
-    expect(wrapper.text()).not.toContain("chain-of-thought-secret");
+
+    const turn = wrapper.findComponent(CoomiClaudeTurn);
+    expect(turn.exists()).toBe(true);
+    expect((turn.props("run") as AgentExecutionRun).traceId).toBe("trace-1");
+    // 运行中不可回滚，按钮不应出现
+    expect(turn.props("canRollback")).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("renders phase timing and never puts collapsed reasoning text in the DOM", async () => {
+    // 已完成的一轮：推理块折叠，正文展开。折叠必须是 v-if 移除节点，
+    // 而不是 CSS 隐藏，否则原始思维链仍会留在 DOM 里被读到。
+    const wrapper = mount(CoomiClaudeTurn, {
+      props: {
+        run: makeRun({
+          traceId: "trace-1",
+          status: "completed",
+          turnDurationMs: 500,
+          items: [
+            phaseItem("意图识别 · 0.5s"),
+            { id: "r-1", type: "reasoning", status: "success", title: "Reasoning", content: "chain-of-thought-secret", timestamp: new Date().toISOString(), raw: {} },
+            { id: "a-1", type: "assistant", status: "success", title: "Assistant", content: "已定位主题切换代码。", timestamp: new Date().toISOString(), raw: {} }
+          ]
+        })
+      }
+    });
+    await nextTick();
+
+    expect(wrapper.find(".cct-phase-text").text()).toContain("0.5s");
+    expect(wrapper.html()).not.toContain("chain-of-thought-secret");
+
+    // 用户主动展开后才可见
+    await wrapper.findAll(".cct-summary")[0].trigger("click");
+    expect(wrapper.find(".cct-reasoning-text").text()).toContain("chain-of-thought-secret");
     wrapper.unmount();
   });
 
@@ -269,7 +328,10 @@ describe("AgentPanel", () => {
     }];
     const wrapper = shallowMount(AgentPanel);
     await nextTick();
-    expect(wrapper.findAll(".coomi-error-text")).toHaveLength(1);
+    // 错误正文由 CoomiClaudeTurn 渲染一次，页脚不得重复同一条错误
+    const turn = wrapper.findComponent(CoomiClaudeTurn);
+    const errorItems = (turn.props("run") as AgentExecutionRun).items.filter((item) => item.type === "error");
+    expect(errorItems).toHaveLength(1);
     expect(wrapper.find("footer .coomi-error").exists()).toBe(false);
     wrapper.unmount();
   });
