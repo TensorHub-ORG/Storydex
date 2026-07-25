@@ -755,6 +755,10 @@ const commandMenuOpen = ref(false);
 const permissionMenuOpen = ref(false);
 const reasoningMenuOpen = ref(false);
 const storyOptionsOpen = ref(false);
+// Once the user starts adjusting the story-generation fields, their local input is
+// authoritative: a settings refresh kicked off when the popover opened must not
+// clobber a just-typed value if it resolves late (read/write race).
+const storyOptionsEditing = ref(false);
 const selectedCommandIndex = ref(0);
 const foldState = ref<Record<string, boolean>>({});
 const toolChunkState = ref<Record<string, boolean>>({});
@@ -1199,6 +1203,12 @@ watch(
   { immediate: true }
 );
 
+// Opening the popover starts a fresh editing session (a refresh may repopulate the
+// fields); closing it clears the guard so external settings changes sync again.
+watch(storyOptionsOpen, () => {
+  storyOptionsEditing.value = false;
+});
+
 async function handleSubmitOrStop(): Promise<void> {
   if (agentStore.editingTraceId || agentStore.isReexecuting) {
     return;
@@ -1343,6 +1353,10 @@ function syncStoryGenerationOptionsFromProjectSettings(): void {
   if (workspaceStore.launchScreenVisible) {
     return;
   }
+  // Don't overwrite the user's in-flight edits with a (possibly stale) refresh.
+  if (storyOptionsEditing.value) {
+    return;
+  }
   agentStore.setStoryGenerationOptions({
     fragmentCount: workspaceStore.storySettings.storyFragmentCount,
     fragmentWordCountMin: workspaceStore.storySettings.storyFragmentWordCountMin,
@@ -1357,6 +1371,7 @@ async function persistStoryGenerationOptions(options: {
   fragmentWordCountMax?: number;
   chapterTemplateId?: string;
 }): Promise<void> {
+  storyOptionsEditing.value = true;
   agentStore.setStoryGenerationOptions(options);
   if (workspaceStore.launchScreenVisible || !workspaceStore.currentProject) {
     return;
