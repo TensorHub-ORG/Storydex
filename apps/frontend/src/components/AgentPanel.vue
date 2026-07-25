@@ -63,133 +63,15 @@
 
       <section v-else class="coomi-runs">
         <article v-for="run in conversationRuns" :key="run.traceId" class="coomi-run">
-          <div class="coomi-run-head">
-            <span>Coomi</span>
-            <span :class="['coomi-run-status', run.status]">{{ formatStatus(run.status, run.errorMessage) }}</span>
-            <span
-              v-if="run.noRestorePoint"
-              class="coomi-no-restore-point"
-              title="本轮没有可用恢复点"
-              aria-label="本轮没有可用恢复点"
-            >
-              <span class="material-symbols-rounded">warning_amber</span>
-              无恢复点
-            </span>
-            <span>{{ formatDate(run.updatedAt) }}</span>
-            <div v-if="canRollbackRun(run)" class="coomi-run-actions">
-              <button
-                class="coomi-run-action"
-                type="button"
-                title="编辑最新消息"
-                aria-label="编辑最新消息"
-                :disabled="agentStore.isRollingBack || agentStore.isReexecuting"
-                @click="handleRollbackEdit(run)"
-              >
-                <span class="material-symbols-rounded">edit</span>
-              </button>
-              <button
-                class="coomi-run-action danger"
-                type="button"
-                title="删除本轮"
-                aria-label="删除本轮"
-                :disabled="agentStore.isRollingBack || agentStore.isReexecuting"
-                @click="handleRollbackDelete(run)"
-              >
-                <span class="material-symbols-rounded">delete</span>
-              </button>
-            </div>
-          </div>
-
-          <div class="coomi-waterfall">
-            <template v-for="entry in displayEntries(run)" :key="entry.id">
-              <section
-                v-if="entry.kind === 'item'"
-                class="coomi-event"
-                :class="[`type-${entry.item.type}`, `status-${entry.item.status}`]"
-              >
-                <button
-                  v-if="entry.item.type === 'reasoning'"
-                  class="coomi-fold-head"
-                  type="button"
-                  @click="toggleFold(entry.id, isActiveReasoning(run, entry.item))"
-                >
-                  <span>{{ reasoningTitle(run, entry.item) }}</span>
-                  <span class="coomi-fold-meta">{{ isFoldOpen(entry.id, isActiveReasoning(run, entry.item)) ? "hide" : "show" }}</span>
-                </button>
-                <div v-else class="coomi-event-head">
-                  <span class="coomi-event-type">{{ formatItemType(entry.item.type) }}</span>
-                  <span class="coomi-event-time">{{ formatDate(entry.item.timestamp, true) }}</span>
-                </div>
-
-                <div
-                  v-if="entry.item.type !== 'reasoning' || isFoldOpen(entry.id, isActiveReasoning(run, entry.item))"
-                  class="coomi-event-body"
-                >
-                  <p v-if="entry.item.type === 'user'" class="coomi-user-text">{{ entry.item.content }}</p>
-                  <div
-                    v-else-if="entry.item.type === 'assistant'"
-                    class="coomi-assistant-text coomi-markdown"
-                    @click="handleMarkdownLinkClick"
-                    v-html="renderMarkdown(entry.item.content)"
-                  ></div>
-                  <div v-else-if="entry.item.type === 'reasoning'" class="coomi-reasoning-text">{{ entry.item.content }}</div>
-                  <div v-else-if="entry.item.type === 'error'" class="coomi-error-text">{{ entry.item.content }}</div>
-                  <div v-else-if="entry.item.type === 'phase'" class="coomi-phase-text" aria-live="polite">
-                    {{ entry.item.content }}
-                  </div>
-                </div>
-              </section>
-
-              <section
-                v-else
-                class="coomi-event coomi-tool-group"
-                :class="[`status-${entry.status}`]"
-              >
-                <button class="coomi-fold-head" type="button" @click="toggleFold(entry.id, toolGroupDefaultOpen(entry))">
-                  <span>{{ toolGroupTitle(entry) }}</span>
-                  <span class="coomi-fold-meta">{{ isToolGroupOpen(entry) ? "hide" : "show" }}</span>
-                </button>
-
-                <div v-if="isToolGroupOpen(entry)" class="coomi-tool-list">
-                  <section v-for="chunk in toolChunks(entry)" :key="chunk.id" class="coomi-tool-chunk">
-                    <button
-                      v-if="entry.tools.length > 5"
-                      class="coomi-tool-chunk-head"
-                      type="button"
-                      @click="toggleToolChunk(chunk.id, toolChunkDefaultOpen(entry, chunk))"
-                    >
-                      <span>{{ toolChunkTitle(chunk) }}</span>
-                      <span>{{ isToolChunkOpen(entry, chunk) ? "收起" : "展开" }}</span>
-                    </button>
-                    <div
-                      v-if="entry.tools.length <= 5 || isToolChunkOpen(entry, chunk)"
-                      class="coomi-tool-chunk-list"
-                    >
-                      <article v-for="tool in chunk.tools" :key="tool.id" class="coomi-tool-row">
-                        <button class="coomi-tool-row-head" type="button" @click="toggleToolRow(toolRowId(entry, tool))">
-                          <span>{{ toolSummary(tool) }}</span>
-                          <span>{{ isToolRowOpen(entry, tool) ? "收起" : "详情" }}</span>
-                        </button>
-                        <div v-if="isToolRowOpen(entry, tool)" class="coomi-tool-preview">
-                          <details v-if="tool.arguments && Object.keys(tool.arguments).length" class="coomi-details">
-                            <summary>参数</summary>
-                            <pre>{{ compactJson(tool.arguments) }}</pre>
-                          </details>
-                          <details v-if="tool.resultPreview" class="coomi-details">
-                            <summary>结果</summary>
-                            <pre>{{ compactText(tool.resultPreview) }}</pre>
-                          </details>
-                        </div>
-                      </article>
-                    </div>
-                  </section>
-                </div>
-              </section>
-            </template>
-            <div v-if="run.status === 'running'" class="coomi-running-tail" aria-live="polite">
-              <span>执行中</span><span class="coomi-running-dots"> · · ·</span>
-            </div>
-          </div>
+          <CoomiClaudeTurn
+            :run="run"
+            :elapsed-ms="runElapsedMs(run)"
+            :can-rollback="canRollbackRun(run)"
+            :actions-busy="agentStore.isRollingBack || agentStore.isReexecuting"
+            @rollback-edit="handleRollbackEdit"
+            @rollback-delete="handleRollbackDelete"
+            @markdown-click="handleMarkdownLinkClick"
+          />
         </article>
       </section>
       </main>
@@ -680,6 +562,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import MarkdownIt from "markdown-it";
 import AgentExecutionFloatBar from "@/components/AgentExecutionFloatBar.vue";
+import CoomiClaudeTurn from "@/components/demo/CoomiClaudeTurn.vue";
 import CoomiConfigPanel from "@/components/CoomiConfigPanel.vue";
 import { useAgentStore } from "@/stores/agent";
 import { useGitStore } from "@/stores/git";
@@ -1964,6 +1847,21 @@ function formatItemType(type: CoomiWaterfallItemType): string {
     error: "错误"
   };
   return labels[type] || type;
+}
+
+/**
+ * 单轮耗时：运行中按 createdAt 本地计时（随 runtimeNow 每秒刷新），
+ * 收敛后交给 CoomiClaudeTurn 用 run.turnDurationMs 的后端权威值覆盖。
+ */
+function runElapsedMs(run: AgentExecutionRun): number {
+  if (run.status !== "running") {
+    return run.turnDurationMs ?? 0;
+  }
+  const startedAt = Date.parse(run.createdAt);
+  if (Number.isNaN(startedAt)) {
+    return 0;
+  }
+  return Math.max(0, runtimeNow.value - startedAt);
 }
 
 function formatStatus(status: string, errorMessage: string): string {
