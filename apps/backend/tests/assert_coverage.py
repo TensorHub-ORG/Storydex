@@ -14,6 +14,19 @@ CRITICAL_MODULES = (
 )
 
 
+def statement_percent(summary: dict[str, object]) -> float:
+    explicit_percent = summary.get("percent_statements_covered")
+    if explicit_percent is not None:
+        return float(explicit_percent)
+
+    if "covered_lines" not in summary or "num_statements" not in summary:
+        return 0.0
+    statement_count = float(summary["num_statements"])
+    if statement_count <= 0:
+        return 100.0
+    return 100.0 * float(summary["covered_lines"]) / statement_count
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Enforce Storydex coverage quality gates.")
     parser.add_argument("coverage_json", type=Path)
@@ -25,7 +38,7 @@ def main() -> int:
     payload = json.loads(args.coverage_json.read_text(encoding="utf-8"))
     totals = payload["totals"]
     failures: list[str] = []
-    line_percent = float(totals.get("percent_statements_covered", totals.get("percent_covered", 0.0)))
+    line_percent = statement_percent(totals)
     branch_percent = 100.0 * float(totals.get("covered_branches", 0)) / max(
         1, float(totals.get("num_branches", 0))
     )
@@ -38,7 +51,7 @@ def main() -> int:
     for expected in CRITICAL_MODULES:
         match = next((value for name, value in files.items() if name.endswith(expected)), None)
         summary = (match or {}).get("summary", {})
-        percent = float(summary.get("percent_statements_covered", summary.get("percent_covered", 0.0)))
+        percent = statement_percent(summary)
         if percent < args.critical_lines:
             failures.append(f"{expected} lines {percent:.2f}% < {args.critical_lines:.2f}%")
 
