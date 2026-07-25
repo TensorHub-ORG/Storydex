@@ -3820,6 +3820,26 @@ class StoryProjectService:
         return accept_min, accept_max
 
     @staticmethod
+    def allocate_story_fragment_reference_word_count(
+        minimum: int,
+        maximum: int,
+        *,
+        written_word_count: int,
+        remaining_fragment_count: int,
+        total_fragment_count: int,
+    ) -> int:
+        """Allocate a soft next-fragment reference from the remaining chapter budget."""
+        low = max(1, int(minimum))
+        high = max(low, int(maximum))
+        chapter_target = (low + high) / 2
+        total_count = max(1, int(total_fragment_count))
+        remaining_count = max(1, int(remaining_fragment_count))
+        minimum_reference = (chapter_target / total_count) * 0.5
+        remaining_budget = chapter_target - max(0, int(written_word_count))
+        dynamic_reference = remaining_budget / remaining_count
+        return max(1, int(round(max(minimum_reference, dynamic_reference))))
+
+    @staticmethod
     def _story_word_count_scope(turn_plan: Dict[str, Any]) -> str:
         policy = turn_plan.get("wordCountPolicy") if isinstance(turn_plan.get("wordCountPolicy"), dict) else {}
         return str(policy.get("scope") or "fragment").strip().lower()

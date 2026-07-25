@@ -443,7 +443,7 @@ class StorydexWordCountTool(_StorydexWorkspaceToolMixin, BaseTool):
     name = "StorydexWordCount"
     description = (
         "Read Storydex's authoritative fiction word count for chapter files. "
-        "This uses the exact same non-whitespace Unicode-character algorithm as the editor; never estimate counts yourself."
+        "The returned value is program-measured with the same non-whitespace Unicode-character algorithm as the editor."
     )
     access = ToolAccess.READ_ONLY
     concurrency = ToolConcurrency.PARALLEL

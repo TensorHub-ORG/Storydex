@@ -157,6 +157,58 @@ def test_project_settings_use_single_target_and_preserve_legacy_ranges(tmp_path:
     assert targeted["wordCountSettingMode"] == "target"
 
 
+@pytest.mark.parametrize(
+    ("written_word_count", "remaining_fragment_count", "expected"),
+    [
+        (0, 4, 625),
+        (900, 3, 533),
+        (2000, 2, 312),
+        (3000, 1, 312),
+    ],
+)
+def test_fragment_reference_allocation_uses_remaining_budget_with_a_half_share_floor(
+    written_word_count: int,
+    remaining_fragment_count: int,
+    expected: int,
+) -> None:
+    service = get_story_project_service()
+    assert service.allocate_story_fragment_reference_word_count(
+        2500,
+        2500,
+        written_word_count=written_word_count,
+        remaining_fragment_count=remaining_fragment_count,
+        total_fragment_count=4,
+    ) == expected
+
+
+def test_multi_fragment_contract_carries_soft_reference_lengths(tmp_path: Path) -> None:
+    contract = _story_contract(
+        tmp_path,
+        fragment_count=4,
+        chapter_word_count_target=2500,
+    )
+    targets = contract["turnPlan"]["fragmentTargets"]
+    assert [item["referenceWordCount"] for item in targets] == [625, 625, 625, 625]
+    assert all(item["referenceWordCountIsHardLimit"] is False for item in targets)
+
+
+def test_correction_prompt_uses_program_measurements_without_hard_counting_commands() -> None:
+    prompt = routes._story_generation_correction_prompt(
+        {
+            "chapterWordCountTarget": 2500,
+            "targetWordCountMin": 2500,
+            "targetWordCountMax": 2500,
+            "acceptWordCountMin": 1875,
+            "acceptWordCountMax": 3125,
+            "fragments": [],
+        },
+        correction_attempt=1,
+    )
+    assert "本章目标约 2500 字，1875-3125 均可接受，以叙事完整为先" in prompt
+    assert "不要自行估算字数" not in prompt
+    assert "必须按" not in prompt
+
+
 def test_built_in_chapter_templates_cover_multi_and_single_file(tmp_path: Path) -> None:
     templates = {item["id"]: item for item in get_story_project_service().list_chapter_templates(tmp_path)}
     assert templates[DEFAULT_CHAPTER_TEMPLATE_ID]["contentMode"] == "multi_fragment"

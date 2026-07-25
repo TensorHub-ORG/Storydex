@@ -1864,10 +1864,10 @@ async def _build_coomi_system_prompt(
         + "relationship changes) must remain pending and must never be forced through. "
         + "If WIKI is not automatic, ask after variables are applied before passing applyWiki=true. "
         + "All newly mentioned characters must be included in newCharacters or characterUpdates, even when every unknown field is only `未知`.\n"
-        + "For story turns, never write or edit `chapters/` with generic Write/Edit tools. The selected fragment count, exact fragment word count, "
-        + "and chapter template are binding execution constraints. `StorydexApplyStoryIncrement` validates them before writing and uses the same "
-        + "non-whitespace character counter as the editor. Never estimate a count. If validation fails, revise using the returned difference and call "
-        + "the tool again. Use `StorydexWordCount` when you need to inspect an existing chapter file.\n"
+        + "For story turns, never write or edit `chapters/` with generic Write/Edit tools. The selected fragment count and chapter template "
+        + "are binding execution constraints. Chapter length is a program-measured target rather than a hard per-fragment quota. "
+        + "`StorydexApplyStoryIncrement` validates the whole chapter with the same non-whitespace character counter as the editor. "
+        + "Use returned measurements for any requested revision, and use `StorydexWordCount` to inspect an existing chapter file.\n"
         + story_options
         + contract_options
     )
@@ -1889,23 +1889,25 @@ def _render_story_generation_options(
 ) -> str:
     payload = value if isinstance(value, dict) else {}
     fragment_count = _positive_int(payload.get("fragmentCount"), default=1)
-    word_count_min, word_count_max = _resolve_word_count_range(payload)
+    chapter_target, accept_min, accept_max = _story_word_count_prompt_values(payload)
     chapter_template = str(payload.get("chapterTemplateId") or payload.get("chapterTemplate") or "").strip()
     # 修改现有文件时，这些片段数/字数只是软参考，不是新建配额，避免重构被当成新建。
     if str(operation_type or "").strip().lower() == "modify_existing":
         return (
             "\nStory generation turn options (modify_existing — soft reference only):\n"
             + f"- fragmentCount: {fragment_count} (reference, NOT a mandate to create new fragments)\n"
-            + f"- fragmentWordCountRange: {word_count_min}-{word_count_max} (soft guide for edited content)\n"
+            + f"- chapterLengthGuidance: target about {chapter_target} non-whitespace characters; "
+            + f"{accept_min}-{accept_max} is acceptable (soft guide for edited content)\n"
             + (f"- chapterTemplateId: {chapter_template}\n" if chapter_template else "")
             + "This turn edits/restructures existing files; do not treat these values as new-fragment creation constraints.\n"
         )
     return (
         "\nStory generation turn options:\n"
         + f"- fragmentCount: {fragment_count}\n"
-        + f"- fragmentWordCountRange: {word_count_min}-{word_count_max} (each fragment must land within this range)\n"
+        + f"- chapterLengthGuidance: target about {chapter_target} non-whitespace characters; "
+        + f"{accept_min}-{accept_max} is acceptable. The target is not an upper limit; prioritize narrative completeness.\n"
         + (f"- chapterTemplateId: {chapter_template}\n" if chapter_template else "")
-        + "For story creation or continuation turns these values are mandatory, not estimates or suggestions.\n"
+        + "For story creation or continuation turns, fragment paths and the chapter template remain binding.\n"
     )
 
 
@@ -1938,7 +1940,7 @@ def _render_turn_contract(value: Dict[str, Any] | None) -> str:
         intent_line += f"; matching skills: {', '.join(intent_skills)}"
     status = str(contract.get("status") or "ready")
     fragment_count = _positive_int(turn_plan.get("fragmentCount"), default=1)
-    fragment_word_count_min, fragment_word_count_max = _resolve_word_count_range(turn_plan)
+    chapter_target, accept_min, accept_max = _story_word_count_prompt_values(turn_plan)
     requires_template = bool(turn_plan.get("requiresChapterTemplateSelection"))
     selected_template = str(turn_plan.get("selectedChapterTemplate") or "").strip()
     selected_template_detail = _dict_value(turn_plan.get("selectedChapterTemplateDetail"))
@@ -1958,7 +1960,11 @@ def _render_turn_contract(value: Dict[str, Any] | None) -> str:
             f"localGitAutoCommit={bool(execution.get('localGitAutoCommit', True))}, "
             f"remotePush={bool(execution.get('remotePush', False))}"
         ),
-        f"- storyFragments: count={fragment_count}, nonWhitespaceCharactersEach in [{fragment_word_count_min}, {fragment_word_count_max}]",
+        f"- storyFragments: count={fragment_count}",
+        (
+            f"- chapterLengthGuidance: target about {chapter_target} non-whitespace characters; "
+            f"{accept_min}-{accept_max} is acceptable. The target is not an upper limit; prioritize narrative completeness."
+        ),
         f"- chapterContentMode: {chapter_content_mode}",
     ]
 
@@ -1982,6 +1988,24 @@ def _render_turn_contract(value: Dict[str, Any] | None) -> str:
     target_paths = [str(item.get("path") or "") for item in fragment_targets if isinstance(item, dict) and str(item.get("path") or "")]
     if target_paths:
         lines.append(f"- authoritativeFragmentPaths: {', '.join(target_paths)}")
+    reference_labels: list[str] = []
+    for index, item in enumerate(fragment_targets):
+        if not isinstance(item, dict):
+            continue
+        reference = _bounded_int(
+            item.get("referenceWordCount"),
+            default=0,
+            minimum=0,
+            maximum=20000,
+        )
+        if reference > 0:
+            reference_labels.append(f"{index + 1}:{str(item.get('path') or '')}~{reference}")
+    if fragment_count > 1 and reference_labels:
+        lines.append(
+            "- softFragmentReferences: "
+            + ", ".join(reference_labels)
+            + " non-whitespace characters each; planning references only, never hard per-fragment limits."
+        )
     # operationType 决定"新建 vs 修改"的执行纪律。这是修复"重构被当成新建、
     # 不断生成新片段"的核心提示词约束。
     if operation_type == "modify_existing":
@@ -1991,18 +2015,17 @@ def _render_turn_contract(value: Dict[str, Any] | None) -> str:
             "(use StorydexProjectSearch / reads) before changing anything. Edit those existing files in place; "
             "when a file is superseded, delete or overwrite the old one — do NOT create parallel new fragments. "
             "Do NOT treat fragmentCount/word-count as a mandate to generate N brand-new fragments. There are no "
-            "authoritative new fragment paths this turn; the word-count range is a soft guide for edited content, "
+            "authoritative new fragment paths this turn; chapter length is a soft guide for edited content, "
             "not a hard new-fragment quota. StorydexApplyStoryIncrement's new-fragment validation is not enforced."
         )
     elif primary == "story_generation":
         lines.append(
             "- operationDiscipline (create_new): generate new story content into the authoritative fragment paths above. "
-            "The fragment count, word-count range, and chapter template are binding creation constraints."
+            "The fragment count and chapter template are binding creation constraints; chapter length remains guidance."
         )
         lines.append(
-            f"- wordCountEnforcement: each fragment's Storydex editor count (every non-whitespace Unicode "
-            f"character) must fall within [{fragment_word_count_min}, {fragment_word_count_max}]; "
-            "never estimate, and do not finish until Storydex validation passes."
+            f"- wordCountGuidance: the whole chapter targets about {chapter_target} Storydex non-whitespace "
+            f"characters; {accept_min}-{accept_max} is acceptable, with narrative completeness taking priority."
         )
 
     lines.append(
@@ -2162,21 +2185,51 @@ def _positive_int(value: Any, *, default: int) -> int:
 
 
 def _resolve_word_count_range(payload: Dict[str, Any]) -> tuple[int, int]:
-    """Resolve the [min, max] fragment word-count range from a turn plan or options dict.
-
-    Falls back to the legacy single ``fragmentWordCount`` (min == max) when the
-    range fields are absent, keeping older contracts and clients working.
-    """
+    """Resolve the chapter target band from a turn plan or options dict."""
+    policy = _dict_value(payload.get("wordCountPolicy"))
+    raw_target = payload.get("chapterWordCountTarget", payload.get("chapter_word_count_target"))
+    if raw_target is not None and str(policy.get("mode") or "target") != "range":
+        target = _bounded_int(raw_target, default=2500, minimum=100, maximum=20000)
+        return target, target
     raw_min = payload.get("fragmentWordCountMin")
     raw_max = payload.get("fragmentWordCountMax")
     if raw_min is None and raw_max is None:
         legacy = _bounded_int(payload.get("fragmentWordCount"), default=2500, minimum=100, maximum=20000)
         return legacy, legacy
-    min_value = _bounded_int(raw_min, default=2000, minimum=100, maximum=20000)
+    min_value = _bounded_int(raw_min, default=2500, minimum=100, maximum=20000)
     max_value = _bounded_int(raw_max, default=2500, minimum=100, maximum=20000)
     if min_value > max_value:
         min_value, max_value = max_value, min_value
     return min_value, max_value
+
+
+def _story_word_count_prompt_values(payload: Dict[str, Any]) -> tuple[int, int, int]:
+    minimum, maximum = _resolve_word_count_range(payload)
+    policy = _dict_value(payload.get("wordCountPolicy"))
+    raw_target = payload.get("chapterWordCountTarget", policy.get("target"))
+    chapter_target = _bounded_int(
+        raw_target if raw_target is not None else round((minimum + maximum) / 2),
+        default=2500,
+        minimum=100,
+        maximum=20000,
+    )
+    default_accept_min = max(50, round(minimum * 0.75))
+    default_accept_max = round(maximum * 1.25)
+    accept_min = _bounded_int(
+        policy.get("acceptanceMinimum"),
+        default=default_accept_min,
+        minimum=1,
+        maximum=25000,
+    )
+    accept_max = _bounded_int(
+        policy.get("acceptanceMaximum"),
+        default=default_accept_max,
+        minimum=1,
+        maximum=25000,
+    )
+    if accept_min > accept_max:
+        accept_min, accept_max = accept_max, accept_min
+    return chapter_target, accept_min, accept_max
 
 
 class _StorydexApprovalContext:
