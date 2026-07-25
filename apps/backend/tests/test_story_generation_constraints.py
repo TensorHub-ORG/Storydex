@@ -598,7 +598,12 @@ def test_failed_post_run_validation_continues_in_same_execution_before_terminal(
 
         async def stream_events(self, **_kwargs: Any):
             self.calls += 1
-            yield "AgentStarted", {"_type": "AgentStarted", "_version": 1}
+            yield "AgentStarted", {
+                "_type": "AgentStarted",
+                "_version": 1,
+                "llmProvider": "test-provider",
+                "llmModel": "test-model",
+            }
             yield "TextChunk", {"_type": "TextChunk", "_version": 1, "content": f"attempt-{self.calls}"}
             if self.calls >= 2:
                 yield "ToolDone", {
@@ -629,8 +634,14 @@ def test_failed_post_run_validation_continues_in_same_execution_before_terminal(
                 "algorithm": STORY_WORD_COUNT_ALGORITHM,
                 "countingRule": "count every non-whitespace Unicode character",
                 "exact": True,
+                "wordCountScope": "chapter",
                 "fragmentCount": 1,
-                "targetWordCount": 100,
+                "generatedWordCount": 100 if passed else 90,
+                "chapterWordCountTarget": 100,
+                "targetWordCountMin": 100,
+                "targetWordCountMax": 100,
+                "acceptWordCountMin": 75,
+                "acceptWordCountMax": 125,
                 "chapterContentMode": "multi_fragment",
                 "structurePassed": True,
                 "fragments": [
@@ -652,6 +663,14 @@ def test_failed_post_run_validation_continues_in_same_execution_before_terminal(
     class GitService:
         def finish_turn(self, _snapshot: AgentGitSnapshot, **_kwargs: Any) -> dict[str, Any]:
             return {"_type": "GitAutoCommit", "status": "info", "created": False}
+
+    class CalibrationService:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def record_generation_result(self, _root: Path, **kwargs: Any) -> bool:
+            self.calls.append(kwargs)
+            return True
 
     class Handle:
         is_cancelled = False
@@ -682,9 +701,11 @@ def test_failed_post_run_validation_continues_in_same_execution_before_terminal(
 
     runtime = RuntimeService()
     project = ProjectService()
+    calibration = CalibrationService()
     handle = Handle(runtime)
     monkeypatch.setattr(routes, "get_storydex_coomi_agent_service", lambda: runtime)
     monkeypatch.setattr(routes, "story_project_service", project)
+    monkeypatch.setattr(routes, "story_length_calibration_service", calibration)
     monkeypatch.setattr(routes, "agent_git_autocommit_service", GitService())
     monkeypatch.setattr(routes, "_persist_execution_trace", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
@@ -704,7 +725,12 @@ def test_failed_post_run_validation_continues_in_same_execution_before_terminal(
         "_version": 1,
         "status": "ready",
         "intentFrame": {"primary": "story_generation"},
-        "turnPlan": {"fragmentCount": 1, "fragmentWordCount": 100},
+        "turnPlan": {
+            "fragmentCount": 1,
+            "fragmentWordCount": 100,
+            "chapterWordCountTarget": 100,
+            "wordCountPolicy": {"scope": "chapter", "target": 100},
+        },
     }
 
     async def collect() -> list[tuple[str, dict[str, Any]]]:
@@ -737,3 +763,6 @@ def test_failed_post_run_validation_continues_in_same_execution_before_terminal(
     assert "AgentError" not in event_names
     assert handle.finalize_calls == 1
     assert handle.runtime_calls_at_finalize == 2
+    assert len(calibration.calls) == 1
+    assert calibration.calls[0]["provider"] == "test-provider"
+    assert calibration.calls[0]["model"] == "test-model"
