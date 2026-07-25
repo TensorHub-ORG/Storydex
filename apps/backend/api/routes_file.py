@@ -164,7 +164,10 @@ class StoryProjectSettingsResponse(BaseModel):
     context_concision_max_calls: int = Field(default=2, alias="contextConcisionMaxCalls")
     context_concision_max_input_tokens: int = Field(default=32000, alias="contextConcisionMaxInputTokens")
     story_fragment_count: int = Field(default=1, alias="storyFragmentCount")
-    story_fragment_word_count: int = Field(default=2000, alias="storyFragmentWordCount")
+    chapter_word_count_target: int = Field(default=2500, alias="chapterWordCountTarget")
+    story_fragment_word_count: int = Field(default=2500, alias="storyFragmentWordCount")
+    story_fragment_word_count_min: int = Field(default=2500, alias="storyFragmentWordCountMin")
+    story_fragment_word_count_max: int = Field(default=2500, alias="storyFragmentWordCountMax")
     story_chapter_template_id: str = Field(default="default_chapter_directory", alias="storyChapterTemplateId")
     auto_update_variables: bool = Field(default=False, alias="autoUpdateVariables")
     auto_update_wiki: bool = Field(default=False, alias="autoUpdateWiki")
@@ -185,7 +188,10 @@ class StoryProjectSettingsUpdateRequest(BaseModel):
     context_concision_max_calls: Optional[int] = Field(default=None, alias="contextConcisionMaxCalls")
     context_concision_max_input_tokens: Optional[int] = Field(default=None, alias="contextConcisionMaxInputTokens")
     story_fragment_count: Optional[int] = Field(default=None, alias="storyFragmentCount")
+    chapter_word_count_target: Optional[int] = Field(default=None, alias="chapterWordCountTarget")
     story_fragment_word_count: Optional[int] = Field(default=None, alias="storyFragmentWordCount")
+    story_fragment_word_count_min: Optional[int] = Field(default=None, alias="storyFragmentWordCountMin")
+    story_fragment_word_count_max: Optional[int] = Field(default=None, alias="storyFragmentWordCountMax")
     story_chapter_template_id: Optional[str] = Field(default=None, alias="storyChapterTemplateId")
     auto_update_variables: Optional[bool] = Field(default=None, alias="autoUpdateVariables")
     auto_update_wiki: Optional[bool] = Field(default=None, alias="autoUpdateWiki")
@@ -280,9 +286,27 @@ def _build_story_settings_payload() -> Dict[str, Any]:
             maximum=500000,
         ),
         "storyFragmentCount": _positive_int(project_settings.get("storyFragmentCount"), default=1),
+        "chapterWordCountTarget": _bounded_int(
+            project_settings.get("chapterWordCountTarget"),
+            default=2500,
+            minimum=100,
+            maximum=20000,
+        ),
         "storyFragmentWordCount": _bounded_int(
             project_settings.get("storyFragmentWordCount"),
-            default=2000,
+            default=2500,
+            minimum=100,
+            maximum=20000,
+        ),
+        "storyFragmentWordCountMin": _bounded_int(
+            project_settings.get("storyFragmentWordCountMin"),
+            default=2500,
+            minimum=100,
+            maximum=20000,
+        ),
+        "storyFragmentWordCountMax": _bounded_int(
+            project_settings.get("storyFragmentWordCountMax"),
+            default=2500,
             minimum=100,
             maximum=20000,
         ),
@@ -585,7 +609,10 @@ def update_story_project_settings(payload: StoryProjectSettingsUpdateRequest) ->
         "contextConcisionMaxCalls": payload.context_concision_max_calls,
         "contextConcisionMaxInputTokens": payload.context_concision_max_input_tokens,
         "storyFragmentCount": payload.story_fragment_count,
+        "chapterWordCountTarget": payload.chapter_word_count_target,
         "storyFragmentWordCount": payload.story_fragment_word_count,
+        "storyFragmentWordCountMin": payload.story_fragment_word_count_min,
+        "storyFragmentWordCountMax": payload.story_fragment_word_count_max,
         "storyChapterTemplateId": payload.story_chapter_template_id,
         "autoUpdateVariables": payload.auto_update_variables,
         "autoUpdateWiki": payload.auto_update_wiki,

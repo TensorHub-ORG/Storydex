@@ -18,7 +18,7 @@ const workspace = vi.hoisted(() => ({
   health: null,
   activeFile: "chapters/001.md",
   activeFileBindingOrPath: "chapters/001.md",
-  storySettings: { storyFragmentCount: 1, storyFragmentWordCount: 2000 },
+  storySettings: { storyFragmentCount: 1, chapterWordCountTarget: 2500, storyFragmentWordCount: 2500 },
   refreshStorySettings: vi.fn().mockResolvedValue(undefined),
   updateStorySettings: vi.fn().mockResolvedValue(undefined),
   openFile: vi.fn()
@@ -479,15 +479,15 @@ describe("AgentPanel", () => {
     await utils.handleConfigSaved(); expect(api.fetchAgentCoomiStatus).toHaveBeenCalled();
 
     utils.updateStoryFragmentCount({ target: { value: "3" } } as any);
-    utils.updateStoryFragmentWordCountMin({ target: { value: "1500" } } as any);
-    utils.updateStoryFragmentWordCountMax({ target: { value: "1800" } } as any);
+    utils.updateChapterWordCountTarget({ target: { value: "1800" } } as any);
     utils.updateStoryChapterTemplate({ target: { value: "custom" } } as any);
     expect(store.storyFragmentCount).toBe(3);
-    expect(store.storyFragmentWordCountMin).toBe(1500);
+    expect(store.chapterWordCountTarget).toBe(1800);
+    expect(store.storyFragmentWordCountMin).toBe(1800);
     expect(store.storyFragmentWordCountMax).toBe(1800);
     // While the user is actively editing, a (possibly stale) settings refresh must
     // not clobber the just-typed value.
-    workspace.storySettings = { storyFragmentCount: 4, storyFragmentWordCountMin: 1600, storyFragmentWordCountMax: 1900 } as any;
+    workspace.storySettings = { storyFragmentCount: 4, chapterWordCountTarget: 1900 } as any;
     utils.syncStoryGenerationOptionsFromProjectSettings(); expect(store.storyFragmentCount).toBe(3);
     // Toggling the popover clears the editing guard, so external settings sync again.
     utils.toggleStoryOptions(); await nextTick();
@@ -596,8 +596,7 @@ describe("AgentPanel", () => {
     utils.handleDocumentPointerDown({ target: document.body } as any);
     utils.handleDocumentPointerDown({ target: "not-node" } as any);
     utils.updateStoryFragmentCount({ target: null } as any);
-    utils.updateStoryFragmentWordCountMin({ target: null } as any);
-    utils.updateStoryFragmentWordCountMax({ target: null } as any);
+    utils.updateChapterWordCountTarget({ target: null } as any);
     utils.updateStoryChapterTemplate({ target: null } as any);
 
     store.storyChapterTemplates = [

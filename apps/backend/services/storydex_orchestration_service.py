@@ -17,6 +17,7 @@ from services.storydex_intent_service import (
     is_valid_intent_frame,
 )
 from services.story_project_service import (
+    DEFAULT_CHAPTER_WORD_COUNT_TARGET,
     DEFAULT_CHAPTER_TEMPLATE_ID,
     SINGLE_FILE_CONTENT_MODE,
     StoryProjectService,
@@ -73,8 +74,14 @@ class StorydexOrchestrationService:
 
         requested_fragment_count = self._positive_int(story_generation.get("fragmentCount"), default=1)
         fragment_word_count_min, fragment_word_count_max = self._resolve_story_word_count_range(story_generation)
-        # 保留旧字段以向后兼容：等于区间上界
-        fragment_word_count = fragment_word_count_max
+        chapter_word_count_target = int(round((fragment_word_count_min + fragment_word_count_max) / 2))
+        word_count_mode = (
+            "range"
+            if self._uses_legacy_story_word_count_range(story_generation)
+            else "target"
+        )
+        # 保留旧字段以向后兼容；在新 contract 中它表示章级目标而非每片段上限。
+        fragment_word_count = chapter_word_count_target
         chapter_content_mode = str((selected_template or {}).get("contentMode") or "multi_fragment")
         fragment_count = 1 if chapter_content_mode == SINGLE_FILE_CONTENT_MODE else requested_fragment_count
         next_segment_path = ""
@@ -90,18 +97,29 @@ class StorydexOrchestrationService:
             )
             next_segment_path = str(fragment_targets[0].get("path") or "") if fragment_targets else ""
 
+        accept_min, accept_max = self.story_project_service._story_word_count_acceptance_band(  # noqa: SLF001
+            fragment_word_count_min,
+            fragment_word_count_max,
+        )
+
         turn_plan = {
             "requestedFragmentCount": requested_fragment_count,
             "fragmentCount": fragment_count,
             "fragmentWordCount": fragment_word_count,
             "fragmentWordCountMin": fragment_word_count_min,
             "fragmentWordCountMax": fragment_word_count_max,
+            "chapterWordCountTarget": chapter_word_count_target,
             "wordCountPolicy": {
                 "algorithm": "storydex_visible_characters_v1",
                 "countingRule": "count every non-whitespace Unicode character",
-                "mode": "range",
+                "mode": word_count_mode,
+                "scope": "chapter",
+                "target": chapter_word_count_target,
                 "minimum": fragment_word_count_min,
                 "maximum": fragment_word_count_max,
+                "acceptanceMinimum": accept_min,
+                "acceptanceMaximum": accept_max,
+                "overBudgetAction": "write_and_mark",
             },
             "operationType": operation_type or "other",
             "complexity": str(intent.get("complexity") or "simple"),
@@ -297,27 +315,64 @@ class StorydexOrchestrationService:
         return max(1, parsed)
 
     def _resolve_story_word_count_range(self, story_generation: Dict[str, Any]) -> tuple[int, int]:
-        """Resolve the [min, max] fragment word-count range from turn options.
+        """Resolve the authoritative chapter target band from turn options.
 
-        Prefers the explicit min/max fields. Falls back to the legacy single
-        ``fragmentWordCount`` (min == max) when the range fields are absent so
-        older clients keep working.
+        The new single target has priority. Old min/max and single-value fields
+        remain accepted as compatibility input.
         """
+        raw_target = story_generation.get(
+            "chapterWordCountTarget",
+            story_generation.get("chapter_word_count_target"),
+        )
+        if raw_target is not None:
+            target = self._bounded_int(
+                raw_target,
+                default=DEFAULT_CHAPTER_WORD_COUNT_TARGET,
+                minimum=100,
+                maximum=20000,
+            )
+            return target, target
         raw_min = story_generation.get("fragmentWordCountMin")
         raw_max = story_generation.get("fragmentWordCountMax")
         if raw_min is None and raw_max is None:
             legacy = self._bounded_int(
                 story_generation.get("fragmentWordCount"),
-                default=2500,
+                default=DEFAULT_CHAPTER_WORD_COUNT_TARGET,
                 minimum=100,
                 maximum=20000,
             )
             return legacy, legacy
-        min_value = self._bounded_int(raw_min, default=2000, minimum=100, maximum=20000)
-        max_value = self._bounded_int(raw_max, default=2500, minimum=100, maximum=20000)
+        min_value = self._bounded_int(
+            raw_min,
+            default=DEFAULT_CHAPTER_WORD_COUNT_TARGET,
+            minimum=100,
+            maximum=20000,
+        )
+        max_value = self._bounded_int(
+            raw_max,
+            default=DEFAULT_CHAPTER_WORD_COUNT_TARGET,
+            minimum=100,
+            maximum=20000,
+        )
         if min_value > max_value:
             min_value, max_value = max_value, min_value
         return min_value, max_value
+
+    @staticmethod
+    def _uses_legacy_story_word_count_range(story_generation: Dict[str, Any]) -> bool:
+        if story_generation.get("chapterWordCountTarget") is not None or story_generation.get(
+            "chapter_word_count_target"
+        ) is not None:
+            return False
+        return any(
+            story_generation.get(key) is not None
+            for key in (
+                "fragmentWordCountMin",
+                "fragment_word_count_min",
+                "fragmentWordCountMax",
+                "fragment_word_count_max",
+            )
+        )
 
     def _skill_registry(self, workspace_root: Path) -> Dict[str, Any]:
         payload = self.story_project_service.read_agent_skill_registry(workspace_root)

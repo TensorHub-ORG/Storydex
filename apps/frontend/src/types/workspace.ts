@@ -290,6 +290,7 @@ export interface StoryProjectSettings {
   segmentExtension: StorySegmentExtension;
   maxSegmentsPerChapter: number;
   storyFragmentCount: number;
+  chapterWordCountTarget: number;
   storyFragmentWordCount: number;
   storyFragmentWordCountMin: number;
   storyFragmentWordCountMax: number;
@@ -318,6 +319,8 @@ export interface StoryProjectSettingsResponse {
   chapter_segment_limit?: number | string;
   storyFragmentCount?: number | string;
   story_fragment_count?: number | string;
+  chapterWordCountTarget?: number | string;
+  chapter_word_count_target?: number | string;
   storyFragmentWordCount?: number | string;
   story_fragment_word_count?: number | string;
   storyFragmentWordCountMin?: number | string;
@@ -363,6 +366,8 @@ export interface StoryProjectSettingsUpdateRequest {
   chapter_segment_limit?: number;
   storyFragmentCount?: number;
   story_fragment_count?: number;
+  chapterWordCountTarget?: number;
+  chapter_word_count_target?: number;
   storyFragmentWordCount?: number;
   story_fragment_word_count?: number;
   storyFragmentWordCountMin?: number;

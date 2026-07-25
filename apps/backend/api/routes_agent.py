@@ -597,6 +597,26 @@ def _normalize_story_generation_options(value: Dict[str, Any] | None) -> Dict[st
         default=1,
     )
     fragment_word_count_min, fragment_word_count_max = _resolve_story_word_count_range(payload)
+    raw_chapter_target = payload.get(
+        "chapterWordCountTarget",
+        payload.get("chapter_word_count_target"),
+    )
+    has_legacy_range = any(
+        payload.get(key) is not None
+        for key in (
+            "fragmentWordCountMin",
+            "fragment_word_count_min",
+            "fragmentWordCountMax",
+            "fragment_word_count_max",
+        )
+    )
+    chapter_word_count_target = (
+        _bounded_int(raw_chapter_target, default=2500, minimum=100, maximum=20000)
+        if raw_chapter_target is not None
+        else None
+        if has_legacy_range
+        else fragment_word_count_max
+    )
     chapter_template_id = str(
         payload.get(
             "chapterTemplateId",
@@ -613,16 +633,21 @@ def _normalize_story_generation_options(value: Dict[str, Any] | None) -> Dict[st
         "fragmentWordCount": fragment_word_count_max,
         "fragmentWordCountMin": fragment_word_count_min,
         "fragmentWordCountMax": fragment_word_count_max,
+        "chapterWordCountTarget": chapter_word_count_target,
         "chapterTemplateId": chapter_template_id,
     }
 
 
 def _resolve_story_word_count_range(payload: Dict[str, Any]) -> tuple[int, int]:
-    """Resolve the [min, max] fragment word-count range from a request payload.
+    """Resolve the authoritative chapter target band from a request payload.
 
-    Falls back to the legacy single ``fragmentWordCount`` (min == max) when the
-    range keys are absent, keeping older clients working.
+    The single chapter target has priority. Legacy min/max and single-value
+    inputs remain accepted for older clients.
     """
+    raw_target = payload.get("chapterWordCountTarget", payload.get("chapter_word_count_target"))
+    if raw_target is not None:
+        target = _bounded_int(raw_target, default=2500, minimum=100, maximum=20000)
+        return target, target
     raw_min = payload.get("fragmentWordCountMin", payload.get("fragment_word_count_min"))
     raw_max = payload.get("fragmentWordCountMax", payload.get("fragment_word_count_max"))
     if raw_min is None and raw_max is None:
@@ -630,10 +655,10 @@ def _resolve_story_word_count_range(payload: Dict[str, Any]) -> tuple[int, int]:
             "fragmentWordCount", payload.get("fragment_word_count", payload.get("segmentWords"))
         )
         if legacy is None:
-            return 2000, 2500
+            return 2500, 2500
         value = _bounded_int(legacy, default=2500, minimum=100, maximum=20000)
         return value, value
-    min_value = _bounded_int(raw_min, default=2000, minimum=100, maximum=20000)
+    min_value = _bounded_int(raw_min, default=2500, minimum=100, maximum=20000)
     max_value = _bounded_int(raw_max, default=2500, minimum=100, maximum=20000)
     if min_value > max_value:
         min_value, max_value = max_value, min_value
@@ -664,6 +689,12 @@ def _apply_turn_contract_story_generation_defaults(
     next_story_generation["fragmentWordCountMin"] = min_value
     next_story_generation["fragmentWordCountMax"] = max_value
     next_story_generation["fragmentWordCount"] = max_value
+    next_story_generation["chapterWordCountTarget"] = _bounded_int(
+        turn_plan.get("chapterWordCountTarget", int(round((min_value + max_value) / 2))),
+        default=2500,
+        minimum=100,
+        maximum=20000,
+    )
     next_story_generation["chapterTemplateId"] = selected_template
     next_story_generation["chapterTemplate"] = selected_template
     return next_story_generation

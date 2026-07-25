@@ -249,6 +249,7 @@ def test_agent_event_and_generation_helpers_cover_boundaries():
         "fragmentWordCount": 800,
         "fragmentWordCountMin": 800,
         "fragmentWordCountMax": 800,
+        "chapterWordCountTarget": 800,
         "chapterTemplateId": "",
     }
     assert routes_agent._phase_for_event("ToolDone") == "tool"
