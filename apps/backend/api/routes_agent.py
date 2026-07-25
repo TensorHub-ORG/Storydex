@@ -1345,6 +1345,19 @@ def _story_generation_correction_prompt(
     fragments = validation.get("fragments") if isinstance(validation.get("fragments"), list) else []
     target_min = int(validation.get("targetWordCountMin") or 0)
     target_max = int(validation.get("targetWordCountMax") or 0)
+    chapter_target = int(
+        validation.get("chapterWordCountTarget")
+        or round((target_min + target_max) / 2)
+        or 2500
+    )
+    accept_min = int(
+        validation.get("acceptWordCountMin")
+        or max(50, round((target_min or chapter_target) * 0.75))
+    )
+    accept_max = int(
+        validation.get("acceptWordCountMax")
+        or round((target_max or chapter_target) * 1.25)
+    )
     failures = [
         {
             "order": int(item.get("order") or index + 1),
@@ -1368,18 +1381,18 @@ def _story_generation_correction_prompt(
         "exact": False,
         "targetWordCountMin": target_min,
         "targetWordCountMax": target_max,
+        "chapterWordCountTarget": chapter_target,
+        "acceptWordCountMin": accept_min,
+        "acceptWordCountMax": accept_max,
         "chapterContentMode": str(validation.get("chapterContentMode") or ""),
         "structurePassed": bool(validation.get("structurePassed")),
         "writeToolApplied": bool(validation.get("writeToolApplied")),
         "failures": failures,
     }
-    range_hint = (
-        f"{target_min}-{target_max}" if target_min or target_max else "目标区间"
-    )
     return (
-        "Storydex 的落盘后客观验收未通过。不要自行估算字数，也不要宣布完成。"
-        "请依据下方校验结果修订全部失败片段，并再次调用 StorydexApplyStoryIncrement。"
-        f"每个片段必须按 Storydex 内置规则（忽略所有空白后逐个 Unicode 字符计数）落在 {range_hint} 字区间内；"
+        "Storydex 已完成落盘后的客观计数。请依据下方程序计数结果修订失败片段，"
+        "并再次调用 StorydexApplyStoryIncrement。"
+        f"本章目标约 {chapter_target} 字，{accept_min}-{accept_max} 均可接受，以叙事完整为先；"
         "章节路径、文件数量和写入模式必须完全遵守当前 TurnContract。"
         "禁止使用普通 Write/Edit 工具写 chapters/ 正文。\n"
         f"STORYDEX_OBJECTIVE_VALIDATION={json.dumps(correction, ensure_ascii=False, separators=(',', ':'))}"

@@ -477,6 +477,16 @@ def test_render_contract_context_templates_and_snapshots(monkeypatch, tmp_path):
         "turnPlan": {
             "fragmentCount": 2,
             "fragmentWordCount": 800,
+            "chapterWordCountTarget": 2500,
+            "wordCountPolicy": {
+                "mode": "target",
+                "acceptanceMinimum": 1875,
+                "acceptanceMaximum": 3125,
+            },
+            "fragmentTargets": [
+                {"path": "chapters/1/001.md", "referenceWordCount": 1250},
+                {"path": "chapters/1/002.md", "referenceWordCount": 1250},
+            ],
             "requiresChapterTemplateSelection": True,
             "invalidChapterTemplate": "bad",
             "availableChapterTemplates": [{"id": "serial", "name": "Serial"}, {"relativePath": "chapters"}],
@@ -495,6 +505,12 @@ def test_render_contract_context_templates_and_snapshots(monkeypatch, tmp_path):
     assert "waiting_for_user" in rendered
     assert "Serial (serial)" in rendered
     assert "Storydex assembled context blocks" in rendered
+    assert "target about 2500" in rendered
+    assert "1875-3125 is acceptable" in rendered
+    assert "softFragmentReferences" in rendered
+    assert "never estimate" not in rendered.lower()
+    assert "do not finish" not in rendered.lower()
+    assert "must fall within" not in rendered.lower()
     contract["contextAssembly"]["contextTrace"] = {
         "sources": [{"kind": "recent", "chars": 4}],
         "duplicates": [],
@@ -767,6 +783,11 @@ def test_build_system_prompt_and_tool_registry(monkeypatch, tmp_path):
     plan = asyncio.run(coomi._build_coomi_system_prompt(workspace_root=tmp_path, prompt="plan", plan_mode=True))
     assert "Storydex Project Runtime" in normal
     assert "generated memory deltas" in normal
+    assert "target about 2500" in normal
+    assert "1875-3125 is acceptable" in normal
+    assert "never estimate" not in normal.lower()
+    assert "do not finish" not in normal.lower()
+    assert "must fall within" not in normal.lower()
     assert "ask the user before passing applyVariables=true" not in normal
     assert "Plan Mode" in plan
 

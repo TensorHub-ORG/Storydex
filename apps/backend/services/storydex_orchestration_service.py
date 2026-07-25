@@ -96,6 +96,18 @@ class StorydexOrchestrationService:
                 is_new_story=is_new_story,
             )
             next_segment_path = str(fragment_targets[0].get("path") or "") if fragment_targets else ""
+            assumed_written = 0
+            for index, target in enumerate(fragment_targets):
+                reference = self.story_project_service.allocate_story_fragment_reference_word_count(
+                    fragment_word_count_min,
+                    fragment_word_count_max,
+                    written_word_count=assumed_written,
+                    remaining_fragment_count=len(fragment_targets) - index,
+                    total_fragment_count=len(fragment_targets),
+                )
+                target["referenceWordCount"] = reference
+                target["referenceWordCountIsHardLimit"] = False
+                assumed_written += reference
 
         accept_min, accept_max = self.story_project_service._story_word_count_acceptance_band(  # noqa: SLF001
             fragment_word_count_min,
