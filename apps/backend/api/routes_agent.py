@@ -62,7 +62,7 @@ _COMMIT_MESSAGE_TIMEOUT_SECONDS = 2.0
 # asyncio timeout wake-up and SSE serialization still consume a few milliseconds.
 _INTENT_STAGE_TIMEOUT_SECONDS = 1.8
 _PLANNER_TIMEOUT_SECONDS = 3.0
-_STORY_GENERATION_MAX_CORRECTIONS = 2
+_STORY_GENERATION_MAX_CORRECTIONS = 1
 _LOGGER = logging.getLogger(__name__)
 _BACKGROUND_EXECUTION_TASKS: set[asyncio.Task[Any]] = set()
 
@@ -1345,21 +1345,9 @@ def _story_generation_correction_prompt(
     correction_attempt: int,
 ) -> str:
     fragments = validation.get("fragments") if isinstance(validation.get("fragments"), list) else []
-    target_min = int(validation.get("targetWordCountMin") or 0)
-    target_max = int(validation.get("targetWordCountMax") or 0)
-    chapter_target = int(
-        validation.get("chapterWordCountTarget")
-        or round((target_min + target_max) / 2)
-        or 2500
-    )
-    accept_min = int(
-        validation.get("acceptWordCountMin")
-        or max(50, round((target_min or chapter_target) * 0.75))
-    )
-    accept_max = int(
-        validation.get("acceptWordCountMax")
-        or round((target_max or chapter_target) * 1.25)
-    )
+    current_word_count = int(validation.get("generatedWordCount") or 0)
+    accept_min = int(validation.get("acceptWordCountMin") or 0)
+    missing_word_count = max(0, accept_min - current_word_count)
     failures = [
         {
             "order": int(item.get("order") or index + 1),
@@ -1368,9 +1356,6 @@ def _story_generation_correction_prompt(
             "writeMode": str(item.get("writeMode") or "replace"),
             "baselineWordCount": int(item.get("baselineWordCount") or 0),
             "generatedWordCount": int(item.get("generatedWordCount") or 0),
-            "targetWordCountMin": int(item.get("targetWordCountMin") or target_min),
-            "targetWordCountMax": int(item.get("targetWordCountMax") or target_max),
-            "difference": int(item.get("difference") or 0),
         }
         for index, item in enumerate(fragments)
         if isinstance(item, dict) and str(item.get("status") or "") != "passed"
@@ -1380,22 +1365,21 @@ def _story_generation_correction_prompt(
         "maximumCorrectionAttempts": _STORY_GENERATION_MAX_CORRECTIONS,
         "algorithm": str(validation.get("algorithm") or "storydex_visible_characters_v1"),
         "countingRule": str(validation.get("countingRule") or "count every non-whitespace Unicode character"),
-        "exact": False,
-        "targetWordCountMin": target_min,
-        "targetWordCountMax": target_max,
-        "chapterWordCountTarget": chapter_target,
-        "acceptWordCountMin": accept_min,
-        "acceptWordCountMax": accept_max,
+        "currentProgramWordCount": current_word_count,
+        "additionalWordCountNeeded": missing_word_count,
         "chapterContentMode": str(validation.get("chapterContentMode") or ""),
         "structurePassed": bool(validation.get("structurePassed")),
         "writeToolApplied": bool(validation.get("writeToolApplied")),
+        "expansionDirections": ["场景细节", "人物心理", "推动情节的对话"],
         "failures": failures,
     }
     return (
-        "Storydex 已完成落盘后的客观计数。请依据下方程序计数结果修订失败片段，"
-        "并再次调用 StorydexApplyStoryIncrement。"
-        f"本章目标约 {chapter_target} 字，{accept_min}-{accept_max} 均可接受，以叙事完整为先；"
-        "章节路径、文件数量和写入模式必须完全遵守当前 TurnContract。"
+        f"Storydex 程序计数显示，本章当前约 {current_word_count} 字，"
+        f"还需补写约 {missing_word_count} 字才能达到可接受下界。"
+        "请基于已有正文做一次定向扩写，优先补充与情节相关的场景细节、人物心理和推动情节的对话，"
+        "避免重复既有信息，并以叙事完整为先。"
+        "请保持当前 TurnContract 约定的章节路径、文件数量和写入模式，"
+        "完成扩写后再次调用 StorydexApplyStoryIncrement。\n"
         "禁止使用普通 Write/Edit 工具写 chapters/ 正文。\n"
         f"STORYDEX_OBJECTIVE_VALIDATION={json.dumps(correction, ensure_ascii=False, separators=(',', ':'))}"
     )
@@ -1416,6 +1400,17 @@ def _rebuild_story_generation_contract_for_correction(
 
     next_contract = copy.deepcopy(turn_contract) if isinstance(turn_contract, dict) else {}
     turn_plan = next_contract.get("turnPlan") if isinstance(next_contract.get("turnPlan"), dict) else {}
+    word_count_policy = (
+        turn_plan.get("wordCountPolicy")
+        if isinstance(turn_plan.get("wordCountPolicy"), dict)
+        else {}
+    )
+    if (
+        str(word_count_policy.get("scope") or "").strip().lower() == "chapter"
+        and bool(validation.get("belowBudget"))
+    ):
+        word_count_policy["allowBelowMinimumAfterCorrection"] = True
+        turn_plan["wordCountPolicy"] = word_count_policy
     targets = turn_plan.get("fragmentTargets") if isinstance(turn_plan.get("fragmentTargets"), list) else []
     if not targets:
         return next_contract
@@ -1450,8 +1445,12 @@ def _rebuild_story_generation_contract_for_correction(
     return next_contract
 
 
-def _has_successful_story_generation_write(events: List[Dict[str, Any]]) -> bool:
-    for item in events:
+def _has_successful_story_generation_write(
+    events: List[Dict[str, Any]],
+    *,
+    start_index: int = 0,
+) -> bool:
+    for item in events[max(0, int(start_index)) :]:
         if item.get("event") != "ToolDone":
             continue
         data = item.get("data") if isinstance(item.get("data"), dict) else {}
@@ -1459,6 +1458,14 @@ def _has_successful_story_generation_write(events: List[Dict[str, Any]]) -> bool
         if tool_name == "storydexapplystoryincrement" and not bool(data.get("is_error")):
             return True
     return False
+
+
+def _story_generation_needs_length_correction(validation: Dict[str, Any]) -> bool:
+    return (
+        str(validation.get("wordCountScope") or "").strip().lower() == "chapter"
+        and bool(validation.get("belowBudget"))
+        and not bool(validation.get("overBudget"))
+    )
 
 
 def _should_create_task_checklist(intent_frame: Dict[str, Any]) -> bool:
@@ -1913,6 +1920,7 @@ async def _stream_coomi_sse_worker(
                 story_generation_model = ""
                 while not execution_handle.is_cancelled and not cancellation_token.is_cancelled():
                     segment_id = f"{trace_id}-segment-{segment_index + 1}"
+                    segment_event_start = len(events)
                     pending_steer: Dict[str, Any] | None = None
                     segment_completed = False
                     segment_cancelled = False
@@ -2163,13 +2171,32 @@ async def _stream_coomi_sse_worker(
                             turn_contract,
                         )
                         if bool(validation_packet.get("applicable")):
-                            write_tool_applied = _has_successful_story_generation_write(events)
-                            validation_passed = bool(validation_packet.get("passed")) and write_tool_applied
+                            write_tool_applied = _has_successful_story_generation_write(
+                                events,
+                                start_index=segment_event_start,
+                            )
+                            correction_applied = story_correction_attempts > 0 and write_tool_applied
+                            corrected_below_minimum = bool(
+                                correction_applied
+                                and _story_generation_needs_length_correction(validation_packet)
+                                and validation_packet.get("structurePassed")
+                            )
+                            validation_passed = bool(
+                                write_tool_applied
+                                and (validation_packet.get("passed") or corrected_below_minimum)
+                            )
                             validation_message = str(validation_packet.get("message") or "")
                             if not write_tool_applied:
                                 validation_message = (
                                     "本轮没有成功调用 StorydexApplyStoryIncrement，"
                                     "不能把磁盘上的既有正文误判为本轮生成结果。"
+                                )
+                            elif corrected_below_minimum:
+                                validation_message = (
+                                    f"已完成一次定向补写并落盘；本章当前生成 "
+                                    f"{int(validation_packet.get('generatedWordCount') or 0)} 字，仍低于可接受下界 "
+                                    f"{int(validation_packet.get('acceptWordCountMin') or 0)} 字，"
+                                    "已按单轮修订上限放行并保留 belowBudget 标记。"
                                 )
                             validation_packet = {
                                 **validation_packet,
@@ -2182,6 +2209,7 @@ async def _stream_coomi_sse_worker(
                                 "segmentId": segment_id,
                                 "correctionAttempt": story_correction_attempts,
                                 "maximumCorrectionAttempts": _STORY_GENERATION_MAX_CORRECTIONS,
+                                "correctionApplied": correction_applied,
                             }
                             events.append(
                                 _event_to_trace_event(
@@ -2200,7 +2228,10 @@ async def _stream_coomi_sse_worker(
                                     model=story_generation_model,
                                 )
                             if not bool(validation_packet.get("passed")):
-                                if story_correction_attempts < _STORY_GENERATION_MAX_CORRECTIONS:
+                                if (
+                                    story_correction_attempts < _STORY_GENERATION_MAX_CORRECTIONS
+                                    and _story_generation_needs_length_correction(validation_packet)
+                                ):
                                     story_correction_attempts += 1
                                     turn_contract = _rebuild_story_generation_contract_for_correction(
                                         workspace_root,
@@ -2237,11 +2268,15 @@ async def _stream_coomi_sse_worker(
                                     terminal_event = None
                                     continue
 
-                                error_message = (
-                                    "正文经过 "
-                                    f"{_STORY_GENERATION_MAX_CORRECTIONS} 次自动修订后仍未通过 Storydex "
-                                    "客观字数或章节结构校验。"
-                                )
+                                if story_correction_attempts:
+                                    error_message = (
+                                        "正文完成一次定向补写后仍未形成可验收的本轮写入，"
+                                        "Storydex 已停止自动修订。"
+                                    )
+                                else:
+                                    error_message = (
+                                        "正文未通过 Storydex 客观校验；仅章级偏短结果可触发一次自动补写。"
+                                    )
                                 completed = False
                                 terminal_event = None
                                 followup_mailbox_service.pause(
