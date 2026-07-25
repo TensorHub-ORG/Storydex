@@ -150,15 +150,26 @@ def test_intent_metadata_provider_uses_strict_openai_responses_schema():
     assert getattr(response, "content")
 
 
-def test_advisory_rule_short_circuits_catalog_history_and_llm_under_100ms(monkeypatch):
+def test_advisory_request_still_goes_through_fast_model(monkeypatch):
+    # 用户明确要求：即便是问询/问候等简单请求，也必须经过一次快速模型意图判断，
+    # 不再用本地 advisory 规则短路。这里验证 advisory 请求确实调用了 LLM。
+    called = {"count": 0}
+
+    async def fake_llm(**kwargs):
+        called["count"] += 1
+        return {
+            "primary": "general",
+            "confidence": "high",
+            "signals": ["llm_classifier"],
+            "method": "llm",
+            "reason": "advisory",
+            "operationType": "inquiry",
+            "complexity": "simple",
+        }
+
     service = StorydexIntentService()
-    monkeypatch.setattr(service, "_catalog", lambda root: (_ for _ in ()).throw(AssertionError("catalog must not load")))
-
-    async def forbidden_llm(**kwargs):
-        raise AssertionError("advisory requests must not call the intent model")
-
-    monkeypatch.setattr(service, "_llm_intent_frame", forbidden_llm)
-    started = time.perf_counter()
+    monkeypatch.setattr(service, "_catalog", lambda root: build_intent_catalog())
+    monkeypatch.setattr(service, "_llm_intent_frame", fake_llm)
     frame = asyncio.run(
         service.classify_intent(
             prompt="这段写得怎么样？",
@@ -166,11 +177,12 @@ def test_advisory_rule_short_circuits_catalog_history_and_llm_under_100ms(monkey
             session_id="session-advisory",
         )
     )
-    elapsed = time.perf_counter() - started
 
+    assert called["count"] == 1
     assert frame["primary"] == "general"
-    assert frame["method"] == "advisory_fast"
-    assert elapsed < 0.1
+    assert frame["method"] == "llm"
+    assert frame["operationType"] == "inquiry"
+    # is_advisory_request 仍作为兜底启发式保留（LLM 不可用时用于推断 operationType）。
     assert is_advisory_request("这段写得怎么样？") is True
     assert is_advisory_request("请修改这段文字并保存") is False
 
@@ -196,7 +208,9 @@ def test_parse_intent_frame_rejects_unknown_label_and_bad_json():
 # ─────────────────── 2. 兜底路径 ───────────────────
 
 
-def test_classify_intent_uses_fast_heuristic_for_clear_signal(monkeypatch):
+def test_classify_intent_calls_llm_even_for_clear_keyword_signal(monkeypatch):
+    # 关键回归：即使 prompt 命中明确关键词（如"整理知识图谱"），也必须调用快速模型，
+    # 不再用关键词短路。provider 不可用时才退回启发式兜底。
     calls = 0
 
     class BrokenProvider:
@@ -208,9 +222,47 @@ def test_classify_intent_uses_fast_heuristic_for_clear_signal(monkeypatch):
     _install_fake_provider(monkeypatch, BrokenProvider())
     service = StorydexIntentService()
     frame = asyncio.run(service.classify_intent(prompt="帮我整理知识图谱", active_file=""))
+    assert calls == 1
     assert frame["primary"] == "wiki_work"
-    assert frame["method"] == "heuristic_fast"
-    assert calls == 0
+    assert frame["method"] == "heuristic_fallback"
+
+
+def test_restructure_request_is_not_forced_to_story_generation(monkeypatch):
+    # 用户报告的核心 bug：含"片段/剧情"但实为重构现有文件的请求，不能被关键词
+    # 短路判成剧情生成。这里让快速模型判为 modify_existing，验证不走 create_new。
+    class FakeProvider:
+        async def chat(self, messages, options):
+            return _FakeResponse(
+                '{"primary":"story_generation","secondary":"","operationType":"modify_existing",'
+                '"complexity":"complex","confidence":"high","reason":"重构现有片段"}'
+            )
+
+    _install_fake_provider(monkeypatch, FakeProvider())
+    service = StorydexIntentService()
+    frame = asyncio.run(
+        service.classify_intent(
+            prompt="第一个片段和后面的剧情不连贯，重构一下，重构后更新变量和WIKI",
+            active_file="chapters/第一章/001.md",
+        )
+    )
+    assert frame["method"] == "llm"
+    assert frame["operationType"] == "modify_existing"
+    assert frame["complexity"] == "complex"
+
+
+def test_greeting_goes_through_fast_model(monkeypatch):
+    class FakeProvider:
+        async def chat(self, messages, options):
+            return _FakeResponse(
+                '{"primary":"general","secondary":"","operationType":"greeting",'
+                '"complexity":"simple","confidence":"high","reason":"greeting"}'
+            )
+
+    _install_fake_provider(monkeypatch, FakeProvider())
+    service = StorydexIntentService()
+    frame = asyncio.run(service.classify_intent(prompt="你好", active_file=""))
+    assert frame["method"] == "llm"
+    assert frame["operationType"] == "greeting"
 
 
 def test_classify_intent_falls_back_on_timeout(monkeypatch):
@@ -364,15 +416,21 @@ def test_classify_intent_passes_previous_turn_context(monkeypatch):
         async def chat(self, messages, options):
             nonlocal calls
             calls += 1
-            return _FakeResponse('{"primary": "general", "confidence": "medium"}')
+            return _FakeResponse(
+                '{"primary":"character_work","secondary":"","operationType":"create_new",'
+                '"complexity":"simple","confidence":"high","reason":"角色设计"}'
+            )
 
     _install_fake_provider(monkeypatch, FakeProvider())
     service = StorydexIntentService()
+    # 首轮走快速模型判为 character_work。
     asyncio.run(service.classify_intent(prompt="设计一个新角色", session_id="s1"))
+    assert calls == 1
+    # "继续"是省略式追问，延续上一轮意图，不再调用模型。
     frame = asyncio.run(service.classify_intent(prompt="继续", session_id="s1"))
     assert frame["primary"] == "character_work"
     assert frame["method"] == "deterministic_context"
-    assert calls == 0
+    assert calls == 1
 
 
 def test_persisted_assistant_action_survives_service_restart(monkeypatch, tmp_path):

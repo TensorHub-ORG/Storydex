@@ -39,6 +39,11 @@ INTENT_LABELS: tuple[str, ...] = (
     "general",
 )
 _CONFIDENCE_LEVELS = {"high", "medium", "low"}
+# 操作类型：区分"新建内容"与"修改现有文件"，这是修复"重构被误判为剧情生成"的关键维度。
+_OPERATION_TYPES = {"create_new", "modify_existing", "inquiry", "greeting", "other"}
+_COMPLEXITY_LEVELS = {"simple", "complex"}
+_DEFAULT_OPERATION_TYPE = "other"
+_DEFAULT_COMPLEXITY = "simple"
 _INTENT_SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 DEFAULT_LLM_TIMEOUT_SECONDS = 2.0
 _MAX_PROMPT_CHARS = 2000
@@ -114,6 +119,51 @@ _PROJECT_ORGANIZE_RE = re.compile(
     r"(整理目录|项目目录|整理项目|目录结构|组织方式|资料整理|盘点.*(?:章节|目录)|organize)",
     re.IGNORECASE,
 )
+
+# operationType 启发式（仅 LLM 不可用时兜底）：
+# 修改现有文件的强信号——重构/整理/调整/清理/更新既有内容，绝不是"新建"。
+_MODIFY_EXISTING_RE = re.compile(
+    r"(重构|重写|改写|重新组织|重新整理|整理一下|梳理|调整|优化|修订|修改|修正|清理|删除|移除|"
+    r"归档|合并|拆分|同步|refactor|restructure|reorganize|rework|revise|adjust|clean\s*up|"
+    r"tidy|consolidate|merge|split|update\s+the\s+existing)",
+    re.IGNORECASE,
+)
+# 新建内容的强信号——续写/新增/生成全新片段。
+_CREATE_NEW_RE = re.compile(
+    r"(续写|新写|新增|新建|再写|再来(一|1)?段|生成.*(剧情|故事|章节|片段|新)|创作|写第|写一段新|"
+    r"continue\s+writing|write\s+(a\s+)?new|add\s+(a\s+)?new|generate\s+(a\s+)?new|create\s+(a\s+)?new)",
+    re.IGNORECASE,
+)
+# 问候语。
+_GREETING_RE = re.compile(
+    r"^\s*(你好|您好|hi|hello|hey|在吗|在么|哈喽|嗨|早上好|下午好|晚上好|早安|晚安|"
+    r"good\s+(morning|afternoon|evening|night))[\s。.!！?？~～]*$",
+    re.IGNORECASE,
+)
+
+
+def _heuristic_operation_type(text: str, *, primary: str) -> str:
+    """兜底推断 operationType。LLM 不可用时使用，保守起见优先识别'修改现有'。"""
+    stripped = str(text or "").strip()
+    if not stripped:
+        return _DEFAULT_OPERATION_TYPE
+    if _GREETING_RE.match(stripped):
+        return "greeting"
+    has_modify = bool(_MODIFY_EXISTING_RE.search(stripped))
+    has_create = bool(_CREATE_NEW_RE.search(stripped))
+    if has_modify and not has_create:
+        return "modify_existing"
+    if has_create and not has_modify:
+        return "create_new"
+    if has_modify and has_create:
+        # 同时出现时（如"重构后再新增一段"），以修改现有为主，避免误触发新片段规划。
+        return "modify_existing"
+    # 无明确读写动词：咨询/讨论类归为 inquiry；有明确内容意图但无动词的兜底为 create_new。
+    if is_advisory_request(stripped):
+        return "inquiry"
+    if primary in {"general"}:
+        return "inquiry"
+    return "create_new"
 
 
 def build_intent_catalog(
@@ -194,12 +244,30 @@ def heuristic_intent_frame(*, prompt: str, active_file: str) -> Dict[str, Any]:
     if active_file.startswith("chapters/") and primary == "general":
         primary = "story_generation"
         signals.append("active_chapter_file")
+    operation_type = _heuristic_operation_type(text, primary=primary)
     return {
         "primary": primary,
         "confidence": "medium" if signals else "low",
         "signals": signals,
         "method": "heuristic",
+        "operationType": operation_type,
+        "complexity": _heuristic_complexity(text),
     }
+
+
+def _heuristic_complexity(text: str) -> str:
+    """兜底推断任务复杂度。LLM 不可用时使用；仅在出现多步骤强信号时判为 complex。"""
+    stripped = str(text or "").strip()
+    if not stripped:
+        return _DEFAULT_COMPLEXITY
+    # 多步骤连接词 + 多个动作动词 → 复杂任务（如"重构后更新变量和WIKI"）。
+    step_markers = len(re.findall(r"(然后|接着|之后|再|并且|同时|以及|、|，然后)", stripped))
+    mutation_verbs = len(_MUTATION_REQUEST_RE.findall(stripped))
+    if step_markers >= 2 and mutation_verbs >= 2:
+        return "complex"
+    if mutation_verbs >= 3:
+        return "complex"
+    return _DEFAULT_COMPLEXITY
 
 
 def is_advisory_request(prompt: str) -> bool:
@@ -363,10 +431,15 @@ def _intent_response_schema() -> Dict[str, Any]:
         "properties": {
             "primary": {"type": "string"},
             "secondary": {"type": "string"},
+            "operationType": {
+                "type": "string",
+                "enum": ["create_new", "modify_existing", "inquiry", "greeting", "other"],
+            },
+            "complexity": {"type": "string", "enum": ["simple", "complex"]},
             "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
             "reason": {"type": "string"},
         },
-        "required": ["primary", "secondary", "confidence", "reason"],
+        "required": ["primary", "secondary", "operationType", "complexity", "confidence", "reason"],
     }
 
 
@@ -438,7 +511,9 @@ def _extract_json_object(content: str) -> Any:
         return None
 
 
-def _parse_intent_frame(content: str, *, valid_labels: set[str]) -> Dict[str, Any] | None:
+def _parse_intent_frame(
+    content: str, *, valid_labels: set[str], prompt: str = ""
+) -> Dict[str, Any] | None:
     payload = _extract_json_object(content)
     if not isinstance(payload, dict):
         return None
@@ -452,12 +527,21 @@ def _parse_intent_frame(content: str, *, valid_labels: set[str]) -> Dict[str, An
     if confidence not in _CONFIDENCE_LEVELS:
         confidence = "medium"
     reason = str(payload.get("reason") or "").strip()
+    operation_type = str(payload.get("operationType") or "").strip().lower()
+    if operation_type not in _OPERATION_TYPES:
+        # LLM 未给出合法 operationType 时用启发式兜底，保证下游门控始终有值。
+        operation_type = _heuristic_operation_type(prompt, primary=primary)
+    complexity = str(payload.get("complexity") or "").strip().lower()
+    if complexity not in _COMPLEXITY_LEVELS:
+        complexity = _DEFAULT_COMPLEXITY
     frame = {
         "primary": primary,
         "confidence": confidence,
         "signals": ["llm_classifier"],
         "method": "llm",
         "reason": reason[:200],
+        "operationType": operation_type,
+        "complexity": complexity,
     }
     if secondary:
         frame["secondary"] = secondary
@@ -486,21 +570,30 @@ def _intent_messages(
     catalog: Dict[str, Dict[str, Any]],
     previous_turn: Dict[str, str] | None,
 ) -> list[Dict[str, Any]]:
+    # 极致精简的意图路由提示词：内置四点判断，要求极快响应、只输出 JSON、不展开思维过程。
     system_prompt = (
-        "You are Storydex's intent router for a fiction-writing workspace. "
-        "Classify the user's request into exactly one primary intent label from this project's catalog:\n"
+        "You are Storydex's fast intent router for a fiction-writing workspace. Decide fast, output JSON only.\n"
+        "primary = one label from this catalog:\n"
         + "\n".join(_catalog_prompt_lines(catalog))
-        + "\n\nRules:\n"
-        "- The user usually writes Chinese; requests may be indirect or elliptical.\n"
-        "- Short continuations like 「继续」「然后呢」「再来一段」 normally keep previousTurn's intent "
-        "unless the topic clearly changed.\n"
-        "- Use activeFile as context (an open chapters/ file suggests story continuation), not as an override.\n"
-        "- If the request mixes two intents, pick the one the user wants executed now as primary "
-        "and put the other in secondary.\n"
-        "Return ONLY a JSON object: "
-        '{"primary": "<label>", "secondary": "<label or empty string>", '
-        '"confidence": "high"|"medium"|"low", "reason": "<short sentence>"}. '
-        "No markdown, no extra keys, no chain-of-thought."
+        + "\noperationType = one of:\n"
+        "- create_new: user wants NEW story/content written or continued (new fragments, next chapter).\n"
+        "- modify_existing: user wants to restructure/reorganize/rewrite/adjust/clean up/delete files that ALREADY exist "
+        "(e.g. 「重构第一个片段」「整理一下」「把旧的删掉」). This is NOT create_new even if it mentions 剧情/片段/章节.\n"
+        "- inquiry: understanding-only question, discussion, review or advice; no write/modify wanted.\n"
+        "- greeting: greeting or small talk only.\n"
+        "- other: none of the above.\n"
+        "complexity = simple (one clear step / chat / small edit) or complex "
+        "(multi-step: needs reading files, restructuring, then updating variables/WIKI, cleanup, etc.).\n"
+        "Judge in your head, fast, do NOT overthink: (1) Does the user want NEW story generated? "
+        "(2) Or to organize/restructure/modify/adjust/create existing project files? "
+        "(3) Is it a write/modify need, or a pure understanding question/discussion, a greeting, or other? "
+        "(4) Is this turn complex?\n"
+        "- User usually writes Chinese; requests may be indirect or elliptical.\n"
+        "- Short 「继续」「然后呢」 keep previousTurn's intent unless topic clearly changed.\n"
+        "- activeFile is context (an open chapters/ file hints story), not an override.\n"
+        "Return ONLY this JSON, no markdown, no extra keys, no chain-of-thought: "
+        '{"primary":"<label>","secondary":"<label or empty>","operationType":"<create_new|modify_existing|inquiry|greeting|other>",'
+        '"complexity":"<simple|complex>","confidence":"high|medium|low","reason":"<short>"}'
     )
     request: Dict[str, Any] = {
         "prompt": str(prompt or "")[:_MAX_PROMPT_CHARS],
@@ -543,10 +636,8 @@ class StorydexIntentService:
         normalized_prompt = str(prompt or "").strip()
         session_key = self._session_key(workspace_root=workspace_root, session_id=session_id)
 
-        # The deterministic and advisory paths must stay independent from cold
-        # filesystem, history and provider initialization.  In particular this
-        # keeps review-style prompts such as ``这段写得怎么样`` in the sub-100ms
-        # path even when the project registry lives on slow storage.
+        # 唯一保留的零成本短路：slash 命令与空输入。它们语义确定，不需要模型
+        # 判断，也不应触发冷文件系统 / provider 初始化。
         if not normalized_prompt or normalized_prompt.startswith("/"):
             frame = heuristic_intent_frame(prompt=normalized_prompt, active_file=active_file)
             frame["method"] = "deterministic"
@@ -556,22 +647,6 @@ class StorydexIntentService:
                 session_key=session_key,
                 prompt=normalized_prompt,
                 primary=str(frame.get("primary") or ""),
-            )
-            return frame
-        if is_advisory_request(normalized_prompt):
-            frame = {
-                "primary": "general",
-                "confidence": "high",
-                "signals": ["local_advisory_rule"],
-                "method": "advisory_fast",
-                "reason": "Local rule identified a consultation, suggestion, or evaluation request.",
-            }
-            catalog = build_intent_catalog()
-            _enrich_frame(frame, catalog)
-            self._remember(
-                session_key=session_key,
-                prompt=normalized_prompt,
-                primary="general",
             )
             return frame
 
@@ -589,25 +664,22 @@ class StorydexIntentService:
             if persisted_turn:
                 previous_turn = {**persisted_turn, **(previous_turn or {})}
         if is_follow_up and previous_turn:
+            # 省略式追问（继续 / 然后呢）延续上一轮意图，不依赖关键词误判，保留短路。
             frame = self._follow_up_frame(previous_turn)
         else:
-            heuristic = heuristic_intent_frame(prompt=normalized_prompt, active_file=active_file)
-            explicit_signals = [
-                signal for signal in heuristic.get("signals", []) if signal != "active_chapter_file"
-            ]
-            if explicit_signals:
-                frame = heuristic
-                frame["method"] = "heuristic_fast"
-            else:
-                frame = await self._llm_intent_frame(
-                    prompt=normalized_prompt,
-                    active_file=active_file,
-                    catalog=catalog,
-                    previous_turn=previous_turn,
-                )
-                if frame is None:
-                    frame = heuristic
-                    frame["method"] = "heuristic_fallback"
+            # 快速模型是主路径：不再让关键词命中抢在模型前面下结论。像"重构一下这个
+            # 片段"这类含"片段/剧情"但实为修改现有文件的请求，必须由模型区分意图与
+            # operationType，而不是被 _STORY_INTENT_RE 直接判成剧情生成。
+            frame = await self._llm_intent_frame(
+                prompt=normalized_prompt,
+                active_file=active_file,
+                catalog=catalog,
+                previous_turn=previous_turn,
+            )
+            if frame is None:
+                # LLM 不可用 / 超时 / 非法输出时才退回关键词启发式，保证离线可用。
+                frame = heuristic_intent_frame(prompt=normalized_prompt, active_file=active_file)
+                frame["method"] = "heuristic_fallback"
         _enrich_frame(frame, catalog)
         self._remember(
             session_key=session_key,
@@ -676,12 +748,23 @@ class StorydexIntentService:
         primary = str(previous_turn.get("intent") or "general")
         if _VARIABLE_ACTION_RE.search(f"{pending_action}\n{assistant_reply}"):
             primary = "general"
+        # 承接式跟进（继续/然后呢）延续上一轮意图；operationType 保守推断：
+        # general 归为 inquiry，story_generation 归为 create_new（续写），其余归为
+        # modify_existing（对既有资产的进一步处理）。复杂度按简单处理。
+        if primary == "general":
+            operation_type = "inquiry"
+        elif primary == "story_generation":
+            operation_type = "create_new"
+        else:
+            operation_type = "modify_existing"
         return {
             "primary": primary,
             "confidence": "high",
             "signals": ["persistent_previous_turn", "elliptical_follow_up"],
             "method": "deterministic_context",
             "reason": "Resolved from the previous assistant proposal in this session.",
+            "operationType": operation_type,
+            "complexity": _DEFAULT_COMPLEXITY,
         }
 
     @staticmethod
@@ -779,6 +862,7 @@ class StorydexIntentService:
         return _parse_intent_frame(
             str(getattr(response, "content", "") or ""),
             valid_labels=set(catalog),
+            prompt=prompt,
         )
 
 

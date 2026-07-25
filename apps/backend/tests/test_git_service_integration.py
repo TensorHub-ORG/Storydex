@@ -36,7 +36,9 @@ def test_full_local_git_lifecycle_and_restore(git_service: GitService, tmp_path:
     initialized = git_service.initialize_repository(workspace)
     assert initialized["initialized"] is True
     assert initialized["branch"] == GitService.DEFAULT_BRANCH
-    assert ".storydex/.agent/" in (workspace / ".gitignore").read_text(encoding="utf-8")
+    gitignore_content = (workspace / ".gitignore").read_text(encoding="utf-8")
+    assert ".storydex/.agent/" in gitignore_content
+    assert ".storydex/.cache/" in gitignore_content
 
     first = git_service.commit_all(workspace, message="story: first")
     assert first["created"] is True

@@ -70,17 +70,36 @@ describe("agent store deterministic helpers", () => {
       contextAssembly: { budget: { blockCount: 4, totalChars: 500 }, sources: [{ kind: "chapter", count: 2 }, {}, null], notes: ["preset_compile_failed: demo", "other"] }
     });
     expect(u.summarizeTurnContractPacket(contract)).toContain("chapters/2.md");
+    const modifySummary = u.summarizeTurnContractPacket(packet({
+      status: "ready",
+      intentFrame: { primary: "story_generation", operationType: "modify_existing", complexity: "complex" }
+    }));
+    expect(modifySummary).toContain("修改现有文件");
+    expect(modifySummary).toContain("复杂度：复杂");
     expect(u.summarizeTurnContractPacket(packet({ turnPlan: { selectedChapterTemplate: "id", selectedChapterTemplateDetail: { name: "Template" } } }))).toContain("Template");
     expect(u.summarizeTurnContractPacket(packet({
       intentFrame: { primary: "story_generation" },
       updatePolicy: { autoUpdateVariables: false }
     }))).toContain("正文生成后直接整理");
-    expect(u.summarizeStoryGenerationValidationPacket(packet({
+    const legacyValidationSummary = u.summarizeStoryGenerationValidationPacket(packet({
       passed: false,
       targetWordCount: 100,
       structurePassed: true,
       fragments: [{ path: "chapters/1/001.md", generatedWordCount: 90, targetWordCount: 100, difference: -10 }]
-    }))).toContain("90/100");
+    }));
+    expect(legacyValidationSummary).toContain("待复核");
+    expect(legacyValidationSummary).toContain("90 字（目标 100）");
+    expect(legacyValidationSummary).toContain("差 -10");
+    const rangeValidationSummary = u.summarizeStoryGenerationValidationPacket(packet({
+      passed: false,
+      targetWordCountMin: 2000,
+      targetWordCountMax: 2500,
+      structurePassed: false,
+      fragments: [{ path: "chapters/第1章/001.md", actualWordCount: 2173, difference: 0 }]
+    }));
+    expect(rangeValidationSummary).toContain("2173 字（目标 2000-2500）");
+    expect(rangeValidationSummary).toContain("章节结构与模板不一致");
+    expect(rangeValidationSummary).not.toContain("2173/0");
     expect(u.summarizePresetCompileFailures({ notes: [] })).toBe("");
     expect(u.summarizePresetCompileFailures({ notes: ["preset_compile_failed:", "preset_compile_failed: one", "preset_compile_failed: two", "preset_compile_failed: three"] })).toBeTruthy();
     expect(u.summarizeContextAssembly({})).toBe("");

@@ -560,6 +560,8 @@ class StorydexContextAssemblerService:
             "turnPlanRef": {
                 "fragmentCount": int((turn_plan or {}).get("fragmentCount") or 0),
                 "fragmentWordCount": int((turn_plan or {}).get("fragmentWordCount") or 0),
+                "fragmentWordCountMin": int((turn_plan or {}).get("fragmentWordCountMin") or 0),
+                "fragmentWordCountMax": int((turn_plan or {}).get("fragmentWordCountMax") or 0),
                 "nextSegmentPath": str((turn_plan or {}).get("nextSegmentPath") or generation_context.get("nextSegmentPath") or ""),
             },
         }
