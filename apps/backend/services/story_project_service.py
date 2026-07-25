@@ -2589,6 +2589,7 @@ class StoryProjectService:
     ) -> tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
         accept_min, accept_max = self._story_word_count_acceptance_band(min_word_count, max_word_count)
         chapter_target = self._story_chapter_word_count_target(turn_plan, min_word_count, max_word_count)
+        allow_below_minimum = self._story_word_count_allows_below_minimum_after_correction(turn_plan)
         actual_count = len(fragments)
         prepared: List[Dict[str, Any]] = []
         results: List[Dict[str, Any]] = []
@@ -2666,7 +2667,9 @@ class StoryProjectService:
             generated_count = int(chapter["generatedWordCount"])
             chapter_below = generated_count < accept_min
             chapter_over = generated_count > accept_max
-            chapter_passed = bool(chapter["allFragmentsReady"] and not chapter_below)
+            chapter_passed = bool(
+                chapter["allFragmentsReady"] and (not chapter_below or allow_below_minimum)
+            )
             passed = passed and chapter_passed
             over_budget = over_budget or chapter_over
             below_budget = below_budget or chapter_below
@@ -2724,12 +2727,17 @@ class StoryProjectService:
             "structurePassed": structure_passed,
             "belowBudget": below_budget,
             "overBudget": over_budget,
+            "correctionApplied": allow_below_minimum,
             "chapters": chapter_results,
             "fragments": results,
             "message": (
-                "正文已通过 Storydex 落盘前章级字数和章节结构校验。"
-                if passed
-                else f"本章正文低于可接受下界 {accept_min} 字，或片段数量、写入基线与章节模板不一致。"
+                f"定向补写正文已落盘；本章仍低于可接受下界 {accept_min} 字，已按单轮修订策略放行。"
+                if passed and below_budget and allow_below_minimum
+                else (
+                    "正文已通过 Storydex 落盘前章级字数和章节结构校验。"
+                    if passed
+                    else f"本章正文低于可接受下界 {accept_min} 字，或片段数量、写入基线与章节模板不一致。"
+                )
             ),
         }
         if not passed:
@@ -3844,6 +3852,10 @@ class StoryProjectService:
         policy = turn_plan.get("wordCountPolicy") if isinstance(turn_plan.get("wordCountPolicy"), dict) else {}
         return str(policy.get("scope") or "fragment").strip().lower()
 
+    def _story_word_count_allows_below_minimum_after_correction(self, turn_plan: Dict[str, Any]) -> bool:
+        policy = turn_plan.get("wordCountPolicy") if isinstance(turn_plan.get("wordCountPolicy"), dict) else {}
+        return self._normalize_bool(policy.get("allowBelowMinimumAfterCorrection"), default=False)
+
     def _story_chapter_word_count_target(
         self,
         turn_plan: Dict[str, Any],
@@ -3956,6 +3968,7 @@ class StoryProjectService:
     ) -> Dict[str, Any]:
         accept_min, accept_max = self._story_word_count_acceptance_band(min_word_count, max_word_count)
         chapter_target = self._story_chapter_word_count_target(turn_plan, min_word_count, max_word_count)
+        allow_below_minimum = self._story_word_count_allows_below_minimum_after_correction(turn_plan)
         results: List[Dict[str, Any]] = []
         chapters: Dict[str, Dict[str, Any]] = {}
 
@@ -4021,7 +4034,9 @@ class StoryProjectService:
             generated_count = int(chapter["generatedWordCount"])
             chapter_below = generated_count < accept_min
             chapter_over = generated_count > accept_max
-            chapter_passed = bool(chapter["allFragmentsExist"] and not chapter_below)
+            chapter_passed = bool(
+                chapter["allFragmentsExist"] and (not chapter_below or allow_below_minimum)
+            )
             word_count_passed = word_count_passed and chapter_passed
             over_budget = over_budget or chapter_over
             below_budget = below_budget or chapter_below
@@ -4054,7 +4069,12 @@ class StoryProjectService:
         structure_passed = self._validate_chapter_target_structure(root, targets, content_mode=content_mode)
         passed = bool(word_count_passed and structure_passed)
         generated_total = sum(int(item["generatedWordCount"]) for item in chapter_results)
-        if passed and over_budget:
+        if passed and below_budget and allow_below_minimum:
+            message = (
+                f"已完成一次定向补写；本章生成 {generated_total} 字，仍低于可接受下界 "
+                f"{accept_min} 字，已按单轮修订策略放行。"
+            )
+        elif passed and over_budget:
             message = (
                 f"正文已落盘；本章生成 {generated_total} 字，超出建议放行带上界 {accept_max} 字，"
                 "已标记 overBudget，请作者按需裁剪。"
@@ -4089,6 +4109,7 @@ class StoryProjectService:
             "structurePassed": structure_passed,
             "belowBudget": below_budget,
             "overBudget": over_budget,
+            "correctionApplied": allow_below_minimum,
             "chapters": chapter_results,
             "fragments": results,
             "message": message,

@@ -195,18 +195,23 @@ def test_multi_fragment_contract_carries_soft_reference_lengths(tmp_path: Path) 
 def test_correction_prompt_uses_program_measurements_without_hard_counting_commands() -> None:
     prompt = routes._story_generation_correction_prompt(
         {
-            "chapterWordCountTarget": 2500,
-            "targetWordCountMin": 2500,
-            "targetWordCountMax": 2500,
+            "generatedWordCount": 1600,
             "acceptWordCountMin": 1875,
             "acceptWordCountMax": 3125,
             "fragments": [],
         },
         correction_attempt=1,
     )
-    assert "本章目标约 2500 字，1875-3125 均可接受，以叙事完整为先" in prompt
+    assert "本章当前约 1600 字" in prompt
+    assert "还需补写约 275 字" in prompt
+    assert "场景细节" in prompt
+    assert "人物心理" in prompt
+    assert "推动情节的对话" in prompt
+    assert '"additionalWordCountNeeded":275' in prompt
+    assert "1875-3125" not in prompt
     assert "不要自行估算字数" not in prompt
-    assert "必须按" not in prompt
+    assert "未通过不得结束" not in prompt
+    assert "must fall within" not in prompt.lower()
 
 
 def test_built_in_chapter_templates_cover_multi_and_single_file(tmp_path: Path) -> None:
@@ -449,6 +454,42 @@ def test_multi_fragment_chapter_is_validated_by_aggregate_word_count(tmp_path: P
     assert validation["generatedWordCount"] == 2800
 
 
+def test_one_correction_can_land_below_minimum_and_preserves_budget_status(tmp_path: Path) -> None:
+    service = get_story_project_service()
+    contract = _story_contract(tmp_path, chapter_word_count_target=2500)
+    target_path = contract["turnPlan"]["fragmentTargets"][0]["path"]
+
+    rejected = service.apply_story_generation_increment(
+        tmp_path,
+        {"fragments": [{"text": "甲" * 1600}]},
+        generation_contract=contract,
+    )
+    assert rejected["ok"] is False
+    corrected_contract = routes._rebuild_story_generation_contract_for_correction(
+        tmp_path,
+        contract,
+        rejected["wordCountValidation"],
+    )
+    assert "allowBelowMinimumAfterCorrection" not in contract["turnPlan"]["wordCountPolicy"]
+    assert corrected_contract["turnPlan"]["wordCountPolicy"]["allowBelowMinimumAfterCorrection"] is True
+
+    corrected = service.apply_story_generation_increment(
+        tmp_path,
+        {"fragments": [{"text": "乙" * 1700}]},
+        generation_contract=corrected_contract,
+    )
+    validation = service.validate_story_generation_turn(tmp_path, corrected_contract)
+    assert corrected["ok"] is True
+    assert corrected["wordCountValidation"]["passed"] is True
+    assert corrected["wordCountValidation"]["belowBudget"] is True
+    assert corrected["wordCountValidation"]["correctionApplied"] is True
+    assert validation["passed"] is True
+    assert validation["generatedWordCount"] == 1700
+    assert validation["belowBudget"] is True
+    assert validation["correctionApplied"] is True
+    assert service.count_story_file_words(tmp_path / target_path) == 1700
+
+
 def test_contract_without_scope_keeps_legacy_per_fragment_gate(tmp_path: Path) -> None:
     service = get_story_project_service()
     contract = _story_contract(
@@ -507,6 +548,63 @@ def test_single_file_continuation_uses_baseline_and_cannot_append_twice(tmp_path
     assert duplicate["ok"] is False
     assert duplicate["wordCountValidation"]["fragments"][0]["baselineMatches"] is False
     assert service.count_story_file_words(tmp_path / target_path) == 200
+
+
+def test_append_correction_can_land_once_below_minimum_without_disabling_duplicate_guard(
+    tmp_path: Path,
+) -> None:
+    service = get_story_project_service()
+    initial = _story_contract(
+        tmp_path,
+        chapter_word_count_target=2500,
+        template_id=SINGLE_FILE_CHAPTER_TEMPLATE_ID,
+    )
+    target_path = initial["turnPlan"]["fragmentTargets"][0]["path"]
+    target = tmp_path / target_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("甲" * 2200, encoding="utf-8")
+
+    continuation = _story_contract(
+        tmp_path,
+        chapter_word_count_target=2500,
+        template_id=SINGLE_FILE_CHAPTER_TEMPLATE_ID,
+        active_file=target_path,
+    )
+    rejected = service.apply_story_generation_increment(
+        tmp_path,
+        {"fragments": [{"text": "乙" * 1000}]},
+        generation_contract=continuation,
+    )
+    assert rejected["ok"] is False
+    assert service.count_story_file_words(target) == 2200
+
+    corrected_contract = routes._rebuild_story_generation_contract_for_correction(
+        tmp_path,
+        continuation,
+        rejected["wordCountValidation"],
+    )
+    corrected_target = corrected_contract["turnPlan"]["fragmentTargets"][0]
+    assert corrected_target["baselineWordCount"] == 2200
+    assert corrected_contract["turnPlan"]["wordCountPolicy"]["allowBelowMinimumAfterCorrection"] is True
+
+    corrected = service.apply_story_generation_increment(
+        tmp_path,
+        {"fragments": [{"text": "丙" * 1200}]},
+        generation_contract=corrected_contract,
+    )
+    validation = service.validate_story_generation_turn(tmp_path, corrected_contract)
+    duplicate = service.apply_story_generation_increment(
+        tmp_path,
+        {"fragments": [{"text": "丁" * 1200}]},
+        generation_contract=corrected_contract,
+    )
+    assert corrected["ok"] is True
+    assert validation["passed"] is True
+    assert validation["belowBudget"] is True
+    assert validation["correctionApplied"] is True
+    assert duplicate["ok"] is False
+    assert duplicate["wordCountValidation"]["fragments"][0]["baselineMatches"] is False
+    assert service.count_story_file_words(target) == 3400
 
 
 def test_append_correction_rebuilds_baseline_without_disabling_duplicate_guard(tmp_path: Path) -> None:
@@ -588,16 +686,67 @@ def test_plain_write_and_edit_tools_cannot_bypass_story_generation_contract(tmp_
     assert not (tmp_path / "chapters/第1章/001.md").exists()
 
 
-def test_failed_post_run_validation_continues_in_same_execution_before_terminal(
+def _chapter_validation_payload(
+    generated_word_count: int,
+    *,
+    passed: bool,
+    below_budget: bool,
+    over_budget: bool = False,
+) -> dict[str, Any]:
+    return {
+        "_type": "StoryGenerationValidation",
+        "_version": 1,
+        "applicable": True,
+        "passed": passed,
+        "status": "success" if passed else "error",
+        "algorithm": STORY_WORD_COUNT_ALGORITHM,
+        "countingRule": "count every non-whitespace Unicode character",
+        "exact": True,
+        "wordCountScope": "chapter",
+        "fragmentCount": 1,
+        "generatedWordCount": generated_word_count,
+        "chapterWordCountTarget": 2500,
+        "targetWordCountMin": 2500,
+        "targetWordCountMax": 2500,
+        "acceptWordCountMin": 1875,
+        "acceptWordCountMax": 3125,
+        "chapterContentMode": "multi_fragment",
+        "structurePassed": True,
+        "belowBudget": below_budget,
+        "overBudget": over_budget,
+        "fragments": [
+            {
+                "order": 1,
+                "path": "chapters/第1章/001.md",
+                "exists": True,
+                "writeMode": "replace",
+                "baselineWordCount": 0,
+                "generatedWordCount": generated_word_count,
+                "status": "failed" if below_budget else "passed",
+            }
+        ],
+        "message": "passed" if passed else "needs correction",
+    }
+
+
+def _run_story_generation_sequence(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-) -> None:
+    *,
+    tool_outcomes: list[bool | None],
+    validation_results: list[dict[str, Any]],
+) -> dict[str, Any]:
     class RuntimeService:
-        def __init__(self) -> None:
+        def __init__(self, outcomes: list[bool | None]) -> None:
             self.calls = 0
+            self.outcomes = outcomes
+            self.prompts: list[str] = []
+            self.contracts: list[dict[str, Any]] = []
 
-        async def stream_events(self, **_kwargs: Any):
+        async def stream_events(self, **kwargs: Any):
             self.calls += 1
+            self.prompts.append(str(kwargs.get("prompt") or ""))
+            self.contracts.append(kwargs.get("turn_contract") or {})
             yield "AgentStarted", {
                 "_type": "AgentStarted",
                 "_version": 1,
@@ -605,60 +754,29 @@ def test_failed_post_run_validation_continues_in_same_execution_before_terminal(
                 "llmModel": "test-model",
             }
             yield "TextChunk", {"_type": "TextChunk", "_version": 1, "content": f"attempt-{self.calls}"}
-            if self.calls >= 2:
+            outcome = self.outcomes[self.calls - 1] if self.calls <= len(self.outcomes) else None
+            if outcome is not None:
                 yield "ToolDone", {
                     "_type": "ToolDone",
                     "_version": 1,
                     "tool_name": "StorydexApplyStoryIncrement",
-                    "tool_call_id": "write-1",
-                    "is_error": False,
+                    "tool_call_id": f"write-{self.calls}",
+                    "is_error": not outcome,
                 }
             yield "AgentCompleted", {"_type": "AgentCompleted", "_version": 1, "total_tokens": 1}
 
     class ProjectService:
-        def __init__(self) -> None:
+        def __init__(self, results: list[dict[str, Any]]) -> None:
             self.validations = 0
+            self.results = results
 
         def read_project_settings(self, _root: Path) -> dict[str, Any]:
             return {"agentCommitPromptEnabled": False}
 
         def validate_story_generation_turn(self, _root: Path, _contract: dict[str, Any]) -> dict[str, Any]:
+            index = min(self.validations, len(self.results) - 1)
             self.validations += 1
-            passed = self.validations >= 2
-            return {
-                "_type": "StoryGenerationValidation",
-                "_version": 1,
-                "applicable": True,
-                "passed": passed,
-                "status": "success" if passed else "error",
-                "algorithm": STORY_WORD_COUNT_ALGORITHM,
-                "countingRule": "count every non-whitespace Unicode character",
-                "exact": True,
-                "wordCountScope": "chapter",
-                "fragmentCount": 1,
-                "generatedWordCount": 100 if passed else 90,
-                "chapterWordCountTarget": 100,
-                "targetWordCountMin": 100,
-                "targetWordCountMax": 100,
-                "acceptWordCountMin": 75,
-                "acceptWordCountMax": 125,
-                "chapterContentMode": "multi_fragment",
-                "structurePassed": True,
-                "fragments": [
-                    {
-                        "order": 1,
-                        "path": "chapters/第1章/001.md",
-                        "exists": passed,
-                        "writeMode": "replace",
-                        "baselineWordCount": 0,
-                        "generatedWordCount": 100 if passed else 90,
-                        "targetWordCount": 100,
-                        "difference": 0 if passed else -10,
-                        "status": "passed" if passed else "failed",
-                    }
-                ],
-                "message": "passed" if passed else "needs correction",
-            }
+            return json.loads(json.dumps(self.results[index], ensure_ascii=False))
 
     class GitService:
         def finish_turn(self, _snapshot: AgentGitSnapshot, **_kwargs: Any) -> dict[str, Any]:
@@ -699,8 +817,8 @@ def test_failed_post_run_validation_continues_in_same_execution_before_terminal(
             if context.persist_trace and isinstance(payload.get("record"), dict):
                 context.persist_trace(payload["record"])
 
-    runtime = RuntimeService()
-    project = ProjectService()
+    runtime = RuntimeService(tool_outcomes)
+    project = ProjectService(validation_results)
     calibration = CalibrationService()
     handle = Handle(runtime)
     monkeypatch.setattr(routes, "get_storydex_coomi_agent_service", lambda: runtime)
@@ -727,9 +845,18 @@ def test_failed_post_run_validation_continues_in_same_execution_before_terminal(
         "intentFrame": {"primary": "story_generation"},
         "turnPlan": {
             "fragmentCount": 1,
-            "fragmentWordCount": 100,
-            "chapterWordCountTarget": 100,
-            "wordCountPolicy": {"scope": "chapter", "target": 100},
+            "fragmentWordCount": 2500,
+            "chapterWordCountTarget": 2500,
+            "chapterContentMode": "multi_fragment",
+            "wordCountPolicy": {"scope": "chapter", "target": 2500},
+            "fragmentTargets": [
+                {
+                    "order": 1,
+                    "path": "chapters/第1章/001.md",
+                    "writeMode": "replace",
+                    "baselineWordCount": 0,
+                }
+            ],
         },
     }
 
@@ -742,7 +869,7 @@ def test_failed_post_run_validation_continues_in_same_execution_before_terminal(
                 session_id="session-story",
                 active_file="",
                 workspace_root=tmp_path,
-                story_generation={"fragmentCount": 1, "fragmentWordCount": 100},
+                story_generation={"fragmentCount": 1, "chapterWordCountTarget": 2500},
                 turn_contract=turn_contract,
                 git_snapshot=AgentGitSnapshot(workspace_root=tmp_path, available=False),
                 cancellation_token=routes._CancellationToken(),
@@ -750,19 +877,110 @@ def test_failed_post_run_validation_continues_in_same_execution_before_terminal(
             )
         ]
 
-    packets = asyncio.run(collect())
+    return {
+        "packets": asyncio.run(collect()),
+        "runtime": runtime,
+        "project": project,
+        "calibration": calibration,
+        "handle": handle,
+    }
+
+
+def test_below_budget_gets_one_correction_and_still_short_write_can_finish(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    result = _run_story_generation_sequence(
+        monkeypatch,
+        tmp_path,
+        tool_outcomes=[False, True],
+        validation_results=[
+            _chapter_validation_payload(1600, passed=False, below_budget=True),
+            _chapter_validation_payload(1700, passed=False, below_budget=True),
+        ],
+    )
+    packets = result["packets"]
     event_names = [name for name, _payload in packets]
     validations = [payload for name, payload in packets if name == "StoryGenerationValidation"]
     continuations = [payload for name, payload in packets if name == "ContinuationStarted"]
-    assert runtime.calls == 2
-    assert project.validations == 2
+    assert result["runtime"].calls == 2
+    assert result["project"].validations == 2
     assert [item["passed"] for item in validations] == [False, True]
+    assert validations[1]["belowBudget"] is True
+    assert validations[1]["correctionApplied"] is True
+    assert validations[1]["maximumCorrectionAttempts"] == 1
     assert len(continuations) == 1
     assert continuations[0]["continuationMode"] == "story_generation_correction"
+    assert continuations[0]["maximumCorrectionAttempts"] == 1
+    assert "本章当前约 1600 字" in result["runtime"].prompts[1]
+    assert "还需补写约 275 字" in result["runtime"].prompts[1]
+    correction_policy = result["runtime"].contracts[1]["turnPlan"]["wordCountPolicy"]
+    assert correction_policy["allowBelowMinimumAfterCorrection"] is True
     assert event_names.count("AgentCompleted") == 1
     assert "AgentError" not in event_names
-    assert handle.finalize_calls == 1
-    assert handle.runtime_calls_at_finalize == 2
-    assert len(calibration.calls) == 1
-    assert calibration.calls[0]["provider"] == "test-provider"
-    assert calibration.calls[0]["model"] == "test-model"
+    assert result["handle"].finalize_calls == 1
+    assert result["handle"].runtime_calls_at_finalize == 2
+    assert len(result["calibration"].calls) == 1
+    assert result["calibration"].calls[0]["provider"] == "test-provider"
+    assert result["calibration"].calls[0]["model"] == "test-model"
+
+
+def test_over_budget_finishes_without_correction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    result = _run_story_generation_sequence(
+        monkeypatch,
+        tmp_path,
+        tool_outcomes=[True],
+        validation_results=[
+            _chapter_validation_payload(3300, passed=True, below_budget=False, over_budget=True),
+        ],
+    )
+    packets = result["packets"]
+    validations = [payload for name, payload in packets if name == "StoryGenerationValidation"]
+    assert result["runtime"].calls == 1
+    assert len(validations) == 1
+    assert validations[0]["passed"] is True
+    assert validations[0]["overBudget"] is True
+    assert validations[0]["correctionApplied"] is False
+    assert not [payload for name, payload in packets if name == "ContinuationStarted"]
+    assert not [payload for name, payload in packets if name == "AgentError"]
+
+
+def test_correction_segment_cannot_reuse_previous_segment_successful_write(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    result = _run_story_generation_sequence(
+        monkeypatch,
+        tmp_path,
+        tool_outcomes=[True, None],
+        validation_results=[
+            _chapter_validation_payload(1600, passed=False, below_budget=True),
+            _chapter_validation_payload(1700, passed=False, below_budget=True),
+        ],
+    )
+    packets = result["packets"]
+    validations = [payload for name, payload in packets if name == "StoryGenerationValidation"]
+    errors = [payload for name, payload in packets if name == "AgentError"]
+    assert result["runtime"].calls == 2
+    assert [item["passed"] for item in validations] == [False, False]
+    assert validations[0]["writeToolApplied"] is True
+    assert validations[1]["writeToolApplied"] is False
+    assert validations[1]["correctionApplied"] is False
+    assert len(errors) == 1
+    assert errors[0]["error_type"] == "StoryGenerationValidationFailed"
+    assert len([payload for name, payload in packets if name == "ContinuationStarted"]) == 1
+
+
+def test_only_chapter_below_budget_requests_length_correction() -> None:
+    assert routes._story_generation_needs_length_correction(
+        {"wordCountScope": "chapter", "belowBudget": True, "overBudget": False}
+    )
+    assert not routes._story_generation_needs_length_correction(
+        {"wordCountScope": "chapter", "belowBudget": False, "overBudget": True}
+    )
+    assert not routes._story_generation_needs_length_correction(
+        {"wordCountScope": "fragment", "belowBudget": True, "overBudget": False}
+    )
