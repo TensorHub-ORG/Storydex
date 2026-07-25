@@ -1355,6 +1355,55 @@ def _story_generation_correction_prompt(
     )
 
 
+def _rebuild_story_generation_contract_for_correction(
+    workspace_root: Path,
+    turn_contract: Dict[str, Any],
+    validation: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Refresh append baselines before a correction reuses the turn contract.
+
+    A successful append advances the file on disk. Reusing the original
+    ``baselineWordCount`` would make the duplicate-append guard reject every
+    correction attempt. Only append targets in chapters reported by the failed
+    validation are refreshed; the guard itself remains unchanged.
+    """
+
+    next_contract = copy.deepcopy(turn_contract) if isinstance(turn_contract, dict) else {}
+    turn_plan = next_contract.get("turnPlan") if isinstance(next_contract.get("turnPlan"), dict) else {}
+    targets = turn_plan.get("fragmentTargets") if isinstance(turn_plan.get("fragmentTargets"), list) else []
+    if not targets:
+        return next_contract
+
+    failed_chapters: set[str] = set()
+    validation_fragments = validation.get("fragments") if isinstance(validation.get("fragments"), list) else []
+    for item in validation_fragments:
+        if not isinstance(item, dict) or str(item.get("status") or "") == "passed":
+            continue
+        relative_path = str(item.get("path") or "").strip().replace("\\", "/").lstrip("/")
+        if relative_path:
+            failed_chapters.add(Path(relative_path).parent.as_posix())
+
+    root = Path(workspace_root).resolve()
+    for raw_target in targets:
+        if not isinstance(raw_target, dict) or str(raw_target.get("writeMode") or "replace") != "append":
+            continue
+        relative_path = str(raw_target.get("path") or "").strip().replace("\\", "/").lstrip("/")
+        if not relative_path:
+            continue
+        chapter_path = Path(relative_path).parent.as_posix()
+        if failed_chapters and chapter_path not in failed_chapters:
+            continue
+        candidate = (root / relative_path).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            continue
+        raw_target["baselineWordCount"] = (
+            story_project_service.count_story_file_words(candidate) if candidate.is_file() else 0
+        )
+    return next_contract
+
+
 def _has_successful_story_generation_write(events: List[Dict[str, Any]]) -> bool:
     for item in events:
         if item.get("event") != "ToolDone":
@@ -2090,6 +2139,11 @@ async def _stream_coomi_sse_worker(
                             if not bool(validation_packet.get("passed")):
                                 if story_correction_attempts < _STORY_GENERATION_MAX_CORRECTIONS:
                                     story_correction_attempts += 1
+                                    turn_contract = _rebuild_story_generation_contract_for_correction(
+                                        workspace_root,
+                                        turn_contract,
+                                        validation_packet,
+                                    )
                                     segment_index += 1
                                     next_segment_id = f"{trace_id}-segment-{segment_index + 1}"
                                     continuation_packet = {

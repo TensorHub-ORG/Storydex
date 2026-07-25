@@ -332,6 +332,67 @@ def test_single_file_continuation_uses_baseline_and_cannot_append_twice(tmp_path
     assert service.count_story_file_words(tmp_path / target_path) == 200
 
 
+def test_append_correction_rebuilds_baseline_without_disabling_duplicate_guard(tmp_path: Path) -> None:
+    service = get_story_project_service()
+    initial = _story_contract(
+        tmp_path,
+        fragment_word_count=2200,
+        template_id=SINGLE_FILE_CHAPTER_TEMPLATE_ID,
+    )
+    target_path = initial["turnPlan"]["fragmentTargets"][0]["path"]
+    target = tmp_path / target_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("甲" * 2200, encoding="utf-8")
+
+    continuation = _story_contract(
+        tmp_path,
+        fragment_word_count_min=2000,
+        fragment_word_count_max=2500,
+        template_id=SINGLE_FILE_CHAPTER_TEMPLATE_ID,
+        active_file=target_path,
+    )
+    assert continuation["turnPlan"]["fragmentTargets"][0]["baselineWordCount"] == 2200
+
+    first_result = service.apply_story_generation_increment(
+        tmp_path,
+        {"fragments": [{"text": "乙" * 1999}]},
+        generation_contract=continuation,
+    )
+    first_validation = service.validate_story_generation_turn(tmp_path, continuation)
+    assert first_result["ok"] is True
+    assert first_validation["passed"] is False
+    assert service.count_story_file_words(target) == 4199
+
+    corrected_contract = routes._rebuild_story_generation_contract_for_correction(
+        tmp_path,
+        continuation,
+        first_validation,
+    )
+    corrected_target = corrected_contract["turnPlan"]["fragmentTargets"][0]
+    assert corrected_target["baselineWordCount"] == 4199
+    assert continuation["turnPlan"]["fragmentTargets"][0]["baselineWordCount"] == 2200
+
+    corrected = service.apply_story_generation_increment(
+        tmp_path,
+        {"fragments": [{"text": "丙" * 2200}]},
+        generation_contract=corrected_contract,
+    )
+    corrected_validation = service.validate_story_generation_turn(tmp_path, corrected_contract)
+    duplicate = service.apply_story_generation_increment(
+        tmp_path,
+        {"fragments": [{"text": "丁" * 2200}]},
+        generation_contract=corrected_contract,
+    )
+    final_text = target.read_text(encoding="utf-8")
+    assert corrected["ok"] is True
+    assert corrected_validation["passed"] is True
+    assert duplicate["ok"] is False
+    assert duplicate["wordCountValidation"]["fragments"][0]["baselineMatches"] is False
+    assert service.count_story_file_words(target) == 6399
+    assert final_text.count("乙") == 1999
+    assert final_text.count("丙") == 2200
+
+
 def test_plain_write_and_edit_tools_cannot_bypass_story_generation_contract(tmp_path: Path) -> None:
     contract = {"intentFrame": {"primary": "story_generation"}}
     write_result = StorydexWriteTool(workspace_root=tmp_path, turn_contract=contract).run(
