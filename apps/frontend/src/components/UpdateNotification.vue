@@ -3,40 +3,59 @@
     <aside
       v-if="isVisible"
       class="update-notification"
+      :class="`tone-${statusTone}`"
       data-testid="update-notification"
       aria-live="polite"
       :aria-busy="actionBusy"
     >
+      <span class="update-notification-icon" aria-hidden="true">
+        <span
+          class="material-symbols-rounded"
+          :class="{ bounce: updaterState.status === 'downloading' }"
+          :style="{ fontSize: `${iconFontSize}px` }"
+        >{{ iconName }}</span>
+      </span>
+
+      <div class="update-notification-copy">
+        <strong>{{ title }}</strong>
+        <span class="update-notification-detail">{{ detail }}</span>
+
+        <button
+          v-if="isError && hasErrorDetail"
+          class="update-notification-error-toggle"
+          type="button"
+          :aria-expanded="errorExpanded"
+          @click="errorExpanded = !errorExpanded"
+        >
+          <span class="material-symbols-rounded" aria-hidden="true">{{ errorExpanded ? "expand_less" : "expand_more" }}</span>
+          {{ errorExpanded ? "收起详情" : "展开详情" }}
+        </button>
+        <pre v-if="isError && hasErrorDetail && errorExpanded" class="update-notification-error-detail">{{ updaterState.error }}</pre>
+      </div>
+
+      <div
+        v-if="showProgress"
+        class="update-notification-progress"
+        role="progressbar"
+        :aria-valuenow="progressPercent"
+        aria-valuemin="0"
+        aria-valuemax="100"
+      >
+        <span class="update-notification-progress-track">
+          <span class="update-notification-progress-fill" :style="{ width: `${progressPercent}%` }"></span>
+        </span>
+        <small>{{ progressPercent.toFixed(0) }}%</small>
+      </div>
+
       <button
+        v-else-if="showAction"
         class="update-notification-action"
         type="button"
         :disabled="actionDisabled"
         :aria-label="actionLabel"
         @click="handleUpdateClick"
       >
-        <span class="update-notification-icon" aria-hidden="true">
-          <span class="material-symbols-rounded">{{ iconName }}</span>
-        </span>
-        <span class="update-notification-copy">
-          <strong>{{ title }}</strong>
-          <span class="update-notification-detail">{{ detail }}</span>
-          <span
-            v-if="showProgress"
-            class="update-notification-progress"
-            role="progressbar"
-            :aria-valuenow="progressPercent"
-            aria-valuemin="0"
-            aria-valuemax="100"
-          >
-            <span class="update-notification-progress-track">
-              <span :style="{ width: `${progressPercent}%` }"></span>
-            </span>
-            <small>{{ progressPercent.toFixed(0) }}%</small>
-          </span>
-        </span>
-        <span v-if="showActionIcon" class="material-symbols-rounded update-notification-arrow" aria-hidden="true">
-          arrow_forward
-        </span>
+        {{ actionText }}
       </button>
 
       <button
@@ -73,6 +92,7 @@ const updaterState = ref<StorydexDesktopUpdaterState>(defaultUpdaterState());
 const dismissedVersion = ref("");
 const updateRequested = ref(false);
 const actionBusy = ref(false);
+const errorExpanded = ref(false);
 const autoCheckStarted = ref(false);
 const checkInFlight = ref(false);
 const installStarted = ref(false);
@@ -83,7 +103,7 @@ const updaterBridge = computed(() => window.storydexDesktop?.updater);
 const updateVersionKey = computed(() => updaterState.value.availableVersion.trim() || "unknown");
 const hasUpdateState = computed(() => {
   return UPDATE_STATUSES.has(updaterState.value.status)
-    || (updateRequested.value && updaterState.value.status === "error" && Boolean(updaterState.value.availableVersion));
+    || (updaterState.value.status === "error" && Boolean(updaterState.value.availableVersion));
 });
 const isVisible = computed(() => {
   return Boolean(updaterBridge.value) && hasUpdateState.value && dismissedVersion.value !== updateVersionKey.value;
@@ -94,6 +114,32 @@ const showProgress = computed(() => {
 const progressPercent = computed(() => {
   const percent = Number(updaterState.value.progress?.percent || 0);
   return Math.min(100, Math.max(0, Number.isFinite(percent) ? percent : 0));
+});
+function formatBytes(bytes: number): string {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value <= 0) {
+    return "0 MB";
+  }
+  const mb = value / (1024 * 1024);
+  if (mb < 1) {
+    return `${mb.toFixed(2)} MB`;
+  }
+  if (mb < 100) {
+    return `${mb.toFixed(1)} MB`;
+  }
+  return `${Math.round(mb)} MB`;
+}
+// 下载中显示已传输/总大小，如 “12.3 MB / 48.5 MB”。缺少 total 时只显示已下载量。
+const downloadedLabel = computed(() => {
+  const progress = updaterState.value.progress;
+  if (!progress) {
+    return "";
+  }
+  const transferred = formatBytes(progress.transferred);
+  if (Number(progress.total) > 0) {
+    return `${transferred} / ${formatBytes(progress.total)}`;
+  }
+  return transferred;
 });
 const actionDisabled = computed(() => {
   return actionBusy.value || updaterState.value.status === "downloading";
@@ -106,13 +152,27 @@ const showActionIcon = computed(() => {
 const iconName = computed(() => {
   switch (updaterState.value.status) {
     case "downloading":
-      return "downloading";
+      return "arrow_downward";
     case "downloaded":
       return "system_update_alt";
     case "error":
       return "refresh";
     default:
       return "system_update_alt";
+  }
+});
+// 不同图标在同一 font-size 下的实际墨迹占比差异很大（system_update_alt 几乎填满 em 盒，
+// arrow_downward 只占约 2/3），导致视觉上大小明显不一致。按各字形的墨迹占比反算 font-size，
+// 使它们的可见尺寸都落在约 16px，保证四个状态图标观感一致。
+const iconFontSize = computed(() => {
+  switch (updaterState.value.status) {
+    case "downloading":
+      return 24; // arrow_downward，墨迹占比约 0.667
+    case "error":
+      return 23; // refresh，墨迹占比约 0.683
+    case "downloaded":
+    default:
+      return 19; // system_update_alt，墨迹占比约 0.85
   }
 });
 const title = computed(() => {
@@ -131,14 +191,42 @@ const title = computed(() => {
 const detail = computed(() => {
   switch (updaterState.value.status) {
     case "downloading":
-      return "下载完成后将自动进入安装。";
+      return downloadedLabel.value || "正在下载更新…";
     case "downloaded":
       return "点击安装并重启 Storydex。";
     case "error":
-      return "点击重试更新。";
+      return errorSummary.value;
     default:
       return "点击立即下载并安装。";
   }
+});
+const isError = computed(() => updaterState.value.status === "error");
+// 把原始报错归类成一句用户能看懂的话，详细堆栈藏在“展开详情”里。
+const errorSummary = computed(() => {
+  const raw = updaterState.value.error.trim();
+  if (!raw) {
+    return "发生未知错误，请重试。";
+  }
+  const lower = raw.toLowerCase();
+  if (/network|net::|econn|etimedout|timed out|enotfound|dns|socket|offline|超时|网络|连接/.test(lower)) {
+    return "网络连接异常，请检查网络后重试。";
+  }
+  if (/signature|sha512|checksum|校验|签名/.test(lower)) {
+    return "更新包校验失败，请重试。";
+  }
+  if (/permission|eacces|eperm|access denied|权限/.test(lower)) {
+    return "权限不足，无法完成更新。";
+  }
+  if (/enospc|disk|space|磁盘|空间/.test(lower)) {
+    return "磁盘空间不足，请清理后重试。";
+  }
+  const firstLine = raw.split(/\r?\n/)[0].trim();
+  return firstLine.length > 48 ? `${firstLine.slice(0, 48)}…` : firstLine;
+});
+// 只有当原始报错比归类摘要更详细时才提供“展开详情”。
+const hasErrorDetail = computed(() => {
+  const raw = updaterState.value.error.trim();
+  return Boolean(raw) && raw !== errorSummary.value;
 });
 const actionLabel = computed(() => {
   switch (updaterState.value.status) {
@@ -152,12 +240,40 @@ const actionLabel = computed(() => {
       return "下载并安装 Storydex 更新";
   }
 });
+const actionText = computed(() => {
+  switch (updaterState.value.status) {
+    case "downloaded":
+      return "安装并重启";
+    case "error":
+      return "重试";
+    case "downloading":
+      return "下载中";
+    default:
+      return "下载更新";
+  }
+});
+const statusTone = computed(() => {
+  switch (updaterState.value.status) {
+    case "error":
+      return "danger";
+    case "downloaded":
+      return "success";
+    case "downloading":
+      return "progress";
+    default:
+      return "accent";
+  }
+});
+const showAction = computed(() => updaterState.value.status !== "downloading");
 
 function applyUpdaterState(nextState: StorydexDesktopUpdaterState | null | undefined): void {
   if (!nextState || typeof nextState !== "object") {
     return;
   }
   updaterState.value = { ...updaterState.value, ...nextState };
+  if (updaterState.value.status !== "error") {
+    errorExpanded.value = false;
+  }
   if (updaterState.value.status === "downloaded" && updateRequested.value) {
     void installDownloadedUpdate();
   }
@@ -285,102 +401,192 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .update-notification {
+  --tone: var(--accent);
+  --tone-soft: var(--accent-soft);
   position: fixed;
   left: 60px;
   bottom: calc(var(--footer-height) + 12px);
   z-index: 90;
-  width: min(360px, calc(100vw - 72px));
-  min-height: 78px;
-  display: flex;
-  overflow: hidden;
-  border: 1px solid var(--border-strong);
-  border-left: 3px solid var(--accent);
-  border-radius: var(--radius-lg);
+  width: min(348px, calc(100vw - 72px));
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  column-gap: 13px;
+  row-gap: 12px;
+  padding: 16px 18px 16px 18px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
   background: var(--bg-card);
   color: var(--text-main);
   box-shadow: var(--shadow-md);
+  overflow: hidden;
 }
 
-.update-notification-action {
-  min-width: 0;
-  flex: 1 1 auto;
-  display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 36px 12px 12px;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  text-align: left;
-  cursor: pointer;
+/* 左侧状态色竖条 */
+.update-notification::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  background: var(--tone);
 }
 
-.update-notification-action:hover:not(:disabled) {
-  background: var(--bg-hover);
+.update-notification.tone-info {
+  --tone: var(--info);
+  --tone-soft: rgba(43, 109, 225, 0.12);
 }
 
-.update-notification-action:disabled {
-  cursor: default;
+.update-notification.tone-success {
+  --tone: var(--success);
+  --tone-soft: rgba(31, 138, 83, 0.14);
 }
 
+.update-notification.tone-danger {
+  --tone: var(--danger);
+  --tone-soft: rgba(192, 63, 54, 0.14);
+}
+
+/* 图标徽章：第一列，跨到文案行 */
 .update-notification-icon {
-  width: 28px;
-  height: 28px;
+  grid-column: 1;
+  grid-row: 1;
+  width: 38px;
+  height: 38px;
   display: grid;
   place-items: center;
-  border-radius: 50%;
-  background: var(--accent-soft);
-  color: var(--accent);
+  border-radius: 11px;
+  background: var(--tone-soft);
+  color: var(--tone);
 }
 
 .update-notification-icon .material-symbols-rounded {
-  font-size: 18px;
+  /* 字号按各图标墨迹占比在模板里逐状态归一，opsz 自动跟随字号 */
+  font-variation-settings: "wght" 500, "GRAD" 0, "FILL" 0;
+  font-optical-sizing: auto;
 }
 
+.update-notification-icon .bounce {
+  animation: update-notification-bounce 1.1s ease-in-out infinite;
+}
+
+@keyframes update-notification-bounce {
+  0%,
+  100% {
+    transform: translateY(-3px);
+  }
+  50% {
+    transform: translateY(3px);
+  }
+}
+
+/* 文案区：第二列第一行，与图标垂直居中对齐 */
 .update-notification-copy {
+  grid-column: 2;
+  grid-row: 1;
+  align-self: center;
   min-width: 0;
   display: grid;
   gap: 3px;
+  padding-right: 24px;
 }
 
-.update-notification-copy strong,
-.update-notification-detail {
+.update-notification-copy strong {
   min-width: 0;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.35;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.update-notification-copy strong {
-  font-size: 13px;
-  font-weight: 700;
-}
-
 .update-notification-detail {
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
-.update-notification-arrow {
-  color: var(--accent);
-  font-size: 18px;
+/* 报错“展开详情”开关 */
+.update-notification-error-toggle {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 2px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--tone);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.update-notification-error-toggle:hover {
+  text-decoration: underline;
+}
+
+.update-notification-error-toggle .material-symbols-rounded {
+  font-size: 16px;
+}
+
+/* 展开后的原始报错，等宽字体、可滚动、不撑破卡片 */
+.update-notification-error-detail {
+  margin: 4px 0 0;
+  max-height: 96px;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--tone-soft);
+  color: var(--text-soft);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 操作行：跨两列，靠右 */
+.update-notification-action {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  justify-self: end;
+  min-height: 32px;
+  padding: 0 20px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--tone);
+  color: var(--accent-contrast);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 140ms ease, opacity 140ms ease;
+}
+
+.update-notification-action:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+
+.update-notification-action:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 .update-notification-close {
   position: absolute;
-  top: 5px;
-  right: 5px;
-  width: 24px;
-  height: 24px;
+  top: 10px;
+  right: 10px;
+  width: 22px;
+  height: 22px;
   display: grid;
   place-items: center;
   padding: 0;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: 6px;
   background: transparent;
-  color: var(--text-muted);
+  color: var(--text-faint);
   cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
 }
 
 .update-notification-close:hover {
@@ -389,49 +595,53 @@ onBeforeUnmount(() => {
 }
 
 .update-notification-close .material-symbols-rounded {
-  font-size: 17px;
+  font-size: 16px;
 }
 
+/* 进度：跨两列 */
 .update-notification-progress {
-  min-width: 0;
+  grid-column: 1 / -1;
+  grid-row: 2;
+  min-height: 32px;
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 10px;
 }
 
 .update-notification-progress-track {
-  height: 4px;
+  height: 6px;
   flex: 1 1 auto;
   overflow: hidden;
   border-radius: 999px;
   background: var(--bg-card-muted);
 }
 
-.update-notification-progress-track span {
+.update-notification-progress-fill {
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: var(--accent);
-  transition: width 160ms ease;
+  background: var(--tone);
+  transition: width 200ms ease;
 }
 
 .update-notification-progress small {
-  min-width: 30px;
-  color: var(--text-muted);
-  font-size: 10px;
+  min-width: 32px;
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
   text-align: right;
 }
 
 .update-notification-enter-active,
 .update-notification-leave-active {
-  transition: opacity 160ms ease, transform 160ms ease;
+  transition: opacity 180ms ease, transform 180ms ease;
 }
 
 .update-notification-enter-from,
 .update-notification-leave-to {
   opacity: 0;
-  transform: translateY(8px);
+  transform: translateY(10px) scale(0.98);
 }
 
 @media (max-width: 560px) {
