@@ -37,6 +37,7 @@ from services.git_service import get_git_service
 from services.llm_replay import get_llm_metrics, llm_trace, reset_llm_metrics
 from services.project_service import get_project_service
 from services.story_project_service import get_story_project_service
+from services.story_length_calibration_service import get_story_length_calibration_service
 from services.storydex_intent_service import get_storydex_intent_service
 from services.storydex_orchestration_service import get_storydex_orchestration_service
 from services.trace_history_service import get_trace_history_service
@@ -51,6 +52,7 @@ storydex_orchestration_service = get_storydex_orchestration_service()
 storydex_intent_service = get_storydex_intent_service()
 git_service = get_git_service()
 story_project_service = get_story_project_service()
+story_length_calibration_service = get_story_length_calibration_service()
 execution_coordinator = get_execution_coordinator()
 followup_mailbox_service = get_followup_mailbox_service()
 
@@ -1907,6 +1909,8 @@ async def _stream_coomi_sse_worker(
                 segment_prompt = prompt
                 segment_index = 0
                 story_correction_attempts = 0
+                story_generation_provider = ""
+                story_generation_model = ""
                 while not execution_handle.is_cancelled and not cancellation_token.is_cancelled():
                     segment_id = f"{trace_id}-segment-{segment_index + 1}"
                     pending_steer: Dict[str, Any] | None = None
@@ -2043,6 +2047,13 @@ async def _stream_coomi_sse_worker(
                                     ),
                                 )
                             packet = dict(payload)
+                            if event_name == "AgentStarted":
+                                story_generation_provider = str(
+                                    packet.get("llmProvider") or packet.get("llm_provider") or ""
+                                )
+                                story_generation_model = str(
+                                    packet.get("llmModel") or packet.get("llm_model") or ""
+                                )
                             if event_name == "TextChunk":
                                 packet["content"] = _strip_visible_tool_text(str(packet.get("content") or ""))
                                 if not packet["content"]:
@@ -2180,6 +2191,14 @@ async def _stream_coomi_sse_worker(
                                 )
                             )
                             yield _encode_sse("StoryGenerationValidation", validation_packet)
+                            if validation_passed:
+                                story_length_calibration_service.record_generation_result(
+                                    workspace_root,
+                                    turn_contract=turn_contract,
+                                    validation=validation_packet,
+                                    provider=story_generation_provider,
+                                    model=story_generation_model,
+                                )
                             if not bool(validation_packet.get("passed")):
                                 if story_correction_attempts < _STORY_GENERATION_MAX_CORRECTIONS:
                                     story_correction_attempts += 1
