@@ -542,6 +542,8 @@ export const useWorkspaceStore = defineStore("workspace", {
           segmentExtension: patch.segmentExtension ?? this.storySettings.segmentExtension,
           maxSegmentsPerChapter: patch.maxSegmentsPerChapter ?? this.storySettings.maxSegmentsPerChapter,
           storyFragmentCount: patch.storyFragmentCount ?? this.storySettings.storyFragmentCount,
+          chapterWordCountTarget:
+            patch.chapterWordCountTarget ?? this.storySettings.chapterWordCountTarget,
           storyFragmentWordCount: patch.storyFragmentWordCount ?? this.storySettings.storyFragmentWordCount,
           storyFragmentWordCountMin:
             patch.storyFragmentWordCountMin ?? this.storySettings.storyFragmentWordCountMin,
@@ -1387,6 +1389,8 @@ export const useWorkspaceStore = defineStore("workspace", {
         chapter_segment_limit: payload.maxSegmentsPerChapter,
         storyFragmentCount: payload.storyFragmentCount,
         story_fragment_count: payload.storyFragmentCount,
+        chapterWordCountTarget: payload.chapterWordCountTarget,
+        chapter_word_count_target: payload.chapterWordCountTarget,
         storyFragmentWordCount: payload.storyFragmentWordCount,
         story_fragment_word_count: payload.storyFragmentWordCount,
         storyFragmentWordCountMin: payload.storyFragmentWordCountMin,
@@ -1792,8 +1796,9 @@ function defaultStoryProjectSettings(settingsPath = ".storydex/config/project-se
       segmentExtension: ".md",
       maxSegmentsPerChapter: 3,
       storyFragmentCount: 1,
+      chapterWordCountTarget: 2500,
       storyFragmentWordCount: 2500,
-      storyFragmentWordCountMin: 2000,
+      storyFragmentWordCountMin: 2500,
       storyFragmentWordCountMax: 2500,
       storyChapterTemplateId: "default_chapter_directory",
       autoUpdateVariables: false,
@@ -1828,6 +1833,7 @@ function normalizeStorySettingsPayload(
   const storyFragmentCount = normalizeStoryFragmentCount(payload.storyFragmentCount);
   const { min: storyFragmentWordCountMin, max: storyFragmentWordCountMax } =
     resolveStoryFragmentWordCountRange(payload);
+  const chapterWordCountTarget = resolveChapterWordCountTarget(payload);
   const storyFragmentWordCount = storyFragmentWordCountMax;
   const storyChapterTemplateId = normalizeStoryChapterTemplateId(
     payload.storyChapterTemplateId ?? payload.story_chapter_template_id
@@ -1851,6 +1857,8 @@ function normalizeStorySettingsPayload(
     chapter_segment_limit: maxSegmentsPerChapter,
     storyFragmentCount,
     story_fragment_count: storyFragmentCount,
+    chapterWordCountTarget,
+    chapter_word_count_target: chapterWordCountTarget,
     storyFragmentWordCount,
     story_fragment_word_count: storyFragmentWordCount,
     storyFragmentWordCountMin,
@@ -1901,23 +1909,11 @@ function normalizeStorySettingsResponse(
       ?? currentSettings?.contextConcisionMinCalls,
     1
   );
-  const responseWordCountRange = resolveStoryFragmentWordCountRange({
-    storyFragmentWordCountMin:
-      payload.storyFragmentWordCountMin
-        ?? payload.story_fragment_word_count_min
-        ?? fallbackSettings?.storyFragmentWordCountMin
-        ?? currentSettings?.storyFragmentWordCountMin,
-    storyFragmentWordCountMax:
-      payload.storyFragmentWordCountMax
-        ?? payload.story_fragment_word_count_max
-        ?? fallbackSettings?.storyFragmentWordCountMax
-        ?? currentSettings?.storyFragmentWordCountMax,
-    storyFragmentWordCount:
-      payload.storyFragmentWordCount
-        ?? payload.story_fragment_word_count
-        ?? fallbackSettings?.storyFragmentWordCount
-        ?? currentSettings?.storyFragmentWordCount
-  });
+  const responseWordCountSource = hasStoryWordCountPayload(payload)
+    ? payload
+    : fallbackSettings ?? currentSettings ?? {};
+  const responseWordCountRange = resolveStoryFragmentWordCountRange(responseWordCountSource);
+  const chapterWordCountTarget = resolveChapterWordCountTarget(responseWordCountSource);
   return {
     segmentExtension: normalizeStorySegmentExtension(payload.segmentExtension ?? payload.storySegmentFormat),
       maxSegmentsPerChapter: normalizeStoryMaxSegmentsPerChapter(
@@ -1934,6 +1930,7 @@ function normalizeStorySettingsResponse(
           ?? fallbackSettings?.storyFragmentCount
           ?? currentSettings?.storyFragmentCount
       ),
+      chapterWordCountTarget,
       storyFragmentWordCount: responseWordCountRange.max,
       storyFragmentWordCountMin: responseWordCountRange.min,
       storyFragmentWordCountMax: responseWordCountRange.max,
@@ -2034,14 +2031,8 @@ function normalizeStorySettingsFromProjectFile(
       ?? storySettings.context_concision_min_calls,
     1
   );
-  const projectWordCountRange = resolveStoryFragmentWordCountRange({
-    storyFragmentWordCountMin:
-      storySettings.storyFragmentWordCountMin ?? storySettings.story_fragment_word_count_min,
-    storyFragmentWordCountMax:
-      storySettings.storyFragmentWordCountMax ?? storySettings.story_fragment_word_count_max,
-    storyFragmentWordCount:
-      storySettings.storyFragmentWordCount ?? storySettings.story_fragment_word_count
-  });
+  const projectWordCountRange = resolveStoryFragmentWordCountRange(storySettings);
+  const chapterWordCountTarget = resolveChapterWordCountTarget(storySettings);
   return {
     segmentExtension: normalizeStorySegmentExtension(
       (storySettings.story_segment_format
@@ -2059,6 +2050,7 @@ function normalizeStorySettingsFromProjectFile(
         storySettings.storyFragmentCount
           ?? storySettings.story_fragment_count
       ),
+      chapterWordCountTarget,
       storyFragmentWordCount: projectWordCountRange.max,
       storyFragmentWordCountMin: projectWordCountRange.min,
       storyFragmentWordCountMax: projectWordCountRange.max,
@@ -2154,7 +2146,7 @@ function normalizeStoryChapterTemplateId(value: unknown): string {
 function normalizeStoryFragmentWordCount(value: unknown): number {
   const parsed = Number.parseInt(String(value ?? "").trim(), 10);
   if (!Number.isFinite(parsed)) {
-    return 2000;
+    return 2500;
   }
   return Math.max(100, Math.min(20000, parsed));
 }
@@ -2167,26 +2159,63 @@ function clampStoryWordCount(value: unknown, fallback: number): number {
   return Math.max(100, Math.min(20000, parsed));
 }
 
-// 解析片段字数区间 [min, max]。缺失区间字段时回退到旧的单值（min == max）。
-function resolveStoryFragmentWordCountRange(payload: {
+type StoryWordCountPayload = {
+  chapterWordCountTarget?: unknown;
+  chapter_word_count_target?: unknown;
   storyFragmentWordCountMin?: unknown;
   story_fragment_word_count_min?: unknown;
   storyFragmentWordCountMax?: unknown;
   story_fragment_word_count_max?: unknown;
   storyFragmentWordCount?: unknown;
   story_fragment_word_count?: unknown;
-}): { min: number; max: number } {
+};
+
+function hasStoryWordCountPayload(payload: StoryWordCountPayload): boolean {
+  return payload.chapterWordCountTarget !== undefined
+    || payload.chapter_word_count_target !== undefined
+    || payload.storyFragmentWordCount !== undefined
+    || payload.story_fragment_word_count !== undefined
+    || payload.storyFragmentWordCountMin !== undefined
+    || payload.story_fragment_word_count_min !== undefined
+    || payload.storyFragmentWordCountMax !== undefined
+    || payload.story_fragment_word_count_max !== undefined;
+}
+
+function resolveChapterWordCountTarget(payload: StoryWordCountPayload): number {
+  const rawTarget = payload.chapterWordCountTarget ?? payload.chapter_word_count_target;
+  if (rawTarget !== undefined) {
+    return clampStoryWordCount(rawTarget, 2500);
+  }
+  const legacySingle = payload.storyFragmentWordCount ?? payload.story_fragment_word_count;
+  if (legacySingle !== undefined) {
+    return clampStoryWordCount(legacySingle, 2500);
+  }
+  const legacyMaximum = payload.storyFragmentWordCountMax ?? payload.story_fragment_word_count_max;
+  if (legacyMaximum !== undefined) {
+    return clampStoryWordCount(legacyMaximum, 2500);
+  }
+  const legacyMinimum = payload.storyFragmentWordCountMin ?? payload.story_fragment_word_count_min;
+  return legacyMinimum === undefined ? 2500 : clampStoryWordCount(legacyMinimum, 2500);
+}
+
+// 新目标优先；缺失时继续读取旧的单值或 [min, max] 区间。
+function resolveStoryFragmentWordCountRange(payload: StoryWordCountPayload): { min: number; max: number } {
+  const rawTarget = payload.chapterWordCountTarget ?? payload.chapter_word_count_target;
+  if (rawTarget !== undefined) {
+    const target = clampStoryWordCount(rawTarget, 2500);
+    return { min: target, max: target };
+  }
   const rawMin = payload.storyFragmentWordCountMin ?? payload.story_fragment_word_count_min;
   const rawMax = payload.storyFragmentWordCountMax ?? payload.story_fragment_word_count_max;
   if (rawMin === undefined && rawMax === undefined) {
     const legacy = payload.storyFragmentWordCount ?? payload.story_fragment_word_count;
     if (legacy === undefined) {
-      return { min: 2000, max: 2500 };
+      return { min: 2500, max: 2500 };
     }
     const value = clampStoryWordCount(legacy, 2500);
     return { min: value, max: value };
   }
-  let min = clampStoryWordCount(rawMin, 2000);
+  let min = clampStoryWordCount(rawMin, 2500);
   let max = clampStoryWordCount(rawMax, 2500);
   if (min > max) {
     [min, max] = [max, min];
@@ -2278,6 +2307,8 @@ function hasExtendedStorySettingsPayload(payload: StoryProjectSettingsResponse):
         || payload.chapter_segment_limit !== undefined
         || payload.storyFragmentCount !== undefined
         || payload.story_fragment_count !== undefined
+        || payload.chapterWordCountTarget !== undefined
+        || payload.chapter_word_count_target !== undefined
         || payload.storyFragmentWordCount !== undefined
         || payload.story_fragment_word_count !== undefined
         || payload.storyFragmentWordCountMin !== undefined
@@ -2647,6 +2678,7 @@ export const __workspaceStoreTestUtils = import.meta.env.MODE === "test" ? {
   normalizeStoryMaxSegmentsPerChapter,
   normalizeStoryFragmentCount,
   normalizeStoryFragmentWordCount,
+  resolveChapterWordCountTarget,
   resolveStoryFragmentWordCountRange,
   normalizeStoryChapterTemplateId,
   normalizeStoryCallCount,

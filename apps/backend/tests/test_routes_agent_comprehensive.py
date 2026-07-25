@@ -55,8 +55,9 @@ def test_request_workspace_story_options_lock_git_and_sse_helpers(monkeypatch, t
     assert routes._normalize_story_generation_options(None) == {
         "fragmentCount": 1,
         "fragmentWordCount": 2500,
-        "fragmentWordCountMin": 2000,
+        "fragmentWordCountMin": 2500,
         "fragmentWordCountMax": 2500,
+        "chapterWordCountTarget": 2500,
         "chapterTemplateId": "",
     }
     normalized = routes._normalize_story_generation_options(
@@ -67,6 +68,7 @@ def test_request_workspace_story_options_lock_git_and_sse_helpers(monkeypatch, t
         "fragmentWordCount": 2500,
         "fragmentWordCountMin": 2500,
         "fragmentWordCountMax": 2500,
+        "chapterWordCountTarget": 2500,
         "chapterTemplateId": "serial",
     }
     assert routes._apply_turn_contract_story_generation_defaults(normalized, {"turnPlan": {}}) is normalized
@@ -1398,8 +1400,9 @@ def test_resolve_story_word_count_range_variants():
     assert routes._resolve_story_word_count_range({"fragmentWordCount": 1800}) == (1800, 1800)
     assert routes._resolve_story_word_count_range({"segmentWords": 900}) == (900, 900)
 
-    # No hints at all falls back to the default 2000-2500 band.
-    assert routes._resolve_story_word_count_range({}) == (2000, 2500)
+    # No hints at all falls back to the default single chapter target.
+    assert routes._resolve_story_word_count_range({}) == (2500, 2500)
+    assert routes._resolve_story_word_count_range({"chapterWordCountTarget": 1800}) == (1800, 1800)
 
 
 def test_normalize_story_generation_options_reads_snake_and_camel():
@@ -1416,6 +1419,7 @@ def test_normalize_story_generation_options_reads_snake_and_camel():
         "fragmentWordCount": 2000,
         "fragmentWordCountMin": 1000,
         "fragmentWordCountMax": 2000,
+        "chapterWordCountTarget": None,
         "chapterTemplateId": "serial",
     }
     # None payload uses defaults.

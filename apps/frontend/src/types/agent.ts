@@ -21,6 +21,7 @@ export interface AgentPendingSnapshotConfirmation {
 
 export interface AgentStoryGenerationOptions {
   fragmentCount: number;
+  chapterWordCountTarget: number;
   fragmentWordCount: number;
   fragmentWordCountMin?: number;
   fragmentWordCountMax?: number;
@@ -313,6 +314,12 @@ export interface AgentStreamPacket {
   targetWordCount?: number;
   targetWordCountMin?: number;
   targetWordCountMax?: number;
+  generatedWordCount?: number;
+  chapterWordCountTarget?: number;
+  acceptWordCountMin?: number;
+  acceptWordCountMax?: number;
+  belowBudget?: boolean;
+  overBudget?: boolean;
   chapterContentMode?: string;
   structurePassed?: boolean;
   writeToolApplied?: boolean;

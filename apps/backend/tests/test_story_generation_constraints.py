@@ -24,6 +24,7 @@ def _story_contract(
     root: Path,
     *,
     fragment_count: int = 1,
+    chapter_word_count_target: int | None = None,
     fragment_word_count: int | None = None,
     fragment_word_count_min: int = 100,
     fragment_word_count_max: int = 100,
@@ -35,16 +36,19 @@ def _story_contract(
     if fragment_word_count is not None:
         fragment_word_count_min = fragment_word_count
         fragment_word_count_max = fragment_word_count
+    story_generation: dict[str, Any] = {
+        "fragmentCount": fragment_count,
+        "fragmentWordCountMin": fragment_word_count_min,
+        "fragmentWordCountMax": fragment_word_count_max,
+        "chapterTemplateId": template_id,
+    }
+    if chapter_word_count_target is not None:
+        story_generation["chapterWordCountTarget"] = chapter_word_count_target
     return get_storydex_orchestration_service().build_turn_contract(
         root,
         prompt=prompt,
         active_file=active_file,
-        story_generation={
-            "fragmentCount": fragment_count,
-            "fragmentWordCountMin": fragment_word_count_min,
-            "fragmentWordCountMax": fragment_word_count_max,
-            "chapterTemplateId": template_id,
-        },
+        story_generation=story_generation,
         intent_frame={
             "primary": "story_generation",
             "confidence": 1.0,
@@ -125,6 +129,34 @@ def test_story_word_count_is_shared_with_workspace_file_statistics() -> None:
     assert WorkspaceIO._count_story_text_words(content) == expected
 
 
+def test_project_settings_use_single_target_and_preserve_legacy_ranges(tmp_path: Path) -> None:
+    service = get_story_project_service()
+    defaults = service.read_project_settings(tmp_path)
+    assert defaults["chapterWordCountTarget"] == 2500
+    assert defaults["storyFragmentWordCountMin"] == 2500
+    assert defaults["storyFragmentWordCountMax"] == 2500
+    assert defaults["wordCountSettingMode"] == "target"
+
+    legacy = service.write_project_settings(
+        tmp_path,
+        {"storyFragmentWordCountMin": 2000, "storyFragmentWordCountMax": 2500},
+    )
+    assert legacy["storyFragmentWordCountMin"] == 2000
+    assert legacy["storyFragmentWordCountMax"] == 2500
+    assert legacy["wordCountSettingMode"] == "legacy_range"
+
+    preserved = service.write_project_settings(tmp_path, {"storyFragmentCount": 2})
+    assert preserved["storyFragmentWordCountMin"] == 2000
+    assert preserved["storyFragmentWordCountMax"] == 2500
+    assert preserved["wordCountSettingMode"] == "legacy_range"
+
+    targeted = service.write_project_settings(tmp_path, {"chapterWordCountTarget": 1800})
+    assert targeted["chapterWordCountTarget"] == 1800
+    assert targeted["storyFragmentWordCountMin"] == 1800
+    assert targeted["storyFragmentWordCountMax"] == 1800
+    assert targeted["wordCountSettingMode"] == "target"
+
+
 def test_built_in_chapter_templates_cover_multi_and_single_file(tmp_path: Path) -> None:
     templates = {item["id"]: item for item in get_story_project_service().list_chapter_templates(tmp_path)}
     assert templates[DEFAULT_CHAPTER_TEMPLATE_ID]["contentMode"] == "multi_fragment"
@@ -184,13 +216,12 @@ def test_near_target_story_fragment_is_accepted_within_tolerance(
     assert (tmp_path / target_path).exists()
 
 
-@pytest.mark.parametrize("actual_word_count", [10, 500])
+@pytest.mark.parametrize("actual_word_count", [10])
 def test_story_fragment_far_outside_band_is_rejected_before_any_file_write(
     tmp_path: Path,
     actual_word_count: int,
 ) -> None:
-    # 只有远超放行带（目标 100，放行带约 60-140）的片段才拦截落盘，
-    # 保留“片段明显不是完整章节”这类硬性保护。
+    # 偏短内容低于目标 100 的章级放行带下界 75 时拦截落盘。
     service = get_story_project_service()
     contract = _story_contract(tmp_path, fragment_word_count=100)
     target_path = contract["turnPlan"]["fragmentTargets"][0]["path"]
@@ -267,28 +298,122 @@ def test_story_fragment_near_range_edges_is_accepted(
     assert (tmp_path / target_path).exists()
 
 
-@pytest.mark.parametrize("actual_word_count", [500, 5000])
-def test_story_fragment_far_outside_band_is_rejected_before_any_file_write(
+@pytest.mark.parametrize(
+    ("actual_word_count", "expected_passed", "expected_over_budget"),
+    [
+        (1874, False, False),
+        (1875, True, False),
+        (2500, True, False),
+        (3125, True, False),
+        (3126, True, True),
+    ],
+)
+def test_chapter_target_uses_one_acceptance_band_before_and_after_write(
     tmp_path: Path,
     actual_word_count: int,
+    expected_passed: bool,
+    expected_over_budget: bool,
 ) -> None:
-    # 远离目标区间（明显不是一整章：过短 500 / 过长 5000）仍应在落盘前被拦下。
     service = get_story_project_service()
-    contract = _story_contract(tmp_path, fragment_word_count_min=2000, fragment_word_count_max=2500)
+    contract = _story_contract(tmp_path, chapter_word_count_target=2500)
     target_path = contract["turnPlan"]["fragmentTargets"][0]["path"]
     result = service.apply_story_generation_increment(
         tmp_path,
         {"fragments": [{"text": "字" * actual_word_count}]},
         generation_contract=contract,
     )
-    fragment = result["wordCountValidation"]["fragments"][0]
-    expected_difference = (
-        actual_word_count - 2000 if actual_word_count < 2000 else actual_word_count - 2500
+    validation = service.validate_story_generation_turn(tmp_path, contract)
+    preflight = result["wordCountValidation"]
+
+    assert result["ok"] is expected_passed
+    assert preflight["passed"] is expected_passed
+    assert preflight["generatedWordCount"] == actual_word_count
+    assert preflight["chapterWordCountTarget"] == 2500
+    assert (preflight["acceptWordCountMin"], preflight["acceptWordCountMax"]) == (1875, 3125)
+    assert preflight["overBudget"] is expected_over_budget
+    assert validation["passed"] is expected_passed
+    assert validation["overBudget"] is expected_over_budget
+    assert (tmp_path / target_path).exists() is expected_passed
+
+
+@pytest.mark.parametrize(
+    ("actual_word_count", "expected_passed", "expected_over_budget"),
+    [
+        (1499, False, False),
+        (1500, True, False),
+        (3125, True, False),
+        (3126, True, True),
+    ],
+)
+def test_legacy_range_settings_use_chapter_scope_acceptance_band(
+    tmp_path: Path,
+    actual_word_count: int,
+    expected_passed: bool,
+    expected_over_budget: bool,
+) -> None:
+    service = get_story_project_service()
+    contract = _story_contract(
+        tmp_path,
+        fragment_word_count_min=2000,
+        fragment_word_count_max=2500,
     )
+    plan = contract["turnPlan"]
+    assert plan["wordCountPolicy"]["scope"] == "chapter"
+    assert plan["wordCountPolicy"]["mode"] == "range"
+
+    result = service.apply_story_generation_increment(
+        tmp_path,
+        {"fragments": [{"text": "字" * actual_word_count}]},
+        generation_contract=contract,
+    )
+    validation = service.validate_story_generation_turn(tmp_path, contract)
+    preflight = result["wordCountValidation"]
+    assert result["ok"] is expected_passed
+    assert (preflight["targetWordCountMin"], preflight["targetWordCountMax"]) == (2000, 2500)
+    assert (preflight["acceptWordCountMin"], preflight["acceptWordCountMax"]) == (1500, 3125)
+    assert preflight["overBudget"] is expected_over_budget
+    assert validation["passed"] is expected_passed
+    assert validation["overBudget"] is expected_over_budget
+
+
+def test_multi_fragment_chapter_is_validated_by_aggregate_word_count(tmp_path: Path) -> None:
+    service = get_story_project_service()
+    contract = _story_contract(
+        tmp_path,
+        fragment_count=4,
+        chapter_word_count_target=2500,
+    )
+    result = service.apply_story_generation_increment(
+        tmp_path,
+        {"fragments": [{"text": "字" * 700} for _ in range(4)]},
+        generation_contract=contract,
+    )
+    validation = service.validate_story_generation_turn(tmp_path, contract)
+
+    assert result["ok"] is True
+    assert result["wordCountValidation"]["generatedWordCount"] == 2800
+    assert all(item["wordCountStatus"] == "passed" for item in result["fragments"])
+    assert validation["passed"] is True
+    assert validation["generatedWordCount"] == 2800
+
+
+def test_contract_without_scope_keeps_legacy_per_fragment_gate(tmp_path: Path) -> None:
+    service = get_story_project_service()
+    contract = _story_contract(
+        tmp_path,
+        fragment_count=4,
+        chapter_word_count_target=2500,
+    )
+    contract["turnPlan"]["wordCountPolicy"].pop("scope", None)
+    result = service.apply_story_generation_increment(
+        tmp_path,
+        {"fragments": [{"text": "字" * 700} for _ in range(4)]},
+        generation_contract=contract,
+    )
+
     assert result["ok"] is False
-    assert result["code"] == "story_generation_constraints_not_met"
-    assert fragment["difference"] == expected_difference
-    assert not (tmp_path / target_path).exists()
+    assert result["wordCountValidation"]["wordCountScope"] == "fragment"
+    assert all(item["status"] == "failed" for item in result["wordCountValidation"]["fragments"])
 
 
 def test_single_file_continuation_uses_baseline_and_cannot_append_twice(tmp_path: Path) -> None:
@@ -351,6 +476,10 @@ def test_append_correction_rebuilds_baseline_without_disabling_duplicate_guard(t
         template_id=SINGLE_FILE_CHAPTER_TEMPLATE_ID,
         active_file=target_path,
     )
+    # W1-1 specifically covers the serialized pre-W1 contract path. New
+    # contracts use a unified chapter-level acceptance band and would accept
+    # 1999 directly.
+    continuation["turnPlan"]["wordCountPolicy"].pop("scope", None)
     assert continuation["turnPlan"]["fragmentTargets"][0]["baselineWordCount"] == 2200
 
     first_result = service.apply_story_generation_increment(

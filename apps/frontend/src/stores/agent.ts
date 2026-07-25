@@ -86,6 +86,7 @@ interface AgentState {
   isCommittingGit: boolean;
   commitActionLabel: string;
   storyFragmentCount: number;
+  chapterWordCountTarget: number;
   storyFragmentWordCount: number;
   storyFragmentWordCountMin: number;
   storyFragmentWordCountMax: number;
@@ -149,8 +150,9 @@ export const useAgentStore = defineStore("agent", {
     isCommittingGit: false,
     commitActionLabel: "",
     storyFragmentCount: 1,
+    chapterWordCountTarget: 2500,
     storyFragmentWordCount: 2500,
-    storyFragmentWordCountMin: 2000,
+    storyFragmentWordCountMin: 2500,
     storyFragmentWordCountMax: 2500,
     storyChapterTemplateId: DEFAULT_CHAPTER_TEMPLATE_ID,
     storyChapterTemplates: [],
@@ -440,6 +442,7 @@ export const useAgentStore = defineStore("agent", {
 
     setStoryGenerationOptions(options: {
       fragmentCount?: number;
+      chapterWordCountTarget?: number;
       fragmentWordCount?: number;
       fragmentWordCountMin?: number;
       fragmentWordCountMax?: number;
@@ -459,7 +462,15 @@ export const useAgentStore = defineStore("agent", {
       } else if (isSingleFileTemplate) {
         this.storyFragmentCount = 1;
       }
-      // 兼容旧的单值入参：等价于把区间上界设为该值
+      if (options.chapterWordCountTarget !== undefined) {
+        const target = clampInteger(options.chapterWordCountTarget, 100, 20000, 2500);
+        this.chapterWordCountTarget = target;
+        this.storyFragmentWordCount = target;
+        this.storyFragmentWordCountMin = target;
+        this.storyFragmentWordCountMax = target;
+        return;
+      }
+      // 兼容旧的单值/区间入参；新 UI 只写 chapterWordCountTarget。
       let nextMin = this.storyFragmentWordCountMin;
       let nextMax = this.storyFragmentWordCountMax;
       if (options.fragmentWordCountMin !== undefined) {
@@ -482,6 +493,7 @@ export const useAgentStore = defineStore("agent", {
       this.storyFragmentWordCountMax = nextMax;
       // 保留旧字段以向后兼容：等于区间上界
       this.storyFragmentWordCount = nextMax;
+      this.chapterWordCountTarget = nextMax;
     },
 
     async loadStoryChapterTemplates(options?: { force?: boolean }): Promise<void> {
@@ -745,6 +757,7 @@ export const useAgentStore = defineStore("agent", {
             workspaceRoot: workspaceStore.currentProject?.workspaceRoot || workspaceStore.health?.workspaceRoot || "",
             storyGeneration: {
               fragmentCount: this.storyFragmentCount,
+              chapterWordCountTarget: this.chapterWordCountTarget,
               fragmentWordCount: this.storyFragmentWordCount,
               fragmentWordCountMin: this.storyFragmentWordCountMin,
               fragmentWordCountMax: this.storyFragmentWordCountMax,
@@ -850,6 +863,7 @@ export const useAgentStore = defineStore("agent", {
         workspaceRoot: workspaceStore.currentProject?.workspaceRoot || workspaceStore.health?.workspaceRoot || "",
         storyGeneration: {
           fragmentCount: this.storyFragmentCount,
+          chapterWordCountTarget: this.chapterWordCountTarget,
           fragmentWordCount: this.storyFragmentWordCount,
           fragmentWordCountMin: this.storyFragmentWordCountMin,
           fragmentWordCountMax: this.storyFragmentWordCountMax,
@@ -974,6 +988,7 @@ export const useAgentStore = defineStore("agent", {
         workspaceRoot: workspaceStore.currentProject?.workspaceRoot || workspaceStore.health?.workspaceRoot || "",
         storyGeneration: {
           fragmentCount: this.storyFragmentCount,
+          chapterWordCountTarget: this.chapterWordCountTarget,
           fragmentWordCount: this.storyFragmentWordCount,
           fragmentWordCountMin: this.storyFragmentWordCountMin,
           fragmentWordCountMax: this.storyFragmentWordCountMax,
@@ -1276,6 +1291,7 @@ export const useAgentStore = defineStore("agent", {
             complexity: String(intentFrame.complexity || ""),
             requiresChapterTemplateSelection: Boolean(turnPlan.requiresChapterTemplateSelection),
             fragmentCount: Number(turnPlan.fragmentCount || 0),
+            chapterWordCountTarget: Number(turnPlan.chapterWordCountTarget || 0),
             fragmentWordCount: Number(turnPlan.fragmentWordCount || 0),
             fragmentWordCountMin: Number(turnPlan.fragmentWordCountMin || 0),
             fragmentWordCountMax: Number(turnPlan.fragmentWordCountMax || 0),
@@ -1295,6 +1311,11 @@ export const useAgentStore = defineStore("agent", {
             algorithm: String(visiblePacket.algorithm || ""),
             exact: Boolean(visiblePacket.exact),
             fragmentCount: Number(visiblePacket.fragmentCount || 0),
+            generatedWordCount: Number(visiblePacket.generatedWordCount || 0),
+            chapterWordCountTarget: Number(visiblePacket.chapterWordCountTarget || 0),
+            acceptWordCountMin: Number(visiblePacket.acceptWordCountMin || 0),
+            acceptWordCountMax: Number(visiblePacket.acceptWordCountMax || 0),
+            overBudget: Boolean(visiblePacket.overBudget),
             targetWordCount: Number(visiblePacket.targetWordCount || 0),
             chapterContentMode: String(visiblePacket.chapterContentMode || ""),
             structurePassed: Boolean(visiblePacket.structurePassed),
@@ -1723,7 +1744,7 @@ function statusForPacket(eventName: string, packet: AgentStreamPacket): CoomiWat
   }
   if (eventName === "StoryGenerationValidation") {
     // 未通过是"待复核提示"而非硬错误：降级为 warning，避免渲染成红色报错。
-    return packet.passed ? "success" : "warning";
+    return packet.passed && !packet.overBudget ? "success" : "warning";
   }
   if (eventName === "ConnectionRetry") return "warning";
   if (eventName === "AgentCancelled") return "warning";
@@ -1783,12 +1804,16 @@ function summarizeTurnContractPacket(packet: AgentStreamPacket): string {
   const operationType = firstString(intentFrame, ["operationType"]);
   const complexity = firstString(intentFrame, ["complexity"]);
   const fragmentCount = firstNumber(turnPlan, ["fragmentCount"]) ?? 1;
+  const wordCountPolicy = toRecord(turnPlan.wordCountPolicy) || {};
   const fragmentWordCountMax = firstNumber(turnPlan, ["fragmentWordCountMax", "fragmentWordCount"]) ?? 2500;
   const fragmentWordCountMin = firstNumber(turnPlan, ["fragmentWordCountMin"]) ?? fragmentWordCountMax;
-  const fragmentWordCountLabel =
-    fragmentWordCountMin === fragmentWordCountMax
-      ? `${fragmentWordCountMax} 字`
-      : `${fragmentWordCountMin}-${fragmentWordCountMax} 字`;
+  const chapterWordCountTarget = firstNumber(turnPlan, ["chapterWordCountTarget"])
+    ?? firstNumber(wordCountPolicy, ["target"])
+    ?? Math.round((fragmentWordCountMin + fragmentWordCountMax) / 2);
+  const acceptWordCountMin = firstNumber(wordCountPolicy, ["acceptanceMinimum"])
+    ?? Math.max(50, Math.round(fragmentWordCountMin * 0.75));
+  const acceptWordCountMax = firstNumber(wordCountPolicy, ["acceptanceMaximum"])
+    ?? Math.round(fragmentWordCountMax * 1.25);
   const requiresTemplate = Boolean(turnPlan.requiresChapterTemplateSelection);
   const selectedTemplate = firstString(turnPlan, ["selectedChapterTemplate"]);
   const selectedTemplateDetail = toRecord(turnPlan.selectedChapterTemplateDetail) || {};
@@ -1815,7 +1840,9 @@ function summarizeTurnContractPacket(packet: AgentStreamPacket): string {
     pieces.push(`复杂度：${complexityLabels[complexity] || complexity}`);
   }
   pieces.push(
-    `片段：${fragmentCount} 条 x ${fragmentWordCountLabel}`,
+    `片段：${fragmentCount} 条`,
+    `章目标：${chapterWordCountTarget} 字`,
+    `可接受：${acceptWordCountMin}-${acceptWordCountMax} 字`,
     `直接写入：${Boolean(executionPolicy.directFileWrites) ? "开启" : "关闭"}`,
     `小说项目 Git：${Boolean(executionPolicy.localGitAutoCommit) ? "自动提交" : "未开启"}`
   );
@@ -1858,9 +1885,25 @@ function summarizeTurnContractPacket(packet: AgentStreamPacket): string {
 
 function summarizeStoryGenerationValidationPacket(packet: AgentStreamPacket): string {
   const fragments = Array.isArray(packet.fragments) ? packet.fragments : [];
-  // 目标区间来自 packet.targetWordCountMin/Max（旧字段 targetWordCount 仅为兼容回退）。
   const packetTargetMin = Number(packet.targetWordCountMin ?? packet.targetWordCount ?? 0);
   const packetTargetMax = Number(packet.targetWordCountMax ?? packet.targetWordCount ?? 0);
+  const chapterWordCountTarget = Number(
+    packet.chapterWordCountTarget
+      ?? packet.targetWordCount
+      ?? (packetTargetMin && packetTargetMax ? Math.round((packetTargetMin + packetTargetMax) / 2) : 0)
+  );
+  const generatedWordCount = Number(packet.generatedWordCount ?? fragments.reduce((total, value) => {
+    const fragment = toRecord(value) || {};
+    return total + (firstNumber(fragment, ["generatedWordCount", "actualWordCount", "fileWordCount"]) ?? 0);
+  }, 0));
+  const acceptWordCountMin = Number(
+    packet.acceptWordCountMin
+      ?? (packetTargetMin ? Math.max(50, Math.round(packetTargetMin * 0.75)) : 0)
+  );
+  const acceptWordCountMax = Number(
+    packet.acceptWordCountMax
+      ?? (packetTargetMax ? Math.round(packetTargetMax * 1.25) : 0)
+  );
   const summaries = fragments.slice(0, 6).map((value, index) => {
     const fragment = toRecord(value) || {};
     const path = firstString(fragment, ["path"]) || `片段 ${index + 1}`;
@@ -1882,10 +1925,16 @@ function summarizeStoryGenerationValidationPacket(packet: AgentStreamPacket): st
     summaries.push(`另有 ${fragments.length - summaries.length} 个片段`);
   }
   const result = packet.passed ? "已通过" : "待复核";
+  const chapterSummary = generatedWordCount || chapterWordCountTarget
+    ? `本章 ${generatedWordCount} 字${chapterWordCountTarget ? ` · 章目标 ${chapterWordCountTarget} 字` : ""}${acceptWordCountMin && acceptWordCountMax ? ` · 可接受 ${acceptWordCountMin}-${acceptWordCountMax} 字` : ""}`
+    : "Storydex 非空白字符统计验收";
   const structure = packet.structurePassed === false ? "；章节结构与模板不一致" : "";
   const writeTool = packet.writeToolApplied === false ? "；本轮未成功执行受约束正文写入" : "";
+  const overBudget = packet.overBudget
+    ? "；正文已超出建议放行带并正常落盘，已标记 overBudget，建议作者按需裁剪"
+    : "";
   const detail = summaries.length ? `；${summaries.join("；")}` : "";
-  return `${result}：Storydex 非空白字符统计验收${structure}${writeTool}${detail}`;
+  return `${result}：${chapterSummary}${structure}${writeTool}${overBudget}${detail}`;
 }
 
 function summarizePresetCompileFailures(contextAssembly: Record<string, unknown>): string {

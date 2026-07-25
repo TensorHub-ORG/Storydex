@@ -70,6 +70,8 @@ describe("agent store deterministic helpers", () => {
       contextAssembly: { budget: { blockCount: 4, totalChars: 500 }, sources: [{ kind: "chapter", count: 2 }, {}, null], notes: ["preset_compile_failed: demo", "other"] }
     });
     expect(u.summarizeTurnContractPacket(contract)).toContain("chapters/2.md");
+    expect(u.summarizeTurnContractPacket(contract)).toContain("章目标：1200 字");
+    expect(u.summarizeTurnContractPacket(contract)).toContain("可接受：900-1500 字");
     const modifySummary = u.summarizeTurnContractPacket(packet({
       status: "ready",
       intentFrame: { primary: "story_generation", operationType: "modify_existing", complexity: "complex" }
@@ -98,8 +100,19 @@ describe("agent store deterministic helpers", () => {
       fragments: [{ path: "chapters/第1章/001.md", actualWordCount: 2173, difference: 0 }]
     }));
     expect(rangeValidationSummary).toContain("2173 字（目标 2000-2500）");
+    expect(rangeValidationSummary).toContain("本章 2173 字 · 章目标 2250 字 · 可接受 1500-3125 字");
     expect(rangeValidationSummary).toContain("章节结构与模板不一致");
     expect(rangeValidationSummary).not.toContain("2173/0");
+    const overBudgetSummary = u.summarizeStoryGenerationValidationPacket(packet({
+      passed: true,
+      overBudget: true,
+      generatedWordCount: 3126,
+      chapterWordCountTarget: 2500,
+      acceptWordCountMin: 1875,
+      acceptWordCountMax: 3125
+    }));
+    expect(overBudgetSummary).toContain("建议作者按需裁剪");
+    expect(u.statusForPacket("StoryGenerationValidation", packet({ passed: true, overBudget: true }))).toBe("warning");
     expect(u.summarizePresetCompileFailures({ notes: [] })).toBe("");
     expect(u.summarizePresetCompileFailures({ notes: ["preset_compile_failed:", "preset_compile_failed: one", "preset_compile_failed: two", "preset_compile_failed: three"] })).toBeTruthy();
     expect(u.summarizeContextAssembly({})).toBe("");
