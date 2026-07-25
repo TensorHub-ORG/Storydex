@@ -17,7 +17,7 @@ class GitService:
     DEFAULT_AUTHOR_NAME = "Storydex Local"
     DEFAULT_AUTHOR_EMAIL = "storydex@local"
     HISTORY_LIMIT = 24
-    SAFE_GITIGNORE_LINES = [".storydex/.agent/"]
+    SAFE_GITIGNORE_LINES = [".storydex/.agent/", ".storydex/.cache/"]
     AGENT_RUNTIME_PREFIX = ".storydex/.agent/"
 
     def restore_to_commit(

@@ -106,6 +106,9 @@
         ></div>
 
         <!-- 错误 -->
+        <!-- 提示：客观验收未通过等警告级信息，不是错误也不该折叠 -->
+        <div v-else-if="entry.kind === 'notice'" class="cct-notice-text">{{ entry.text }}</div>
+
         <div v-else-if="entry.kind === 'error'" class="cct-error-text">{{ entry.text }}</div>
       </template>
 
@@ -137,6 +140,7 @@ type FlowEntry =
   | { kind: "assistant"; id: string; text: string }
   | { kind: "user"; id: string; text: string }
   | { kind: "phase"; id: string; text: string }
+  | { kind: "notice"; id: string; text: string }
   | { kind: "error"; id: string; text: string };
 
 type ToolChunk = {
@@ -214,6 +218,8 @@ const entries = computed<FlowEntry[]>(() => {
       list.push({ kind: "user", id: item.id, text: item.content });
     } else if (item.type === "phase") {
       list.push({ kind: "phase", id: item.id, text: item.content });
+    } else if (item.type === "notice") {
+      list.push({ kind: "notice", id: item.id, text: item.content });
     } else if (item.type === "error") {
       list.push({ kind: "error", id: item.id, text: item.content });
     }
@@ -617,6 +623,15 @@ function compactText(value: unknown, limit = 1200): string {
   color: var(--danger);
   font-size: 14px;
   line-height: 1.7;
+}
+
+/* 客观验收未通过等警告类提示，与上游 coomi-notice-text 同色调 */
+.cct-notice-text {
+  color: var(--warning);
+  font-size: 13px;
+  line-height: 1.72;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* 底部元信息：纯文字，承载状态与时间，不与顶部重复 */

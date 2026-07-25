@@ -22,6 +22,8 @@ export interface AgentPendingSnapshotConfirmation {
 export interface AgentStoryGenerationOptions {
   fragmentCount: number;
   fragmentWordCount: number;
+  fragmentWordCountMin?: number;
+  fragmentWordCountMax?: number;
   chapterTemplateId?: string;
   chapterTemplate?: string;
 }
@@ -309,6 +311,8 @@ export interface AgentStreamPacket {
   countingRule?: string;
   fragmentCount?: number;
   targetWordCount?: number;
+  targetWordCountMin?: number;
+  targetWordCountMax?: number;
   chapterContentMode?: string;
   structurePassed?: boolean;
   writeToolApplied?: boolean;
@@ -415,6 +419,7 @@ export type CoomiWaterfallItemType =
   | "compression"
   | "phase"
   | "system"
+  | "notice"
   | "error";
 
 export type CoomiWaterfallItemStatus = "running" | "success" | "error" | "info" | "warning";

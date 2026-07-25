@@ -76,7 +76,7 @@ describe("workspace store full action lifecycle", () => {
     const store = useWorkspaceStore();
     await store.refreshStorySettings();
     store.launchScreenVisible = false; store.currentProject = project as any; store.tree = tree.roots as any;
-    await store.refreshStorySettings(); expect(store.storySettings.storyFragmentWordCount).toBe(2000);
+    await store.refreshStorySettings(); expect(store.storySettings.storyFragmentWordCount).toBe(2500);
     await store.updateStorySettings({ storyFragmentCount: 2 });
     await store.setChapterCompletion("", true);
     await store.setChapterCompletion("chapters/a", true);

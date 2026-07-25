@@ -217,7 +217,14 @@ def test_slow_task_planning_runs_in_background_without_blocking_agent_start(monk
                 active_file="",
                 workspace_root=tmp_path,
                 story_generation={},
-                turn_contract={"status": "ready", "intentFrame": {"primary": "content_generation"}},
+                turn_contract={
+                    "status": "ready",
+                    "intentFrame": {
+                        "primary": "content_generation",
+                        "operationType": "modify_existing",
+                        "complexity": "complex",
+                    },
+                },
                 git_snapshot=AgentGitSnapshot(workspace_root=tmp_path, available=True),
                 request=_ConnectedRequest(),
                 cancellation_token=routes_agent._CancellationToken(),

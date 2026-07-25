@@ -185,14 +185,27 @@
               />
             </label>
             <label class="coomi-story-field">
-              <span>片段字数</span>
+              <span>最小字数</span>
               <input
                 type="number"
                 min="100"
                 max="20000"
                 step="100"
-                :value="agentStore.storyFragmentWordCount"
-                @input="updateStoryFragmentWordCount"
+                :value="agentStore.storyFragmentWordCountMin"
+                title="每个片段的最小字数（Storydex 非空白字符统计）"
+                @input="updateStoryFragmentWordCountMin"
+              />
+            </label>
+            <label class="coomi-story-field">
+              <span>最大字数</span>
+              <input
+                type="number"
+                min="100"
+                max="20000"
+                step="100"
+                :value="agentStore.storyFragmentWordCountMax"
+                title="每个片段的最大字数（Storydex 非空白字符统计）"
+                @input="updateStoryFragmentWordCountMax"
               />
             </label>
             <label class="coomi-story-field coomi-story-template-field">
@@ -221,7 +234,7 @@
               {{ storyChapterTemplateErrorMessage }}
             </small>
             <small class="coomi-story-template-hint">
-              片段字数由 Storydex 内置统计精确验收：忽略空白后，每个 Unicode 字符计 1 字。
+              每个片段的字数需落在设定区间内，由 Storydex 内置统计验收：忽略空白后，每个 Unicode 字符计 1 字。
             </small>
           </div>
         </div>
@@ -426,7 +439,7 @@
         </div>
       </section>
       <section
-        v-if="agentStore.followupPaused || visibleFollowups.length"
+        v-if="visibleFollowups.length"
         class="coomi-followup-mailbox"
         aria-label="待发送信息"
       >
@@ -465,7 +478,7 @@
             rows="2"
             @keydown.stop
           ></textarea>
-          <p v-else class="coomi-followup-content">{{ message.content }}</p>
+          <p v-else class="coomi-followup-content" :title="message.content">{{ message.content }}</p>
           <div class="coomi-followup-actions">
             <template v-if="editingFollowupId === message.messageId">
               <button type="button" @click="cancelFollowupEdit">取消</button>
@@ -624,6 +637,10 @@ const commandMenuOpen = ref(false);
 const permissionMenuOpen = ref(false);
 const reasoningMenuOpen = ref(false);
 const storyOptionsOpen = ref(false);
+// Once the user starts adjusting the story-generation fields, their local input is
+// authoritative: a settings refresh kicked off when the popover opened must not
+// clobber a just-typed value if it resolves late (read/write race).
+const storyOptionsEditing = ref(false);
 const selectedCommandIndex = ref(0);
 const foldState = ref<Record<string, boolean>>({});
 const toolChunkState = ref<Record<string, boolean>>({});
@@ -789,7 +806,7 @@ const selectedReasoningOption = computed(
 );
 const reasoningLabel = computed(() => `推理：${selectedReasoningOption.value.shortLabel}`);
 const storyOptionsLabel = computed(
-  () => `${agentStore.storyFragmentCount}段/${agentStore.storyFragmentWordCount}字`
+  () => `${agentStore.storyFragmentCount}段/${agentStore.storyFragmentWordCountMin}-${agentStore.storyFragmentWordCountMax}字`
 );
 const selectedChapterTemplate = computed(() =>
   agentStore.storyChapterTemplates.find((template) => template.id === agentStore.storyChapterTemplateId) || null
@@ -1058,7 +1075,8 @@ watch(
   () => [
     workspaceStore.currentProject?.workspaceRoot || "",
     workspaceStore.storySettings.storyFragmentCount,
-    workspaceStore.storySettings.storyFragmentWordCount,
+    workspaceStore.storySettings.storyFragmentWordCountMin,
+    workspaceStore.storySettings.storyFragmentWordCountMax,
     workspaceStore.storySettings.storyChapterTemplateId
   ],
   () => {
@@ -1066,6 +1084,12 @@ watch(
   },
   { immediate: true }
 );
+
+// Opening the popover starts a fresh editing session (a refresh may repopulate the
+// fields); closing it clears the guard so external settings changes sync again.
+watch(storyOptionsOpen, () => {
+  storyOptionsEditing.value = false;
+});
 
 async function handleSubmitOrStop(): Promise<void> {
   if (agentStore.editingTraceId || agentStore.isReexecuting) {
@@ -1190,9 +1214,14 @@ function updateStoryFragmentCount(event: Event): void {
   void persistStoryGenerationOptions({ fragmentCount: Number(target?.value || 1) });
 }
 
-function updateStoryFragmentWordCount(event: Event): void {
+function updateStoryFragmentWordCountMin(event: Event): void {
   const target = event.target as HTMLInputElement | null;
-  void persistStoryGenerationOptions({ fragmentWordCount: Number(target?.value || 2000) });
+  void persistStoryGenerationOptions({ fragmentWordCountMin: Number(target?.value || 2000) });
+}
+
+function updateStoryFragmentWordCountMax(event: Event): void {
+  const target = event.target as HTMLInputElement | null;
+  void persistStoryGenerationOptions({ fragmentWordCountMax: Number(target?.value || 2500) });
 }
 
 function updateStoryChapterTemplate(event: Event): void {
@@ -1206,18 +1235,25 @@ function syncStoryGenerationOptionsFromProjectSettings(): void {
   if (workspaceStore.launchScreenVisible) {
     return;
   }
+  // Don't overwrite the user's in-flight edits with a (possibly stale) refresh.
+  if (storyOptionsEditing.value) {
+    return;
+  }
   agentStore.setStoryGenerationOptions({
     fragmentCount: workspaceStore.storySettings.storyFragmentCount,
-    fragmentWordCount: workspaceStore.storySettings.storyFragmentWordCount,
+    fragmentWordCountMin: workspaceStore.storySettings.storyFragmentWordCountMin,
+    fragmentWordCountMax: workspaceStore.storySettings.storyFragmentWordCountMax,
     chapterTemplateId: workspaceStore.storySettings.storyChapterTemplateId || "default_chapter_directory"
   });
 }
 
 async function persistStoryGenerationOptions(options: {
   fragmentCount?: number;
-  fragmentWordCount?: number;
+  fragmentWordCountMin?: number;
+  fragmentWordCountMax?: number;
   chapterTemplateId?: string;
 }): Promise<void> {
+  storyOptionsEditing.value = true;
   agentStore.setStoryGenerationOptions(options);
   if (workspaceStore.launchScreenVisible || !workspaceStore.currentProject) {
     return;
@@ -1225,7 +1261,8 @@ async function persistStoryGenerationOptions(options: {
   try {
     await workspaceStore.updateStorySettings({
       storyFragmentCount: agentStore.storyFragmentCount,
-      storyFragmentWordCount: agentStore.storyFragmentWordCount,
+      storyFragmentWordCountMin: agentStore.storyFragmentWordCountMin,
+      storyFragmentWordCountMax: agentStore.storyFragmentWordCountMax,
       storyChapterTemplateId: agentStore.storyChapterTemplateId
     });
   } catch (error: unknown) {
@@ -1844,6 +1881,7 @@ function formatItemType(type: CoomiWaterfallItemType): string {
     compression: "压缩",
     phase: "阶段",
     system: "系统",
+    notice: "提示",
     error: "错误"
   };
   return labels[type] || type;
@@ -2017,7 +2055,8 @@ defineExpose({
     toggleStoryOptions,
     handleDocumentPointerDown,
     updateStoryFragmentCount,
-    updateStoryFragmentWordCount,
+    updateStoryFragmentWordCountMin,
+    updateStoryFragmentWordCountMax,
     updateStoryChapterTemplate,
     syncStoryGenerationOptionsFromProjectSettings,
     persistStoryGenerationOptions,
@@ -2537,6 +2576,16 @@ defineExpose({
 
 .coomi-error-text {
   color: var(--danger);
+}
+
+.coomi-notice-text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--warning);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.72;
 }
 
 .coomi-phase-text {
@@ -3490,8 +3539,8 @@ defineExpose({
 .coomi-followup-mailbox {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 9px 10px;
+  gap: 6px;
+  padding: 7px 9px;
   border: 1px solid var(--border-subtle);
   border-radius: 6px;
   background: color-mix(in srgb, var(--bg-input) 94%, transparent);
@@ -3574,7 +3623,7 @@ defineExpose({
 }
 
 .coomi-followup-mailbox {
-  max-height: 180px;
+  max-height: 148px;
   overflow-y: auto;
 }
 
@@ -3622,11 +3671,15 @@ defineExpose({
 
 .coomi-followup-content {
   margin: 0;
+  overflow: hidden;
   overflow-wrap: anywhere;
-  white-space: pre-wrap;
   color: var(--text-soft);
   font-size: 12px;
   line-height: 1.45;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
 }
 
 .coomi-followup-editor {

@@ -59,14 +59,20 @@ app.include_router(presets_router, prefix="/api/v1")
 def bootstrap_workspace() -> None:
     project = get_project_service().current_project()
     app_logger.info("Workspace bootstrap completed at %s", project["workspaceRoot"])
-    reconciled = get_execution_coordinator().reconcile_workspace(Path(project["workspaceRoot"]))
-    if reconciled:
-        app_logger.warning("Marked %s interrupted execution(s) as unfinished", len(reconciled))
-    coomi_status = check_coomi_version()
-    if coomi_status["ok"]:
-        app_logger.info("Coomi version check passed: %s", coomi_status["expected"])
-    else:
-        app_logger.error("Coomi version check failed: %s", "; ".join(coomi_status["warnings"]))
+    try:
+        reconciled = get_execution_coordinator().reconcile_workspace(Path(project["workspaceRoot"]))
+        if reconciled:
+            app_logger.warning("Marked %s interrupted execution(s) as unfinished", len(reconciled))
+    except Exception as exc:
+        app_logger.error("Execution reconciliation failed: %s", exc)
+    try:
+        coomi_status = check_coomi_version()
+        if coomi_status["ok"]:
+            app_logger.info("Coomi version check passed: %s", coomi_status["expected"])
+        else:
+            app_logger.error("Coomi version check failed: %s", "; ".join(coomi_status["warnings"]))
+    except Exception as exc:
+        app_logger.error("Coomi version check failed with exception: %s", exc)
 
 
 def _resolve_trace_id(request: Request) -> str:
