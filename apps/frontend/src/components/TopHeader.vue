@@ -477,8 +477,8 @@ const commandResults = computed<CommandPaletteGroup[]>(() => {
         icon: "draft",
         flatIndex: flatIndex++,
         run: async () => {
-          switchActivity("resources");
           await workspaceStore.openFile(node.relativePath!);
+          switchActivity("resources");
         },
       }));
     if (fileItems.length) {
@@ -505,8 +505,13 @@ function closeCommandPalette(): void {
 }
 
 async function runCommandItem(item: CommandPaletteItem): Promise<void> {
-  closeCommandPalette();
-  await item.run();
+  try {
+    await item.run();
+  } catch (error) {
+    console.error("Failed to run command:", error);
+  } finally {
+    closeCommandPalette();
+  }
 }
 
 function handleCommandKeydown(event: KeyboardEvent): void {
