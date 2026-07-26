@@ -50,6 +50,8 @@ import type {
   WorkspaceTreeNode
 } from "@/types/workspace";
 
+const DEFAULT_CHAPTER_WORD_COUNT_TARGET = 3000;
+
 interface CachedWorkspaceDocument extends WorkspaceFileDocument {
   savedContent: string;
   dirty: boolean;
@@ -469,7 +471,20 @@ export const useWorkspaceStore = defineStore("workspace", {
         this.isTreeLoading = true;
       }
       try {
-        const result = await fetchWorkspaceTree();
+        const expectedWorkspaceRoot = this.currentProject?.workspaceRoot || "";
+        let result = await fetchWorkspaceTree();
+        if (
+          expectedWorkspaceRoot &&
+          !workspaceRootsMatch(result.data.workspaceRoot, expectedWorkspaceRoot)
+        ) {
+          await openWorkspaceProject({ projectPath: expectedWorkspaceRoot });
+          result = await fetchWorkspaceTree();
+          if (!workspaceRootsMatch(result.data.workspaceRoot, expectedWorkspaceRoot)) {
+            throw new Error(
+              `工作区根目录不一致：预期 ${expectedWorkspaceRoot}，后端返回 ${result.data.workspaceRoot}`
+            );
+          }
+        }
         this.tree = result.data.roots;
         this.treeTrace = result.trace;
         this.applyTreeProjectInfo(result.data);
@@ -1796,10 +1811,10 @@ function defaultStoryProjectSettings(settingsPath = ".storydex/config/project-se
       segmentExtension: ".md",
       maxSegmentsPerChapter: 3,
       storyFragmentCount: 1,
-      chapterWordCountTarget: 2500,
-      storyFragmentWordCount: 2500,
-      storyFragmentWordCountMin: 2500,
-      storyFragmentWordCountMax: 2500,
+      chapterWordCountTarget: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
+      storyFragmentWordCount: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
+      storyFragmentWordCountMin: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
+      storyFragmentWordCountMax: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
       storyChapterTemplateId: "default_chapter_directory",
       autoUpdateVariables: false,
       autoUpdateWiki: false,
@@ -2146,7 +2161,7 @@ function normalizeStoryChapterTemplateId(value: unknown): string {
 function normalizeStoryFragmentWordCount(value: unknown): number {
   const parsed = Number.parseInt(String(value ?? "").trim(), 10);
   if (!Number.isFinite(parsed)) {
-    return 2500;
+    return DEFAULT_CHAPTER_WORD_COUNT_TARGET;
   }
   return Math.max(100, Math.min(20000, parsed));
 }
@@ -2184,25 +2199,27 @@ function hasStoryWordCountPayload(payload: StoryWordCountPayload): boolean {
 function resolveChapterWordCountTarget(payload: StoryWordCountPayload): number {
   const rawTarget = payload.chapterWordCountTarget ?? payload.chapter_word_count_target;
   if (rawTarget !== undefined) {
-    return clampStoryWordCount(rawTarget, 2500);
+    return clampStoryWordCount(rawTarget, DEFAULT_CHAPTER_WORD_COUNT_TARGET);
   }
   const legacySingle = payload.storyFragmentWordCount ?? payload.story_fragment_word_count;
   if (legacySingle !== undefined) {
-    return clampStoryWordCount(legacySingle, 2500);
+    return clampStoryWordCount(legacySingle, DEFAULT_CHAPTER_WORD_COUNT_TARGET);
   }
   const legacyMaximum = payload.storyFragmentWordCountMax ?? payload.story_fragment_word_count_max;
   if (legacyMaximum !== undefined) {
-    return clampStoryWordCount(legacyMaximum, 2500);
+    return clampStoryWordCount(legacyMaximum, DEFAULT_CHAPTER_WORD_COUNT_TARGET);
   }
   const legacyMinimum = payload.storyFragmentWordCountMin ?? payload.story_fragment_word_count_min;
-  return legacyMinimum === undefined ? 2500 : clampStoryWordCount(legacyMinimum, 2500);
+  return legacyMinimum === undefined
+    ? DEFAULT_CHAPTER_WORD_COUNT_TARGET
+    : clampStoryWordCount(legacyMinimum, DEFAULT_CHAPTER_WORD_COUNT_TARGET);
 }
 
 // 新目标优先；缺失时继续读取旧的单值或 [min, max] 区间。
 function resolveStoryFragmentWordCountRange(payload: StoryWordCountPayload): { min: number; max: number } {
   const rawTarget = payload.chapterWordCountTarget ?? payload.chapter_word_count_target;
   if (rawTarget !== undefined) {
-    const target = clampStoryWordCount(rawTarget, 2500);
+    const target = clampStoryWordCount(rawTarget, DEFAULT_CHAPTER_WORD_COUNT_TARGET);
     return { min: target, max: target };
   }
   const rawMin = payload.storyFragmentWordCountMin ?? payload.story_fragment_word_count_min;
@@ -2210,13 +2227,13 @@ function resolveStoryFragmentWordCountRange(payload: StoryWordCountPayload): { m
   if (rawMin === undefined && rawMax === undefined) {
     const legacy = payload.storyFragmentWordCount ?? payload.story_fragment_word_count;
     if (legacy === undefined) {
-      return { min: 2500, max: 2500 };
+      return { min: DEFAULT_CHAPTER_WORD_COUNT_TARGET, max: DEFAULT_CHAPTER_WORD_COUNT_TARGET };
     }
-    const value = clampStoryWordCount(legacy, 2500);
+    const value = clampStoryWordCount(legacy, DEFAULT_CHAPTER_WORD_COUNT_TARGET);
     return { min: value, max: value };
   }
-  let min = clampStoryWordCount(rawMin, 2500);
-  let max = clampStoryWordCount(rawMax, 2500);
+  let min = clampStoryWordCount(rawMin, DEFAULT_CHAPTER_WORD_COUNT_TARGET);
+  let max = clampStoryWordCount(rawMax, DEFAULT_CHAPTER_WORD_COUNT_TARGET);
   if (min > max) {
     [min, max] = [max, min];
   }
@@ -2624,6 +2641,19 @@ function normalizePathList(paths: string[]): string[] {
 
 function normalizeFilesystemPath(value: string): string {
   return String(value || "").trim().replace(/\\/g, "/").replace(/\/+$/g, "");
+}
+
+function workspaceRootsMatch(left: string, right: string): boolean {
+  const normalizedLeft = normalizeFilesystemPath(left);
+  const normalizedRight = normalizeFilesystemPath(right);
+  if (!normalizedLeft || !normalizedRight) {
+    return false;
+  }
+  const isWindowsPath = (value: string): boolean => /^[a-z]:\//i.test(value) || value.startsWith("//");
+  if (isWindowsPath(normalizedLeft) || isWindowsPath(normalizedRight)) {
+    return normalizedLeft.toLowerCase() === normalizedRight.toLowerCase();
+  }
+  return normalizedLeft === normalizedRight;
 }
 
 function shouldRestoreProjectFromHealth(health: SystemHealthResponse | null, lastProjectPath: string): boolean {

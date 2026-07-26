@@ -14,9 +14,11 @@ def _clean_text(value: Any) -> str:
 @dataclass(frozen=True)
 class EntityRecord:
     canonical_name: str
+    entity_id: str = ""
     aliases: Tuple[str, ...] = ()
     kind: str = ""
     status: str = "active"
+    source_paths: Tuple[str, ...] = ()
 
     @classmethod
     def from_payload(cls, payload: Dict[str, Any]) -> Optional["EntityRecord"]:
@@ -31,11 +33,32 @@ class EntityRecord:
                 if alias and alias != canonical
             )
         )
+        source_paths_payload = (
+            payload.get("source_paths")
+            if isinstance(payload.get("source_paths"), list)
+            else payload.get("sourcePaths")
+            if isinstance(payload.get("sourcePaths"), list)
+            else []
+        )
         return cls(
             canonical_name=canonical,
+            entity_id=_clean_text(
+                payload.get("entity_id")
+                or payload.get("entityId")
+                or payload.get("stable_id")
+                or payload.get("stableId")
+                or payload.get("id")
+            ),
             aliases=aliases,
             kind=_clean_text(payload.get("kind")),
             status=_clean_text(payload.get("status")) or "active",
+            source_paths=tuple(
+                dict.fromkeys(
+                    path
+                    for path in (_clean_text(item).replace("\\", "/") for item in source_paths_payload)
+                    if path
+                )
+            ),
         )
 
     def names(self) -> Tuple[str, ...]:

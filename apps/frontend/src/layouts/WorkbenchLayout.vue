@@ -117,7 +117,7 @@ const workspaceStyle = computed(() => {
   }
 
   return {
-    gridTemplateColumns: [...leadColumns, editorColumn, `${AGENT_SPLITTER_WIDTH}px`, `${agentWidth}px`].join(" ")
+    gridTemplateColumns: [...leadColumns, editorColumn, `${AGENT_SPLITTER_WIDTH}px`, `min(${agentWidth}px, 100vw)`].join(" ")
   };
 });
 

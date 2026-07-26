@@ -1094,6 +1094,7 @@ function buildBackendEnvironment(candidate, runtimeEnvironment) {
     PYTHONNOUSERSITE: "1",
     PYTHONDONTWRITEBYTECODE: "1",
     STORYDEX_WORKSPACE_ROOT: runtimeEnvironment.workspaceRoot,
+    STORYDEX_RESTORE_LAST_WORKSPACE: "1",
     STORYDEX_GLOBAL_ROOT: runtimeEnvironment.globalRoot,
     STORYDEX_HELP_GUIDE_ROOT: helpGuideRoot,
     STORYDEX_PROMPT_REPOSITORY_ROOT: promptRepositoryRoot,

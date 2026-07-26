@@ -59,7 +59,7 @@ DEFAULT_CHAPTER_TEMPLATE_ID = "default_chapter_directory"
 SINGLE_FILE_CHAPTER_TEMPLATE_ID = "single_file_chapter_directory"
 MULTI_FRAGMENT_CONTENT_MODE = "multi_fragment"
 SINGLE_FILE_CONTENT_MODE = "single_file"
-DEFAULT_CHAPTER_WORD_COUNT_TARGET = 2500
+DEFAULT_CHAPTER_WORD_COUNT_TARGET = 3000
 CHAPTER_WORD_COUNT_SCOPE = "chapter"
 _STORY_WORD_COUNT_SETTING_KEYS = {
     "chapterWordCountTarget",
@@ -3800,9 +3800,9 @@ class StoryProjectService:
 
     @staticmethod
     def _story_word_count_acceptance_band(minimum: int, maximum: int) -> tuple[int, int]:
-        """Expand the chapter target band by 25 percent for acceptance.
+        """Expand the chapter target band by 30 percent for acceptance.
 
-        The default target 2500 therefore yields [1875, 3125]. The target is a
+        The default target 3000 therefore yields [2100, 3900]. The target is a
         center value, not an upper limit; over-budget chapters are written and
         reported separately instead of being regenerated.
         """
@@ -3810,8 +3810,8 @@ class StoryProjectService:
         high = max(low, int(maximum))
         # 下限只做防空保护（50 字），不要用大的绝对下限，否则会把 100 字这种
         # 小目标算出反向区间，反而把合法片段挡在外面。
-        accept_min = max(50, int(round(low * 0.75)))
-        accept_max = int(round(high * 1.25))
+        accept_min = max(50, int(round(low * 0.70)))
+        accept_max = int(round(high * 1.30))
         if accept_min > accept_max:
             accept_min, accept_max = accept_max, accept_min
         return accept_min, accept_max

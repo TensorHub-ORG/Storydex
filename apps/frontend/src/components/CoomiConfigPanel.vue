@@ -37,15 +37,54 @@
             </select>
             <span class="material-symbols-rounded llm-select-caret">expand_more</span>
           </div>
-          <button
-            class="llm-icon-btn"
-            type="button"
-            title="新建提供方"
-            :disabled="loading || saving"
-            @click="createProvider"
-          >
-            <span class="material-symbols-rounded">add</span>
-          </button>
+          <div class="llm-provider-preset-picker">
+            <button
+              class="llm-icon-btn coomi-provider-create-trigger"
+              type="button"
+              title="从预设新建提供方"
+              aria-haspopup="menu"
+              aria-controls="coomi-provider-preset-options"
+              :aria-expanded="providerPresetMenuOpen"
+              :disabled="loading || saving"
+              @click.stop="toggleProviderPresetMenu"
+              @keydown.esc.stop.prevent="closeProviderPresetMenu"
+            >
+              <span class="material-symbols-rounded">add</span>
+            </button>
+            <div
+              v-if="providerPresetMenuOpen"
+              id="coomi-provider-preset-options"
+              class="llm-options-menu llm-options-menu--presets coomi-provider-preset-options"
+              role="menu"
+              aria-label="新建提供方"
+            >
+              <button
+                v-for="preset in providerPresets"
+                :key="preset.id"
+                class="llm-option llm-provider-preset-option"
+                type="button"
+                role="menuitem"
+                @click="createProvider(preset)"
+              >
+                <span class="llm-provider-preset-option__body">
+                  <span class="llm-provider-preset-option__name">{{ preset.display }}</span>
+                  <span class="llm-provider-preset-option__meta">{{ providerPresetTypeLabel(preset) }}</span>
+                </span>
+              </button>
+              <div class="llm-options-menu__divider"></div>
+              <button
+                class="llm-option llm-provider-preset-option coomi-provider-custom-option"
+                type="button"
+                role="menuitem"
+                @click="createProvider()"
+              >
+                <span class="llm-provider-preset-option__body">
+                  <span class="llm-provider-preset-option__name">自定义接口</span>
+                  <span class="llm-provider-preset-option__meta">手动填写全部连接信息</span>
+                </span>
+              </button>
+            </div>
+          </div>
           <button
             class="llm-icon-btn llm-icon-btn--danger"
             type="button"
@@ -199,19 +238,45 @@
               />
             </label>
 
-            <label class="llm-field">
-              <span class="llm-field__label">API 密钥</span>
-              <input
-                v-model="form.apiKey"
-                class="llm-input"
-                type="password"
-                :disabled="loading || saving"
-                spellcheck="false"
-                autocomplete="off"
-                placeholder="sk-..."
-                @input="handleProviderConnectionInput"
-              />
-            </label>
+            <div class="llm-field">
+              <div class="llm-field__label-row llm-field__label-row--split">
+                <label class="llm-field__label" for="coomi-api-key">API 密钥</label>
+                <a
+                  v-if="selectedProviderPreset"
+                  class="llm-field__external-link coomi-api-key-link"
+                  :href="selectedProviderPreset.apiKeyUrl"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  :title="`在 ${selectedProviderPreset.display} 官网获取 API Key`"
+                >
+                  <span>获取密钥</span>
+                  <span class="material-symbols-rounded">open_in_new</span>
+                </a>
+              </div>
+              <div class="llm-input-action">
+                <input
+                  id="coomi-api-key"
+                  v-model="form.apiKey"
+                  class="llm-input"
+                  :type="showApiKey ? 'text' : 'password'"
+                  :disabled="loading || saving"
+                  spellcheck="false"
+                  autocomplete="off"
+                  :placeholder="selectedProviderPreset?.apiKeyPlaceholder || 'sk-...'"
+                  @input="handleProviderConnectionInput"
+                />
+                <button
+                  class="llm-input-action__button"
+                  type="button"
+                  :disabled="loading || saving"
+                  :aria-label="showApiKey ? '隐藏 API 密钥' : '显示 API 密钥'"
+                  :title="showApiKey ? '隐藏 API 密钥' : '显示 API 密钥'"
+                  @click="showApiKey = !showApiKey"
+                >
+                  <span class="material-symbols-rounded">{{ showApiKey ? "visibility_off" : "visibility" }}</span>
+                </button>
+              </div>
+            </div>
 
             <div class="llm-fetch coomi-model-fetch-row">
               <button
@@ -403,10 +468,22 @@
       <section v-else class="llm-cfg__empty">
         <span class="material-symbols-rounded llm-cfg__empty-icon">cloud_off</span>
         <p class="llm-cfg__empty-copy">providers.json 里还没有提供方。</p>
-        <button class="llm-btn llm-btn--primary" type="button" :disabled="loading || saving" @click="createProvider">
-          <span class="material-symbols-rounded">add</span>
-          <span>新建提供方</span>
-        </button>
+        <div class="llm-select-wrap llm-cfg__empty-select">
+          <select
+            class="llm-input coomi-empty-provider-preset"
+            value=""
+            :disabled="loading || saving"
+            aria-label="选择服务商预设"
+            @change="handleEmptyProviderPresetSelect"
+          >
+            <option value="" disabled>选择服务商预设</option>
+            <option v-for="preset in providerPresets" :key="preset.id" :value="preset.id">
+              {{ preset.display }} · {{ providerPresetTypeLabel(preset) }}
+            </option>
+            <option value="custom">自定义接口</option>
+          </select>
+          <span class="material-symbols-rounded llm-select-caret">expand_more</span>
+        </div>
       </section>
     </main>
 
@@ -450,9 +527,15 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { fetchAgentCoomiConfig, fetchAgentCoomiModels, updateAgentCoomiConfig } from "@/api/agent";
+import {
+  findLlmProviderPreset,
+  LLM_PROVIDER_PRESETS,
+  type LlmProviderPreset,
+  type LlmProviderType
+} from "@/constants/llmProviderPresets";
 import { useAgentStore } from "@/stores/agent";
 
-type ProviderType = "openai_compatible" | "openai_responses" | "anthropic_messages";
+type ProviderType = LlmProviderType;
 type ToolProtocol = "auto" | "native" | "structured" | "mimo" | "disabled";
 type ModelField = "model" | "fastModel";
 
@@ -485,6 +568,7 @@ const providerTypeOptions: ProviderTypeOption[] = [
   { value: "openai_responses", label: "OpenAI Responses" },
   { value: "anthropic_messages", label: "Anthropic Messages" }
 ];
+const providerPresets = LLM_PROVIDER_PRESETS;
 
 const props = defineProps<{ visible: boolean }>();
 const emit = defineEmits<{
@@ -509,9 +593,11 @@ const providerTypeHelpPinned = ref(false);
 const providerTypeHelpHovered = ref(false);
 const providerTypeDropdownOpen = ref(false);
 const providerTypeHighlightedIndex = ref(0);
+const providerPresetMenuOpen = ref(false);
 const activeModelDropdown = ref<ModelField | null>(null);
 const modelOptionHighlightedIndex = ref(-1);
 const modelFilterText = ref("");
+const showApiKey = ref(false);
 const form = reactive<ProviderForm>(emptyForm());
 
 const activeProviderId = computed(() => asString(configData.value.active) || "");
@@ -546,6 +632,7 @@ const providerTypeActiveDescendant = computed(() => {
   const option = availableProviderTypeOptions.value[providerTypeHighlightedIndex.value];
   return option ? providerTypeOptionId(option.value) : undefined;
 });
+const selectedProviderPreset = computed(() => findLlmProviderPreset(form.baseUrl, form.type));
 
 const modelFetchDisabled = computed(
   () => loading.value || saving.value || fetchingModels.value || !form.baseUrl.trim() || !form.apiKey.trim()
@@ -567,6 +654,7 @@ watch(
     }
     providerTypeHelpPinned.value = false;
     providerTypeHelpHovered.value = false;
+    closeProviderPresetMenu();
     closeProviderTypeDropdown();
     closeModelOptions();
   },
@@ -583,6 +671,9 @@ function handleDocumentPointerDown(event: PointerEvent): void {
   }
   if (!target.closest(".coomi-provider-type-combobox")) {
     closeProviderTypeDropdown();
+  }
+  if (!target.closest(".llm-provider-preset-picker")) {
+    closeProviderPresetMenu();
   }
   if (!target.closest(".llm-model-combobox")) {
     closeModelOptions();
@@ -653,6 +744,7 @@ async function applyConfig(): Promise<void> {
 
 function selectProvider(providerId: string): void {
   commitProviderFields(formProviderId.value);
+  closeProviderPresetMenu();
   selectedProviderId.value = providerId;
   loadForm(providerId);
 }
@@ -672,6 +764,7 @@ function openProviderTypeDropdown(): void {
   if (loading.value || saving.value || !availableProviderTypeOptions.value.length) {
     return;
   }
+  closeProviderPresetMenu();
   closeModelOptions();
   providerTypeHighlightedIndex.value = 0;
   providerTypeDropdownOpen.value = true;
@@ -761,14 +854,46 @@ function handleProviderTypeFocusout(event: FocusEvent): void {
   }
 }
 
-function createProvider(): void {
+function toggleProviderPresetMenu(): void {
+  if (providerPresetMenuOpen.value) {
+    closeProviderPresetMenu();
+    return;
+  }
+  closeProviderTypeDropdown();
+  closeModelOptions();
+  providerPresetMenuOpen.value = true;
+}
+
+function closeProviderPresetMenu(): void {
+  providerPresetMenuOpen.value = false;
+}
+
+function providerPresetTypeLabel(preset: LlmProviderPreset): string {
+  if (preset.type === "anthropic_messages") {
+    return "Anthropic Messages";
+  }
+  if (preset.type === "openai_responses") {
+    return "OpenAI Responses";
+  }
+  return preset.category === "aggregator" ? "聚合服务 · OpenAI 兼容" : "OpenAI 兼容";
+}
+
+function handleEmptyProviderPresetSelect(event: Event): void {
+  const presetId = event.target instanceof HTMLSelectElement ? event.target.value : "";
+  if (!presetId) {
+    return;
+  }
+  createProvider(providerPresets.find((preset) => preset.id === presetId));
+}
+
+function createProvider(preset?: LlmProviderPreset): void {
   const providers = getProviders();
-  const id = nextProviderId(providers);
+  const id = nextProviderId(providers, preset?.id || "new-provider");
   providers[id] = {
-    type: "openai_compatible",
-    display: "",
+    type: preset?.type || "openai_compatible",
+    display: preset?.display || "",
     api_key: "",
-    base_url: "",
+    base_url: preset?.baseUrl || "",
     model: "",
     fast_model: "",
     tool_protocol: "auto"
@@ -780,9 +905,11 @@ function createProvider(): void {
   selectedProviderId.value = id;
   loadForm(id);
   dirty.value = true;
+  closeProviderPresetMenu();
 }
 
 function deleteProvider(): void {
+  closeProviderPresetMenu();
   const providers = getProviders();
   const currentId = selectedProviderId.value;
   if (!currentId || providerOptions.value.length <= 1) {
@@ -839,6 +966,7 @@ function openModelOptions(field: ModelField): void {
   if (loading.value || saving.value || !modelOptions.value.length) {
     return;
   }
+  closeProviderPresetMenu();
   closeProviderTypeDropdown();
   activeModelDropdown.value = field;
   modelFilterText.value = "";
@@ -977,7 +1105,7 @@ async function fetchModels(): Promise<void> {
 
   fetchingModels.value = true;
   try {
-    const result = await fetchAgentCoomiModels({ baseUrl, apiKey });
+    const result = await fetchAgentCoomiModels({ baseUrl, apiKey, providerType: form.type });
     modelOptions.value = normalizeModelOptions(result.data.models);
     if (!modelOptions.value.length) {
       modelFetchMessage.value = "未获取到模型列表，可继续保留当前模型。";
@@ -1102,6 +1230,7 @@ function selectInitialProvider(): void {
 function loadForm(providerId: string): void {
   const provider = asRecord(getProviders()[providerId]) || {};
   resetModelOptions();
+  showApiKey.value = false;
   formProviderId.value = providerId;
   Object.assign(form, {
     id: providerId,
@@ -1173,12 +1302,12 @@ function emptyForm(): ProviderForm {
   };
 }
 
-function nextProviderId(providers: Record<string, unknown>): string {
+function nextProviderId(providers: Record<string, unknown>, preferredId = "new-provider"): string {
   let index = 1;
-  let id = "new-provider";
+  let id = preferredId;
   while (Object.prototype.hasOwnProperty.call(providers, id)) {
     index += 1;
-    id = `new-provider-${index}`;
+    id = `${preferredId}-${index}`;
   }
   return id;
 }
@@ -1236,6 +1365,7 @@ function formatDate(value: string): string {
   position: relative;
   width: 100%;
   min-height: 100%;
+  container-type: inline-size;
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr) auto;
   overflow: hidden;
@@ -1336,6 +1466,76 @@ function formatDate(value: string): string {
   min-width: 0;
 }
 
+.llm-provider-preset-picker {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.llm-options-menu.llm-options-menu--presets {
+  right: 0;
+  left: auto;
+  width: min(286px, calc(100vw - 32px));
+  max-height: min(520px, calc(100vh - 300px));
+  max-height: min(520px, calc(100dvh - 300px));
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: color-mix(in srgb, var(--text-muted) 48%, transparent) transparent;
+  scrollbar-width: thin;
+}
+
+.llm-options-menu--presets::-webkit-scrollbar {
+  width: 8px;
+}
+
+.llm-options-menu--presets::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.llm-options-menu--presets::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-muted) 48%, transparent);
+  background-clip: padding-box;
+}
+
+.llm-option.llm-provider-preset-option {
+  min-height: 33px;
+  justify-content: flex-start;
+  padding: 1px 8px;
+}
+
+.llm-provider-preset-option__body {
+  min-width: 0;
+  display: grid;
+  gap: 0;
+}
+
+.llm-provider-preset-option__name,
+.llm-provider-preset-option__meta {
+  overflow: hidden;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llm-provider-preset-option__name {
+  color: var(--text-main);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.llm-provider-preset-option__meta {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.llm-options-menu__divider {
+  height: 1px;
+  margin: 4px;
+  background: var(--border-subtle);
+}
+
 /* ── 扁平分区 ─────────────────────────── */
 .llm-section {
   padding: 14px var(--llm-pad-x);
@@ -1381,6 +1581,34 @@ function formatDate(value: string): string {
   align-items: center;
   gap: 5px;
   min-height: 16px;
+}
+
+.llm-field__label-row--split {
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.llm-field__external-link {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--accent);
+  font-size: 11px;
+  line-height: 1.3;
+  text-decoration: none;
+}
+
+.llm-field__external-link:hover,
+.llm-field__external-link:focus-visible {
+  color: var(--accent-strong);
+  text-decoration: underline;
+  outline: none;
+}
+
+.llm-field__external-link .material-symbols-rounded {
+  flex: 0 0 auto;
+  font-size: 13px;
 }
 
 .llm-field-help {
@@ -1471,6 +1699,47 @@ function formatDate(value: string): string {
 .llm-input:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+.llm-input-action {
+  position: relative;
+}
+
+.llm-input-action .llm-input {
+  padding-right: 38px;
+}
+
+.llm-input-action__button {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  width: 31px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 0 calc(var(--radius-sm) - 1px) calc(var(--radius-sm) - 1px) 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.llm-input-action__button:hover:not(:disabled),
+.llm-input-action__button:focus-visible {
+  background: var(--bg-hover);
+  color: var(--text-main);
+  outline: none;
+}
+
+.llm-input-action__button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.llm-input-action__button .material-symbols-rounded {
+  font-size: 17px;
 }
 
 /* select 自定义箭头 */
@@ -1789,6 +2058,10 @@ function formatDate(value: string): string {
   font-size: 13px;
 }
 
+.llm-cfg__empty-select {
+  width: min(286px, 100%);
+}
+
 /* ── 底栏 ─────────────────────────────── */
 .llm-cfg__footer {
   display: grid;
@@ -1879,7 +2152,7 @@ function formatDate(value: string): string {
 }
 
 /* ── 窄栏适配 ─────────────────────────── */
-@media (max-width: 360px) {
+@container (max-width: 360px) {
   .llm-row {
     grid-template-columns: minmax(0, 1fr);
   }

@@ -1,3 +1,4 @@
+import copy
 import json
 
 from services.story_wiki_service import StoryWikiService
@@ -139,6 +140,285 @@ def test_read_or_build_rebuilds_old_category_schema_payload(tmp_path):
     assert payload["categorySchemaVersion"] == "story-wiki-v4-stable-chapter-ids"
     assert not any(node["id"] == "stale:node" for node in payload["graph"]["nodes"])
     assert payload["sourceStats"]["chapterFiles"] == 1
+
+
+def test_character_relationship_mentions_do_not_crosswire_primary_cards(tmp_path):
+    cards = tmp_path / ".storydex" / "characters"
+    cards.mkdir(parents=True)
+    cards.joinpath("01_林澈.md").write_text(
+        "# 林澈\n\n记者。\n\n## 关系网络\n- **苏晚**（char:suwan）：盟友\n- **顾衡**（char:guheng）：协作\n",
+        encoding="utf-8",
+    )
+    cards.joinpath("02_苏晚.md").write_text(
+        "# 苏晚\n\n法医。\n\n## 关系网络\n- **林澈**（char:linche）：盟友\n- **顾衡**（char:guheng）：同事\n",
+        encoding="utf-8",
+    )
+    cards.joinpath("03_顾衡.md").write_text(
+        "# 顾衡\n\n警探。\n\n## 关系网络\n- **林澈**（char:linche）：协作\n- **苏晚**（char:suwan）：同事\n",
+        encoding="utf-8",
+    )
+
+    service = StoryWikiService()
+    payload = service.rebuild(tmp_path)
+    characters = {
+        entry["title"]: entry
+        for entry in payload["entries"]
+        if entry["category"] == "characters"
+    }
+
+    assert set(characters) == {"林澈", "苏晚", "顾衡"}
+    for name, filename in (("林澈", "01_林澈.md"), ("苏晚", "02_苏晚.md"), ("顾衡", "03_顾衡.md")):
+        entry = characters[name]
+        assert entry["summary"].startswith(f"# {name}")
+        character_cards = [path for path in entry["sourcePaths"] if "/characters/" in f"/{path}"]
+        assert character_cards == [f".storydex/characters/{filename}"]
+
+    relationship_query = service.query_graph(tmp_path, category="relationships")
+    relationship_edges = [
+        edge
+        for edge in relationship_query["graph"]["edges"]
+        if edge.get("type") == "relationship" and not edge.get("coOccurrence")
+    ]
+    assert {node["label"] for node in relationship_query["graph"]["nodes"]} == {"林澈", "苏晚", "顾衡"}
+    assert len(relationship_edges) == 3
+    assert all(edge.get("status") == "asserted" for edge in relationship_edges)
+    assert all(edge.get("relationType") != "unknown" for edge in relationship_edges)
+
+
+def test_rebuild_layers_planned_and_observed_sources_with_aligned_revision(tmp_path):
+    cards = tmp_path / ".storydex" / "characters"
+    scripts = tmp_path / ".storydex" / "scripts"
+    chapters = tmp_path / "chapters"
+    cards.mkdir(parents=True)
+    scripts.mkdir(parents=True)
+    chapters.mkdir(parents=True)
+    cards.joinpath("林澈.md").write_text(
+        "# 林澈\n\n> 稳定实体ID: `char:linche`\n\n调查记者。\n",
+        encoding="utf-8",
+    )
+    scripts.joinpath("故事大纲.md").write_text(
+        "# 故事大纲\n\n林澈计划调查机械鸟失窃案。\n",
+        encoding="utf-8",
+    )
+    chapter_path = chapters / "001.md"
+    chapter_path.write_text("# 雾港失窃案\n\n林澈抵达失窃现场。\n", encoding="utf-8")
+
+    service = StoryWikiService()
+    initial = service.rebuild(tmp_path)
+
+    assert initial["schemaVersion"] == 2
+    assert initial["status"] == "ready"
+    assert initial["knowledgeRevision"] == initial["builtFromRevision"]
+    assert initial["sourceSetChecksum"].startswith("sha256:")
+    character = next(node for node in initial["graph"]["nodes"] if node.get("label") == "林澈")
+    assert character["id"] == "char:linche"
+    planned = [entry for entry in initial["entries"] if entry.get("knowledgeStatus") == "planned"]
+    observed = [entry for entry in initial["entries"] if entry.get("knowledgeStatus") == "observed"]
+    assert [entry["title"] for entry in planned] == ["故事大纲"]
+    assert any("失窃现场" in entry["summary"] for entry in observed)
+
+    chapter_path.write_text("# 雾港失窃案\n\n林澈在失窃现场发现蓝色羽毛。\n", encoding="utf-8")
+    refreshed = service.read_or_build(tmp_path)
+
+    assert refreshed["knowledgeRevision"] == initial["knowledgeRevision"] + 1
+    assert refreshed["builtFromRevision"] == refreshed["knowledgeRevision"]
+    assert refreshed["status"] == "ready"
+    assert any(
+        "蓝色羽毛" in entry["summary"]
+        for entry in refreshed["entries"]
+        if entry.get("knowledgeStatus") == "observed"
+    )
+    index = service.read_index(tmp_path)
+    for key in (
+        "schemaVersion",
+        "knowledgeRevision",
+        "builtFromRevision",
+        "sourceSetChecksum",
+        "graphChecksum",
+        "status",
+    ):
+        assert index[key] == refreshed[key]
+    assert index["sourceStats"] == refreshed["sourceStats"]
+
+
+def test_invalid_projection_keeps_last_good_and_reports_diagnostics(tmp_path):
+    cards = tmp_path / ".storydex" / "characters"
+    cards.mkdir(parents=True)
+    cards.joinpath("林澈.md").write_text(
+        "# 林澈\n\n> 稳定实体ID: `char:linche`\n\n调查记者。\n",
+        encoding="utf-8",
+    )
+    service = StoryWikiService()
+    baseline = service.rebuild(tmp_path)
+    sources = service._collect_sources(tmp_path)
+
+    candidates = []
+
+    dangling = copy.deepcopy(baseline)
+    dangling["graph"]["edges"].append({
+        "source": "char:linche",
+        "target": "char:missing",
+        "label": "认识",
+        "type": "relationship",
+        "relationType": "unknown",
+    })
+    candidates.append((dangling, "graph.edge.missing_endpoint"))
+
+    internal_label = copy.deepcopy(baseline)
+    next(
+        node for node in internal_label["graph"]["nodes"]
+        if node.get("id") == "char:linche"
+    )["label"] = "entity:char:linche"
+    candidates.append((internal_label, "graph.node.internal_label"))
+
+    missing_source = copy.deepcopy(baseline)
+    next(
+        entry for entry in missing_source["entries"]
+        if entry.get("id") == "char:linche"
+    )["sourcePaths"] = []
+    candidates.append((missing_source, "graph.entry.missing_source"))
+
+    for candidate, expected_code in candidates:
+        diagnostics = service.validate_graph_invariants(candidate, root=tmp_path)
+        assert expected_code in {item["code"] for item in diagnostics}
+
+        rejected = service._persist_payload(
+            tmp_path,
+            candidate,
+            workflow="test_invalid_projection",
+            status="completed",
+            agent_result=None,
+            sources=sources,
+            changed_paths=[],
+        )
+        persisted = json.loads(service.wiki_json_path(tmp_path).read_text(encoding="utf-8"))
+
+        assert rejected["status"] == "error"
+        assert expected_code in {item["code"] for item in rejected["diagnostics"]}
+        assert rejected["lastSuccessfulRevision"] == baseline["knowledgeRevision"]
+        assert persisted["graphChecksum"] == baseline["graphChecksum"]
+        assert persisted["status"] == "ready"
+
+
+def test_character_rename_keeps_structured_entity_id_and_old_alias(tmp_path):
+    cards = tmp_path / ".storydex" / "characters"
+    cards.mkdir(parents=True)
+    old_path = cards / "林澈.md"
+    old_path.write_text("# 林澈\n\n> 稳定实体ID: `char:linche`\n", encoding="utf-8")
+    service = StoryWikiService()
+
+    initial = service.rebuild(tmp_path)
+    assert any(node.get("id") == "char:linche" and node.get("label") == "林澈" for node in initial["graph"]["nodes"])
+
+    old_path.unlink()
+    cards.joinpath("林岚.md").write_text("# 林岚\n\n> 稳定实体ID: `char:linche`\n", encoding="utf-8")
+    renamed = service.sync_local_incremental(tmp_path)
+    node = next(node for node in renamed["graph"]["nodes"] if node.get("id") == "char:linche")
+    entry = next(entry for entry in renamed["entries"] if entry.get("id") == "char:linche")
+
+    assert node["label"] == "林岚"
+    assert entry["title"] == "林岚"
+    assert "林澈" in entry["aliases"]
+
+
+def test_character_card_registry_lifecycle_archives_and_reactivates_without_touching_registry_only_roles(tmp_path):
+    cards = tmp_path / ".storydex" / "characters"
+    cards.mkdir(parents=True)
+    card_path = cards / "顾衡.md"
+    card_path.write_text("# 顾衡\n\n> 稳定实体ID: `char:guheng`\n", encoding="utf-8")
+    registry_path = tmp_path / ".storydex" / "memory" / "current" / "entities.json"
+    _write_json(
+        registry_path,
+        {
+            "version": 2,
+            "entities": [
+                {
+                    "entityId": "char:guheng",
+                    "canonical_name": "顾衡",
+                    "kind": "character",
+                    "status": "active",
+                    "sourcePaths": [".storydex/characters/顾衡.md"],
+                },
+                {
+                    "entityId": "char:registry-only",
+                    "canonical_name": "档案角色",
+                    "kind": "character",
+                    "status": "active",
+                },
+            ],
+        },
+    )
+    service = StoryWikiService()
+
+    initial = service.rebuild(tmp_path)
+    assert {"char:guheng", "char:registry-only"} <= {
+        node.get("id") for node in initial["graph"]["nodes"]
+    }
+
+    card_path.unlink()
+    deleted = service.sync_local_incremental(tmp_path)
+    assert "char:guheng" not in {node.get("id") for node in deleted["graph"]["nodes"]}
+    assert "char:registry-only" in {node.get("id") for node in deleted["graph"]["nodes"]}
+    deleted_records = {
+        item["entityId"]: item
+        for item in json.loads(registry_path.read_text(encoding="utf-8"))["entities"]
+    }
+    assert deleted_records["char:guheng"]["status"] == "archived"
+    assert deleted_records["char:guheng"]["sourcePaths"] == []
+    assert deleted_records["char:registry-only"]["status"] == "active"
+
+    cards.joinpath("顾衡归来.md").write_text(
+        "# 顾衡归来\n\n> 稳定实体ID: `char:guheng`\n",
+        encoding="utf-8",
+    )
+    restored = service.sync_local_incremental(tmp_path)
+    restored_node = next(node for node in restored["graph"]["nodes"] if node.get("id") == "char:guheng")
+    assert restored_node["label"] == "顾衡归来"
+    restored_records = {
+        item["entityId"]: item
+        for item in json.loads(registry_path.read_text(encoding="utf-8"))["entities"]
+    }
+    assert restored_records["char:guheng"]["status"] == "active"
+    assert "顾衡" in restored_records["char:guheng"]["aliases"]
+    assert restored_records["char:guheng"]["sourcePaths"] == [".storydex/characters/顾衡归来.md"]
+
+
+def test_incremental_projection_matches_cold_rebuild_canonical_checksum(tmp_path):
+    cards = tmp_path / ".storydex" / "characters"
+    scripts = tmp_path / ".storydex" / "scripts"
+    chapters = tmp_path / "chapters"
+    cards.mkdir(parents=True)
+    scripts.mkdir(parents=True)
+    chapters.mkdir(parents=True)
+    cards.joinpath("林澈.md").write_text(
+        "# 林澈\n\n> 稳定实体ID: `char:linche`\n\n调查记者。\n",
+        encoding="utf-8",
+    )
+    scripts.joinpath("故事大纲.md").write_text(
+        "# 故事大纲\n\n林澈计划调查失窃案。\n",
+        encoding="utf-8",
+    )
+    chapter = chapters / "001.md"
+    chapter.write_text("# 第一章\n\n林澈抵达现场。\n", encoding="utf-8")
+    service = StoryWikiService()
+    service.rebuild(tmp_path)
+
+    chapter.write_text("# 第一章\n\n林澈抵达现场并发现蓝色羽毛。\n", encoding="utf-8")
+    cards.joinpath("苏晚.md").write_text(
+        "# 苏晚\n\n> 稳定实体ID: `char:suwan`\n\n法医。\n",
+        encoding="utf-8",
+    )
+    incremental = service.sync_local_incremental(tmp_path)
+
+    service.wiki_json_path(tmp_path).unlink()
+    service.wiki_index_path(tmp_path).unlink()
+    service.wiki_markdown_path(tmp_path).unlink()
+    cold = service.read_or_build(tmp_path)
+
+    assert cold["graphChecksum"] == incremental["graphChecksum"]
+    assert cold["sourceSetChecksum"] == incremental["sourceSetChecksum"]
+    assert cold["knowledgeRevision"] == incremental["knowledgeRevision"]
+    assert cold["sourceStats"] == incremental["sourceStats"]
 
 
 def test_sync_local_incremental_replaces_fact_edges_when_facts_change(tmp_path):

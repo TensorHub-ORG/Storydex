@@ -142,6 +142,25 @@ class ProjectService:
         forced_root = str(os.environ.get("STORYDEX_FORCE_WORKSPACE_ROOT") or "").strip()
         if forced_root:
             return Path(forced_root).expanduser().resolve()
+
+        restore_last_workspace = str(os.environ.get("STORYDEX_RESTORE_LAST_WORKSPACE") or "").strip().lower()
+        if restore_last_workspace in {"1", "true", "yes", "on"}:
+            try:
+                workspace_state = self.global_config.read_workspace_state()
+            except OSError:
+                workspace_state = {}
+            last_project_path = (
+                str(workspace_state.get("lastProjectPath") or "").strip()
+                if isinstance(workspace_state, dict)
+                else ""
+            )
+            if last_project_path:
+                try:
+                    candidate = Path(last_project_path).expanduser()
+                    if candidate.exists() and candidate.is_dir():
+                        return candidate.resolve()
+                except (OSError, RuntimeError):
+                    pass
         return self._default_workspace_root
 
     def _persist_state(self, workspace_root: Path) -> None:

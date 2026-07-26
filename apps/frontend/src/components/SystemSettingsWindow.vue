@@ -1,9 +1,17 @@
 <template>
   <section v-if="visible" class="system-settings-overlay" @click.self="emit('close')">
     <div class="system-settings-window" role="dialog" aria-modal="true" aria-label="系统设置">
+      <header class="system-settings-titlebar">
+        <div class="system-settings-titlebar-main">
+          <span class="material-symbols-rounded system-settings-titlebar-icon" aria-hidden="true">settings</span>
+          <span class="system-settings-titlebar-text">系统设置</span>
+        </div>
+        <button class="system-settings-titlebar-close" type="button" title="关闭" @click="emit('close')">
+          <span class="material-symbols-rounded">close</span>
+        </button>
+      </header>
       <div class="system-settings-body">
         <aside class="system-settings-sidebar">
-          <div class="system-settings-sidebar-title">系统设置</div>
           <label class="system-settings-search" for="system-settings-search-input">
             <span class="material-symbols-rounded" aria-hidden="true">search</span>
             <input
@@ -14,6 +22,7 @@
             />
           </label>
 
+          <div class="system-settings-nav-label">分类</div>
           <div class="system-settings-nav" role="tablist" aria-label="设置分类">
             <button
               v-for="section in matchedSections"
@@ -68,9 +77,6 @@
                     @click="saveSection(section.id)"
                   >
                     <span class="material-symbols-rounded" aria-hidden="true">save</span>
-                  </button>
-                  <button class="system-settings-icon-action" type="button" title="关闭" @click="emit('close')">
-                    <span class="material-symbols-rounded" aria-hidden="true">close</span>
                   </button>
                 </div>
               </header>
@@ -292,10 +298,12 @@
 
               <div v-else class="system-settings-card-body">
                 <section class="system-settings-block">
-                  <div class="system-settings-project-meta-bar">
-                    <span>来源：{{ sourceLabel }}</span>
-                    <span>更新：{{ updatedAtLabel }}</span>
-                    <span class="system-settings-project-path">路径：{{ settingsPathLabel }}</span>
+                  <div class="system-settings-chips">
+                    <span class="system-settings-chip">来源 <b>{{ sourceLabel }}</b></span>
+                    <span class="system-settings-chip">更新 <b>{{ updatedAtLabel }}</b></span>
+                    <span class="system-settings-chip system-settings-chip-path" :title="settingsPathLabel">
+                      路径 <b>{{ settingsPathLabel }}</b>
+                    </span>
                   </div>
                 </section>
 
@@ -363,6 +371,10 @@
           </div>
         </main>
       </div>
+      <footer class="system-settings-footer">
+        <span class="system-settings-footer-hint">界面、布局与字体设置即时生效并自动保存；Agent 与项目设置修改后需点击保存。</span>
+        <span class="system-settings-footer-key">Esc 关闭</span>
+      </footer>
     </div>
   </section>
 </template>
@@ -857,9 +869,9 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 }
 
 .system-settings-window {
-  width: min(1240px, calc(100vw - 28px));
-  height: min(820px, calc(100vh - 28px));
-  border-radius: 8px;
+  width: min(1120px, calc(100vw - 28px));
+  height: min(780px, calc(100vh - 28px));
+  border-radius: 6px;
   border: 1px solid var(--border-subtle);
   background: var(--bg-card);
   box-shadow: var(--shadow-md);
@@ -868,11 +880,64 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
   overflow: hidden;
 }
 
+/* ---- 标题栏（与预设导入预览同款面板头） ---- */
+.system-settings-titlebar {
+  flex: 0 0 auto;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px 0 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-card-muted);
+}
+
+.system-settings-titlebar-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.system-settings-titlebar-icon {
+  font-size: 17px;
+  color: var(--text-muted);
+}
+
+.system-settings-titlebar-text {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--text-soft);
+}
+
+.system-settings-titlebar-close {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.system-settings-titlebar-close:hover {
+  background: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.system-settings-titlebar-close .material-symbols-rounded {
+  font-size: 17px;
+}
+
 .system-settings-body {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 228px minmax(0, 1fr);
+  grid-template-columns: 216px minmax(0, 1fr);
   overflow: hidden;
 }
 
@@ -880,36 +945,28 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 12px;
-  border-right: 1px solid var(--border-ghost);
-  background: var(--bg-sidebar);
-}
-
-.system-settings-sidebar-title {
-  padding: 2px 2px 4px;
-  color: var(--text-main);
-  font-size: 15px;
-  font-weight: 700;
+  padding: 10px 0 8px;
+  border-right: 1px solid var(--border-subtle);
+  background: var(--bg-card-muted);
 }
 
 .system-settings-card-actions {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
 }
 
 .system-settings-icon-action {
-  width: 32px;
-  height: 32px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 6px;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 3px;
   background: transparent;
-  color: var(--text-soft);
+  color: var(--text-muted);
   display: inline-grid;
   place-items: center;
   cursor: pointer;
-  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
 .system-settings-icon-action:hover:not(:disabled) {
@@ -919,23 +976,34 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 
 .system-settings-icon-action:disabled {
   cursor: not-allowed;
-  opacity: 0.55;
+  opacity: 0.45;
 }
 
 .system-settings-icon-action .material-symbols-rounded {
-  font-size: 19px;
+  font-size: 17px;
 }
 
 .system-settings-search {
-  min-height: 34px;
-  border-radius: 6px;
+  flex: 0 0 auto;
+  margin: 0 12px;
+  height: 28px;
+  border-radius: 3px;
   border: 1px solid var(--border-subtle);
-  background: color-mix(in srgb, var(--bg-card) 92%, transparent);
+  background: var(--bg-input);
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 10px;
+  gap: 6px;
+  padding: 0 8px;
   color: var(--text-muted);
+}
+
+.system-settings-search:focus-within {
+  border-color: var(--accent);
+}
+
+.system-settings-search .material-symbols-rounded {
+  font-size: 15px;
+  color: var(--text-faint);
 }
 
 .system-settings-search input {
@@ -946,6 +1014,10 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
   color: var(--text-main);
   outline: none;
   font-size: 13px;
+}
+
+.system-settings-search input::placeholder {
+  color: var(--text-faint);
 }
 
 .system-settings-update-meta {
@@ -994,30 +1066,33 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 }
 
 .system-settings-update-btn {
-  min-height: 32px;
+  min-height: 28px;
   padding: 0 14px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-main);
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  background: var(--bg-card);
+  color: var(--text-soft);
   font: inherit;
-  font-size: 12px;
+  font-size: 12.5px;
   cursor: pointer;
-  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
 .system-settings-update-btn:hover:not(:disabled) {
   background: var(--bg-hover);
+  color: var(--text-main);
 }
 
 .system-settings-update-btn.primary {
   border-color: transparent;
-  background: var(--accent-strong);
-  color: var(--text-on-accent, #fff);
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-weight: 600;
 }
 
 .system-settings-update-btn.primary:hover:not(:disabled) {
-  filter: brightness(1.06);
+  background: var(--accent-strong);
+  color: var(--accent-contrast);
 }
 
 .system-settings-update-btn:disabled {
@@ -1025,24 +1100,38 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
   opacity: 0.55;
 }
 
+.system-settings-nav-label {
+  padding: 12px 14px 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--text-faint);
+}
+
 .system-settings-nav {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  overflow-y: auto;
 }
 
 .system-settings-nav-item {
-  min-height: 34px;
-  padding: 0 9px;
-  border: 1px solid transparent;
-  border-radius: 6px;
+  min-height: 30px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 0;
   background: transparent;
   color: var(--text-soft);
   display: inline-flex;
   align-items: center;
-  gap: 10px;
+  gap: 9px;
   cursor: pointer;
   text-align: left;
+  font-size: 13px;
+}
+
+.system-settings-nav-item .material-symbols-rounded {
+  font-size: 16px;
+  color: var(--text-muted);
 }
 
 .system-settings-nav-item:hover {
@@ -1051,13 +1140,18 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 }
 
 .system-settings-nav-item.active {
-  border-color: color-mix(in srgb, var(--accent) 28%, var(--border-subtle));
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  background: var(--bg-selected);
+  box-shadow: inset 2px 0 0 var(--accent);
+  color: var(--text-main);
+}
+
+.system-settings-nav-item.active .material-symbols-rounded {
   color: var(--accent-strong);
 }
 
 .system-settings-search-meta {
-  margin-top: auto;
+  margin: auto 14px 4px;
+  padding-top: 8px;
   color: var(--text-muted);
   font-size: 12px;
 }
@@ -1072,7 +1166,7 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 14px 16px 18px;
+  padding: 12px 18px 16px;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -1082,7 +1176,7 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 .system-settings-empty {
   min-height: 220px;
   border: 1px dashed var(--border-subtle);
-  border-radius: 6px;
+  border-radius: 3px;
   display: grid;
   place-items: center;
   color: var(--text-muted);
@@ -1102,8 +1196,8 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 }
 
 .system-settings-card-header {
-  min-height: 38px;
-  padding: 0 0 10px;
+  min-height: 32px;
+  padding: 0 0 8px;
   border-bottom: 1px solid var(--border-ghost);
   display: flex;
   align-items: center;
@@ -1114,10 +1208,11 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 .system-settings-card-title-wrap {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
 
 .system-settings-card-title-wrap .material-symbols-rounded {
+  font-size: 17px;
   color: var(--accent);
 }
 
@@ -1127,8 +1222,8 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 
 .system-settings-card-title {
   color: var(--text-main);
-  font-size: 18px;
-  font-weight: 700;
+  font-size: 15px;
+  font-weight: 600;
   margin: 0;
 }
 
@@ -1159,22 +1254,23 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 }
 
 .system-settings-block-title {
-  color: var(--text-main);
-  font-size: 13px;
+  color: var(--text-faint);
+  font-size: 12px;
   font-weight: 700;
+  letter-spacing: 0.06em;
 }
 
 .theme-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  gap: 8px;
 }
 
 .theme-option {
   border: 1px solid var(--border-subtle);
-  border-radius: 6px;
-  background: var(--bg-input);
-  padding: 8px;
+  border-radius: 3px;
+  background: var(--bg-card);
+  padding: 7px 9px;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -1187,14 +1283,15 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 }
 
 .theme-option.active {
-  border-color: color-mix(in srgb, var(--accent) 32%, var(--border-subtle));
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-subtle));
+  background: var(--bg-selected);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .theme-option-preview {
-  width: 30px;
-  height: 30px;
-  border-radius: 6px;
+  width: 28px;
+  height: 28px;
+  border-radius: 3px;
   border: 1px solid color-mix(in srgb, var(--border-subtle) 90%, white 10%);
   flex-shrink: 0;
 }
@@ -1279,46 +1376,66 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 
 .system-settings-input {
   width: 100%;
-  min-height: 34px;
-  padding: 0 10px;
+  min-height: 30px;
+  padding: 0 9px;
   border: 1px solid var(--border-subtle);
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--bg-card) 90%, transparent);
+  border-radius: 3px;
+  background: var(--bg-input);
   color: var(--text-main);
+  font-size: 13px;
   outline: none;
 }
 
 .system-settings-input:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-soft);
 }
 
-.system-settings-project-meta-bar {
+/* ---- 元信息 chips（与导入预览同款） ---- */
+.system-settings-chips {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px 14px;
-  padding: 8px 10px;
-  border: 1px solid var(--border-ghost);
-  border-radius: 6px;
-  background: var(--bg-input);
-  color: var(--text-muted);
-  font-size: 12px;
-  line-height: 1.5;
+  gap: 6px;
 }
 
-.system-settings-project-path {
-  min-width: 180px;
+.system-settings-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  background: var(--bg-card);
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.system-settings-chip b {
+  color: var(--text-main);
+  font-weight: 600;
+}
+
+.system-settings-chip-path {
+  min-width: 0;
   max-width: 100%;
+}
+
+.system-settings-chip-path b {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 400;
 }
 
 .system-settings-empty-inline {
   min-height: 48px;
   border: 1px dashed var(--border-subtle);
-  border-radius: 6px;
+  border-radius: 3px;
   display: grid;
   place-items: center;
   color: var(--text-muted);
@@ -1370,10 +1487,10 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 }
 
 .system-settings-switch-track {
-  width: 48px;
-  height: 28px;
+  width: 38px;
+  height: 20px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--text-soft) 22%, transparent);
+  background: color-mix(in srgb, var(--text-soft) 24%, transparent);
   position: relative;
   transition: background-color 0.18s ease;
 }
@@ -1381,22 +1498,22 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 .system-settings-switch-track::after {
   content: "";
   position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 22px;
-  height: 22px;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
   border-radius: 999px;
   background: #fff;
-  box-shadow: 0 4px 10px color-mix(in srgb, black 16%, transparent);
+  box-shadow: 0 2px 6px color-mix(in srgb, black 18%, transparent);
   transition: transform 0.18s ease;
 }
 
 .system-settings-switch input:checked + .system-settings-switch-track {
-  background: color-mix(in srgb, var(--accent) 66%, white 10%);
+  background: var(--accent);
 }
 
 .system-settings-switch input:checked + .system-settings-switch-track::after {
-  transform: translateX(20px);
+  transform: translateX(18px);
 }
 
 .system-settings-primary-btn,
@@ -1449,6 +1566,34 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
   color: var(--success);
 }
 
+/* ---- 底栏（与导入预览同款信息栏） ---- */
+.system-settings-footer {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 34px;
+  padding: 0 14px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-card-muted);
+}
+
+.system-settings-footer-hint {
+  min-width: 0;
+  color: var(--text-faint);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.system-settings-footer-key {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
 @media (max-width: 980px) {
   .system-settings-window {
     width: calc(100vw - 20px);
@@ -1461,13 +1606,12 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 
   .system-settings-sidebar {
     border-right: 0;
-    border-bottom: 1px solid var(--border-ghost);
+    border-bottom: 1px solid var(--border-subtle);
   }
 
   .system-settings-nav {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 8px;
   }
 
   .theme-grid {
@@ -1480,7 +1624,6 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
     padding: 8px;
   }
 
-  .system-settings-sidebar,
   .system-settings-content-scroll {
     padding: 12px;
   }

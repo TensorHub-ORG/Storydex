@@ -17,6 +17,7 @@ from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 from services.context_policy import ContextPolicy, context_policy_from_turn_contract
+from services.story_project_service import DEFAULT_CHAPTER_WORD_COUNT_TARGET
 
 
 STORYDEX_COOMI_HOME = Path.home() / ".storydex"
@@ -868,18 +869,16 @@ class StorydexCoomiAgentService:
         *,
         base_url: str,
         api_key: str,
+        provider_type: str = "openai_compatible",
         timeout: float = 20.0,
         http_get: Callable[..., Any] | None = None,
     ) -> Dict[str, Any]:
-        endpoint = _coomi_models_endpoint(base_url)
+        endpoint = _coomi_models_endpoint(base_url, provider_type=provider_type)
         normalized_key = str(api_key or "").strip()
         if not normalized_key:
             raise ValueError("Coomi API key is required to fetch models.")
 
-        headers = {
-            "Authorization": f"Bearer {normalized_key}",
-            "Accept": "application/json",
-        }
+        headers = _coomi_model_headers(api_key=normalized_key, provider_type=provider_type)
         try:
             response = (
                 http_get(endpoint, headers=headers, timeout=timeout)
@@ -1122,6 +1121,145 @@ async def _call_provider_chat(provider: Any, messages: list[Dict[str, Any]], opt
     return response
 
 
+class CoomiStoryGenerationAdapter:
+    """Provider adapter for the semantic-budget controller.
+
+    It owns transport retries and Provider selection, but has no project write
+    access. Logical scene/planning calls remain visible to the controller while
+    retry attempts are reported separately through ``event_sink``.
+    """
+
+    def __init__(
+        self,
+        *,
+        trace_id: str,
+        provider_id: str = "",
+        maximum_transport_retries: int = 1,
+        event_sink: Callable[[str, Dict[str, Any]], None] | None = None,
+        sleep: Callable[[float], Any] = asyncio.sleep,
+    ) -> None:
+        self.trace_id = str(trace_id or "semantic-budget")
+        self.provider_id = str(provider_id or "").strip()
+        self.maximum_transport_retries = max(0, min(2, int(maximum_transport_retries)))
+        self.event_sink = event_sink
+        self.sleep = sleep
+        self.provider_attempts = 0
+        self.provider_retries = 0
+        self._provider: Any = None
+
+    async def complete(
+        self,
+        *,
+        messages: list[Dict[str, str]],
+        purpose: str,
+        metadata: Dict[str, Any],
+    ) -> str:
+        for retry_index in range(self.maximum_transport_retries + 1):
+            self.provider_attempts += 1
+            try:
+                with _storydex_coomi_home():
+                    from coomi.services import get_llm_provider
+                    from services.llm_replay import (
+                        get_replayable_llm_provider,
+                        llm_purpose,
+                        llm_trace,
+                    )
+
+                    if self._provider is None:
+                        raw_provider = get_llm_provider(self.provider_id or None)
+                        self._provider = get_replayable_llm_provider(raw_provider)
+                    with llm_trace(self.trace_id), llm_purpose(purpose):
+                        response = await _call_provider_chat(self._provider, messages, None)
+                self._emit_attempt(
+                    purpose=purpose,
+                    metadata=metadata,
+                    attempt=retry_index + 1,
+                    outcome="success",
+                )
+                return str(getattr(response, "content", "") or "")
+            except Exception as exc:
+                retryable = _semantic_provider_error_retryable(exc)
+                should_retry = retryable and retry_index < self.maximum_transport_retries
+                delay = _semantic_provider_retry_delay(exc) if should_retry else 0
+                self._emit_attempt(
+                    purpose=purpose,
+                    metadata=metadata,
+                    attempt=retry_index + 1,
+                    outcome="error",
+                    error=exc,
+                    retry_scheduled=should_retry,
+                    retry_delay=delay,
+                )
+                if not should_retry:
+                    raise
+                self.provider_retries += 1
+                sleep_result = self.sleep(delay)
+                if inspect.isawaitable(sleep_result):
+                    await sleep_result
+        raise RuntimeError("semantic Provider retry loop exited unexpectedly")
+
+    def _emit_attempt(
+        self,
+        *,
+        purpose: str,
+        metadata: Dict[str, Any],
+        attempt: int,
+        outcome: str,
+        error: Exception | None = None,
+        retry_scheduled: bool = False,
+        retry_delay: int = 0,
+    ) -> None:
+        if self.event_sink is None:
+            return
+        self.event_sink(
+            "SemanticBudgetProviderAttempt",
+            {
+                "_type": "SemanticBudgetProviderAttempt",
+                "_version": 1,
+                "purpose": purpose,
+                "metadata": dict(metadata),
+                "attempt": attempt,
+                "outcome": outcome,
+                "statusCode": _semantic_provider_error_status(error) if error is not None else None,
+                "errorType": type(error).__name__ if error is not None else "",
+                "retryScheduled": retry_scheduled,
+                "retryDelaySeconds": retry_delay,
+            },
+        )
+
+
+def _semantic_provider_error_status(exc: Exception | None) -> int | None:
+    status = getattr(exc, "status_code", None) if exc is not None else None
+    try:
+        return int(status) if status is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _semantic_provider_error_retryable(exc: Exception) -> bool:
+    status = _semantic_provider_error_status(exc)
+    if status == 429 or (status is not None and status >= 500):
+        return True
+    name = type(exc).__name__.lower()
+    return any(token in name for token in ("timeout", "connection", "network"))
+
+
+def _semantic_provider_retry_delay(exc: Exception) -> int:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        try:
+            value = headers.get("retry-after")
+            if value is not None:
+                return max(1, min(120, int(float(value))))
+        except (AttributeError, TypeError, ValueError):
+            pass
+    match = re.search(r"retry_after['\"\s:]+(\d+)", str(exc), re.IGNORECASE)
+    if match:
+        return max(1, min(120, int(match.group(1))))
+    return 5
+
+
 def _coomi_api_base_url(base_url: str) -> str:
     raw = str(base_url or "").strip()
     if not raw:
@@ -1169,7 +1307,7 @@ def _install_coomi_endpoint_compat() -> None:
     _COOMI_ENDPOINT_COMPAT_INSTALLED = True
 
 
-def _coomi_models_endpoint(base_url: str) -> str:
+def _coomi_models_endpoint(base_url: str, *, provider_type: str = "openai_compatible") -> str:
     raw = str(base_url or "").strip()
     if not raw:
         raise ValueError("Coomi base URL is required to fetch models.")
@@ -1183,15 +1321,38 @@ def _coomi_models_endpoint(base_url: str) -> str:
         "/chat/completions",
         "/completions",
         "/responses",
+        "/messages",
     )
     for suffix in replacements:
         if lowered.endswith(suffix):
             path = f"{path[:-len(suffix)]}/models"
             break
     else:
-        if not lowered.endswith("/models"):
+        if lowered.endswith("/models"):
+            pass
+        elif _is_anthropic_provider_type(provider_type) and not lowered.endswith("/v1"):
+            path = f"{path}/v1/models" if path else "/v1/models"
+        else:
             path = f"{path}/models" if path else "/models"
     return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+
+def _coomi_model_headers(*, api_key: str, provider_type: str) -> Dict[str, str]:
+    if _is_anthropic_provider_type(provider_type):
+        return {
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "Accept": "application/json",
+        }
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+    }
+
+
+def _is_anthropic_provider_type(value: str) -> bool:
+    normalized = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return normalized in {"anthropic", "anthropic_message", "anthropic_messages", "messages"}
 
 
 def _extract_model_ids(payload: Any) -> list[str]:
@@ -1815,7 +1976,9 @@ async def _build_coomi_system_prompt(
     contract_intent = _dict_value(_dict_value(turn_contract).get("intentFrame"))
     contract_operation_type = str(contract_intent.get("operationType") or "").strip().lower()
     story_options = _render_story_generation_options(
-        story_generation, operation_type=contract_operation_type
+        story_generation,
+        operation_type=contract_operation_type,
+        include_length=not bool(_dict_value(turn_contract).get("turnPlan")),
     )
     contract_options = _render_turn_contract(turn_contract)
     retrieval_tools_prompt = (
@@ -1885,27 +2048,34 @@ async def _build_coomi_system_prompt(
 
 
 def _render_story_generation_options(
-    value: Dict[str, Any] | None, *, operation_type: str = ""
+    value: Dict[str, Any] | None,
+    *,
+    operation_type: str = "",
+    include_length: bool = True,
 ) -> str:
     payload = value if isinstance(value, dict) else {}
     fragment_count = _positive_int(payload.get("fragmentCount"), default=1)
     chapter_target, accept_min, accept_max = _story_word_count_prompt_values(payload)
     chapter_template = str(payload.get("chapterTemplateId") or payload.get("chapterTemplate") or "").strip()
+    length_line = (
+        f"- chapterLengthGuidance: target about {chapter_target} non-whitespace characters; "
+        f"{accept_min}-{accept_max} is acceptable"
+        if include_length
+        else ""
+    )
     # 修改现有文件时，这些片段数/字数只是软参考，不是新建配额，避免重构被当成新建。
     if str(operation_type or "").strip().lower() == "modify_existing":
         return (
             "\nStory generation turn options (modify_existing — soft reference only):\n"
             + f"- fragmentCount: {fragment_count} (reference, NOT a mandate to create new fragments)\n"
-            + f"- chapterLengthGuidance: target about {chapter_target} non-whitespace characters; "
-            + f"{accept_min}-{accept_max} is acceptable (soft guide for edited content)\n"
+            + (f"{length_line} (soft guide for edited content)\n" if length_line else "")
             + (f"- chapterTemplateId: {chapter_template}\n" if chapter_template else "")
             + "This turn edits/restructures existing files; do not treat these values as new-fragment creation constraints.\n"
         )
     return (
         "\nStory generation turn options:\n"
         + f"- fragmentCount: {fragment_count}\n"
-        + f"- chapterLengthGuidance: target about {chapter_target} non-whitespace characters; "
-        + f"{accept_min}-{accept_max} is acceptable. The target is not an upper limit; prioritize narrative completeness.\n"
+        + (f"{length_line}.\n" if length_line else "")
         + (f"- chapterTemplateId: {chapter_template}\n" if chapter_template else "")
         + "For story creation or continuation turns, fragment paths and the chapter template remain binding.\n"
     )
@@ -1941,6 +2111,13 @@ def _render_turn_contract(value: Dict[str, Any] | None) -> str:
     status = str(contract.get("status") or "ready")
     fragment_count = _positive_int(turn_plan.get("fragmentCount"), default=1)
     chapter_target, accept_min, accept_max = _story_word_count_prompt_values(turn_plan)
+    word_count_policy = _dict_value(turn_plan.get("wordCountPolicy"))
+    calibration = _dict_value(word_count_policy.get("calibration"))
+    reference_label = (
+        "calibrated generation reference"
+        if str(calibration.get("status") or "").strip().lower() == "applied"
+        else "generation reference"
+    )
     requires_template = bool(turn_plan.get("requiresChapterTemplateSelection"))
     selected_template = str(turn_plan.get("selectedChapterTemplate") or "").strip()
     selected_template_detail = _dict_value(turn_plan.get("selectedChapterTemplateDetail"))
@@ -1961,10 +2138,6 @@ def _render_turn_contract(value: Dict[str, Any] | None) -> str:
             f"remotePush={bool(execution.get('remotePush', False))}"
         ),
         f"- storyFragments: count={fragment_count}",
-        (
-            f"- chapterLengthGuidance: target about {chapter_target} non-whitespace characters; "
-            f"{accept_min}-{accept_max} is acceptable. The target is not an upper limit; prioritize narrative completeness."
-        ),
         f"- chapterContentMode: {chapter_content_mode}",
     ]
 
@@ -2010,6 +2183,11 @@ def _render_turn_contract(value: Dict[str, Any] | None) -> str:
     # 不断生成新片段"的核心提示词约束。
     if operation_type == "modify_existing":
         lines.append(
+            f"- wordCountGuidance: {reference_label} is about {chapter_target} Storydex non-whitespace "
+            f"characters; edited chapter content should finish within {accept_min}-{accept_max} when applicable. "
+            "Treat this as a soft editing guide, not a mandate to create new text."
+        )
+        lines.append(
             "- operationDiscipline (modify_existing): the user wants to restructure/reorganize/rewrite/adjust "
             "or clean up files that ALREADY exist. First READ and understand the relevant existing files "
             "(use StorydexProjectSearch / reads) before changing anything. Edit those existing files in place; "
@@ -2024,8 +2202,11 @@ def _render_turn_contract(value: Dict[str, Any] | None) -> str:
             "The fragment count and chapter template are binding creation constraints; chapter length remains guidance."
         )
         lines.append(
-            f"- wordCountGuidance: the whole chapter targets about {chapter_target} Storydex non-whitespace "
-            f"characters; {accept_min}-{accept_max} is acceptable, with narrative completeness taking priority."
+            f"- wordCountGuidance: {reference_label} is about {chapter_target} Storydex non-whitespace "
+            f"characters; the completed chapter should finish within {accept_min}-{accept_max}. "
+            "Complete the core turn, then close naturally near the reference; compress repeated explanation first "
+            "while preserving necessary action, character thought, dialogue, and causal transitions. "
+            "Never pad, repeat, mention the word count, or cut off a scene merely to hit length."
         )
 
     lines.append(
@@ -2189,15 +2370,35 @@ def _resolve_word_count_range(payload: Dict[str, Any]) -> tuple[int, int]:
     policy = _dict_value(payload.get("wordCountPolicy"))
     raw_target = payload.get("chapterWordCountTarget", payload.get("chapter_word_count_target"))
     if raw_target is not None and str(policy.get("mode") or "target") != "range":
-        target = _bounded_int(raw_target, default=2500, minimum=100, maximum=20000)
+        target = _bounded_int(
+            raw_target,
+            default=DEFAULT_CHAPTER_WORD_COUNT_TARGET,
+            minimum=100,
+            maximum=20000,
+        )
         return target, target
     raw_min = payload.get("fragmentWordCountMin")
     raw_max = payload.get("fragmentWordCountMax")
     if raw_min is None and raw_max is None:
-        legacy = _bounded_int(payload.get("fragmentWordCount"), default=2500, minimum=100, maximum=20000)
+        legacy = _bounded_int(
+            payload.get("fragmentWordCount"),
+            default=DEFAULT_CHAPTER_WORD_COUNT_TARGET,
+            minimum=100,
+            maximum=20000,
+        )
         return legacy, legacy
-    min_value = _bounded_int(raw_min, default=2500, minimum=100, maximum=20000)
-    max_value = _bounded_int(raw_max, default=2500, minimum=100, maximum=20000)
+    min_value = _bounded_int(
+        raw_min,
+        default=DEFAULT_CHAPTER_WORD_COUNT_TARGET,
+        minimum=100,
+        maximum=20000,
+    )
+    max_value = _bounded_int(
+        raw_max,
+        default=DEFAULT_CHAPTER_WORD_COUNT_TARGET,
+        minimum=100,
+        maximum=20000,
+    )
     if min_value > max_value:
         min_value, max_value = max_value, min_value
     return min_value, max_value
@@ -2206,15 +2407,18 @@ def _resolve_word_count_range(payload: Dict[str, Any]) -> tuple[int, int]:
 def _story_word_count_prompt_values(payload: Dict[str, Any]) -> tuple[int, int, int]:
     minimum, maximum = _resolve_word_count_range(payload)
     policy = _dict_value(payload.get("wordCountPolicy"))
-    raw_target = payload.get("chapterWordCountTarget", policy.get("target"))
+    raw_target = policy.get(
+        "modelReferenceWordCount",
+        payload.get("chapterWordCountTarget", policy.get("target")),
+    )
     chapter_target = _bounded_int(
         raw_target if raw_target is not None else round((minimum + maximum) / 2),
-        default=2500,
-        minimum=100,
-        maximum=20000,
+        default=DEFAULT_CHAPTER_WORD_COUNT_TARGET,
+        minimum=50,
+        maximum=25000,
     )
-    default_accept_min = max(50, round(minimum * 0.75))
-    default_accept_max = round(maximum * 1.25)
+    default_accept_min = max(50, round(minimum * 0.70))
+    default_accept_max = round(maximum * 1.30)
     accept_min = _bounded_int(
         policy.get("acceptanceMinimum"),
         default=default_accept_min,

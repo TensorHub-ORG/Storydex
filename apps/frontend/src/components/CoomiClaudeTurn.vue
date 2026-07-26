@@ -3,6 +3,7 @@
     <!-- 用户消息：左侧淡色圆角块；右侧 hover 浮现回滚操作 -->
     <div v-if="run.prompt" class="cct-user">
       <span class="cct-user-text">{{ run.prompt }}</span>
+      <span v-if="promptTimeText" class="cct-time">{{ promptTimeText }}</span>
       <div v-if="canRollback" class="cct-user-actions">
         <button
           class="cct-user-action"
@@ -33,6 +34,7 @@
         <!-- 中途插话（steer）：与首条用户消息同款 -->
         <div v-if="entry.kind === 'user'" class="cct-user cct-user-inline">
           <span class="cct-user-text">{{ entry.text }}</span>
+          <span v-if="entry.time" class="cct-time">{{ entry.time }}</span>
         </div>
 
         <!-- 活动阶段提示：运行中的一行灰字，收敛后由 store 覆盖 -->
@@ -40,43 +42,43 @@
           {{ entry.text }}
         </div>
 
-        <!-- 思考过程：仅当前活跃块展开，其余折叠成一行灰字 -->
+        <!-- 思考过程：运行中保持展开；整轮结束后才折叠成一行灰字 -->
         <div v-else-if="entry.kind === 'reasoning'" class="cct-line-block">
-          <button class="cct-summary" type="button" @click="toggle(entry.id, entry.live)">
+          <button class="cct-summary" type="button" @click="toggle(entry.id, isRunning)">
             <span>{{ entry.live ? "正在思考…" : "思考过程" }}</span>
             <span class="cct-chev material-symbols-rounded">
-              {{ isOpen(entry.id, entry.live) ? "expand_more" : "chevron_right" }}
+              {{ isOpen(entry.id, isRunning) ? "expand_more" : "chevron_right" }}
             </span>
           </button>
-          <div v-if="isOpen(entry.id, entry.live)" class="cct-reveal cct-reasoning-text">
+          <div v-if="isOpen(entry.id, isRunning)" class="cct-reveal cct-reasoning-text">
             {{ entry.text }}
           </div>
         </div>
 
-        <!-- 工具调用：运行中默认展开，结束后折叠成一行摘要 -->
+        <!-- 工具调用：运行中保持展开；整轮结束后才折叠成一行摘要 -->
         <div v-else-if="entry.kind === 'tools'" class="cct-line-block">
-          <button class="cct-summary" type="button" @click="toggle(entry.id, entry.live)">
+          <button class="cct-summary" type="button" @click="toggle(entry.id, isRunning)">
             <span>{{ toolsSummary(entry) }}</span>
             <span class="cct-chev material-symbols-rounded">
-              {{ isOpen(entry.id, entry.live) ? "expand_more" : "chevron_right" }}
+              {{ isOpen(entry.id, isRunning) ? "expand_more" : "chevron_right" }}
             </span>
           </button>
-          <div v-if="isOpen(entry.id, entry.live)" class="cct-reveal cct-tool-list">
+          <div v-if="isOpen(entry.id, isRunning)" class="cct-reveal cct-tool-list">
             <div v-for="chunk in toolChunks(entry)" :key="chunk.id" class="cct-tool-chunk">
               <!-- 工具超过 5 个时分块，避免长列表一次铺开 -->
               <button
                 v-if="entry.tools.length > TOOL_CHUNK_SIZE"
                 class="cct-summary cct-chunk-head"
                 type="button"
-                @click="toggle(chunk.id, chunkDefaultOpen(entry, chunk))"
+                @click="toggle(chunk.id, isRunning)"
               >
                 <span>{{ chunk.start }}–{{ chunk.end }} 共 {{ chunk.tools.length }} 项</span>
                 <span class="cct-chev material-symbols-rounded">
-                  {{ isOpen(chunk.id, chunkDefaultOpen(entry, chunk)) ? "expand_more" : "chevron_right" }}
+                  {{ isOpen(chunk.id, isRunning) ? "expand_more" : "chevron_right" }}
                 </span>
               </button>
               <div
-                v-if="entry.tools.length <= TOOL_CHUNK_SIZE || isOpen(chunk.id, chunkDefaultOpen(entry, chunk))"
+                v-if="entry.tools.length <= TOOL_CHUNK_SIZE || isOpen(chunk.id, isRunning)"
                 class="cct-tool-chunk-list"
               >
                 <div v-for="tool in chunk.tools" :key="tool.id" class="cct-tool">
@@ -112,7 +114,7 @@
         <div v-else-if="entry.kind === 'error'" class="cct-error-text">{{ entry.text }}</div>
       </template>
 
-      <!-- 底部元信息：耗时 · token · 状态 · 无恢复点，纯文字不重复头部 -->
+      <!-- 底部元信息：耗时 · token · 状态 · 无恢复点，纯文字不重复头部；右侧为完成时刻 -->
       <div class="cct-meta">
         <span class="cct-meta-text">{{ metaLine }}</span>
         <span
@@ -124,6 +126,7 @@
           <span class="material-symbols-rounded">warning_amber</span>
           无恢复点
         </span>
+        <span v-if="completedTimeText" class="cct-meta-time">{{ completedTimeText }}</span>
       </div>
     </div>
   </article>
@@ -131,14 +134,14 @@
 
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import MarkdownIt from "markdown-it";
 import type { AgentExecutionRun, CoomiWaterfallItem, CoomiWaterfallItemStatus } from "@/types/agent";
+import { createMarkdownRenderer } from "@/utils/markdown";
 
 type FlowEntry =
   | { kind: "reasoning"; id: string; text: string; lines: number; live: boolean }
   | { kind: "tools"; id: string; tools: CoomiWaterfallItem[]; status: CoomiWaterfallItemStatus; live: boolean }
   | { kind: "assistant"; id: string; text: string }
-  | { kind: "user"; id: string; text: string }
+  | { kind: "user"; id: string; text: string; time: string }
   | { kind: "phase"; id: string; text: string }
   | { kind: "notice"; id: string; text: string }
   | { kind: "error"; id: string; text: string };
@@ -148,7 +151,6 @@ type ToolChunk = {
   start: number;
   end: number;
   tools: CoomiWaterfallItem[];
-  status: CoomiWaterfallItemStatus;
 };
 
 const TOOL_CHUNK_SIZE = 5;
@@ -169,7 +171,7 @@ const emit = defineEmits<{
   (event: "markdown-click", payload: MouseEvent): void;
 }>();
 
-const md = new MarkdownIt({ html: false, linkify: true, breaks: true });
+const md = createMarkdownRenderer({}, { linkifyWorkspaceMarkdownFiles: true });
 
 const foldState = ref<Record<string, boolean>>({});
 
@@ -215,7 +217,7 @@ const entries = computed<FlowEntry[]>(() => {
     } else if (item.type === "assistant") {
       list.push({ kind: "assistant", id: item.id, text: item.content });
     } else if (item.type === "user") {
-      list.push({ kind: "user", id: item.id, text: item.content });
+      list.push({ kind: "user", id: item.id, text: item.content, time: formatClock(item.timestamp) });
     } else if (item.type === "phase") {
       list.push({ kind: "phase", id: item.id, text: item.content });
     } else if (item.type === "notice") {
@@ -226,7 +228,8 @@ const entries = computed<FlowEntry[]>(() => {
   }
   flush(!isRunning.value);
 
-  // 运行中：仅当末尾就是推理块时才算活跃（与 AgentPanel 的 isActiveReasoning 对齐）
+  // live 只决定摘要文案（“正在思考…”/“正在调用工具…”）；
+  // 展开态统一由 isRunning 决定：运行中全程展开，整轮结束后才折叠
   if (isRunning.value) {
     const last = [...list].reverse().find((entry) => entry.kind !== "phase");
     if (last?.kind === "reasoning") {
@@ -241,20 +244,14 @@ function toolChunks(entry: Extract<FlowEntry, { kind: "tools" }>): ToolChunk[] {
   const chunks: ToolChunk[] = [];
   for (let index = 0; index < entry.tools.length; index += TOOL_CHUNK_SIZE) {
     const tools = entry.tools.slice(index, index + TOOL_CHUNK_SIZE);
-    const running = entry.live && tools.some((t) => t.status === "running");
     chunks.push({
       id: `${entry.id}-chunk-${Math.floor(index / TOOL_CHUNK_SIZE)}`,
       start: index + 1,
       end: index + tools.length,
-      tools,
-      status: running ? "running" : tools.some((t) => t.status === "error") ? "error" : "success"
+      tools
     });
   }
   return chunks;
-}
-
-function chunkDefaultOpen(entry: Extract<FlowEntry, { kind: "tools" }>, chunk: ToolChunk): boolean {
-  return entry.live && chunk.status === "running";
 }
 
 // 折叠后的工具摘要，模仿 "Ran 2 commands, read 3 files"
@@ -309,6 +306,30 @@ const metaLine = computed(() => {
   const parts = [durationText.value, tokenText.value, statusText.value].filter(Boolean);
   return parts.join(" · ");
 });
+
+// 时钟格式：当天只显示时分，跨天补日期，跨年补年份
+function formatClock(value: string): string {
+  const date = new Date(value || "");
+  if (Number.isNaN(date.getTime())) return "";
+  const now = new Date();
+  const clock = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  if (
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate()
+  ) {
+    return clock;
+  }
+  const day = `${date.getMonth() + 1}月${date.getDate()}日`;
+  return date.getFullYear() === now.getFullYear()
+    ? `${day} ${clock}`
+    : `${date.getFullYear()}年${day} ${clock}`;
+}
+
+const promptTimeText = computed(() => formatClock(props.run.createdAt));
+
+// 运行中输出尚未定稿，meta 行左侧已有实时计时；终态才展示完成时刻
+const completedTimeText = computed(() => (isRunning.value ? "" : formatClock(props.run.updatedAt)));
 
 const durationText = computed(() => {
   // 运行中用父级传入的本地计时，完成后固定为后端权威值
@@ -373,12 +394,16 @@ function compactText(value: unknown, limit = 1200): string {
   gap: 18px;
 }
 
-/* 用户消息：左侧一个很淡的圆角块 */
+/* 用户消息：左侧一个很淡的圆角块，时间靠右对齐 */
 .cct-user {
   display: flex;
   align-items: center;
   justify-content: flex-start;
   gap: 6px;
+}
+
+.cct-user .cct-time {
+  margin-left: auto;
 }
 
 .cct-user-inline {
@@ -395,6 +420,14 @@ function compactText(value: unknown, limit = 1200): string {
   line-height: 1.6;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* 消息尾部时间：淡色小字，不抢正文视觉 */
+.cct-time {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  white-space: nowrap;
 }
 
 /* 回滚操作：hover 才浮现，避免常驻抢视觉 */
@@ -659,6 +692,14 @@ function compactText(value: unknown, limit = 1200): string {
   font-size: 15px;
 }
 
+/* 完成时刻：靠右对齐，与左侧统计文字互不干扰 */
+.cct-meta-time {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 /* markdown */
 .cct-markdown :deep(p) {
   margin: 0 0 0.6em;
@@ -708,6 +749,33 @@ function compactText(value: unknown, limit = 1200): string {
 
 .cct-markdown :deep(li + li) {
   margin-top: 0.25em;
+}
+
+.cct-markdown :deep(table) {
+  display: table;
+  width: max-content;
+  max-width: 100%;
+  margin: 0.6em 0 0.8em;
+  border-collapse: collapse;
+  table-layout: auto;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.cct-markdown :deep(th),
+.cct-markdown :deep(td) {
+  padding: 5px 9px;
+  border: 1px solid var(--border-subtle);
+  text-align: left;
+  vertical-align: top;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.cct-markdown :deep(th) {
+  background: color-mix(in srgb, var(--text-main) 6%, transparent);
+  color: var(--text-main);
+  font-weight: 700;
 }
 
 @keyframes cct-spin {

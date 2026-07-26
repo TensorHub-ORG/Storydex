@@ -23,15 +23,19 @@ const workspace = vi.hoisted(() => ({
   updateStorySettings: vi.fn().mockResolvedValue(undefined),
   openFile: vi.fn()
 }));
+const filePreview = vi.hoisted(() => ({
+  openFilePreviewWindow: vi.fn().mockResolvedValue(true)
+}));
 
 vi.mock("@/api/agent", () => ({ AgentApiError: class extends Error {}, ...api }));
 vi.mock("@/stores/git", () => ({ useGitStore: () => git }));
 vi.mock("@/stores/workspace", () => ({ useWorkspaceStore: () => workspace }));
+vi.mock("@/utils/filePreview", () => filePreview);
 vi.mock("@/api/workspace", () => ({ fetchStoryChapterTemplates: vi.fn().mockResolvedValue({ data: { items: [] } }) }));
 vi.mock("@/api/client", () => ({ describeTransportError: (_error: unknown, fallback: string) => fallback }));
 
 import AgentPanel from "@/components/AgentPanel.vue";
-import CoomiClaudeTurn from "@/components/demo/CoomiClaudeTurn.vue";
+import CoomiClaudeTurn from "@/components/CoomiClaudeTurn.vue";
 import { useAgentStore } from "@/stores/agent";
 import type { AgentExecutionRun } from "@/types/agent";
 
@@ -297,6 +301,9 @@ describe("AgentPanel", () => {
     await nextTick();
     expect(wrapper.find(".coomi-scroll-latest").exists()).toBe(true);
 
+    await wrapper.find('button[title="Settings"]').trigger("click");
+    expect(wrapper.find(".coomi-scroll-latest").exists()).toBe(false);
+
     store.executionHistory = [{
       traceId: "scroll-run", sessionId: "session", prompt: "p", route: "coomi", agentMode: "coomi", llmModel: "", llmProvider: "",
       status: "running", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastAction: "chat", reply: "new output", trace: null,
@@ -333,6 +340,34 @@ describe("AgentPanel", () => {
     const errorItems = (turn.props("run") as AgentExecutionRun).items.filter((item) => item.type === "error");
     expect(errorItems).toHaveLength(1);
     expect(wrapper.find("footer .coomi-error").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("opens a bare Markdown filename in the workspace preview instead of an external website", async () => {
+    const store = useAgentStore();
+    store.executionHistory = [makeRun({
+      status: "completed",
+      items: [{
+        id: "assistant-file-link",
+        type: "assistant",
+        status: "success",
+        title: "Assistant",
+        content: "扩写完成。002.md 已写入。",
+        timestamp: new Date().toISOString(),
+        raw: {}
+      }]
+    })];
+    const openExternal = vi.spyOn(window, "open").mockImplementation(() => null);
+    const wrapper = mount(AgentPanel, { attachTo: document.body });
+    await nextTick();
+
+    const fileLink = wrapper.get(".cct-markdown a");
+    expect(fileLink.attributes("href")).toBe("002.md");
+    await fileLink.trigger("click");
+
+    expect(filePreview.openFilePreviewWindow).toHaveBeenCalledWith("chapters/002.md");
+    expect(workspace.openFile).not.toHaveBeenCalled();
+    expect(openExternal).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 
@@ -512,6 +547,21 @@ describe("AgentPanel", () => {
     wrapper.unmount();
   });
 
+  it("shows the current chapter length policy and uses its default for an empty input", async () => {
+    const store = useAgentStore();
+    const wrapper = shallowMount(AgentPanel);
+    const utils = (wrapper.vm as any).__testUtils;
+
+    utils.toggleStoryOptions();
+    await nextTick();
+    expect(wrapper.text()).toContain("3000 是默认目标值");
+    expect(wrapper.text()).toContain("±30%");
+
+    utils.updateChapterWordCountTarget({ target: { value: "" } } as any);
+    expect(store.chapterWordCountTarget).toBe(3000);
+    wrapper.unmount();
+  });
+
   it("covers submit/stop, keyboard, commit failures and Markdown link handling", async () => {
     const store = useAgentStore();
     const wrapper = shallowMount(AgentPanel, { attachTo: document.body });
@@ -543,9 +593,10 @@ describe("AgentPanel", () => {
     const internal = wrapper.find(".coomi-stream").element;
     Object.defineProperty(internal, "scrollHeight", { value: 123, configurable: true });
     utils.scrollToBottom(); expect((internal as HTMLElement).scrollTop).toBe(123);
-    const relativeAnchor = document.createElement("a"); relativeAnchor.href = "chapters/002.md"; relativeAnchor.setAttribute("href", "chapters/002.md");
+    const relativeAnchor = document.createElement("a"); relativeAnchor.href = "002.md"; relativeAnchor.setAttribute("href", "002.md");
     const relativeEvent = { target: relativeAnchor, preventDefault: vi.fn(), stopPropagation: vi.fn() } as any;
-    utils.handleMarkdownLinkClick(relativeEvent); expect(workspace.openFile).toHaveBeenCalled();
+    utils.handleMarkdownLinkClick(relativeEvent);
+    expect(filePreview.openFilePreviewWindow).toHaveBeenCalledWith("chapters/002.md");
     const open = vi.spyOn(window, "open").mockImplementation(() => null);
     const external = document.createElement("a"); external.href = "https://example.com"; external.setAttribute("href", "https://example.com");
     utils.handleMarkdownLinkClick({ target: external, preventDefault: vi.fn(), stopPropagation: vi.fn() } as any); expect(open).toHaveBeenCalled();

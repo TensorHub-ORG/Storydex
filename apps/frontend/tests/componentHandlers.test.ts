@@ -98,6 +98,62 @@ describe("high-density component handler matrices", () => {
     wrapper.unmount();
   });
 
+  it("restores the active composer after copying a path from the explorer", async () => {
+    const store = useWorkspaceStore();
+    store.launchScreenVisible = false;
+    store.currentProject = { projectName: "Demo", workspaceRoot: "C:/story", openedAt: "" } as never;
+    store.tree = [
+      { kind: "file", name: "one.md", relativePath: "chapters/one.md", extension: ".md" }
+    ] as never;
+    useGitStore().refreshSummary = vi.fn().mockResolvedValue(undefined);
+
+    const composer = document.createElement("textarea");
+    composer.className = "coomi-input";
+    composer.value = "continue writing";
+    document.body.appendChild(composer);
+    composer.focus();
+    composer.setSelectionRange(8, 8);
+
+    const wrapper = mount(ExplorerSidebar, {
+      attachTo: document.body,
+      global: { stubs: { teleport: true } }
+    });
+    await nextTick();
+
+    async function copyFromContextMenu(label: "复制路径" | "复制相对路径"): Promise<void> {
+      composer.focus();
+      const row = wrapper.find("button.tree-row");
+      await row.trigger("pointerdown", { button: 2 });
+      (row.element as HTMLButtonElement).focus();
+      await row.trigger("contextmenu", { clientX: 20, clientY: 20 });
+      await nextTick();
+
+      const copyButton = wrapper
+        .findAll("button.context-menu-item")
+        .find((button) => button.text() === label);
+      expect(copyButton).toBeTruthy();
+      (copyButton!.element as HTMLButtonElement).focus();
+      await copyButton!.trigger("click");
+      await nextTick();
+    }
+
+    await copyFromContextMenu("复制路径");
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith("C:/story/chapters/one.md");
+    expect(document.activeElement).toBe(composer);
+    expect(composer.value).toBe("continue writing");
+    expect(composer.selectionStart).toBe(8);
+    expect(composer.selectionEnd).toBe(8);
+
+    composer.setSelectionRange(4, 4);
+    await copyFromContextMenu("复制相对路径");
+    expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith("chapters/one.md");
+    expect(navigator.clipboard.writeText).toHaveBeenCalledTimes(2);
+    expect(document.activeElement).toBe(composer);
+    expect(composer.selectionStart).toBe(4);
+    expect(composer.selectionEnd).toBe(4);
+    wrapper.unmount();
+  });
+
   it("renders the compact status bar with real health memory data", async () => {
     const store = useWorkspaceStore();
     store.launchScreenVisible = false;

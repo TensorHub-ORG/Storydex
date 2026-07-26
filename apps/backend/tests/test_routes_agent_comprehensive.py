@@ -54,10 +54,10 @@ def test_request_workspace_story_options_lock_git_and_sse_helpers(monkeypatch, t
 
     assert routes._normalize_story_generation_options(None) == {
         "fragmentCount": 1,
-        "fragmentWordCount": 2500,
-        "fragmentWordCountMin": 2500,
-        "fragmentWordCountMax": 2500,
-        "chapterWordCountTarget": 2500,
+        "fragmentWordCount": 3000,
+        "fragmentWordCountMin": 3000,
+        "fragmentWordCountMax": 3000,
+        "chapterWordCountTarget": 3000,
         "chapterTemplateId": "",
     }
     normalized = routes._normalize_story_generation_options(
@@ -65,10 +65,10 @@ def test_request_workspace_story_options_lock_git_and_sse_helpers(monkeypatch, t
     )
     assert normalized == {
         "fragmentCount": 99,
-        "fragmentWordCount": 2500,
-        "fragmentWordCountMin": 2500,
-        "fragmentWordCountMax": 2500,
-        "chapterWordCountTarget": 2500,
+        "fragmentWordCount": 3000,
+        "fragmentWordCountMin": 3000,
+        "fragmentWordCountMax": 3000,
+        "chapterWordCountTarget": 3000,
         "chapterTemplateId": "serial",
     }
     assert routes._apply_turn_contract_story_generation_defaults(normalized, {"turnPlan": {}}) is normalized
@@ -424,6 +424,94 @@ def test_stream_coomi_sse_success_needs_input_and_runtime_error(monkeypatch, tmp
     monkeypatch.setattr(routes, "get_storydex_coomi_agent_service", lambda: BrokenService())
     failed = asyncio.run(collect({"status": "ready"}))
     assert any(name == "AgentError" for name, _ in failed)
+
+
+def test_stream_finalizer_reconciles_written_knowledge_after_provider_401(monkeypatch, tmp_path):
+    persisted_records = []
+    coordinator = ExecutionCoordinator()
+    monkeypatch.setattr(routes, "execution_coordinator", coordinator)
+    monkeypatch.setattr(routes, "_create_agent_task_plan", lambda **kwargs: asyncio.sleep(0, result=[]))
+    monkeypatch.setattr(
+        routes,
+        "_build_chat_payload",
+        lambda **kwargs: {
+            "record": {
+                "traceId": kwargs["trace_id"],
+                "status": kwargs["status"],
+                "errorMessage": kwargs["error_message"],
+                "events": kwargs["events"],
+            }
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "_persist_execution_trace",
+        lambda workspace, record, session: persisted_records.append(dict(record)) or record,
+    )
+
+    class Git:
+        def finish_turn(self, snapshot, **kwargs):
+            return {"_type": "GitAutoCommit", "status": "info", "created": False}
+
+    class ProviderFailsAfterWrite:
+        def cancel_execution(self, **kwargs):
+            return False
+
+        async def stream_events(self, **kwargs):
+            cards = tmp_path / ".storydex" / "characters"
+            scripts = tmp_path / ".storydex" / "scripts"
+            cards.mkdir(parents=True, exist_ok=True)
+            scripts.mkdir(parents=True, exist_ok=True)
+            cards.joinpath("林澈.md").write_text(
+                "# 林澈\n\n> 稳定实体ID: `char:linche`\n",
+                encoding="utf-8",
+            )
+            scripts.joinpath("故事大纲.md").write_text(
+                "# 故事大纲\n\n林澈计划调查失窃案。\n",
+                encoding="utf-8",
+            )
+            yield "AgentStarted", {"llmProvider": "chy", "llmModel": "deepseek-v4-flash"}
+            yield "ToolDone", {"tool_name": "Write", "is_error": False}
+            yield "AgentError", {"message": "401 Invalid API key", "error_type": "ProviderError"}
+
+    monkeypatch.setattr(routes, "agent_git_autocommit_service", Git())
+    monkeypatch.setattr(routes, "get_storydex_coomi_agent_service", lambda: ProviderFailsAfterWrite())
+
+    async def collect():
+        return [
+            _decode_sse(item)
+            async for item in routes._stream_coomi_sse(
+                prompt="write story knowledge",
+                trace_id="trace-401-finalizer",
+                session_id="session-401-finalizer",
+                active_file="",
+                workspace_root=tmp_path,
+                story_generation={},
+                turn_contract={"status": "ready"},
+                git_snapshot=AgentGitSnapshot(workspace_root=tmp_path, available=True),
+                request=FakeRequest(),
+                cancellation_token=routes._CancellationToken(),
+            )
+        ]
+
+    packets = asyncio.run(collect())
+    projection = next(data for name, data in packets if name == "KnowledgeProjectionUpdated")
+    graph = json.loads(
+        (tmp_path / ".storydex" / "wiki" / "knowledge_graph.json").read_text(encoding="utf-8")
+    )
+
+    assert projection["status"] == "ready"
+    assert projection["knowledgeRevision"] == projection["builtFromRevision"]
+    assert ".storydex/characters/林澈.md" in projection["changedSourcePaths"]
+    assert any(node.get("id") == "char:linche" for node in graph["graph"]["nodes"])
+    assert any(entry.get("knowledgeStatus") == "planned" for entry in graph["entries"])
+    assert persisted_records
+    record = persisted_records[-1]
+    assert record["status"] == "failed"
+    assert record["partialFailed"] is True
+    assert record["executionOutcome"] == "partial_failed"
+    assert record["knowledgeProjection"]["status"] == "ready"
+    assert "401" in record["errorMessage"]
 
 
 def test_stream_disconnect_finishes_cancelled_execution_in_background(monkeypatch, tmp_path):
@@ -1401,7 +1489,7 @@ def test_resolve_story_word_count_range_variants():
     assert routes._resolve_story_word_count_range({"segmentWords": 900}) == (900, 900)
 
     # No hints at all falls back to the default single chapter target.
-    assert routes._resolve_story_word_count_range({}) == (2500, 2500)
+    assert routes._resolve_story_word_count_range({}) == (3000, 3000)
     assert routes._resolve_story_word_count_range({"chapterWordCountTarget": 1800}) == (1800, 1800)
 
 

@@ -15,7 +15,15 @@ from pydantic import BaseModel, ConfigDict, Field
 from api.response import ApiEnvelope, ApiTrace, success_response
 from core.bounded_text_io import read_text_preview as read_bounded_text_preview
 from services.project_service import get_project_service
-from services.story_project_service import get_story_project_service
+from services.story_relationship_semantics import (
+    classify_relationship,
+    parse_relationship_markdown,
+    semantics_for_dimension,
+)
+from services.story_project_service import (
+    DEFAULT_CHAPTER_WORD_COUNT_TARGET,
+    get_story_project_service,
+)
 
 router = APIRouter(tags=["story"])
 project_service = get_project_service()
@@ -29,10 +37,10 @@ class StoryProjectSettingsResponse(BaseModel):
     segment_naming_mode: str = Field(alias="segmentNamingMode")
     max_segments_per_chapter: int = Field(alias="maxSegmentsPerChapter")
     story_fragment_count: int = Field(default=1, alias="storyFragmentCount")
-    chapter_word_count_target: int = Field(default=2500, alias="chapterWordCountTarget")
-    story_fragment_word_count: int = Field(default=2500, alias="storyFragmentWordCount")
-    story_fragment_word_count_min: int = Field(default=2500, alias="storyFragmentWordCountMin")
-    story_fragment_word_count_max: int = Field(default=2500, alias="storyFragmentWordCountMax")
+    chapter_word_count_target: int = Field(default=DEFAULT_CHAPTER_WORD_COUNT_TARGET, alias="chapterWordCountTarget")
+    story_fragment_word_count: int = Field(default=DEFAULT_CHAPTER_WORD_COUNT_TARGET, alias="storyFragmentWordCount")
+    story_fragment_word_count_min: int = Field(default=DEFAULT_CHAPTER_WORD_COUNT_TARGET, alias="storyFragmentWordCountMin")
+    story_fragment_word_count_max: int = Field(default=DEFAULT_CHAPTER_WORD_COUNT_TARGET, alias="storyFragmentWordCountMax")
     story_chapter_template_id: str = Field(default="default_chapter_directory", alias="storyChapterTemplateId")
     auto_update_variables: bool = Field(default=False, alias="autoUpdateVariables")
     auto_update_wiki: bool = Field(default=False, alias="autoUpdateWiki")
@@ -480,36 +488,28 @@ def _canonical_relationship_endpoint(value: Any, node_lookup: Dict[str, str]) ->
 
 
 def _relationship_dimension_from_text(text: str) -> str:
-    normalized = _compact_graph_text(text).lower()
-    dimension_tokens = (
-        ("hostility", ("hostility", "enemy", "hostile", "\u654c\u5bf9", "\u4ec7", "\u6028")),
-        ("rivalry", ("rivalry", "rival", "\u7ade\u4e89", "\u5bf9\u624b", "\u8f83\u91cf", "\u51b2\u7a81")),
-        ("alliance", ("alliance", "ally", "partner", "\u540c\u76df", "\u5408\u4f5c", "\u7ed3\u76df", "\u8054\u624b", "\u4f19\u4f34")),
-        ("trust", ("trust", "trusted", "\u4fe1\u4efb", "\u4fe1\u8d56", "\u4e0d\u4f1a\u8f7b\u6613\u5bb3\u4eba", "\u6258\u4ed8")),
-        ("loyalty", ("loyalty", "loyal", "\u5fe0\u8bda", "\u6548\u5fe0", "\u8ffd\u968f")),
-        ("intimacy", ("intimacy", "friend", "\u4eb2\u5bc6", "\u670b\u53cb", "\u53cb\u4eba", "\u6545\u4ea4", "\u4eb2\u8fd1")),
-        ("professional", ("professional", "mentor", "student", "\u5e08\u5f92", "\u5e08\u7236", "\u5e08\u95e8", "\u638c\u67dc", "\u4e0a\u53f8", "\u4e0b\u5c5e", "\u540c\u4e8b")),
-        ("family", ("family", "\u5bb6\u4eba", "\u4eb2\u5c5e", "\u7236\u4eb2", "\u6bcd\u4eb2", "\u5144", "\u5f1f", "\u59d0", "\u59b9", "\u59bb", "\u592b", "\u53d4", "\u59d1", "\u8205", "\u59e8")),
-    )
-    for dimension, tokens in dimension_tokens:
-        if any(token in normalized for token in tokens):
-            return dimension
-    return "intimacy"
+    return classify_relationship(text).dimension
 
 
 def _relationship_level_for_dimension(dimension: str) -> int:
-    if dimension in {"hostility", "rivalry"}:
-        return -2
-    if dimension in {"trust", "intimacy", "loyalty", "alliance"}:
-        return 2
-    return 0
+    return semantics_for_dimension(dimension).current_level
+
+
+def _relationship_semantics(dimension: str) -> Dict[str, Any]:
+    semantics = semantics_for_dimension(dimension)
+    return {
+        "relationType": semantics.relation_type,
+        "polarity": semantics.polarity,
+        "strength": semantics.strength,
+        "status": semantics.status,
+    }
 
 
 def _relationship_edge_key(edge: Dict[str, Any]) -> tuple[str, str, str]:
     return (
         _compact_graph_text(edge.get("source")),
         _compact_graph_text(edge.get("target")),
-        _compact_graph_text(edge.get("dimension")).lower() or "intimacy",
+        _compact_graph_text(edge.get("relationType") or edge.get("dimension")).lower() or "unknown",
     )
 
 
@@ -539,6 +539,7 @@ def _build_derived_relationship_edge(
     if not combined_detail:
         return None
     dimension = _relationship_dimension_from_text(combined_detail)
+    semantics = _relationship_semantics(dimension)
     source_path = _relative_project_path(root, path)
     evidence = detail or relation or source_path
     return {
@@ -546,6 +547,7 @@ def _build_derived_relationship_edge(
         "target": target,
         "dimension": dimension,
         "current_level": _relationship_level_for_dimension(dimension),
+        **semantics,
         "sourcePath": source_path,
         "derivedFrom": "character_asset",
         "history": [
@@ -605,25 +607,21 @@ def _parse_markdown_relationship_line(
     line: str,
     node_lookup: Dict[str, str],
 ) -> Optional[Dict[str, Any]]:
-    text = _compact_graph_text(re.sub(r"^[-*+\u2022]\s*", "", str(line or "").strip()))
-    text = re.sub(r"^\d+[.)]\s*", "", text)
-    text = text.strip("*_ ")
-    if not text or text in {"\u6682\u65e0", "\u65e0", "none", "n/a"}:
+    statement = parse_relationship_markdown(line)
+    if statement is None:
         return None
-    match = re.match(r"^(.{1,40}?)[\uff1a:]\s*(.+)$", text)
-    if not match:
-        return None
-    target = _clean_relationship_target(match.group(1))
-    detail = _compact_graph_text(match.group(2))
-    if target in node_lookup:
-        target = node_lookup[target]
+    target = (
+        node_lookup.get(statement.stable_target)
+        or node_lookup.get(statement.display_target)
+        or statement.display_target
+    )
     return _build_derived_relationship_edge(
         root,
         path,
         source=source,
         target=target,
         relation="",
-        detail=detail,
+        detail=statement.detail,
     )
 
 

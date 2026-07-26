@@ -505,8 +505,8 @@ def test_render_contract_context_templates_and_snapshots(monkeypatch, tmp_path):
     assert "waiting_for_user" in rendered
     assert "Serial (serial)" in rendered
     assert "Storydex assembled context blocks" in rendered
-    assert "target about 2500" in rendered
-    assert "1875-3125 is acceptable" in rendered
+    assert "generation reference is about 2500" in rendered
+    assert "completed chapter should finish within 1875-3125" in rendered
     assert "softFragmentReferences" in rendered
     assert "never estimate" not in rendered.lower()
     assert "do not finish" not in rendered.lower()
@@ -781,15 +781,52 @@ def test_build_system_prompt_and_tool_registry(monkeypatch, tmp_path):
 
     normal = asyncio.run(coomi._build_coomi_system_prompt(workspace_root=tmp_path, prompt="write"))
     plan = asyncio.run(coomi._build_coomi_system_prompt(workspace_root=tmp_path, prompt="plan", plan_mode=True))
+    calibrated = asyncio.run(
+        coomi._build_coomi_system_prompt(
+            workspace_root=tmp_path,
+            prompt="write",
+            story_generation={"fragmentCount": 1, "chapterWordCountTarget": 3000},
+            turn_contract={
+                "intentFrame": {
+                    "primary": "story_generation",
+                    "operationType": "create_new",
+                },
+                "turnPlan": {
+                    "fragmentCount": 1,
+                    "chapterWordCountTarget": 3000,
+                    "wordCountPolicy": {
+                        "scope": "chapter",
+                        "target": 3000,
+                        "modelReferenceWordCount": 2500,
+                        "acceptanceMinimum": 2100,
+                        "acceptanceMaximum": 3900,
+                        "calibration": {"status": "applied"},
+                    },
+                    "fragmentTargets": [
+                        {"path": "chapters/1/001.md", "referenceWordCount": 2500}
+                    ],
+                },
+            },
+        )
+    )
     assert "Storydex Project Runtime" in normal
     assert "generated memory deltas" in normal
-    assert "target about 2500" in normal
-    assert "1875-3125 is acceptable" in normal
+    assert "target about 3000" in normal
+    assert "2100-3900 is acceptable" in normal
     assert "never estimate" not in normal.lower()
     assert "do not finish" not in normal.lower()
     assert "must fall within" not in normal.lower()
     assert "ask the user before passing applyVariables=true" not in normal
     assert "Plan Mode" in plan
+    assert calibrated.count("wordCountGuidance:") == 1
+    assert "chapterLengthGuidance:" not in calibrated
+    assert "calibrated generation reference is about 2500" in calibrated
+    assert "completed chapter should finish within 2100-3900" in calibrated
+    assert "compress repeated explanation first" in calibrated
+    assert "necessary action, character thought, dialogue, and causal transitions" in calibrated
+    assert "Never pad, repeat, mention the word count, or cut off a scene" in calibrated
+    assert "not an upper limit" not in calibrated
+    assert "narrative completeness" not in calibrated
 
     registered = []
     registry = types.SimpleNamespace(register=lambda tool: registered.append(tool))

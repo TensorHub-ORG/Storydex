@@ -7,6 +7,28 @@ from pathlib import Path
 from api import routes_story as routes
 
 
+def test_chy_markdown_relationship_uses_parenthesized_stable_id(tmp_path):
+    path = tmp_path / ".storydex" / "characters" / "linche.md"
+    lookup = {
+        "林澈": "林澈",
+        "char:linche": "林澈",
+        "苏晚": "苏晚",
+        "char:suwan": "苏晚",
+    }
+
+    edge = routes._parse_markdown_relationship_line(
+        tmp_path,
+        path,
+        source="林澈",
+        line="- **苏晚**（char:suwan）：互相信任的盟友。",
+        node_lookup=lookup,
+    )
+
+    assert edge is not None
+    assert edge["target"] == "苏晚"
+    assert edge["history"][0]["detail"] == "互相信任的盟友。"
+
+
 def test_character_graph_nodes_paths_lookup_and_relationship_parsers(monkeypatch, tmp_path):
     storydex = tmp_path / ".storydex"
     chars = storydex / "characters"
@@ -59,7 +81,8 @@ def test_character_graph_nodes_paths_lookup_and_relationship_parsers(monkeypatch
 
     dimensions = {
         "enemy": "hostility", "rival": "rivalry", "ally": "alliance", "trust": "trust",
-        "loyal": "loyalty", "friend": "intimacy", "mentor": "professional", "family": "family", "unknown": "intimacy",
+        "loyal": "loyalty", "friend": "intimacy", "mentor": "professional", "family": "family", "unknown": "unknown",
+        "普通的专业合作关系，保持中立": "professional",
     }
     for text, expected in dimensions.items():
         assert routes._relationship_dimension_from_text(text) == expected
@@ -72,6 +95,24 @@ def test_character_graph_nodes_paths_lookup_and_relationship_parsers(monkeypatch
         tmp_path, bob, source="Bob", target="Alice", relation="friend", detail="trusted"
     )
     assert edge["dimension"] == "trust" and edge["current_level"] == 2
+    professional = routes._build_derived_relationship_edge(
+        tmp_path,
+        bob,
+        source="Bob",
+        target="Alice",
+        relation="",
+        detail="普通的专业合作关系，保持中立。",
+    )
+    assert professional["relationType"] == "professional_collaboration"
+    assert professional["polarity"] == "neutral"
+    assert professional["strength"] == 0.65
+    unresolved = routes._build_derived_relationship_edge(
+        tmp_path, bob, source="Bob", target="Alice", relation="", detail="关系尚未说明"
+    )
+    assert unresolved["relationType"] == "unknown"
+    assert unresolved["polarity"] == "unknown"
+    assert unresolved["strength"] is None
+    assert unresolved["status"] == "unresolved"
     assert routes._build_derived_relationship_edge(tmp_path, bob, source="", target="A", relation="x", detail="") is None
     assert routes._build_derived_relationship_edge(tmp_path, bob, source="A", target="A", relation="x", detail="y") is None
     assert routes._build_derived_relationship_edge(tmp_path, bob, source="A", target="B", relation="", detail="") is None

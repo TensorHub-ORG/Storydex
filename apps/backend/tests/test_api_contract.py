@@ -113,7 +113,8 @@ class _Coomi:
             raise ValueError("invalid JSON")
         return {"configPath": "/isolated/providers.json", "content": content, "parsed": {}}
 
-    def list_models(self, *, base_url, api_key):
+    def list_models(self, *, base_url, api_key, provider_type="openai_compatible"):
+        del api_key, provider_type
         if base_url == "invalid":
             raise ValueError("provider unavailable")
         return {"endpoint": f"{base_url.rstrip('/')}/models", "models": ["fake-model"]}

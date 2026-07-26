@@ -5,6 +5,7 @@ import pytest
 
 from services.story_wiki_service import (
     CATEGORY_LABELS,
+    PROJECTION_SCHEMA_VERSION,
     WIKI_CATEGORY_SCHEMA_VERSION,
     StoryWikiService,
 )
@@ -21,10 +22,14 @@ def _source(path, text, kind="chapter"):
 
 def test_schema_normalization_and_reports_cover_malformed_agent_payloads(service):
     assert not service._has_current_category_schema({})
-    assert not service._has_current_category_schema({"categorySchemaVersion": WIKI_CATEGORY_SCHEMA_VERSION, "entries": [{"category": ""}]})
-    assert not service._has_current_category_schema({"categorySchemaVersion": WIKI_CATEGORY_SCHEMA_VERSION, "entries": [{"category": "character"}]})
-    assert not service._has_current_category_schema({"categorySchemaVersion": WIKI_CATEGORY_SCHEMA_VERSION, "graph": {"nodes": [{"category": "character"}]}})
-    assert service._has_current_category_schema({"categorySchemaVersion": WIKI_CATEGORY_SCHEMA_VERSION, "entries": [None, {"category": "characters"}], "graph": {"nodes": [None, {"category": ""}]}})
+    current_schema = {
+        "schemaVersion": PROJECTION_SCHEMA_VERSION,
+        "categorySchemaVersion": WIKI_CATEGORY_SCHEMA_VERSION,
+    }
+    assert not service._has_current_category_schema({**current_schema, "entries": [{"category": ""}]})
+    assert not service._has_current_category_schema({**current_schema, "entries": [{"category": "character"}]})
+    assert not service._has_current_category_schema({**current_schema, "graph": {"nodes": [{"category": "character"}]}})
+    assert service._has_current_category_schema({**current_schema, "entries": [None, {"category": "characters"}], "graph": {"nodes": [None, {"category": ""}]}})
 
     payload = service._normalize_wiki_payload({
         "entries": [None, {"title": "Hero", "category": "characters", "details": ["", 2], "sourcePaths": "bad", "confidence": 8}],
@@ -176,7 +181,7 @@ def test_entity_and_text_helpers_cover_optional_paths(service, tmp_path):
 
 
 def test_character_mapping_entry_edges_dedupe_and_render(service):
-    sources = [_source("characters/alice.md", "Alice Al", "character"), _source("chapters/1.md", "Alice appears")]
+    sources = [_source("characters/alice.md", "# Alice\n\nAl", "character"), _source("chapters/1.md", "Alice appears")]
     entities = [{"name": "Alice", "aliases": ["Al"]}, {"name": "Bob", "aliases": []}]
     mapping = service._character_sources(Path("."), sources, entities)
     assert mapping["Alice"] and mapping["Bob"] == []

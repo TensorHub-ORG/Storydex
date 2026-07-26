@@ -29,10 +29,10 @@ describe("workspace store deterministic helpers", () => {
     expect(u.normalizeStoryMaxSegmentsPerChapter("bad")).toBe(3); expect(u.normalizeStoryMaxSegmentsPerChapter(-1)).toBe(1);
     expect(u.normalizeStoryFragmentCount("bad")).toBe(1); expect(u.normalizeStoryFragmentCount(99)).toBe(99);
     expect(u.normalizeStoryChapterTemplateId(" ")).toBe("default_chapter_directory");
-    expect(u.normalizeStoryFragmentWordCount("bad")).toBe(2500); expect(u.normalizeStoryFragmentWordCount(1)).toBe(100);
-    expect(u.resolveChapterWordCountTarget({})).toBe(2500);
+    expect(u.normalizeStoryFragmentWordCount("bad")).toBe(3000); expect(u.normalizeStoryFragmentWordCount(1)).toBe(100);
+    expect(u.resolveChapterWordCountTarget({})).toBe(3000);
     expect(u.resolveChapterWordCountTarget({ storyFragmentWordCountMax: 1800 })).toBe(1800);
-    expect(u.resolveStoryFragmentWordCountRange({})).toEqual({ min: 2500, max: 2500 });
+    expect(u.resolveStoryFragmentWordCountRange({})).toEqual({ min: 3000, max: 3000 });
     expect(u.resolveStoryFragmentWordCountRange({ chapterWordCountTarget: 1800, storyFragmentWordCountMin: 1000, storyFragmentWordCountMax: 3000 })).toEqual({ min: 1800, max: 1800 });
     expect(u.resolveStoryFragmentWordCountRange({ storyFragmentWordCount: 1800 })).toEqual({ min: 1800, max: 1800 });
     expect(u.resolveStoryFragmentWordCountRange({ storyFragmentWordCountMin: 3000, storyFragmentWordCountMax: 1500 })).toEqual({ min: 1500, max: 3000 });

@@ -65,6 +65,29 @@ def test_list_models_accepts_common_response_variants():
     assert result["models"] == ["deepseek-chat", "deepseek-reasoner", "qwen-max"]
 
 
+def test_list_models_uses_anthropic_endpoint_and_authentication_headers():
+    seen = {}
+
+    def fake_get(url, *, headers, timeout):
+        seen["url"] = url
+        seen["headers"] = headers
+        seen["timeout"] = timeout
+        return _FakeModelResponse()
+
+    result = StorydexCoomiAgentService().list_models(
+        base_url="https://api.anthropic.com",
+        api_key="sk-ant-test",
+        provider_type="anthropic_messages",
+        http_get=fake_get,
+    )
+
+    assert seen["url"] == "https://api.anthropic.com/v1/models"
+    assert seen["headers"]["x-api-key"] == "sk-ant-test"
+    assert seen["headers"]["anthropic-version"] == "2023-06-01"
+    assert "Authorization" not in seen["headers"]
+    assert result["models"] == ["claude-sonnet-4", "gpt-4.1"]
+
+
 def test_list_models_sanitizes_transport_errors():
     def fake_get(url, *, headers, timeout):
         raise RuntimeError("network down for sk-secret")
@@ -149,9 +172,10 @@ def test_storydex_coomi_home_normalizes_provider_config_runtime_base_url(monkeyp
 
 def test_agent_coomi_models_route_returns_model_list(monkeypatch):
     class FakeService:
-        def list_models(self, *, base_url, api_key):
+        def list_models(self, *, base_url, api_key, provider_type):
             assert base_url == "https://api.example.com/v1/chat/completions"
             assert api_key == "sk-test"
+            assert provider_type == "anthropic_messages"
             return {"endpoint": "https://api.example.com/v1/models", "models": ["model-a"]}
 
     monkeypatch.setattr(routes_agent, "get_storydex_coomi_agent_service", lambda: FakeService())
@@ -159,6 +183,7 @@ def test_agent_coomi_models_route_returns_model_list(monkeypatch):
     payload = routes_agent.AgentCoomiModelListRequest(
         baseUrl="https://api.example.com/v1/chat/completions",
         apiKey="sk-test",
+        providerType="anthropic_messages",
     )
     response = routes_agent.agent_list_coomi_models(payload, request=None)
 
