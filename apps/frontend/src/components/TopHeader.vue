@@ -77,10 +77,49 @@
     </div>
 
     <div class="top-header-center">
-      <label class="command-bar no-drag">
-        <span class="material-symbols-rounded">search</span>
-        <input class="command-bar-input" type="text" readonly :placeholder="commandPlaceholder" />
-      </label>
+      <div ref="commandBarRef" class="command-bar-wrap no-drag">
+        <label class="command-bar" :class="{ active: commandOpen }">
+          <span class="material-symbols-rounded">search</span>
+          <input
+            ref="commandInputRef"
+            v-model="commandQuery"
+            class="command-bar-input"
+            type="text"
+            :placeholder="commandPlaceholder"
+            @focus="openCommandPalette"
+            @keydown="handleCommandKeydown"
+          />
+          <span v-if="!commandOpen" class="command-bar-hint">Ctrl K</span>
+        </label>
+
+        <div v-if="commandOpen" class="command-palette">
+          <template v-if="hasCommandResults">
+            <template v-for="(group, groupIndex) in commandResults" :key="group.label">
+              <div class="command-palette-group">{{ group.label }}</div>
+              <button
+                v-for="item in group.items"
+                :key="item.key"
+                class="command-palette-item"
+                :class="{ active: item.flatIndex === commandActiveIndex }"
+                type="button"
+                @pointerenter="commandActiveIndex = item.flatIndex"
+                @click="runCommandItem(item)"
+              >
+                <span class="material-symbols-rounded">{{ item.icon }}</span>
+                <span class="command-palette-item-label">{{ item.label }}</span>
+                <span v-if="item.detail" class="command-palette-item-detail">{{ item.detail }}</span>
+              </button>
+              <div
+                v-if="groupIndex < commandResults.length - 1"
+                class="command-palette-separator"
+              ></div>
+            </template>
+          </template>
+          <div v-else class="command-palette-empty">
+            没有匹配的命令或文件。
+          </div>
+        </div>
+      </div>
     </div>
 
     <div class="top-header-right">
@@ -237,7 +276,7 @@ import storydexIcon from "@/assets/storydex_icon_01.png";
 import { useProjectLauncher } from "@/composables/useProjectLauncher";
 import { useUiStore } from "@/stores/ui";
 import { useWorkspaceStore } from "@/stores/workspace";
-import type { WorkspaceProjectInfo } from "@/types/workspace";
+import type { WorkspaceProjectInfo, WorkspaceTreeNode } from "@/types/workspace";
 
 const uiStore = useUiStore();
 const workspaceStore = useWorkspaceStore();
@@ -275,6 +314,243 @@ const commandPlaceholder = computed(() => {
 
 const agentHeaderToggleTitle = computed(() => (uiStore.agentCollapsed ? "展开 Agent 侧栏" : "收起 Agent 侧栏"));
 
+// ---- 顶部命令面板：命令 + 项目文件模糊搜索 ----
+
+interface CommandPaletteItem {
+  key: string;
+  label: string;
+  detail?: string;
+  icon: string;
+  flatIndex: number;
+  run: () => void | Promise<void>;
+}
+
+interface CommandPaletteGroup {
+  label: string;
+  items: CommandPaletteItem[];
+}
+
+const commandBarRef = ref<HTMLElement | null>(null);
+const commandInputRef = ref<HTMLInputElement | null>(null);
+const commandOpen = ref(false);
+const commandQuery = ref("");
+const commandActiveIndex = ref(0);
+const COMMAND_FILE_RESULT_LIMIT = 12;
+
+interface StaticCommandDefinition {
+  key: string;
+  label: string;
+  keywords: string;
+  icon: string;
+  requiresProject?: boolean;
+  run: () => void | Promise<void>;
+}
+
+const STATIC_COMMANDS: StaticCommandDefinition[] = [
+  {
+    key: "activity:resources",
+    label: "打开文件浏览器",
+    keywords: "files explorer 资源 文件 浏览",
+    icon: "description",
+    run: () => switchActivity("resources"),
+  },
+  {
+    key: "activity:relationships",
+    label: "打开知识图谱",
+    keywords: "graph wiki 图谱 知识 关系",
+    icon: "hub",
+    requiresProject: true,
+    run: () => switchActivity("relationships"),
+  },
+  {
+    key: "activity:source-control",
+    label: "打开版本控制",
+    keywords: "git 版本 提交 diff",
+    icon: "account_tree",
+    requiresProject: true,
+    run: () => switchActivity("source-control"),
+  },
+  {
+    key: "activity:presets",
+    label: "打开预设管理",
+    keywords: "presets 预设 模板",
+    icon: "tune",
+    run: () => switchActivity("presets"),
+  },
+  {
+    key: "activity:prompts",
+    label: "打开指令仓库",
+    keywords: "prompts 指令 提示词",
+    icon: "prompt_suggestion",
+    run: () => switchActivity("prompts"),
+  },
+  {
+    key: "command:open-project",
+    label: "打开项目文件夹",
+    keywords: "open folder 打开 项目 文件夹",
+    icon: "folder_open",
+    run: () => handleOpenProjectRequest(),
+  },
+  {
+    key: "command:create-project",
+    label: "新建项目",
+    keywords: "new create 新建 创建 项目",
+    icon: "create_new_folder",
+    run: () => openCreateProjectDialog(),
+  },
+  {
+    key: "command:refresh",
+    label: "刷新工作区",
+    keywords: "refresh reload 刷新",
+    icon: "refresh",
+    requiresProject: true,
+    run: () => handleRefresh(),
+  },
+  {
+    key: "command:help-guide",
+    label: "查看使用指南",
+    keywords: "help guide 帮助 指南 文档",
+    icon: "menu_book",
+    run: () => handleOpenHelpGuide(),
+  },
+  {
+    key: "command:toggle-agent",
+    label: "展开/收起 Agent 侧栏",
+    keywords: "agent panel 侧栏 面板 coomi",
+    icon: "right_panel_open",
+    run: () => uiStore.toggleAgentCollapsed(),
+  },
+];
+
+function switchActivity(activityId: string): void {
+  uiStore.setActivity(activityId);
+  uiStore.setSidebarCollapsed(false);
+}
+
+function flattenWorkspaceFiles(nodes: WorkspaceTreeNode[], collected: WorkspaceTreeNode[] = []): WorkspaceTreeNode[] {
+  for (const node of nodes) {
+    if (node.kind === "file" && node.relativePath) {
+      collected.push(node);
+    }
+    if (node.children?.length) {
+      flattenWorkspaceFiles(node.children, collected);
+    }
+  }
+  return collected;
+}
+
+const workspaceFileList = computed<WorkspaceTreeNode[]>(() => flattenWorkspaceFiles(workspaceStore.tree));
+
+function commandMatches(haystack: string, query: string): boolean {
+  const normalized = haystack.toLowerCase();
+  return query.toLowerCase().split(/\s+/).every((token) => normalized.includes(token));
+}
+
+const commandResults = computed<CommandPaletteGroup[]>(() => {
+  const query = commandQuery.value.trim().toLowerCase();
+  const hasProject = !workspaceStore.launchScreenVisible;
+  let flatIndex = 0;
+  const groups: CommandPaletteGroup[] = [];
+
+  const commandItems: CommandPaletteItem[] = STATIC_COMMANDS
+    .filter((command) => (!command.requiresProject || hasProject))
+    .filter((command) => !query || commandMatches(`${command.label} ${command.keywords}`, query))
+    .map((command) => ({
+      key: command.key,
+      label: command.label,
+      icon: command.icon,
+      flatIndex: flatIndex++,
+      run: command.run,
+    }));
+  if (commandItems.length) {
+    groups.push({ label: "命令", items: commandItems });
+  }
+
+  if (hasProject && query) {
+    const fileItems: CommandPaletteItem[] = workspaceFileList.value
+      .filter((node) => commandMatches(`${node.name} ${node.relativePath ?? ""}`, query))
+      .slice(0, COMMAND_FILE_RESULT_LIMIT)
+      .map((node) => ({
+        key: `file:${node.relativePath}`,
+        label: node.name,
+        detail: node.relativePath ?? "",
+        icon: "draft",
+        flatIndex: flatIndex++,
+        run: async () => {
+          switchActivity("resources");
+          await workspaceStore.openFile(node.relativePath!);
+        },
+      }));
+    if (fileItems.length) {
+      groups.push({ label: "项目文件", items: fileItems });
+    }
+  }
+
+  return groups;
+});
+
+const commandFlatItems = computed<CommandPaletteItem[]>(() => commandResults.value.flatMap((group) => group.items));
+
+const hasCommandResults = computed<boolean>(() => commandResults.value.length > 0 && commandFlatItems.value.length > 0);
+
+function openCommandPalette(): void {
+  commandOpen.value = true;
+}
+
+function closeCommandPalette(): void {
+  commandOpen.value = false;
+  commandQuery.value = "";
+  commandActiveIndex.value = 0;
+  commandInputRef.value?.blur();
+}
+
+async function runCommandItem(item: CommandPaletteItem): Promise<void> {
+  closeCommandPalette();
+  await item.run();
+}
+
+function handleCommandKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeCommandPalette();
+    return;
+  }
+  const items = commandFlatItems.value;
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    if (items.length) {
+      commandActiveIndex.value = (commandActiveIndex.value + 1) % items.length;
+    }
+    return;
+  }
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    if (items.length) {
+      commandActiveIndex.value = (commandActiveIndex.value - 1 + items.length) % items.length;
+    }
+    return;
+  }
+  if (event.key === "Enter") {
+    event.preventDefault();
+    const target = items[commandActiveIndex.value] ?? items[0];
+    if (target) {
+      void runCommandItem(target);
+    }
+  }
+}
+
+function handleGlobalCommandShortcut(event: KeyboardEvent): void {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+    event.preventDefault();
+    commandOpen.value = true;
+    commandInputRef.value?.focus();
+  }
+}
+
+watch(commandQuery, () => {
+  commandActiveIndex.value = 0;
+});
+
 watch(
   () => workspaceStore.currentProject,
   (project) => {
@@ -297,14 +573,19 @@ watch(
 
 onMounted(() => {
   document.addEventListener("pointerdown", handleDocumentPointerDown, true);
+  window.addEventListener("keydown", handleGlobalCommandShortcut);
 });
 
 onBeforeUnmount(() => {
   document.removeEventListener("pointerdown", handleDocumentPointerDown, true);
+  window.removeEventListener("keydown", handleGlobalCommandShortcut);
 });
 
 function handleDocumentPointerDown(event: PointerEvent): void {
   const target = event.target as Node | null;
+  if (commandOpen.value && target && !commandBarRef.value?.contains(target)) {
+    closeCommandPalette();
+  }
   if (!openMenu.value) {
     return;
   }
