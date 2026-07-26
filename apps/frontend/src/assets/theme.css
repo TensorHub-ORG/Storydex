@@ -4135,6 +4135,126 @@ body.is-resizing-panels .workspace-splitter::before {
   color: var(--text-faint);
 }
 
+.command-bar-wrap {
+  position: relative;
+  width: min(500px, 100%);
+  z-index: 90;
+}
+
+.command-bar-wrap .command-bar {
+  width: 100%;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.command-bar.active,
+.command-bar:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.command-bar-hint {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid var(--border-ghost);
+  border-radius: 4px;
+  color: var(--text-faint);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.command-palette {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  max-height: min(420px, 60vh);
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-card);
+  box-shadow: var(--shadow-md);
+}
+
+.command-palette-group {
+  padding: 6px 10px 4px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.command-palette-item {
+  width: 100%;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-main);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.command-palette-item:hover {
+  background: var(--bg-hover);
+}
+
+.command-palette-item .material-symbols-rounded {
+  flex: 0 0 auto;
+  font-size: 16px;
+  color: var(--text-muted);
+}
+
+.command-palette-item.active,
+.command-palette-item:hover {
+  background: var(--bg-hover);
+}
+
+.command-palette-item.active .material-symbols-rounded,
+.command-palette-item:hover .material-symbols-rounded {
+  color: var(--accent-strong);
+}
+
+.command-palette-item-label {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-palette-item-detail {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.command-palette-separator {
+  height: 1px;
+  margin: 5px 8px;
+  background: var(--border-ghost);
+}
+
+.command-palette-empty {
+  padding: 14px 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
 .file-menu-card {
   top: calc(100% + 6px);
   width: 300px;
