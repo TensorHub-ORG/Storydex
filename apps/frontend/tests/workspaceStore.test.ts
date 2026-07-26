@@ -72,6 +72,27 @@ describe("workspace store full action lifecycle", () => {
     store.enterLaunchScreen(); expect(store.launchScreenVisible).toBe(true);
   });
 
+  it("rebinds the backend before accepting a tree from another workspace", async () => {
+    const store = useWorkspaceStore();
+    store.launchScreenVisible = false;
+    store.currentProject = project as any;
+    const staleTree = {
+      ...tree,
+      workspaceRoot: "C:/default",
+      storydexRoot: "C:/default/.storydex",
+      projectName: "default"
+    };
+    api.fetchWorkspaceTree
+      .mockResolvedValueOnce(result(staleTree))
+      .mockResolvedValueOnce(result(tree));
+
+    await store.refreshTree();
+
+    expect(api.openWorkspaceProject).toHaveBeenCalledWith({ projectPath: project.workspaceRoot });
+    expect(api.fetchWorkspaceTree).toHaveBeenCalledTimes(2);
+    expect(store.currentProject?.workspaceRoot).toBe(project.workspaceRoot);
+  });
+
   it("reads, updates and falls back for story settings, completion and diagnostics", async () => {
     const store = useWorkspaceStore();
     await store.refreshStorySettings();

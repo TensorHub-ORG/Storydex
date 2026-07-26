@@ -23,6 +23,15 @@ from services.story_project_service import (
     StoryProjectService,
     get_story_project_service,
 )
+from services.story_length_calibration_service import (
+    StoryLengthCalibrationService,
+    get_story_length_calibration_service,
+)
+from services.story_semantic_budget_controller import (
+    SEMANTIC_BUDGET_STRATEGY,
+    automatic_scene_count,
+    automatic_scene_revision_limit,
+)
 
 
 @dataclass(frozen=True)
@@ -30,6 +39,7 @@ class StorydexOrchestrationService:
     story_project_service: StoryProjectService
     context_assembler: StorydexContextAssemblerService | None = None
     global_config_service: GlobalConfigService | None = None
+    length_calibration_service: StoryLengthCalibrationService | None = None
 
     def build_turn_contract(
         self,
@@ -40,6 +50,8 @@ class StorydexOrchestrationService:
         story_generation: Dict[str, Any] | None = None,
         intent_frame: Dict[str, Any] | None = None,
         context_policy: ContextPolicy | None = None,
+        provider: str = "",
+        model: str = "",
     ) -> Dict[str, Any]:
         root = Path(workspace_root).resolve()
         effective_context_policy = self._context_policy(context_policy)
@@ -80,6 +92,38 @@ class StorydexOrchestrationService:
             if self._uses_legacy_story_word_count_range(story_generation)
             else "target"
         )
+        length_guidance = (
+            self.length_calibration_service or get_story_length_calibration_service()
+        ).resolve_generation_guidance(
+            root,
+            product_target_word_count=chapter_word_count_target,
+            provider=provider,
+            model=model,
+        )
+        if word_count_mode == "target":
+            model_reference_word_count = int(length_guidance["modelReferenceWordCount"])
+            accept_min = int(length_guidance["acceptanceMinimum"])
+            accept_max = int(length_guidance["acceptanceMaximum"])
+            calibration = dict(length_guidance["calibration"])
+            allocation_min = model_reference_word_count
+            allocation_max = model_reference_word_count
+        else:
+            model_reference_word_count = chapter_word_count_target
+            accept_min, accept_max = self.story_project_service._story_word_count_acceptance_band(  # noqa: SLF001
+                fragment_word_count_min,
+                fragment_word_count_max,
+            )
+            calibration = {
+                **dict(length_guidance["calibration"]),
+                "status": "fallback",
+                "reason": "legacy_range_not_calibrated",
+                "sourceTargetGrade": None,
+                "sampleCount": 0,
+                "medianRatio": None,
+                "appliedRatio": 1.0,
+            }
+            allocation_min = fragment_word_count_min
+            allocation_max = fragment_word_count_max
         # 保留旧字段以向后兼容；在新 contract 中它表示章级目标而非每片段上限。
         fragment_word_count = chapter_word_count_target
         chapter_content_mode = str((selected_template or {}).get("contentMode") or "multi_fragment")
@@ -99,8 +143,8 @@ class StorydexOrchestrationService:
             assumed_written = 0
             for index, target in enumerate(fragment_targets):
                 reference = self.story_project_service.allocate_story_fragment_reference_word_count(
-                    fragment_word_count_min,
-                    fragment_word_count_max,
+                    allocation_min,
+                    allocation_max,
                     written_word_count=assumed_written,
                     remaining_fragment_count=len(fragment_targets) - index,
                     total_fragment_count=len(fragment_targets),
@@ -108,11 +152,6 @@ class StorydexOrchestrationService:
                 target["referenceWordCount"] = reference
                 target["referenceWordCountIsHardLimit"] = False
                 assumed_written += reference
-
-        accept_min, accept_max = self.story_project_service._story_word_count_acceptance_band(  # noqa: SLF001
-            fragment_word_count_min,
-            fragment_word_count_max,
-        )
 
         turn_plan = {
             "requestedFragmentCount": requested_fragment_count,
@@ -127,11 +166,13 @@ class StorydexOrchestrationService:
                 "mode": word_count_mode,
                 "scope": "chapter",
                 "target": chapter_word_count_target,
+                "modelReferenceWordCount": model_reference_word_count,
                 "minimum": fragment_word_count_min,
                 "maximum": fragment_word_count_max,
                 "acceptanceMinimum": accept_min,
                 "acceptanceMaximum": accept_max,
                 "overBudgetAction": "write_and_mark",
+                "calibration": calibration,
             },
             "operationType": operation_type or "other",
             "complexity": str(intent.get("complexity") or "simple"),
@@ -148,6 +189,19 @@ class StorydexOrchestrationService:
             "activeFile": active_file,
             "storyFormatSource": "existing_project" if chapters else "selected_chapter_template" if selected_template else "chapter_template",
         }
+        requested_generation_strategy = str(story_generation.get("generationStrategy") or "").strip().lower()
+        if is_story_creation and requested_generation_strategy == SEMANTIC_BUDGET_STRATEGY:
+            semantic_scene_count = automatic_scene_count(chapter_word_count_target)
+            turn_plan["generationControl"] = {
+                "strategy": SEMANTIC_BUDGET_STRATEGY,
+                "productTargetWordCount": chapter_word_count_target,
+                "sceneCount": semantic_scene_count,
+                "internalToleranceRatio": 0.20,
+                "finalToleranceRatio": 0.15,
+                "maximumSceneRevisions": automatic_scene_revision_limit(chapter_word_count_target),
+                "applyMode": "single_commit",
+                "rolloutMode": "gated_direct",
+            }
         context_assembly = (self.context_assembler or StorydexContextAssemblerService(self.story_project_service)).assemble(
             root,
             prompt=prompt,
@@ -470,6 +524,7 @@ class StorydexOrchestrationService:
 _SERVICE = StorydexOrchestrationService(
     story_project_service=get_story_project_service(),
     context_assembler=get_storydex_context_assembler_service(),
+    length_calibration_service=get_story_length_calibration_service(),
 )
 
 

@@ -14,7 +14,10 @@ from services.diagnostics_service import get_diagnostics_service
 from services.git_service import get_git_service
 from services.large_file_service import get_large_file_service
 from services.project_service import get_project_service
-from services.story_project_service import get_story_project_service
+from services.story_project_service import (
+    DEFAULT_CHAPTER_WORD_COUNT_TARGET,
+    get_story_project_service,
+)
 
 router = APIRouter(tags=["file"])
 editor_service = EditorService()
@@ -164,10 +167,10 @@ class StoryProjectSettingsResponse(BaseModel):
     context_concision_max_calls: int = Field(default=2, alias="contextConcisionMaxCalls")
     context_concision_max_input_tokens: int = Field(default=32000, alias="contextConcisionMaxInputTokens")
     story_fragment_count: int = Field(default=1, alias="storyFragmentCount")
-    chapter_word_count_target: int = Field(default=2500, alias="chapterWordCountTarget")
-    story_fragment_word_count: int = Field(default=2500, alias="storyFragmentWordCount")
-    story_fragment_word_count_min: int = Field(default=2500, alias="storyFragmentWordCountMin")
-    story_fragment_word_count_max: int = Field(default=2500, alias="storyFragmentWordCountMax")
+    chapter_word_count_target: int = Field(default=DEFAULT_CHAPTER_WORD_COUNT_TARGET, alias="chapterWordCountTarget")
+    story_fragment_word_count: int = Field(default=DEFAULT_CHAPTER_WORD_COUNT_TARGET, alias="storyFragmentWordCount")
+    story_fragment_word_count_min: int = Field(default=DEFAULT_CHAPTER_WORD_COUNT_TARGET, alias="storyFragmentWordCountMin")
+    story_fragment_word_count_max: int = Field(default=DEFAULT_CHAPTER_WORD_COUNT_TARGET, alias="storyFragmentWordCountMax")
     story_chapter_template_id: str = Field(default="default_chapter_directory", alias="storyChapterTemplateId")
     auto_update_variables: bool = Field(default=False, alias="autoUpdateVariables")
     auto_update_wiki: bool = Field(default=False, alias="autoUpdateWiki")
@@ -288,25 +291,25 @@ def _build_story_settings_payload() -> Dict[str, Any]:
         "storyFragmentCount": _positive_int(project_settings.get("storyFragmentCount"), default=1),
         "chapterWordCountTarget": _bounded_int(
             project_settings.get("chapterWordCountTarget"),
-            default=2500,
+            default=DEFAULT_CHAPTER_WORD_COUNT_TARGET,
             minimum=100,
             maximum=20000,
         ),
         "storyFragmentWordCount": _bounded_int(
             project_settings.get("storyFragmentWordCount"),
-            default=2500,
+            default=DEFAULT_CHAPTER_WORD_COUNT_TARGET,
             minimum=100,
             maximum=20000,
         ),
         "storyFragmentWordCountMin": _bounded_int(
             project_settings.get("storyFragmentWordCountMin"),
-            default=2500,
+            default=DEFAULT_CHAPTER_WORD_COUNT_TARGET,
             minimum=100,
             maximum=20000,
         ),
         "storyFragmentWordCountMax": _bounded_int(
             project_settings.get("storyFragmentWordCountMax"),
-            default=2500,
+            default=DEFAULT_CHAPTER_WORD_COUNT_TARGET,
             minimum=100,
             maximum=20000,
         ),

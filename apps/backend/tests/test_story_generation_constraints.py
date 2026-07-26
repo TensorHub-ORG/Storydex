@@ -8,12 +8,15 @@ from typing import Any
 import pytest
 
 from api import routes_agent as routes
+from api.routes_file import StoryProjectSettingsResponse as FileStoryProjectSettingsResponse
+from api.routes_story import StoryProjectSettingsResponse as StoryStoryProjectSettingsResponse
 from services.agent_git_autocommit_service import AgentGitSnapshot
 from services.story_project_service import (
     DEFAULT_CHAPTER_TEMPLATE_ID,
     SINGLE_FILE_CHAPTER_TEMPLATE_ID,
     get_story_project_service,
 )
+from services.story_length_calibration_service import StoryLengthCalibrationService
 from services.story_word_count_service import STORY_WORD_COUNT_ALGORITHM, count_story_text_words
 from services.storydex_coomi_runtime_tools import StorydexEditTool, StorydexWriteTool
 from services.storydex_orchestration_service import get_storydex_orchestration_service
@@ -132,9 +135,9 @@ def test_story_word_count_is_shared_with_workspace_file_statistics() -> None:
 def test_project_settings_use_single_target_and_preserve_legacy_ranges(tmp_path: Path) -> None:
     service = get_story_project_service()
     defaults = service.read_project_settings(tmp_path)
-    assert defaults["chapterWordCountTarget"] == 2500
-    assert defaults["storyFragmentWordCountMin"] == 2500
-    assert defaults["storyFragmentWordCountMax"] == 2500
+    assert defaults["chapterWordCountTarget"] == 3000
+    assert defaults["storyFragmentWordCountMin"] == 3000
+    assert defaults["storyFragmentWordCountMax"] == 3000
     assert defaults["wordCountSettingMode"] == "target"
 
     legacy = service.write_project_settings(
@@ -156,6 +159,21 @@ def test_project_settings_use_single_target_and_preserve_legacy_ranges(tmp_path:
     assert targeted["storyFragmentWordCountMax"] == 1800
     assert targeted["wordCountSettingMode"] == "target"
 
+    explicitly_preserved = service.write_project_settings(
+        tmp_path,
+        {"chapterWordCountTarget": 2500},
+    )
+    assert explicitly_preserved["chapterWordCountTarget"] == 2500
+    assert service.read_project_settings(tmp_path)["chapterWordCountTarget"] == 2500
+
+
+def test_story_settings_transport_defaults_match_the_domain_default() -> None:
+    for response_model in (FileStoryProjectSettingsResponse, StoryStoryProjectSettingsResponse):
+        assert response_model.model_fields["chapter_word_count_target"].default == 3000
+        assert response_model.model_fields["story_fragment_word_count"].default == 3000
+        assert response_model.model_fields["story_fragment_word_count_min"].default == 3000
+        assert response_model.model_fields["story_fragment_word_count_max"].default == 3000
+
 
 @pytest.mark.parametrize(
     ("written_word_count", "remaining_fragment_count", "expected"),
@@ -166,6 +184,8 @@ def test_project_settings_use_single_target_and_preserve_legacy_ranges(tmp_path:
         (3000, 1, 312),
     ],
 )
+
+
 def test_fragment_reference_allocation_uses_remaining_budget_with_a_half_share_floor(
     written_word_count: int,
     remaining_fragment_count: int,
@@ -190,6 +210,47 @@ def test_multi_fragment_contract_carries_soft_reference_lengths(tmp_path: Path) 
     targets = contract["turnPlan"]["fragmentTargets"]
     assert [item["referenceWordCount"] for item in targets] == [625, 625, 625, 625]
     assert all(item["referenceWordCountIsHardLimit"] is False for item in targets)
+
+
+def test_turn_contract_uses_calibrated_model_reference_without_changing_product_target(
+    tmp_path: Path,
+) -> None:
+    calibration = StoryLengthCalibrationService()
+    for _ in range(3):
+        assert calibration.append_sample(
+            tmp_path,
+            product_target_word_count=3000,
+            model_reference_word_count=3000,
+            actual_word_count=3600,
+            provider="chy",
+            model="deepseek-v4-flash",
+        )
+
+    contract = get_storydex_orchestration_service().build_turn_contract(
+        tmp_path,
+        prompt="请续写剧情",
+        story_generation={
+            "fragmentCount": 1,
+            "chapterWordCountTarget": 3000,
+            "chapterTemplateId": DEFAULT_CHAPTER_TEMPLATE_ID,
+        },
+        intent_frame={
+            "primary": "story_generation",
+            "operationType": "create_new",
+            "confidence": 1.0,
+        },
+        provider="chy",
+        model="deepseek-v4-flash",
+    )
+
+    plan = contract["turnPlan"]
+    policy = plan["wordCountPolicy"]
+    assert plan["chapterWordCountTarget"] == 3000
+    assert (policy["acceptanceMinimum"], policy["acceptanceMaximum"]) == (2100, 3900)
+    assert policy["modelReferenceWordCount"] == 2500
+    assert policy["calibration"]["status"] == "applied"
+    assert policy["calibration"]["reason"] == "same_target_grade"
+    assert [item["referenceWordCount"] for item in plan["fragmentTargets"]] == [2500]
 
 
 def test_correction_prompt_uses_program_measurements_without_hard_counting_commands() -> None:
@@ -358,11 +419,11 @@ def test_story_fragment_near_range_edges_is_accepted(
 @pytest.mark.parametrize(
     ("actual_word_count", "expected_passed", "expected_over_budget"),
     [
-        (1874, False, False),
-        (1875, True, False),
-        (2500, True, False),
-        (3125, True, False),
-        (3126, True, True),
+        (2099, False, False),
+        (2100, True, False),
+        (3000, True, False),
+        (3900, True, False),
+        (3901, True, True),
     ],
 )
 def test_chapter_target_uses_one_acceptance_band_before_and_after_write(
@@ -372,7 +433,7 @@ def test_chapter_target_uses_one_acceptance_band_before_and_after_write(
     expected_over_budget: bool,
 ) -> None:
     service = get_story_project_service()
-    contract = _story_contract(tmp_path, chapter_word_count_target=2500)
+    contract = _story_contract(tmp_path, chapter_word_count_target=3000)
     target_path = contract["turnPlan"]["fragmentTargets"][0]["path"]
     result = service.apply_story_generation_increment(
         tmp_path,
@@ -385,8 +446,8 @@ def test_chapter_target_uses_one_acceptance_band_before_and_after_write(
     assert result["ok"] is expected_passed
     assert preflight["passed"] is expected_passed
     assert preflight["generatedWordCount"] == actual_word_count
-    assert preflight["chapterWordCountTarget"] == 2500
-    assert (preflight["acceptWordCountMin"], preflight["acceptWordCountMax"]) == (1875, 3125)
+    assert preflight["chapterWordCountTarget"] == 3000
+    assert (preflight["acceptWordCountMin"], preflight["acceptWordCountMax"]) == (2100, 3900)
     assert preflight["overBudget"] is expected_over_budget
     assert validation["passed"] is expected_passed
     assert validation["overBudget"] is expected_over_budget
@@ -396,10 +457,10 @@ def test_chapter_target_uses_one_acceptance_band_before_and_after_write(
 @pytest.mark.parametrize(
     ("actual_word_count", "expected_passed", "expected_over_budget"),
     [
-        (1499, False, False),
-        (1500, True, False),
-        (3125, True, False),
-        (3126, True, True),
+        (1399, False, False),
+        (1400, True, False),
+        (3250, True, False),
+        (3251, True, True),
     ],
 )
 def test_legacy_range_settings_use_chapter_scope_acceptance_band(
@@ -427,7 +488,7 @@ def test_legacy_range_settings_use_chapter_scope_acceptance_band(
     preflight = result["wordCountValidation"]
     assert result["ok"] is expected_passed
     assert (preflight["targetWordCountMin"], preflight["targetWordCountMax"]) == (2000, 2500)
-    assert (preflight["acceptWordCountMin"], preflight["acceptWordCountMax"]) == (1500, 3125)
+    assert (preflight["acceptWordCountMin"], preflight["acceptWordCountMax"]) == (1400, 3250)
     assert preflight["overBudget"] is expected_over_budget
     assert validation["passed"] is expected_passed
     assert validation["overBudget"] is expected_over_budget

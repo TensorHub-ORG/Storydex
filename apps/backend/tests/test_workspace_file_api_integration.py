@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import shutil
 from pathlib import Path
 
@@ -219,6 +220,108 @@ def test_story_increment_snapshot_memory_wiki_and_sync(workspace_client):
     assert isinstance(synced_wiki.get("entries"), list)
     graph = ok(client.get("/api/v1/story/wiki/graph?q=林舟&depth=2&limit=20"))
     assert graph.get("mode")
+
+
+def test_story_wiki_projection_api_change_sequence_and_cold_rebuild(workspace_client):
+    client, root, _ = workspace_client
+    baseline = ok(client.get("/api/v1/story/wiki"))
+    assert baseline["schemaVersion"] == 2
+    assert baseline["status"] == "ready"
+
+    cards = root / ".storydex" / "characters"
+    scripts = root / ".storydex" / "scripts"
+    chapters = root / "chapters"
+    cards.mkdir(parents=True, exist_ok=True)
+    scripts.mkdir(parents=True, exist_ok=True)
+    chapters.mkdir(parents=True, exist_ok=True)
+    cards.joinpath("林澈.md").write_text(
+        "# 林澈\n\n> 稳定实体ID: `char:linche`\n\n## 关系网络\n"
+        "- **苏晚**（char:suwan）：互相信任的盟友。\n"
+        "- **顾衡**（char:guheng）：专业协作的同事。\n",
+        encoding="utf-8",
+    )
+    cards.joinpath("苏晚.md").write_text(
+        "# 苏晚\n\n> 稳定实体ID: `char:suwan`\n\n## 关系网络\n"
+        "- **林澈**（char:linche）：互相信任的盟友。\n"
+        "- **顾衡**（char:guheng）：专业协作的同事。\n",
+        encoding="utf-8",
+    )
+    cards.joinpath("顾衡.md").write_text(
+        "# 顾衡\n\n> 稳定实体ID: `char:guheng`\n\n## 关系网络\n"
+        "- **林澈**（char:linche）：专业协作的同事。\n"
+        "- **苏晚**（char:suwan）：专业协作的同事。\n",
+        encoding="utf-8",
+    )
+    scripts.joinpath("故事大纲.md").write_text(
+        "# 故事大纲\n\n三人计划调查机械鸟失窃案。\n",
+        encoding="utf-8",
+    )
+    chapters.joinpath("001.md").write_text(
+        "# 雾港失窃案\n\n林澈、苏晚和顾衡抵达现场。\n",
+        encoding="utf-8",
+    )
+
+    synced = ok(client.post("/api/v1/story/wiki/sync"))
+    assert synced["knowledgeRevision"] == baseline["knowledgeRevision"] + 1
+    assert synced["builtFromRevision"] == synced["knowledgeRevision"]
+    assert synced["sourceStats"]["characters"] == 3
+    assert {"planned", "observed"} <= {
+        entry.get("knowledgeStatus")
+        for entry in synced["entries"]
+    }
+
+    relationships = ok(client.get("/api/v1/story/wiki/graph?category=relationships&limit=60"))
+    real_edges = [
+        edge
+        for edge in relationships["graph"]["edges"]
+        if edge.get("type") == "relationship" and not edge.get("coOccurrence")
+    ]
+    assert {node["id"] for node in relationships["graph"]["nodes"]} == {
+        "char:linche", "char:suwan", "char:guheng",
+    }
+    assert len(real_edges) == 3
+    assert all(edge.get("status") == "asserted" for edge in real_edges)
+    assert all(edge.get("relationType") in {"alliance", "trust", "professional_collaboration"} for edge in real_edges)
+    assert relationships["knowledgeRevision"] == synced["knowledgeRevision"]
+    assert relationships["builtFromRevision"] == synced["builtFromRevision"]
+
+    cards.joinpath("林澈.md").unlink()
+    cards.joinpath("林岚.md").write_text(
+        "# 林岚\n\n> 稳定实体ID: `char:linche`\n\n## 关系网络\n"
+        "- **苏晚**（char:suwan）：互相信任的盟友。\n"
+        "- **顾衡**（char:guheng）：专业协作的同事。\n",
+        encoding="utf-8",
+    )
+    renamed = ok(client.post("/api/v1/story/wiki/sync"))
+    renamed_entry = next(entry for entry in renamed["entries"] if entry.get("id") == "char:linche")
+    assert renamed_entry["title"] == "林岚"
+    assert "林澈" in renamed_entry["aliases"]
+
+    cards.joinpath("顾衡.md").unlink()
+    cards.joinpath("林岚.md").write_text(
+        "# 林岚\n\n> 稳定实体ID: `char:linche`\n\n## 关系网络\n"
+        "- **苏晚**（char:suwan）：互相信任的盟友。\n",
+        encoding="utf-8",
+    )
+    cards.joinpath("苏晚.md").write_text(
+        "# 苏晚\n\n> 稳定实体ID: `char:suwan`\n\n## 关系网络\n"
+        "- **林岚**（char:linche）：互相信任的盟友。\n",
+        encoding="utf-8",
+    )
+    deleted = ok(client.post("/api/v1/story/wiki/sync"))
+    assert not any(node.get("id") == "char:guheng" for node in deleted["graph"]["nodes"])
+    assert deleted["sourceStats"]["characters"] == 2
+
+    incremental_checksum = deleted["graphChecksum"]
+    wiki_root = root / ".storydex" / "wiki"
+    for name in ("knowledge_graph.json", "index.json", "WIKI.md"):
+        wiki_root.joinpath(name).unlink()
+    cold = ok(client.get("/api/v1/story/wiki"))
+
+    assert cold["graphChecksum"] == incremental_checksum
+    assert cold["sourceSetChecksum"] == deleted["sourceSetChecksum"]
+    assert cold["knowledgeRevision"] == deleted["knowledgeRevision"]
+    assert json.loads((wiki_root / "index.json").read_text(encoding="utf-8"))["graphChecksum"] == cold["graphChecksum"]
 
 
 def test_story_increment_requires_decisions_and_rejects_unsafe_path(workspace_client):

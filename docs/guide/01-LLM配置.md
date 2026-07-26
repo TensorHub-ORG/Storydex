@@ -1,6 +1,6 @@
 ﻿# LLM 配置详细说明
 
-LLM 配置用于告诉 Storydex：本地 Agent 应该连接哪个模型服务、使用哪个 API Key、默认使用哪个模型，以及工具调用协议如何处理。
+LLM 配置用于告诉 Storydex：本地 Agent 应该连接哪个模型服务、使用哪个 API Key、默认使用哪个模型，以及工具调用协议如何处理。新建提供方时可以直接选择常用服务商预设，Storydex 会填好协议类型和接口地址，并提供官方 API Key 页面入口。
 
 配置文件通常位于：
 
@@ -39,11 +39,10 @@ C:/Users/Septem/.storydex/.coomi/config/providers.json
 | 按钮/图标 | 位置 | 作用 | 使用建议 |
 | --- | --- | --- | --- |
 | `退出` | 面板右上角 | 关闭 LLM 配置面板。 | 改完配置后先点 `保存` 或 `应用`，再退出。 |
-| `+` / `新建提供方` | 提供方下拉框右侧 | 新增一个模型提供方配置。 | 接入新的服务商时使用，例如 OpenAI 兼容接口、Anthropic 或自定义网关。 |
+| `+` / `新建提供方` | 提供方下拉框右侧 | 从常用服务商预设或自定义接口新增配置。 | 优先选择预设，协议类型和接口地址会自动填写。 |
 | 删除图标 / `删除提供方` | `+` 右侧 | 删除当前选中的提供方。 | 删除前确认不是当前正在使用的配置；删除后需要保存。 |
-| `设为当前` | 编辑提供方标题右侧 | 把当前提供方设为 Storydex 默认使用的模型提供方。 | 配好新提供方并测试无误后点击。 |
 | `保存` | 面板底部 | 保存 providers.json，但不一定立即切换运行时。 | 批量编辑多个配置时先保存。 |
-| `应用` | 面板底部 | 保存并让当前运行中的 Agent 配置生效。 | 改 API Key、模型名、当前提供方后优先点 `应用`。 |
+| `应用` | 面板底部 | 保存、切换到当前正在编辑的提供方，并让运行中的 Agent 配置生效。 | 改 API Key、模型名或提供方后优先点 `应用`。 |
 
 键盘快捷键：
 
@@ -56,7 +55,7 @@ C:/Users/Septem/.storydex/.coomi/config/providers.json
 | 字段 | 作用 | 示例 | 注意事项 |
 | --- | --- | --- | --- |
 | `提供方 ID` | 供应商配置的唯一标识。 | `opencode-go`、`openai-main` | 建议使用英文、数字、短横线；不要频繁修改，避免旧配置引用失效。 |
-| `类型` | 提供方类型。 | `generic`、`openai`、`anthropic` | OpenAI 兼容服务通常可选 `generic` 或 `openai`，具体看接口兼容程度。 |
+| `类型` | 提供方使用的 API 协议。 | `OpenAI Compatible`、`OpenAI Responses`、`Anthropic Messages` | 预设会自动选择；只有自定义接口需要按服务商文档判断。旧 `generic/openai/anthropic` 配置会自动转换。 |
 | `工具协议` | Agent 调用工具时采用的协议。 | `auto`、`native`、`structured`、`mimo`、`disabled` | 不确定时使用 `auto`；如果模型不支持工具调用，可临时使用 `disabled`。 |
 | `显示名称` | 界面上展示给用户看的名称。 | `deepseek-v4-pro` | 不影响接口调用，只用于识别。 |
 | `接口地址` | 模型 API 的 base URL。 | `https://example.com/v1` | OpenAI 兼容接口通常以 `/v1` 结尾。 |
@@ -79,18 +78,44 @@ C:/Users/Septem/.storydex/.coomi/config/providers.json
 
 ## 常用操作
 
-### 新增一个模型提供方
+### 从预设新增模型提供方
 
 1. 打开 `LLM配置`。
 2. 点击 `+`。
-3. 填写 `提供方 ID`。
-4. 选择 `类型`。
-5. `工具协议` 先保持 `auto`。
-6. 填写 `显示名称`、`接口地址`、`API 密钥`。
-7. 填写 `标准模型` 和 `快速模型`。
-8. 点击 `保存`。
-9. 点击 `设为当前`。
-10. 点击 `应用`。
+3. 选择服务商；第一次配置且列表为空时，直接在空状态下选择服务商。
+4. 在 `API 密钥` 右侧点击 `获取密钥`，系统浏览器会打开该服务商的官方页面。
+5. 创建并复制 API Key，粘贴回 Storydex。
+6. 点击 `获取模型` 后选择模型，或者直接在 `标准模型` 中输入服务商提供的模型 ID。
+7. `快速模型` 可留空，也可以继续选择或手动输入另一个模型 ID。
+8. 点击 `应用`，保存并切换到这个提供方。
+
+预设不会锁定模型名。不同账号、套餐和区域可见的模型可能不同，因此 `标准模型` 和 `快速模型` 始终保留自由输入能力。
+
+### 当前内置预设
+
+| 服务商 | 自动填写的协议 | 自动填写的接口地址 |
+| --- | --- | --- |
+| OpenAI | OpenAI Responses | `https://api.openai.com/v1` |
+| Anthropic | Anthropic Messages | `https://api.anthropic.com` |
+| DeepSeek | OpenAI Compatible | `https://api.deepseek.com/v1` |
+| Kimi | OpenAI Compatible | `https://api.moonshot.cn/v1` |
+| 智谱 GLM | OpenAI Compatible | `https://open.bigmodel.cn/api/paas/v4` |
+| 阿里云百炼 | OpenAI Compatible | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| MiniMax | OpenAI Compatible | `https://api.minimaxi.com/v1` |
+| 硅基流动 | OpenAI Compatible | `https://api.siliconflow.cn/v1` |
+| OpenRouter | OpenAI Compatible | `https://openrouter.ai/api/v1` |
+| Google Gemini | OpenAI Compatible | `https://generativelanguage.googleapis.com/v1beta/openai` |
+| xAI | OpenAI Compatible | `https://api.x.ai/v1` |
+
+服务商接口和账号权限可能变化。如果预设地址不适用于你的套餐，可以直接修改接口地址，或从 `+` 菜单选择 `自定义接口`。
+
+### 新增自定义接口
+
+1. 点击 `+`，选择 `自定义接口`。
+2. 填写 `提供方 ID`、显示名称和接口地址。
+3. 按上游实际协议选择类型，工具协议不确定时保持 `auto`。
+4. 粘贴 API Key，并获取或手动输入模型 ID。
+5. 点击 `应用`。
 
 ### 更换 API Key
 
@@ -102,9 +127,8 @@ C:/Users/Septem/.storydex/.coomi/config/providers.json
 ### 切换默认模型提供方
 
 1. 在 `提供方` 下拉框选择目标提供方。
-2. 点击 `设为当前`。
-3. 点击 `应用`。
-4. Agent 面板底部的模型状态会更新为当前配置。
+2. 点击 `应用`。
+3. Agent 面板底部的模型状态会更新为当前配置。
 
 ### 删除不用的提供方
 
@@ -163,6 +187,8 @@ Agent 面板中常见状态包括：
 ### 为什么填了 API Key 还是失败？
 
 常见原因有：接口地址不正确、模型名不存在、服务商不兼容当前工具协议、API Key 没有额度或权限、网络不可用。
+
+`获取模型` 会按当前类型选择认证方式：Anthropic Messages 使用 Anthropic 原生的 `x-api-key`，其他预设使用 Bearer 认证。如果服务商没有提供兼容的模型列表接口，界面会提示获取失败；这不影响直接在模型输入框中填写模型 ID。
 
 ### providers.json 可以手动编辑吗？
 

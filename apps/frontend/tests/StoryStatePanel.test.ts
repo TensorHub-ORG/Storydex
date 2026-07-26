@@ -125,6 +125,116 @@ describe("StoryStatePanel deterministic graph and inspector behavior", () => {
     wrapper.unmount();
   });
 
+  it("keeps internal IDs out of labels and renders relationship semantics without a raw zero", async () => {
+    const wrapper = mountPanel(); const u = (wrapper.vm as any).__testUtils;
+    await flushPromises();
+    expect(u.resolveWikiDisplayLabel("")).toBe("未解析实体");
+    expect(u.resolveWikiDisplayLabel("entity:char:linche")).toBe("未解析实体");
+    expect(u.resolveWikiDisplayLabel("林澈")).toBe("林澈");
+    expect(u.wikiRelationshipSemanticsLabel({
+      relationType: "professional_collaboration",
+      polarity: "neutral",
+      strength: 0.65,
+    })).toBe("专业合作 · 中立 · 中等强度");
+
+    u.selectedWikiCategory.value = "relationships";
+    u.wikiGraphQueryData.value = {
+      graph: {
+        nodes: [
+          { id: "char:linche", label: "林澈", type: "character", entryId: "char:linche" },
+          { id: "char:suwan", label: "苏晚", type: "character", entryId: "char:suwan" },
+        ],
+        edges: [{
+          source: "char:linche",
+          target: "char:suwan",
+          label: "职业",
+          type: "relationship",
+          level: 0,
+          dimension: "professional",
+          relationType: "professional_collaboration",
+          polarity: "neutral",
+          strength: 0.65,
+          status: "asserted",
+        }],
+      },
+      entries: [],
+    };
+    u.recomputeWikiLayout();
+    await nextTick();
+    const edge = unref(u.wikiGraphEdges)[0];
+    expect(edge.displayLabel).toBe("专业合作");
+    expect(edge.semanticsLabel).toBe("专业合作 · 中立 · 中等强度");
+    expect(edge.displayLabel).not.toContain("0");
+    wrapper.unmount();
+  });
+
+  it("filters planned and observed plot layers and exposes projection freshness", async () => {
+    const wrapper = mountPanel(); const u = (wrapper.vm as any).__testUtils;
+    await flushPromises();
+    u.selectedWikiCategory.value = "plot";
+    u.wikiData.value = {
+      projectName: "Demo",
+      generatedAt: "2026-07-26T00:00:00Z",
+      generator: "local-fallback-wiki",
+      summary: "Demo",
+      schemaVersion: 2,
+      knowledgeRevision: 7,
+      builtFromRevision: 7,
+      lastSuccessfulRevision: 7,
+      status: "ready",
+      diagnostics: [],
+      entries: [
+        { id: "planned:outline", category: "plot", title: "故事大纲", summary: "计划调查", knowledgeStatus: "planned" },
+        { id: "chapter:001", category: "plot", title: "第一章", summary: "已经抵达", knowledgeStatus: "observed" },
+      ],
+      graph: { nodes: [], edges: [] },
+    };
+    u.wikiGraphQueryData.value = {
+      schemaVersion: 2,
+      knowledgeRevision: 7,
+      builtFromRevision: 7,
+      lastSuccessfulRevision: 7,
+      status: "ready",
+      entries: u.wikiData.value.entries,
+      graph: {
+        nodes: [
+          { id: "planned:outline", label: "故事大纲", type: "event", entryId: "planned:outline", knowledgeStatus: "planned" },
+          { id: "chapter:001", label: "第一章", type: "chapter", entryId: "chapter:001", knowledgeStatus: "observed" },
+          { id: "event:raw-id", label: "event:raw-id", type: "event", entryId: "planned:outline", knowledgeStatus: "planned" },
+        ],
+        edges: [],
+      },
+    };
+    u.wikiKnowledgeStatusFilter.value = "planned";
+    u.recomputeWikiLayout();
+    await nextTick();
+
+    expect(unref(u.visibleWikiEntries).map((entry: any) => entry.id)).toEqual(["planned:outline"]);
+    expect(unref(u.wikiGraphNodes).map((node: any) => node.label)).toEqual(["故事大纲", "未解析实体"]);
+    expect(unref(u.wikiProjectionStatus)).toBe("ready");
+    expect(unref(u.wikiRevisionLabel)).toContain("7/7");
+    wrapper.unmount();
+  });
+
+  it("surfaces automatic sync failures and marks the shown projection stale", async () => {
+    const wrapper = mountPanel(); const u = (wrapper.vm as any).__testUtils;
+    await flushPromises();
+    transport.post.mockReset();
+    transport.post.mockRejectedValueOnce(new Error("network down"));
+    u.wikiData.value = {
+      projectName: "Demo", generatedAt: "now", generator: "local", summary: "Demo",
+      knowledgeRevision: 3, builtFromRevision: 3, status: "ready",
+      entries: [], graph: { nodes: [], edges: [] },
+    };
+
+    await u.syncWiki();
+
+    expect(u.wikiSyncErrorMessage.value).toContain("知识图谱自动同步失败");
+    expect(u.wikiData.value.status).toBe("stale");
+    expect(u.wikiData.value.lastSuccessfulRevision).toBe(3);
+    wrapper.unmount();
+  });
+
   it("evaluates empty and populated relationship/WIKI computed matrices", async () => {
     const wrapper = mountPanel(); const u = (wrapper.vm as any).__testUtils; const read = (name: string) => unref(u[name]);
     u.snapshot.value = {}; u.wikiData.value = null; u.wikiGraphQueryData.value = null;

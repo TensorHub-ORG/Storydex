@@ -356,6 +356,13 @@ interface ClipboardState {
   node: WorkspaceTreeNode;
 }
 
+interface EditableFocusSnapshot {
+  element: HTMLInputElement | HTMLTextAreaElement;
+  selectionStart: number | null;
+  selectionEnd: number | null;
+  selectionDirection: "forward" | "backward" | "none" | null;
+}
+
 interface PendingCreateState {
   kind: "file" | "directory";
   parentPath: string;
@@ -378,6 +385,7 @@ const gitStore = useGitStore();
 const { handleOpenProjectRequest, openCreateProjectDialog } = useProjectLauncher();
 let autoRefreshTimer: number | null = null;
 let lastGitRefreshAt = 0;
+let contextMenuFocusSnapshot: EditableFocusSnapshot | null = null;
 const GIT_REFRESH_INTERVAL_MS = 8000;
 const diagnosticSeverities = ["error", "warning", "info"] as const;
 type DiagnosticSeverity = (typeof diagnosticSeverities)[number];
@@ -722,6 +730,9 @@ function handleAutoRefresh(): void {
 
 function handleWindowPointerDown(event: PointerEvent): void {
   const target = event.target instanceof Element ? event.target : null;
+  if (event.button === 2 && target?.closest(".tree-view")) {
+    contextMenuFocusSnapshot = captureEditableFocus();
+  }
   if (target?.closest(".tree-inline-create")) {
     return;
   }
@@ -781,6 +792,9 @@ async function openContextMenuAt(
   node: WorkspaceTreeNode | null
 ): Promise<void> {
   cancelPendingRename();
+  if (!contextMenuFocusSnapshot) {
+    contextMenuFocusSnapshot = captureEditableFocus();
+  }
   const anchorX = event.clientX;
   const anchorY = event.clientY;
   contextMenu.value = {
@@ -798,6 +812,35 @@ function closeContextMenu(): void {
   contextMenu.value.visible = false;
   contextMenu.value.target = null;
   contextMenu.value.node = null;
+  contextMenuFocusSnapshot = null;
+}
+
+function captureEditableFocus(): EditableFocusSnapshot | null {
+  const element = document.activeElement;
+  if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) || element.disabled) {
+    return null;
+  }
+  return {
+    element,
+    selectionStart: element.selectionStart,
+    selectionEnd: element.selectionEnd,
+    selectionDirection: element.selectionDirection
+  };
+}
+
+async function restoreEditableFocus(snapshot: EditableFocusSnapshot | null): Promise<void> {
+  if (!snapshot) {
+    return;
+  }
+  await nextTick();
+  const { element, selectionStart, selectionEnd, selectionDirection } = snapshot;
+  if (!element.isConnected || element.disabled) {
+    return;
+  }
+  element.focus({ preventScroll: true });
+  if (selectionStart !== null && selectionEnd !== null) {
+    element.setSelectionRange(selectionStart, selectionEnd, selectionDirection || undefined);
+  }
 }
 
 function isDirectoryDropTarget(node: WorkspaceTreeNode): boolean {
@@ -1239,18 +1282,28 @@ async function handleDeleteNode(node: WorkspaceTreeNode | null): Promise<void> {
 }
 
 async function handleCopyPath(node: WorkspaceTreeNode): Promise<void> {
+  const focusSnapshot = contextMenuFocusSnapshot;
   closeContextMenu();
   const absolutePath = absolutePathFor(node.relativePath);
-  if (absolutePath) {
-    await writeClipboard(absolutePath);
+  try {
+    if (absolutePath) {
+      await writeClipboard(absolutePath);
+    }
+  } finally {
+    await restoreEditableFocus(focusSnapshot);
   }
 }
 
 async function handleCopyRelativePath(node: WorkspaceTreeNode): Promise<void> {
+  const focusSnapshot = contextMenuFocusSnapshot;
   closeContextMenu();
   const relativePath = node.relativePath || node.name;
-  if (relativePath) {
-    await writeClipboard(relativePath);
+  try {
+    if (relativePath) {
+      await writeClipboard(relativePath);
+    }
+  } finally {
+    await restoreEditableFocus(focusSnapshot);
   }
 }
 

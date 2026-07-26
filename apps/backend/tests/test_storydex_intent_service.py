@@ -30,6 +30,7 @@ from services.storydex_intent_service import (
     is_valid_intent_frame,
 )
 from services.story_project_service import get_story_project_service
+from services.storydex_agent_tools import StorydexApplyStoryIncrementTool
 from services.storydex_orchestration_service import get_storydex_orchestration_service
 
 
@@ -206,6 +207,53 @@ def test_parse_intent_frame_rejects_unknown_label_and_bad_json():
 
 
 # ─────────────────── 2. 兜底路径 ───────────────────
+
+
+def test_negated_modify_terms_do_not_block_explicit_story_creation(tmp_path):
+    prompt = (
+        "当前项目已经有林澈、苏晚、顾衡三张角色卡和故事大纲。"
+        "现在只完成一件事：使用 StorydexApplyStoryIncrement 创建 chapters/001.md 第一章。"
+        "不要重写现有角色卡或大纲，不要修改设置或 provider。"
+    )
+    frame = heuristic_intent_frame(prompt=prompt, active_file="")
+
+    assert frame["primary"] == "story_generation"
+    assert frame["operationType"] == "create_new"
+
+    contract = get_storydex_orchestration_service().build_turn_contract(
+        tmp_path,
+        prompt=prompt,
+        story_generation={
+            "fragmentCount": 1,
+            "fragmentWordCountMin": 1200,
+            "fragmentWordCountMax": 1200,
+            "chapterWordCountTarget": 1200,
+        },
+        intent_frame=frame,
+    )
+    targets = contract["turnPlan"]["fragmentTargets"]
+    assert len(targets) == 1
+
+    target_path = targets[0]["path"]
+    story_text = "字" * 1200
+    tool = StorydexApplyStoryIncrementTool(workspace_root=tmp_path, turn_contract=contract)
+    result = json.loads(
+        tool.run({"fragments": [{"path": target_path, "text": story_text}]}).output
+    )
+
+    assert result["ok"] is True
+    assert result["wordCountValidation"]["structurePassed"] is True
+    assert (tmp_path / target_path).read_text(encoding="utf-8") == story_text + "\n"
+
+
+def test_positive_modify_and_create_request_still_prefers_modification():
+    frame = heuristic_intent_frame(
+        prompt="重构第一章后再新增一段剧情",
+        active_file="chapters/第一章/001.md",
+    )
+
+    assert frame["primary"] == "story_generation"
+    assert frame["operationType"] == "modify_existing"
 
 
 def test_classify_intent_calls_llm_even_for_clear_keyword_signal(monkeypatch):

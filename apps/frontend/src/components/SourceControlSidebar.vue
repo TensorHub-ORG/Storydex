@@ -44,10 +44,13 @@
         <section class="scm-compose">
           <div class="scm-compose-head">
             <span class="scm-section-label">提交仓库</span>
-            <span class="scm-branch-pill">{{ branchName }}</span>
+            <span class="scm-branch-pill" :title="`当前分支：${branchName}`">
+              <span class="material-symbols-rounded">fork_right</span>
+              <span class="scm-branch-name">{{ branchName }}</span>
+            </span>
           </div>
           <div class="scm-compose-meta">
-            <span class="scm-head-subject" :title="headSubject">{{ headSubject }}</span>
+            <span class="scm-head-subject" :title="`最新提交：${headSubject}`">最新：{{ headSubject }}</span>
             <span class="scm-head-separator">·</span>
             <span class="scm-head-count">{{ changedCountLabel }}</span>
           </div>
@@ -58,7 +61,13 @@
             rows="2"
             @keydown="handleCommitKeydown"
           ></textarea>
-          <button class="scm-commit-btn" type="button" :disabled="gitStore.isCommitting" @click="commitAllChanges">
+          <button
+            class="scm-commit-btn"
+            type="button"
+            :disabled="gitStore.isCommitting || changedFiles.length === 0"
+            :title="changedFiles.length === 0 ? '当前没有待提交的更改' : `提交全部更改到 ${branchName}`"
+            @click="commitAllChanges"
+          >
             <span class="material-symbols-rounded">check_circle</span>
             <span>{{ gitStore.isCommitting ? "提交中..." : "提交" }}</span>
           </button>
@@ -95,7 +104,7 @@
                 :key="`${item.status}-${item.relativePath}`"
                 class="scm-change-row"
                 type="button"
-                :title="item.relativePath"
+                :title="`查看差异：${item.relativePath}`"
                 @click="openChangedFile(item.relativePath)"
               >
                 <span class="scm-row-icon material-symbols-rounded">{{ fileIconName(item.relativePath) }}</span>
@@ -103,7 +112,9 @@
                   <span class="scm-row-name">{{ fileBaseName(item.relativePath) }}</span>
                   <span class="scm-row-dir">{{ fileDirectory(item.relativePath) }}</span>
                 </span>
-                <span class="scm-row-status" :class="statusClassName(item.status)">{{ formatStatus(item.status) }}</span>
+                <span class="scm-row-status" :class="statusClassName(item.status)" :title="statusTitle(item.status)">
+                  {{ formatStatus(item.status) }}
+                </span>
               </button>
             </div>
           </section>
@@ -122,7 +133,7 @@
                 <span class="scm-pane-caret material-symbols-rounded">
                   {{ historyExpanded ? "expand_more" : "chevron_right" }}
                 </span>
-                <span>图表</span>
+                <span>提交历史</span>
               </div>
               <span class="scm-pane-count">{{ recentCommits.length }}</span>
             </header>
@@ -130,15 +141,13 @@
             <div v-if="historyExpanded" class="scm-pane-body">
               <div v-if="recentCommits.length === 0" class="scm-inline-empty">仓库已就绪，等待首个本地提交。</div>
 
-              <button
+              <!-- 行本身只做展示；回退是 hover 浮现的显式按钮，避免点一下就进入危险操作 -->
+              <div
                 v-for="(item, index) in recentCommits"
                 :key="item.id"
                 class="scm-history-row"
                 :class="{ current: isCurrentCommit(item.id) }"
-                type="button"
                 :title="historyRowTitle(item)"
-                :disabled="gitStore.isRestoring || isCurrentCommit(item.id)"
-                @click="restoreCommit(item.id, item.subject)"
               >
                 <span class="scm-graph-lane" :class="{ tail: index === recentCommits.length - 1 }">
                   <span class="scm-graph-node"></span>
@@ -148,7 +157,19 @@
                   <span class="scm-history-meta">{{ historyMetaText(item) }}</span>
                   <span v-if="historyRefLabel(item)" class="scm-history-ref">{{ historyRefLabel(item) }}</span>
                 </span>
-              </button>
+                <span v-if="isCurrentCommit(item.id)" class="scm-current-badge">当前</span>
+                <button
+                  v-else
+                  class="scm-restore-btn"
+                  type="button"
+                  title="回退到此版本（会先自动保留当前状态的备份分支）"
+                  aria-label="回退到此版本"
+                  :disabled="gitStore.isRestoring"
+                  @click="restoreCommit(item.id, item.subject)"
+                >
+                  <span class="material-symbols-rounded">history</span>
+                </button>
+              </div>
             </div>
           </section>
         </div>
@@ -273,6 +294,24 @@ function statusClassName(status: string): string {
   return "is-modified";
 }
 
+// 状态字母对写作者不自解释，悬浮时给中文含义
+function statusTitle(status: string): string {
+  const compact = formatStatus(status);
+  if (compact === "U") {
+    return "新文件（尚未跟踪）";
+  }
+  if (compact.includes("A")) {
+    return "新增";
+  }
+  if (compact.includes("D")) {
+    return "已删除";
+  }
+  if (compact.includes("R")) {
+    return "已重命名";
+  }
+  return "已修改";
+}
+
 function fileBaseName(relativePath: string): string {
   const normalized = String(relativePath || "").replace(/\\/g, "/");
   const parts = normalized.split("/").filter(Boolean);
@@ -311,8 +350,9 @@ function historyRefLabel(item: WorkspaceGitCommitEntry): string {
     .split(",")
     .map((part) => part.trim())
     .filter(Boolean);
+  // 当前提交由“当前”徽章标识，这里不再重复分支名
   if (isCurrentCommit(item.id)) {
-    return branchName.value;
+    return "";
   }
   const directRef = refs.find((part) => !part.startsWith("HEAD ->"));
   if (directRef) {
@@ -345,7 +385,7 @@ defineExpose({
   __testUtils: import.meta.env.MODE === "test" ? {
     commitMessage, changesExpanded, historyExpanded, summary, changedFiles, recentCommits,
     refreshSummary, initializeRepository, toggleChanges, toggleHistory, handleCommitKeydown,
-    commitAllChanges, openChangedFile, restoreCommit, isCurrentCommit, formatStatus, statusClassName,
+    commitAllChanges, openChangedFile, restoreCommit, isCurrentCommit, formatStatus, statusClassName, statusTitle,
     fileBaseName, fileDirectory, fileIconName, historyMetaText, historyRefLabel, historyRowTitle, formatTimestamp
   } : null
 });
@@ -410,14 +450,15 @@ defineExpose({
   align-items: center;
   justify-content: center;
   border: 0;
-  border-radius: 0;
+  border-radius: 3px;
   background: transparent;
-  color: var(--text-main);
+  color: var(--text-muted);
   cursor: pointer;
 }
 
 .source-icon-btn:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--text-muted) 8%, transparent);
+  background: var(--bg-hover);
+  color: var(--text-main);
 }
 
 .source-body {
@@ -471,16 +512,42 @@ defineExpose({
   text-transform: uppercase;
 }
 
-.scm-branch-pill,
-.scm-history-ref {
+/* 分支徽标：chip 样式，与导入预览一致 */
+.scm-branch-pill {
   flex: 0 0 auto;
-  max-width: 112px;
-  padding: 0;
-  border-radius: 0;
-  background: transparent;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 132px;
+  height: 20px;
+  padding: 0 7px 0 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  background: var(--bg-card);
   color: var(--accent-strong);
   font-size: 11px;
   font-weight: 700;
+}
+
+.scm-branch-pill .material-symbols-rounded {
+  flex: 0 0 auto;
+  font-size: 13px;
+}
+
+.scm-branch-name {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 历史行的 ref/短哈希：辅助信息，弱化为灰色等宽字 */
+.scm-history-ref {
+  flex: 0 0 auto;
+  max-width: 112px;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 11px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -504,15 +571,15 @@ defineExpose({
   flex: 0 0 auto;
 }
 
+/* 提交输入框：盒式输入，易识别为可输入区域 */
 .commit-message-input {
   width: 100%;
-  min-height: 42px;
-  max-height: 48px;
-  padding: 6px 0;
-  border: 0;
-  border-bottom: 1px solid var(--border-ghost);
-  border-radius: 0;
-  background: transparent;
+  min-height: 46px;
+  max-height: 56px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  background: var(--bg-input);
   color: var(--text-main);
   font: inherit;
   font-size: 12px;
@@ -527,32 +594,32 @@ defineExpose({
 
 .commit-message-input:focus {
   outline: none;
-  border-bottom-color: var(--accent-primary);
+  border-color: var(--accent);
   box-shadow: none;
 }
 
+/* 提交按钮：全宽主按钮，动作醒目（VSCode SCM 同款布局） */
 .scm-commit-btn {
-  width: auto;
-  align-self: flex-end;
-  min-width: 70px;
+  width: 100%;
+  align-self: stretch;
   height: 28px;
-  padding: 0 8px;
+  padding: 0 10px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 5px;
   border: 0;
-  border-radius: 0;
-  background: transparent;
-  color: var(--accent-strong);
+  border-radius: 3px;
+  background: var(--accent);
+  color: var(--accent-contrast);
   font: inherit;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 600;
   cursor: pointer;
 }
 
 .scm-commit-btn:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--accent-soft) 18%, transparent);
+  background: var(--accent-strong);
 }
 
 .scm-commit-btn .material-symbols-rounded {
@@ -562,7 +629,7 @@ defineExpose({
 .scm-commit-btn:disabled,
 .source-icon-btn:disabled,
 .scm-change-row:disabled,
-.scm-history-row:disabled {
+.scm-restore-btn:disabled {
   cursor: not-allowed;
   opacity: 0.6;
 }
@@ -640,9 +707,17 @@ defineExpose({
 
 .scm-pane-count {
   flex: 0 0 auto;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: var(--bg-hover);
   color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .scm-pane-body {
@@ -741,12 +816,58 @@ defineExpose({
   color: var(--danger);
 }
 
+/* 历史行：纯展示行，回退按钮 hover 才浮现，避免误触危险操作 */
 .scm-history-row {
-  grid-template-columns: 18px minmax(0, 1fr);
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  cursor: default;
 }
 
 .scm-history-row.current {
   background: color-mix(in srgb, var(--accent-soft) 16%, transparent);
+}
+
+.scm-restore-btn {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.scm-history-row:hover .scm-restore-btn,
+.scm-restore-btn:focus-visible {
+  opacity: 1;
+}
+
+.scm-restore-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.scm-restore-btn .material-symbols-rounded {
+  font-size: 16px;
+}
+
+.scm-current-badge {
+  flex: 0 0 auto;
+  height: 18px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border-subtle));
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .scm-graph-lane {

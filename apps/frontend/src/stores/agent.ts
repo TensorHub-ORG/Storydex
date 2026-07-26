@@ -105,6 +105,7 @@ interface AgentState {
 }
 
 const MAX_EXECUTION_HISTORY = 40;
+const DEFAULT_CHAPTER_WORD_COUNT_TARGET = 3000;
 const DEFAULT_CHAPTER_TEMPLATE_ID = "default_chapter_directory";
 const SINGLE_FILE_CHAPTER_TEMPLATE_ID = "single_file_chapter_directory";
 let activeStreamAbortController: AbortController | null = null;
@@ -150,10 +151,10 @@ export const useAgentStore = defineStore("agent", {
     isCommittingGit: false,
     commitActionLabel: "",
     storyFragmentCount: 1,
-    chapterWordCountTarget: 2500,
-    storyFragmentWordCount: 2500,
-    storyFragmentWordCountMin: 2500,
-    storyFragmentWordCountMax: 2500,
+    chapterWordCountTarget: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
+    storyFragmentWordCount: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
+    storyFragmentWordCountMin: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
+    storyFragmentWordCountMax: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
     storyChapterTemplateId: DEFAULT_CHAPTER_TEMPLATE_ID,
     storyChapterTemplates: [],
     storyChapterTemplatesLoading: false,
@@ -463,7 +464,12 @@ export const useAgentStore = defineStore("agent", {
         this.storyFragmentCount = 1;
       }
       if (options.chapterWordCountTarget !== undefined) {
-        const target = clampInteger(options.chapterWordCountTarget, 100, 20000, 2500);
+        const target = clampInteger(
+          options.chapterWordCountTarget,
+          100,
+          20000,
+          DEFAULT_CHAPTER_WORD_COUNT_TARGET
+        );
         this.chapterWordCountTarget = target;
         this.storyFragmentWordCount = target;
         this.storyFragmentWordCountMin = target;
@@ -477,14 +483,24 @@ export const useAgentStore = defineStore("agent", {
         nextMin = clampInteger(options.fragmentWordCountMin, 100, 20000, 2000);
       }
       if (options.fragmentWordCountMax !== undefined) {
-        nextMax = clampInteger(options.fragmentWordCountMax, 100, 20000, 2500);
+        nextMax = clampInteger(
+          options.fragmentWordCountMax,
+          100,
+          20000,
+          DEFAULT_CHAPTER_WORD_COUNT_TARGET
+        );
       }
       if (
         options.fragmentWordCountMin === undefined
         && options.fragmentWordCountMax === undefined
         && options.fragmentWordCount !== undefined
       ) {
-        nextMax = clampInteger(options.fragmentWordCount, 100, 20000, 2500);
+        nextMax = clampInteger(
+          options.fragmentWordCount,
+          100,
+          20000,
+          DEFAULT_CHAPTER_WORD_COUNT_TARGET
+        );
       }
       if (nextMin > nextMax) {
         [nextMin, nextMax] = [nextMax, nextMin];
@@ -1805,15 +1821,22 @@ function summarizeTurnContractPacket(packet: AgentStreamPacket): string {
   const complexity = firstString(intentFrame, ["complexity"]);
   const fragmentCount = firstNumber(turnPlan, ["fragmentCount"]) ?? 1;
   const wordCountPolicy = toRecord(turnPlan.wordCountPolicy) || {};
-  const fragmentWordCountMax = firstNumber(turnPlan, ["fragmentWordCountMax", "fragmentWordCount"]) ?? 2500;
+  const calibration = toRecord(wordCountPolicy.calibration) || {};
+  const modelReferenceWordCount = firstNumber(wordCountPolicy, ["modelReferenceWordCount"]);
+  const calibrationStatus = firstString(calibration, ["status"]);
+  const calibrationProvider = firstString(calibration, ["provider"]);
+  const calibrationModel = firstString(calibration, ["model"]);
+  const calibrationSampleCount = firstNumber(calibration, ["sampleCount"]) ?? 0;
+  const fragmentWordCountMax = firstNumber(turnPlan, ["fragmentWordCountMax", "fragmentWordCount"])
+    ?? DEFAULT_CHAPTER_WORD_COUNT_TARGET;
   const fragmentWordCountMin = firstNumber(turnPlan, ["fragmentWordCountMin"]) ?? fragmentWordCountMax;
   const chapterWordCountTarget = firstNumber(turnPlan, ["chapterWordCountTarget"])
     ?? firstNumber(wordCountPolicy, ["target"])
     ?? Math.round((fragmentWordCountMin + fragmentWordCountMax) / 2);
   const acceptWordCountMin = firstNumber(wordCountPolicy, ["acceptanceMinimum"])
-    ?? Math.max(50, Math.round(fragmentWordCountMin * 0.75));
+    ?? Math.max(50, Math.round(fragmentWordCountMin * 0.70));
   const acceptWordCountMax = firstNumber(wordCountPolicy, ["acceptanceMaximum"])
-    ?? Math.round(fragmentWordCountMax * 1.25);
+    ?? Math.round(fragmentWordCountMax * 1.30);
   const requiresTemplate = Boolean(turnPlan.requiresChapterTemplateSelection);
   const selectedTemplate = firstString(turnPlan, ["selectedChapterTemplate"]);
   const selectedTemplateDetail = toRecord(turnPlan.selectedChapterTemplateDetail) || {};
@@ -1846,6 +1869,11 @@ function summarizeTurnContractPacket(packet: AgentStreamPacket): string {
     `直接写入：${Boolean(executionPolicy.directFileWrites) ? "开启" : "关闭"}`,
     `小说项目 Git：${Boolean(executionPolicy.localGitAutoCommit) ? "自动提交" : "未开启"}`
   );
+  if (calibrationStatus === "applied" && modelReferenceWordCount !== null) {
+    const modelIdentity = [calibrationProvider, calibrationModel].filter(Boolean).join("/");
+    pieces.push(`模型参考：${modelReferenceWordCount} 字`);
+    pieces.push(`校准：${modelIdentity || "未知模型"} · ${calibrationSampleCount} 个样本`);
+  }
   if (requiresTemplate) {
     pieces.push("需要先选择章节目录模板");
   }
@@ -1898,11 +1926,11 @@ function summarizeStoryGenerationValidationPacket(packet: AgentStreamPacket): st
   }, 0));
   const acceptWordCountMin = Number(
     packet.acceptWordCountMin
-      ?? (packetTargetMin ? Math.max(50, Math.round(packetTargetMin * 0.75)) : 0)
+      ?? (packetTargetMin ? Math.max(50, Math.round(packetTargetMin * 0.70)) : 0)
   );
   const acceptWordCountMax = Number(
     packet.acceptWordCountMax
-      ?? (packetTargetMax ? Math.round(packetTargetMax * 1.25) : 0)
+      ?? (packetTargetMax ? Math.round(packetTargetMax * 1.30) : 0)
   );
   const summaries = fragments.slice(0, 6).map((value, index) => {
     const fragment = toRecord(value) || {};

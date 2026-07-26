@@ -130,16 +130,35 @@ _MODIFY_EXISTING_RE = re.compile(
 )
 # 新建内容的强信号——续写/新增/生成全新片段。
 _CREATE_NEW_RE = re.compile(
-    r"(续写|新写|新增|新建|再写|再来(一|1)?段|生成.*(剧情|故事|章节|片段|新)|创作|写第|写一段新|"
+    r"(续写|新写|新增|新建|创建|再写|再来(一|1)?段|生成.*(剧情|故事|章节|片段|新)|创作|写第|写一段新|"
     r"continue\s+writing|write\s+(a\s+)?new|add\s+(a\s+)?new|generate\s+(a\s+)?new|create\s+(a\s+)?new)",
     re.IGNORECASE,
 )
+_NEGATED_OPERATION_PREFIX_RE = re.compile(
+    r"(?:不要|请勿|禁止|无需|无须|不用|不必|避免|不得|切勿|别|"
+    r"do\s+not|don't|must\s+not|never)\s*[^，,。！？!?；;\n]{0,32}$",
+    re.IGNORECASE,
+)
+_OPERATION_CLAUSE_BOUNDARIES = "，,。！？!?；;\n"
 # 问候语。
 _GREETING_RE = re.compile(
     r"^\s*(你好|您好|hi|hello|hey|在吗|在么|哈喽|嗨|早上好|下午好|晚上好|早安|晚安|"
     r"good\s+(morning|afternoon|evening|night))[\s。.!！?？~～]*$",
     re.IGNORECASE,
 )
+
+
+def _has_positive_operation_match(pattern: re.Pattern[str], text: str) -> bool:
+    for match in pattern.finditer(text):
+        clause_start = max(
+            (text.rfind(boundary, 0, match.start()) for boundary in _OPERATION_CLAUSE_BOUNDARIES),
+            default=-1,
+        )
+        prefix = text[clause_start + 1 : match.start()]
+        if _NEGATED_OPERATION_PREFIX_RE.search(prefix):
+            continue
+        return True
+    return False
 
 
 def _heuristic_operation_type(text: str, *, primary: str) -> str:
@@ -149,8 +168,8 @@ def _heuristic_operation_type(text: str, *, primary: str) -> str:
         return _DEFAULT_OPERATION_TYPE
     if _GREETING_RE.match(stripped):
         return "greeting"
-    has_modify = bool(_MODIFY_EXISTING_RE.search(stripped))
-    has_create = bool(_CREATE_NEW_RE.search(stripped))
+    has_modify = _has_positive_operation_match(_MODIFY_EXISTING_RE, stripped)
+    has_create = _has_positive_operation_match(_CREATE_NEW_RE, stripped)
     if has_modify and not has_create:
         return "modify_existing"
     if has_create and not has_modify:

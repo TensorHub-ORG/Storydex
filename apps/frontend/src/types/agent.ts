@@ -143,6 +143,7 @@ export interface AgentCoomiConfigUpdateRequest {
 export interface AgentCoomiModelListRequest {
   baseUrl: string;
   apiKey: string;
+  providerType: string;
 }
 
 export interface AgentCoomiModelListResponse {

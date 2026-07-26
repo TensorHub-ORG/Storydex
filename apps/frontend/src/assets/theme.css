@@ -334,7 +334,7 @@ body.is-resizing-panels .workspace-splitter::before {
 
 .top-header {
   position: relative;
-  z-index: 40;
+  z-index: 1000;
   overflow: visible;
   height: var(--header-height);
   padding: 0 14px;
@@ -4138,7 +4138,7 @@ body.is-resizing-panels .workspace-splitter::before {
 .command-bar-wrap {
   position: relative;
   width: min(500px, 100%);
-  z-index: 90;
+  z-index: 1000;
 }
 
 .command-bar-wrap .command-bar {
@@ -4175,6 +4175,8 @@ body.is-resizing-panels .workspace-splitter::before {
   border-radius: 6px;
   background: var(--bg-card);
   box-shadow: var(--shadow-md);
+  z-index: 1001;
+  pointer-events: auto;
 }
 
 .command-palette-group {

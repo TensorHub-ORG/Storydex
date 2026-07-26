@@ -8,10 +8,10 @@
         <button class="coomi-icon-btn" type="button" title="新建会话" @click="handleNewSession">
           <span class="material-symbols-rounded">add_box</span>
         </button>
-        <button class="coomi-icon-btn" type="button" title="History" @click="sessionMenuOpen = !sessionMenuOpen">
+        <button class="coomi-icon-btn" type="button" title="History" @click="toggleSessionMenu">
           <span class="material-symbols-rounded">history</span>
         </button>
-        <button class="coomi-icon-btn" type="button" title="Settings" @click="configPanelOpen = true">
+        <button class="coomi-icon-btn" type="button" title="Settings" @click="openConfigPanel">
           <span class="material-symbols-rounded">settings</span>
         </button>
         <div class="coomi-run-state" :class="{ running: agentStore.isRunning }">
@@ -31,8 +31,14 @@
       />
 
       <section v-else-if="sessionMenuOpen" class="coomi-session-view">
-        <div class="coomi-session-title">Sessions</div>
-        <div v-if="sessionSummaries.length === 0" class="coomi-empty">No Coomi sessions yet.</div>
+        <div class="coomi-session-head">
+          <span class="coomi-session-title">会话历史</span>
+          <span v-if="sessionSummaries.length" class="coomi-session-count">{{ sessionSummaries.length }}</span>
+        </div>
+        <div v-if="sessionSummaries.length === 0" class="coomi-session-empty">
+          <span class="material-symbols-rounded">forum</span>
+          <p>还没有历史会话。</p>
+        </div>
         <div
           v-for="session in sessionSummaries"
           :key="session.sessionId"
@@ -40,8 +46,15 @@
           :class="{ active: session.sessionId === agentStore.currentSessionId }"
         >
           <button class="coomi-session-select" type="button" @click="handleSessionSelect(session.sessionId)">
-            <span>{{ session.firstPrompt || session.sessionId }}</span>
-            <small>{{ formatDate(session.updatedAt) }}</small>
+            <span class="coomi-session-icon material-symbols-rounded">chat_bubble</span>
+            <span class="coomi-session-copy">
+              <span class="coomi-session-prompt">{{ session.firstPrompt || session.sessionId }}</span>
+              <span class="coomi-session-meta">
+                {{ formatDate(session.updatedAt) }}
+                <template v-if="session.traceCount > 0"> · {{ session.traceCount }} 轮</template>
+              </span>
+            </span>
+            <span v-if="session.sessionId === agentStore.currentSessionId" class="coomi-session-current">当前</span>
           </button>
           <button
             class="coomi-session-delete"
@@ -76,7 +89,7 @@
       </section>
       </main>
       <button
-        v-if="showScrollToLatest"
+        v-if="showScrollToLatest && !configPanelOpen"
         class="coomi-scroll-latest"
         type="button"
         title="回到最新输出"
@@ -222,7 +235,7 @@
               {{ storyChapterTemplateErrorMessage }}
             </small>
             <small class="coomi-story-template-hint">
-              2500 是目标值，不是上限。章级正文合计在目标值 ±25% 内均可接受；偏长正文仍会落盘并标记，供作者按需裁剪。Storydex 忽略空白后，每个 Unicode 字符计 1 字。
+              3000 是默认目标值。章级正文合计在目标值 ±30% 内均可接受；偏长正文仍会落盘并标记，供作者按需裁剪。Storydex 忽略空白后，每个 Unicode 字符计 1 字。
             </small>
           </div>
         </div>
@@ -561,13 +574,14 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import MarkdownIt from "markdown-it";
 import AgentExecutionFloatBar from "@/components/AgentExecutionFloatBar.vue";
-import CoomiClaudeTurn from "@/components/demo/CoomiClaudeTurn.vue";
+import CoomiClaudeTurn from "@/components/CoomiClaudeTurn.vue";
 import CoomiConfigPanel from "@/components/CoomiConfigPanel.vue";
 import { useAgentStore } from "@/stores/agent";
 import { useGitStore } from "@/stores/git";
 import { useWorkspaceStore } from "@/stores/workspace";
+import { openFilePreviewWindow } from "@/utils/filePreview";
+import { createMarkdownRenderer } from "@/utils/markdown";
 import {
   findMarkdownLinkAnchor,
   isExternalMarkdownHref,
@@ -712,11 +726,7 @@ const reasoningOptions: Array<{ value: ReasoningChoice; label: string; shortLabe
   { value: "medium", label: "中", shortLabel: "中", description: "平衡速度和推理深度。" },
   { value: "high", label: "高", shortLabel: "高", description: "偏向更充分的推理。" }
 ];
-const markdown = new MarkdownIt({
-  html: false,
-  linkify: true,
-  breaks: true
-});
+const markdown = createMarkdownRenderer({}, { linkifyWorkspaceMarkdownFiles: true });
 
 function buildPendingTargetPathOperationItems(pendingWrite: PendingWriteLike | null | undefined): LiveOperationItem[] {
   const targetPaths = Array.isArray(pendingWrite?.targetPaths) ? pendingWrite.targetPaths : [];
@@ -1203,7 +1213,7 @@ function updateStoryFragmentCount(event: Event): void {
 
 function updateChapterWordCountTarget(event: Event): void {
   const target = event.target as HTMLInputElement | null;
-  void persistStoryGenerationOptions({ chapterWordCountTarget: Number(target?.value || 2500) });
+  void persistStoryGenerationOptions({ chapterWordCountTarget: Number(target?.value || 3000) });
 }
 
 function updateStoryChapterTemplate(event: Event): void {
@@ -1301,6 +1311,19 @@ function handleNewSession(): void {
   sessionMenuOpen.value = false;
   configPanelOpen.value = false;
   void nextTick(() => inputRef.value?.focus());
+}
+
+// 设置面板打开时 History 必须仍可用：两个视图互斥，后点的生效
+function toggleSessionMenu(): void {
+  sessionMenuOpen.value = !sessionMenuOpen.value;
+  if (sessionMenuOpen.value) {
+    configPanelOpen.value = false;
+  }
+}
+
+function openConfigPanel(): void {
+  configPanelOpen.value = true;
+  sessionMenuOpen.value = false;
 }
 
 async function handleSessionSelect(sessionId: string): Promise<void> {
@@ -1896,10 +1919,23 @@ function formatDate(value: string, timeOnly = false): string {
   if (Number.isNaN(date.getTime())) {
     return value || "";
   }
-  return date.toLocaleString("zh-CN", {
-    hour12: false,
-    ...(timeOnly ? { hour: "2-digit", minute: "2-digit", second: "2-digit" } : {})
-  });
+  if (timeOnly) {
+    return date.toLocaleString("zh-CN", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  }
+  // 会话列表：当天只显示时分，跨天补日期，跨年补年份（与消息时间戳一致）
+  const now = new Date();
+  const clock = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  if (
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate()
+  ) {
+    return clock;
+  }
+  const day = `${date.getMonth() + 1}月${date.getDate()}日`;
+  return date.getFullYear() === now.getFullYear()
+    ? `${day} ${clock}`
+    : `${date.getFullYear()}年${day} ${clock}`;
 }
 
 function compactJson(value: unknown): string {
@@ -1921,7 +1957,7 @@ function handleMarkdownLinkClick(event: MouseEvent): void {
   if (relativePath) {
     event.preventDefault();
     event.stopPropagation();
-    void workspaceStore.openFile(relativePath);
+    void openFilePreviewWindow(relativePath);
     return;
   }
 
@@ -2046,6 +2082,8 @@ defineExpose({
     handleNewSession,
     handleSessionSelect,
     handleSessionDelete,
+    toggleSessionMenu,
+    openConfigPanel,
     canRollbackRun,
     handleRollbackEdit,
     handleRollbackDelete,
@@ -2297,11 +2335,16 @@ defineExpose({
 }
 
 .coomi-runs,
-.coomi-waterfall,
-.coomi-session-view {
+.coomi-waterfall {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.coomi-session-view {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .coomi-run + .coomi-run {
@@ -2727,10 +2770,52 @@ defineExpose({
   }
 }
 
+.coomi-session-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding-bottom: 4px;
+}
+
 .coomi-session-title {
   color: var(--text-main);
   font-size: 13px;
   font-weight: 700;
+}
+
+.coomi-session-count {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: var(--bg-hover);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.coomi-session-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 36px 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.coomi-session-empty .material-symbols-rounded {
+  font-size: 26px;
+  color: var(--text-faint);
+}
+
+.coomi-session-empty p {
+  margin: 0;
+  line-height: 1.6;
 }
 
 .coomi-session-item {
@@ -2740,18 +2825,18 @@ defineExpose({
   align-items: center;
   width: 100%;
   border: 0;
-  border-bottom: 1px solid var(--border-ghost);
+  border-radius: 6px;
   background: transparent;
 }
 
 .coomi-session-select {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px;
+  grid-template-columns: 26px minmax(0, 1fr) auto;
+  gap: 8px;
   align-items: center;
   width: 100%;
   min-width: 0;
-  padding: 10px 4px;
+  padding: 8px 6px;
   border: 0;
   background: transparent;
   color: var(--text-main);
@@ -2760,18 +2845,65 @@ defineExpose({
   cursor: pointer;
 }
 
-.coomi-session-item:hover,
-.coomi-session-item.active {
+.coomi-session-item:hover {
   background: var(--bg-hover);
 }
 
-.coomi-session-select span {
+.coomi-session-item.active {
+  background: color-mix(in srgb, var(--accent-soft) 22%, transparent);
+}
+
+.coomi-session-icon {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--text-main) 6%, transparent);
+  color: var(--text-muted);
+  font-size: 15px;
+}
+
+.coomi-session-item.active .coomi-session-icon {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.coomi-session-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.coomi-session-prompt {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 13px;
+  line-height: 1.4;
 }
 
-.coomi-session-select small,
+.coomi-session-meta {
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.coomi-session-current {
+  flex: 0 0 auto;
+  height: 18px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .coomi-empty {
   color: var(--text-muted);
 }

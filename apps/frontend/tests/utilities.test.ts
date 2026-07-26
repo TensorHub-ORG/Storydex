@@ -3,6 +3,7 @@ import { isRunActivelyStreaming, shouldShowLiveTurnPhase } from "@/utils/agentRu
 import { collapseFragmentedShortLines, formatAgentStreamText } from "@/utils/agentTextLayout";
 import { applyCachedThemeSnapshot, applyThemeSnapshot, readCachedThemeCode, THEME_CACHE_KEY, writeCachedThemeCode } from "@/utils/appearance";
 import { openFilePreviewWindow } from "@/utils/filePreview";
+import { createMarkdownRenderer } from "@/utils/markdown";
 import { computeForceLayout } from "@/utils/forceLayout";
 import { compactText } from "@/utils/format";
 import {
@@ -106,6 +107,13 @@ describe("frontend deterministic utilities", () => {
     expect(await openFilePreviewWindow("a.md")).toBe(false);
   });
 
+  it("keeps fuzzy Markdown filenames local without rewriting explicit external links", () => {
+    const markdown = createMarkdownRenderer({}, { linkifyWorkspaceMarkdownFiles: true });
+    expect(markdown.render("002.md")).toContain('href="002.md"');
+    expect(markdown.render("https://example.md")).toContain('href="https://example.md"');
+    expect(markdown.render("[站点](https://002.md)")).toContain('href="https://002.md"');
+  });
+
   it("computes bounded deterministic force layouts", () => {
     expect(computeForceLayout([], [], { width: 100, height: 100 })).toEqual({});
     expect(computeForceLayout([{ id: "a" }], [], { width: 100, height: 80 })).toEqual({ a: { x: 50, y: 40 } });
@@ -118,6 +126,30 @@ describe("frontend deterministic utilities", () => {
     expect(Object.values(layout).every(({ x, y }) => Number.isFinite(x) && Number.isFinite(y))).toBe(true);
     const cramped = computeForceLayout([{ id: "a" }, { id: "b" }], [], { width: 20, height: 20, iterations: 1, padding: 20 });
     expect(cramped.a.x).toBe(10);
+  });
+
+  it("keeps every force-layout node inside the graph safe rectangle", () => {
+    const nodes = [
+      { id: "top-left", x: 0, y: 0, radius: 12 },
+      { id: "bottom-right", x: 300, y: 200, radius: 18 },
+      { id: "center", radius: 10 },
+    ];
+    const safeRect = { left: 24, top: 20, right: 214, bottom: 132 };
+    const layout = computeForceLayout(nodes, [], {
+      width: 240,
+      height: 180,
+      iterations: 2,
+      padding: 0,
+      safeRect,
+    });
+
+    for (const node of nodes) {
+      const point = layout[node.id];
+      expect(point.x - node.radius).toBeGreaterThanOrEqual(safeRect.left);
+      expect(point.x + node.radius).toBeLessThanOrEqual(safeRect.right);
+      expect(point.y - node.radius).toBeGreaterThanOrEqual(safeRect.top);
+      expect(point.y + node.radius).toBeLessThanOrEqual(safeRect.bottom);
+    }
   });
 
   it("builds checklist, compact text and safe workspace link results", () => {

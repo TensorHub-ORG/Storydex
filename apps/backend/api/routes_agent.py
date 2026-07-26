@@ -11,7 +11,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Query, Request
@@ -19,9 +19,14 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from api.response import ApiEnvelope, ApiTrace, success_response
+from core.config import FEATURE_FLAG_DEFAULTS
 from core.exceptions import GitServiceError, StorydexError
+from core.feature_flags import FeatureFlags
 from services.agent_git_autocommit_service import AgentGitSnapshot, get_agent_git_autocommit_service
-from services.coomi_agent_service import get_storydex_coomi_agent_service
+from services.coomi_agent_service import (
+    CoomiStoryGenerationAdapter,
+    get_storydex_coomi_agent_service,
+)
 from services.context_policy import ContextPolicy
 from services.context_trace_service import merge_llm_metrics, summarize_context_trace
 from services.execution_log_service import ExecutionLogSession, create_execution_log_session
@@ -36,8 +41,20 @@ from services.execution_coordinator import (
 from services.git_service import get_git_service
 from services.llm_replay import get_llm_metrics, llm_trace, reset_llm_metrics
 from services.project_service import get_project_service
-from services.story_project_service import get_story_project_service
+from services.story_project_service import (
+    DEFAULT_CHAPTER_WORD_COUNT_TARGET,
+    get_story_project_service,
+)
 from services.story_length_calibration_service import get_story_length_calibration_service
+from services.story_semantic_budget_context import read_scene_constraint_context
+from services.story_semantic_budget_controller import (
+    SEMANTIC_BUDGET_STRATEGY,
+    SemanticBudgetController,
+    SemanticBudgetRequest,
+    SemanticBudgetResult,
+    automatic_scene_revision_limit,
+)
+from services.story_wiki_service import get_story_wiki_service
 from services.storydex_intent_service import get_storydex_intent_service
 from services.storydex_orchestration_service import get_storydex_orchestration_service
 from services.trace_history_service import get_trace_history_service
@@ -232,6 +249,7 @@ class AgentCoomiConfigUpdateRequest(BaseModel):
 class AgentCoomiModelListRequest(BaseModel):
     base_url: str = Field(default="", alias="baseUrl")
     api_key: str = Field(default="", alias="apiKey")
+    provider_type: str = Field(default="openai_compatible", alias="providerType")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -613,7 +631,12 @@ def _normalize_story_generation_options(value: Dict[str, Any] | None) -> Dict[st
         )
     )
     chapter_word_count_target = (
-        _bounded_int(raw_chapter_target, default=2500, minimum=100, maximum=20000)
+        _bounded_int(
+            raw_chapter_target,
+            default=DEFAULT_CHAPTER_WORD_COUNT_TARGET,
+            minimum=100,
+            maximum=20000,
+        )
         if raw_chapter_target is not None
         else None
         if has_legacy_range
@@ -629,7 +652,10 @@ def _normalize_story_generation_options(value: Dict[str, Any] | None) -> Dict[st
         )
         or ""
     ).strip()
-    return {
+    generation_strategy = str(
+        payload.get("generationStrategy", payload.get("generation_strategy", "")) or ""
+    ).strip().lower()
+    normalized = {
         "fragmentCount": fragment_count,
         # 保留旧字段以向后兼容：等于区间上界
         "fragmentWordCount": fragment_word_count_max,
@@ -638,6 +664,9 @@ def _normalize_story_generation_options(value: Dict[str, Any] | None) -> Dict[st
         "chapterWordCountTarget": chapter_word_count_target,
         "chapterTemplateId": chapter_template_id,
     }
+    if generation_strategy in {"legacy_agent", SEMANTIC_BUDGET_STRATEGY}:
+        normalized["generationStrategy"] = generation_strategy
+    return normalized
 
 
 def _resolve_story_word_count_range(payload: Dict[str, Any]) -> tuple[int, int]:
@@ -648,7 +677,12 @@ def _resolve_story_word_count_range(payload: Dict[str, Any]) -> tuple[int, int]:
     """
     raw_target = payload.get("chapterWordCountTarget", payload.get("chapter_word_count_target"))
     if raw_target is not None:
-        target = _bounded_int(raw_target, default=2500, minimum=100, maximum=20000)
+        target = _bounded_int(
+            raw_target,
+            default=DEFAULT_CHAPTER_WORD_COUNT_TARGET,
+            minimum=100,
+            maximum=20000,
+        )
         return target, target
     raw_min = payload.get("fragmentWordCountMin", payload.get("fragment_word_count_min"))
     raw_max = payload.get("fragmentWordCountMax", payload.get("fragment_word_count_max"))
@@ -657,11 +691,26 @@ def _resolve_story_word_count_range(payload: Dict[str, Any]) -> tuple[int, int]:
             "fragmentWordCount", payload.get("fragment_word_count", payload.get("segmentWords"))
         )
         if legacy is None:
-            return 2500, 2500
-        value = _bounded_int(legacy, default=2500, minimum=100, maximum=20000)
+            return DEFAULT_CHAPTER_WORD_COUNT_TARGET, DEFAULT_CHAPTER_WORD_COUNT_TARGET
+        value = _bounded_int(
+            legacy,
+            default=DEFAULT_CHAPTER_WORD_COUNT_TARGET,
+            minimum=100,
+            maximum=20000,
+        )
         return value, value
-    min_value = _bounded_int(raw_min, default=2500, minimum=100, maximum=20000)
-    max_value = _bounded_int(raw_max, default=2500, minimum=100, maximum=20000)
+    min_value = _bounded_int(
+        raw_min,
+        default=DEFAULT_CHAPTER_WORD_COUNT_TARGET,
+        minimum=100,
+        maximum=20000,
+    )
+    max_value = _bounded_int(
+        raw_max,
+        default=DEFAULT_CHAPTER_WORD_COUNT_TARGET,
+        minimum=100,
+        maximum=20000,
+    )
     if min_value > max_value:
         min_value, max_value = max_value, min_value
     return min_value, max_value
@@ -681,11 +730,26 @@ def _apply_turn_contract_story_generation_defaults(
     raw_min = turn_plan.get("fragmentWordCountMin")
     raw_max = turn_plan.get("fragmentWordCountMax")
     if raw_min is None and raw_max is None:
-        legacy = _bounded_int(turn_plan.get("fragmentWordCount"), default=2500, minimum=100, maximum=20000)
+        legacy = _bounded_int(
+            turn_plan.get("fragmentWordCount"),
+            default=DEFAULT_CHAPTER_WORD_COUNT_TARGET,
+            minimum=100,
+            maximum=20000,
+        )
         min_value, max_value = legacy, legacy
     else:
-        min_value = _bounded_int(raw_min, default=2000, minimum=100, maximum=20000)
-        max_value = _bounded_int(raw_max, default=2500, minimum=100, maximum=20000)
+        min_value = _bounded_int(
+            raw_min,
+            default=DEFAULT_CHAPTER_WORD_COUNT_TARGET,
+            minimum=100,
+            maximum=20000,
+        )
+        max_value = _bounded_int(
+            raw_max,
+            default=DEFAULT_CHAPTER_WORD_COUNT_TARGET,
+            minimum=100,
+            maximum=20000,
+        )
         if min_value > max_value:
             min_value, max_value = max_value, min_value
     next_story_generation["fragmentWordCountMin"] = min_value
@@ -693,13 +757,42 @@ def _apply_turn_contract_story_generation_defaults(
     next_story_generation["fragmentWordCount"] = max_value
     next_story_generation["chapterWordCountTarget"] = _bounded_int(
         turn_plan.get("chapterWordCountTarget", int(round((min_value + max_value) / 2))),
-        default=2500,
+        default=DEFAULT_CHAPTER_WORD_COUNT_TARGET,
         minimum=100,
         maximum=20000,
     )
     next_story_generation["chapterTemplateId"] = selected_template
     next_story_generation["chapterTemplate"] = selected_template
     return next_story_generation
+
+
+def _build_turn_contract_with_active_model(
+    workspace_root: Path,
+    *,
+    prompt: str,
+    active_file: str,
+    story_generation: Dict[str, Any],
+    intent_frame: Dict[str, Any],
+    context_policy: ContextPolicy | None,
+) -> Dict[str, Any]:
+    provider = ""
+    model = ""
+    try:
+        status = get_storydex_coomi_agent_service().get_status(workspace_root=workspace_root)
+        provider = str(status.get("providerId") or "") if isinstance(status, dict) else ""
+        model = str(status.get("model") or "") if isinstance(status, dict) else ""
+    except Exception as exc:
+        _LOGGER.warning("Unable to resolve active Coomi model for length calibration: %s", exc)
+    return storydex_orchestration_service.build_turn_contract(
+        workspace_root,
+        prompt=prompt,
+        active_file=active_file,
+        story_generation=story_generation,
+        intent_frame=intent_frame,
+        context_policy=context_policy,
+        provider=provider,
+        model=model,
+    )
 
 
 def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
@@ -752,6 +845,58 @@ def _agent_busy_error(*, trace_id: str, session_id: str) -> StorydexError:
 
 def _encode_sse(event_name: str, payload: Dict[str, Any]) -> str:
     return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _reconcile_story_knowledge_projection(workspace_root: Path) -> Dict[str, Any]:
+    """Run the deterministic projection finalizer for every terminal Agent outcome."""
+    try:
+        payload = get_story_wiki_service().sync_local_incremental(Path(workspace_root).resolve())
+    except Exception as exc:
+        return {
+            "_type": "KnowledgeProjectionError",
+            "_version": 1,
+            "ok": False,
+            "status": "error",
+            "knowledgeRevision": 0,
+            "builtFromRevision": 0,
+            "lastSuccessfulRevision": 0,
+            "changedSourcePaths": [],
+            "diagnostics": [],
+            "errorMessage": str(exc) or exc.__class__.__name__,
+        }
+    diagnostics = [
+        dict(item)
+        for item in payload.get("diagnostics", [])
+        if isinstance(item, dict)
+    ]
+    status = str(payload.get("status") or "ready")
+    ok = status == "ready"
+    error_message = ""
+    if not ok:
+        error_message = next(
+            (str(item.get("message") or "") for item in diagnostics if item.get("message")),
+            f"Knowledge projection finished with status {status}.",
+        )
+    return {
+        "_type": "KnowledgeProjectionUpdated" if ok else "KnowledgeProjectionError",
+        "_version": 1,
+        "ok": ok,
+        "status": status,
+        "schemaVersion": int(payload.get("schemaVersion") or 0),
+        "knowledgeRevision": int(payload.get("knowledgeRevision") or 0),
+        "builtFromRevision": int(payload.get("builtFromRevision") or 0),
+        "lastSuccessfulRevision": int(payload.get("lastSuccessfulRevision") or 0),
+        "sourceSetChecksum": str(payload.get("sourceSetChecksum") or ""),
+        "graphChecksum": str(payload.get("graphChecksum") or ""),
+        "changedSourcePaths": [
+            str(path)
+            for path in payload.get("changedSourcePaths", [])
+            if str(path).strip()
+        ],
+        "sourceStats": dict(payload.get("sourceStats") or {}),
+        "diagnostics": diagnostics,
+        "errorMessage": error_message,
+    }
 
 
 def _turn_phase_packet(
@@ -822,10 +967,14 @@ def _phase_for_event(event_name: str) -> str:
         return "model"
     if event_name in {"GitAutoCommit", "GitCommitPrompt", "GitCommitResult"}:
         return "version_control"
+    if event_name in {"KnowledgeProjectionUpdated", "KnowledgeProjectionError"}:
+        return "knowledge_projection"
     if event_name.startswith("Task"):
         return "planning"
     if event_name in {"TurnContract", "StoryGenerationValidation"}:
         return "orchestration"
+    if event_name.startswith("SemanticBudget"):
+        return "model"
     if event_name in {"RunAccepted", "UsageUpdate", "CompressionEvent", "TurnPhase"}:
         return "runtime"
     if event_name.startswith("Agent"):
@@ -852,6 +1001,20 @@ def _status_for_event(event_name: str, payload: Dict[str, Any]) -> str:
         return "warning" if str(payload.get("status") or "") == "needs_user_input" else "info"
     if event_name == "StoryGenerationValidation":
         return "success" if bool(payload.get("passed")) else "error"
+    if event_name == "SemanticBudgetProviderAttempt":
+        if str(payload.get("outcome") or "") == "success":
+            return "success"
+        return "warning" if bool(payload.get("retryScheduled")) else "error"
+    if event_name in {"SemanticBudgetProgress", "SemanticBudgetResult"}:
+        state = str(payload.get("state") or "").upper()
+        status = str(payload.get("status") or "").lower()
+        if state == "FAILED" or status.startswith("failed"):
+            return "error"
+        if state == "COMPLETED" or status == "completed":
+            return "success"
+        return "running"
+    if event_name in {"KnowledgeProjectionUpdated", "KnowledgeProjectionError"}:
+        return "success" if bool(payload.get("ok")) else "error"
     if event_name == "RunAccepted":
         return "running"
     if event_name == "ConnectionRetry":
@@ -893,6 +1056,33 @@ def _detail_for_event(event_name: str, payload: Dict[str, Any]) -> str:
         return str(intent.get("primary") or "Storydex turn contract")
     if event_name == "StoryGenerationValidation":
         return str(payload.get("message") or "Storydex 正文客观验收")
+    if event_name == "SemanticBudgetProviderAttempt":
+        purpose = str(payload.get("purpose") or "provider")
+        attempt = int(payload.get("attempt") or 1)
+        if payload.get("retryScheduled"):
+            return f"{purpose} 第 {attempt} 次请求失败，按上游要求有界重试"
+        return f"{purpose} 第 {attempt} 次请求{('完成' if payload.get('outcome') == 'success' else '失败')}"
+    if event_name in {"SemanticBudgetProgress", "SemanticBudgetResult"}:
+        labels = {
+            "PLANNING": "正在规划章节场景",
+            "REPAIRING_PLAN": "正在修复场景计划结构",
+            "GENERATING_SCENE": "正在生成当前场景",
+            "REVISING_SCENE": "正在局部修订当前场景",
+            "VERIFYING_SCENE": "正在校验当前场景",
+            "ASSEMBLING": "正在组装章节正文",
+            "APPLYING": "正在一次性写入章节正文",
+            "COMPLETED": "语义预算生成完成",
+            "FAILED": "语义预算生成失败",
+        }
+        state = str(payload.get("state") or "").upper()
+        return labels.get(state, str(payload.get("status") or event_name))
+    if event_name == "SemanticBudgetFallback":
+        return f"语义预算策略未启用，回退普通 Agent：{payload.get('reason') or 'unknown'}"
+    if event_name in {"KnowledgeProjectionUpdated", "KnowledgeProjectionError"}:
+        changed_count = len(payload.get("changedSourcePaths") or [])
+        if payload.get("ok"):
+            return f"知识图谱已对齐 revision {payload.get('builtFromRevision') or 0}，处理 {changed_count} 个源文件变更"
+        return str(payload.get("errorMessage") or "知识图谱投影更新失败")
     return event_name
 
 
@@ -1468,6 +1658,343 @@ def _story_generation_needs_length_correction(validation: Dict[str, Any]) -> boo
     )
 
 
+def _semantic_budget_gate(
+    workspace_root: Path,
+    turn_contract: Dict[str, Any],
+) -> Dict[str, Any]:
+    intent = turn_contract.get("intentFrame") if isinstance(turn_contract.get("intentFrame"), dict) else {}
+    turn_plan = turn_contract.get("turnPlan") if isinstance(turn_contract.get("turnPlan"), dict) else {}
+    control = (
+        turn_plan.get("generationControl")
+        if isinstance(turn_plan.get("generationControl"), dict)
+        else {}
+    )
+    requested = str(control.get("strategy") or "").strip().lower() == SEMANTIC_BUDGET_STRATEGY
+    if not requested:
+        return {"requested": False, "enabled": False, "reason": "not_requested"}
+    if str(intent.get("primary") or "").strip().lower() != "story_generation":
+        return {"requested": True, "enabled": False, "reason": "not_story_generation"}
+    if str(turn_plan.get("operationType") or "").strip().lower() == "modify_existing":
+        return {"requested": True, "enabled": False, "reason": "modify_existing_not_supported"}
+    flags = FeatureFlags(Path(workspace_root).resolve(), FEATURE_FLAG_DEFAULTS)
+    if not flags.get_bool("SEMANTIC_BUDGET_GENERATION_ENABLED"):
+        return {"requested": True, "enabled": False, "reason": "feature_flag_disabled"}
+    targets = turn_plan.get("fragmentTargets") if isinstance(turn_plan.get("fragmentTargets"), list) else []
+    if int(turn_plan.get("fragmentCount") or 0) != 1 or len(targets) != 1:
+        return {"requested": True, "enabled": False, "reason": "single_target_required"}
+    target = int(control.get("productTargetWordCount") or turn_plan.get("chapterWordCountTarget") or 0)
+    if target < 900:
+        return {"requested": True, "enabled": False, "reason": "target_below_900"}
+    return {"requested": True, "enabled": True, "reason": "enabled"}
+
+
+def _semantic_budget_source_context(
+    workspace_root: Path,
+    *,
+    active_file: str,
+    turn_contract: Dict[str, Any],
+    limit: int = 8000,
+) -> str:
+    root = Path(workspace_root).resolve()
+    relative = str(active_file or "").strip().replace("\\", "/").lstrip("/")
+    if relative:
+        candidate = (root / relative).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            candidate = root / "__invalid_active_file__"
+        if candidate.is_file():
+            try:
+                return candidate.read_text(encoding="utf-8-sig")[-limit:]
+            except OSError:
+                pass
+    assembly = (
+        turn_contract.get("contextAssembly")
+        if isinstance(turn_contract.get("contextAssembly"), dict)
+        else {}
+    )
+    blocks = assembly.get("promptBlocks") if isinstance(assembly.get("promptBlocks"), list) else []
+    chunks: list[str] = []
+    for block in blocks:
+        if not isinstance(block, dict) or str(block.get("id") or "") == "runtime_presets":
+            continue
+        content = str(block.get("content") or "").strip()
+        if content:
+            chunks.append(content)
+    return "\n\n".join(chunks)[-limit:]
+
+
+def _semantic_budget_result_packet(
+    result: SemanticBudgetResult,
+    adapter: CoomiStoryGenerationAdapter,
+) -> Dict[str, Any]:
+    return {
+        "_type": "SemanticBudgetResult",
+        "_version": 1,
+        "state": "COMPLETED" if result.completed else "FAILED",
+        "status": result.status,
+        "strategy": result.strategy,
+        "targetWordCount": result.target_word_count,
+        "generatedWordCount": result.generated_word_count,
+        "acceptanceMinimum": result.acceptance_minimum,
+        "acceptanceMaximum": result.acceptance_maximum,
+        "withinAcceptance": result.within_acceptance,
+        "sceneCount": len(result.scenes),
+        "scenes": [dict(item) for item in result.scenes],
+        "providerCalls": result.provider_calls,
+        "providerAttempts": adapter.provider_attempts,
+        "providerRetries": adapter.provider_retries,
+        "revisionAttempts": result.revision_attempts,
+        "revisionAcceptances": result.revision_acceptances,
+        "durationMs": result.duration_ms,
+        "mechanicalIssues": list(result.mechanical_issues),
+        "error": dict(result.error),
+    }
+
+
+async def _execute_semantic_budget_generation(
+    *,
+    prompt: str,
+    trace_id: str,
+    active_file: str,
+    workspace_root: Path,
+    turn_contract: Dict[str, Any],
+    event_sink: Callable[[str, Dict[str, Any]], None],
+) -> Dict[str, Any]:
+    turn_plan = turn_contract.get("turnPlan") if isinstance(turn_contract.get("turnPlan"), dict) else {}
+    control = (
+        turn_plan.get("generationControl")
+        if isinstance(turn_plan.get("generationControl"), dict)
+        else {}
+    )
+    constraint_context, constraint_audit = read_scene_constraint_context(workspace_root)
+    product_target_word_count = int(
+        control.get("productTargetWordCount") or turn_plan.get("chapterWordCountTarget") or 0
+    )
+    maximum_scene_revisions = control.get("maximumSceneRevisions")
+    request = SemanticBudgetRequest(
+        product_target_word_count=product_target_word_count,
+        user_task=prompt,
+        source_context=_semantic_budget_source_context(
+            workspace_root,
+            active_file=active_file,
+            turn_contract=turn_contract,
+        ),
+        constraint_context=constraint_context,
+        scene_count=int(control.get("sceneCount") or 0),
+        maximum_scene_revisions=(
+            int(maximum_scene_revisions)
+            if maximum_scene_revisions is not None
+            else automatic_scene_revision_limit(product_target_word_count)
+        ),
+        internal_tolerance_ratio=float(control.get("internalToleranceRatio") or 0.20),
+        final_tolerance_ratio=float(control.get("finalToleranceRatio") or 0.15),
+    )
+    adapter = CoomiStoryGenerationAdapter(
+        trace_id=trace_id,
+        maximum_transport_retries=1,
+        event_sink=event_sink,
+    )
+    deferred_completion: Dict[str, Any] | None = None
+
+    def controller_event_sink(name: str, packet: Dict[str, Any]) -> None:
+        nonlocal deferred_completion
+        normalized = dict(packet)
+        if (
+            name == "SemanticBudgetProgress"
+            and str(normalized.get("state") or "").upper() == "COMPLETED"
+        ):
+            deferred_completion = normalized
+            return
+        event_sink(name, normalized)
+
+    result = await SemanticBudgetController().generate(
+        request,
+        adapter,
+        event_sink=controller_event_sink,
+    )
+    result_packet = _semantic_budget_result_packet(result, adapter)
+    result_packet["constraintModules"] = constraint_audit
+
+    def emit_apply_failure(apply_error: Dict[str, Any]) -> Dict[str, Any]:
+        failure_packet = {
+            **result_packet,
+            "state": "FAILED",
+            "status": "failed_apply",
+            "generationStatus": result.status,
+            "error": dict(apply_error),
+        }
+        event_sink(
+            "SemanticBudgetProgress",
+            {
+                "_type": "SemanticBudgetProgress",
+                "_version": 1,
+                "strategy": SEMANTIC_BUDGET_STRATEGY,
+                "state": "FAILED",
+                "status": "failed_apply",
+                "errorType": str(apply_error.get("type") or "StoryGenerationApplyFailed"),
+            },
+        )
+        event_sink("SemanticBudgetResult", failure_packet)
+        return failure_packet
+
+    if not result.completed:
+        event_sink("SemanticBudgetResult", result_packet)
+        return {
+            "ok": False,
+            "result": result,
+            "resultPacket": result_packet,
+            "applyResult": {},
+            "validation": {},
+        }
+
+    targets = turn_plan.get("fragmentTargets") if isinstance(turn_plan.get("fragmentTargets"), list) else []
+    target_spec = targets[0] if len(targets) == 1 and isinstance(targets[0], dict) else {}
+    target_path = str(target_spec.get("path") or "").strip()
+    if not target_path:
+        apply_error = {"type": "MissingTargetPath"}
+        failure_packet = emit_apply_failure(apply_error)
+        return {
+            "ok": False,
+            "result": result,
+            "resultPacket": failure_packet,
+            "applyResult": {},
+            "validation": {},
+            "applyError": apply_error,
+        }
+    event_sink(
+        "SemanticBudgetProgress",
+        {
+            "_type": "SemanticBudgetProgress",
+            "_version": 1,
+            "strategy": SEMANTIC_BUDGET_STRATEGY,
+            "state": "APPLYING",
+            "targetPath": target_path,
+        },
+    )
+    payload = {
+        "activeFile": active_file,
+        "prompt": prompt,
+        "applyVariables": False,
+        "applyWiki": False,
+        "fragments": [{"path": target_path, "text": result.text}],
+    }
+    try:
+        apply_result = await asyncio.to_thread(
+            story_project_service.apply_story_generation_increment,
+            workspace_root,
+            payload,
+            generation_contract=turn_contract,
+        )
+    except Exception as exc:
+        apply_error = {
+            "type": "StoryGenerationApplyError",
+            "causeType": type(exc).__name__,
+        }
+        failure_packet = emit_apply_failure(apply_error)
+        return {
+            "ok": False,
+            "result": result,
+            "resultPacket": failure_packet,
+            "applyResult": {},
+            "validation": {},
+            "targetPath": target_path,
+            "applyError": apply_error,
+        }
+    apply_result = dict(apply_result) if isinstance(apply_result, dict) else {}
+    if not bool(apply_result.get("ok")):
+        apply_error = {"type": "StoryGenerationApplyRejected"}
+        failure_packet = emit_apply_failure(apply_error)
+        return {
+            "ok": False,
+            "result": result,
+            "resultPacket": failure_packet,
+            "applyResult": apply_result,
+            "validation": {},
+            "targetPath": target_path,
+            "applyError": apply_error,
+        }
+    try:
+        validation = await asyncio.to_thread(
+            story_project_service.validate_story_generation_turn,
+            workspace_root,
+            turn_contract,
+        )
+    except Exception as exc:
+        apply_error = {
+            "type": "StoryGenerationPostApplyValidationError",
+            "causeType": type(exc).__name__,
+        }
+        failure_packet = emit_apply_failure(apply_error)
+        return {
+            "ok": False,
+            "result": result,
+            "resultPacket": failure_packet,
+            "applyResult": apply_result,
+            "validation": {},
+            "targetPath": target_path,
+            "applyError": apply_error,
+        }
+    validation = dict(validation) if isinstance(validation, dict) else {}
+    if not bool(validation.get("passed")):
+        apply_error = {"type": "StoryGenerationPostApplyValidationFailed"}
+        failure_packet = emit_apply_failure(apply_error)
+        return {
+            "ok": False,
+            "result": result,
+            "resultPacket": failure_packet,
+            "applyResult": apply_result,
+            "validation": validation,
+            "targetPath": target_path,
+            "applyError": apply_error,
+        }
+
+    completion_packet = {
+        "_type": "SemanticBudgetProgress",
+        "_version": 1,
+        "strategy": SEMANTIC_BUDGET_STRATEGY,
+        **dict(deferred_completion or {}),
+        "state": "COMPLETED",
+        "status": result.status,
+        "generatedWordCount": result.generated_word_count,
+        "withinAcceptance": result.within_acceptance,
+    }
+    event_sink("SemanticBudgetProgress", completion_packet)
+    event_sink("SemanticBudgetResult", result_packet)
+    return {
+        "ok": True,
+        "result": result,
+        "resultPacket": result_packet,
+        "applyResult": apply_result,
+        "validation": validation,
+        "targetPath": target_path,
+        "applyError": {},
+    }
+
+
+def _semantic_budget_failure_message(outcome: Dict[str, Any]) -> str:
+    apply_error = outcome.get("applyError") if isinstance(outcome.get("applyError"), dict) else {}
+    apply_error_type = str(apply_error.get("type") or "")
+    apply_labels = {
+        "MissingTargetPath": "语义场景正文缺少合法目标路径，项目未写入。",
+        "StoryGenerationApplyError": "语义场景正文写入时发生错误，Execution 已停止并保留审计。",
+        "StoryGenerationApplyRejected": "项目服务拒绝语义场景正文写入，Execution 已停止。",
+        "StoryGenerationPostApplyValidationError": "语义场景正文写入后验收发生错误，Execution 以失败收尾。",
+        "StoryGenerationPostApplyValidationFailed": "语义场景正文已写入，但未通过落盘后项目验收。",
+    }
+    if apply_error_type in apply_labels:
+        return apply_labels[apply_error_type]
+    result = outcome.get("result")
+    status = str(getattr(result, "status", "") or "")
+    labels = {
+        "failed_provider": "语义场景生成的 Provider 请求失败，项目未写入。",
+        "failed_plan": "语义场景计划无效，项目未写入。",
+        "failed_quality": "候选正文未通过机械质量门禁，项目未写入。",
+        "failed_length": "候选正文未进入章节字数放行区间，项目未写入。",
+    }
+    return labels.get(status, "语义场景候选未能安全写入项目。")
+
+
 def _should_create_task_checklist(intent_frame: Dict[str, Any]) -> bool:
     """仅复杂任务才创建任务清单。
 
@@ -1799,6 +2326,7 @@ async def _stream_coomi_sse_worker(
     finalization_packets: List[str] = []
     planning_task: asyncio.Task[List[Dict[str, Any]]] | None = None
     planning_started = 0.0
+    knowledge_projection: Dict[str, Any] = {}
 
     def finish_git_turn() -> Dict[str, Any]:
         nonlocal git_finished
@@ -1894,6 +2422,215 @@ async def _stream_coomi_sse_worker(
                     reply_chunks.append(str(packet.get("message") or ""))
                     terminal_event = ("AgentCompleted", packet)
                     should_run_coomi = False
+
+            semantic_gate = (
+                _semantic_budget_gate(workspace_root, turn_contract)
+                if should_run_coomi
+                else {"requested": False, "enabled": False, "reason": "turn_not_runnable"}
+            )
+            if semantic_gate.get("requested") and not semantic_gate.get("enabled"):
+                fallback_packet = {
+                    "_type": "SemanticBudgetFallback",
+                    "_version": 1,
+                    "strategy": SEMANTIC_BUDGET_STRATEGY,
+                    "status": "warning",
+                    "reason": str(semantic_gate.get("reason") or "not_enabled"),
+                    "degradedFallbackReason": str(semantic_gate.get("reason") or "not_enabled"),
+                }
+                events.append(
+                    _event_to_trace_event(
+                        "SemanticBudgetFallback",
+                        fallback_packet,
+                        len(events) + 1,
+                    )
+                )
+                yield _encode_sse("SemanticBudgetFallback", fallback_packet)
+
+            if semantic_gate.get("enabled") and not execution_handle.is_cancelled:
+                if replacement is not None and not replacement.accepted:
+                    await asyncio.to_thread(replacement.accept)
+                if tracker is not None:
+                    for task_event_name, task_payload in tracker.start_next():
+                        events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
+                        yield _encode_sse(task_event_name, task_payload)
+                semantic_started = time.perf_counter()
+                yield _encode_sse(
+                    "TurnPhase",
+                    _turn_phase_packet(
+                        trace_id=trace_id,
+                        session_id=session_id,
+                        phase="model_execution",
+                        label="正在执行语义场景预算生成",
+                        status="running",
+                        phase_started=semantic_started,
+                    ),
+                )
+                provider_status = get_storydex_coomi_agent_service().get_status(
+                    workspace_root=workspace_root
+                )
+                started_packet = {
+                    "_type": "AgentStarted",
+                    "_version": 1,
+                    "session_id": session_id,
+                    "mode": "semantic_budget",
+                    "query": prompt,
+                    "llmModel": str(provider_status.get("model") or ""),
+                    "llmProvider": str(provider_status.get("providerId") or ""),
+                    "coomiStatus": provider_status,
+                }
+                events.append(_event_to_trace_event("AgentStarted", started_packet, len(events) + 1))
+                yield _encode_sse("AgentStarted", started_packet)
+
+                semantic_events: asyncio.Queue[tuple[str, Dict[str, Any]]] = asyncio.Queue()
+                semantic_apply_started = False
+
+                def semantic_event_sink(name: str, packet: Dict[str, Any]) -> None:
+                    nonlocal semantic_apply_started
+                    if (
+                        name == "SemanticBudgetProgress"
+                        and str(packet.get("state") or "").upper() == "APPLYING"
+                    ):
+                        semantic_apply_started = True
+                    semantic_events.put_nowait((name, dict(packet)))
+
+                semantic_task = asyncio.create_task(
+                    _execute_semantic_budget_generation(
+                        prompt=prompt,
+                        trace_id=trace_id,
+                        active_file=active_file,
+                        workspace_root=workspace_root,
+                        turn_contract=turn_contract,
+                        event_sink=semantic_event_sink,
+                    ),
+                    name=f"storydex-semantic-budget-{trace_id}",
+                )
+                semantic_outcome: Dict[str, Any] = {}
+                semantic_cancelled = False
+                try:
+                    while not semantic_task.done() or not semantic_events.empty():
+                        if execution_handle.is_cancelled or cancellation_token.is_cancelled():
+                            semantic_cancelled = True
+                            if not semantic_apply_started:
+                                semantic_task.cancel()
+                                break
+                            # asyncio.to_thread cannot stop an in-flight project write.
+                            # Let that single atomic apply finish before Git/Trace finalization.
+                        try:
+                            semantic_event_name, semantic_packet = await asyncio.wait_for(
+                                semantic_events.get(),
+                                timeout=_PHASE_HEARTBEAT_SECONDS,
+                            )
+                        except asyncio.TimeoutError:
+                            yield _encode_sse(
+                                "TurnPhase",
+                                _turn_phase_packet(
+                                    trace_id=trace_id,
+                                    session_id=session_id,
+                                    phase="model_execution",
+                                    label="正在执行语义场景预算生成",
+                                    status="running",
+                                    phase_started=semantic_started,
+                                    heartbeat=True,
+                                ),
+                            )
+                            continue
+                        events.append(
+                            _event_to_trace_event(
+                                semantic_event_name,
+                                semantic_packet,
+                                len(events) + 1,
+                            )
+                        )
+                        yield _encode_sse(semantic_event_name, semantic_packet)
+                    if semantic_cancelled:
+                        await asyncio.gather(semantic_task, return_exceptions=True)
+                    else:
+                        semantic_outcome = await semantic_task
+                finally:
+                    if not semantic_task.done():
+                        semantic_task.cancel()
+                        await asyncio.gather(semantic_task, return_exceptions=True)
+
+                if semantic_cancelled:
+                    terminal_event = (
+                        "AgentCancelled",
+                        {
+                            "_type": "AgentCancelled",
+                            "_version": 1,
+                            "session_id": session_id,
+                            "reason": execution_handle.cancel_reason or "cancelled",
+                        },
+                    )
+                    completed = False
+                elif bool(semantic_outcome.get("ok")):
+                    validation_packet = dict(semantic_outcome.get("validation") or {})
+                    validation_packet.update(
+                        {
+                            "passed": True,
+                            "status": "success",
+                            "writeToolApplied": True,
+                            "strategy": SEMANTIC_BUDGET_STRATEGY,
+                            "traceId": trace_id,
+                            "sessionId": session_id,
+                            "providerCalls": int(
+                                (semantic_outcome.get("resultPacket") or {}).get("providerCalls") or 0
+                            ),
+                        }
+                    )
+                    events.append(
+                        _event_to_trace_event(
+                            "StoryGenerationValidation",
+                            validation_packet,
+                            len(events) + 1,
+                        )
+                    )
+                    yield _encode_sse("StoryGenerationValidation", validation_packet)
+                    story_length_calibration_service.record_generation_result(
+                        workspace_root,
+                        turn_contract=turn_contract,
+                        validation=validation_packet,
+                        provider=str(provider_status.get("providerId") or ""),
+                        model=str(provider_status.get("model") or ""),
+                    )
+                    target_path = str(semantic_outcome.get("targetPath") or "")
+                    reply = f"正文已生成并写入 {target_path}。"
+                    reply_packet = {
+                        "_type": "TextChunk",
+                        "_version": 1,
+                        "content": reply,
+                    }
+                    reply_chunks.append(reply)
+                    events.append(_event_to_trace_event("TextChunk", reply_packet, len(events) + 1))
+                    yield _encode_sse("TextChunk", reply_packet)
+                    completed = True
+                    terminal_event = (
+                        "AgentCompleted",
+                        {
+                            "_type": "AgentCompleted",
+                            "_version": 1,
+                            "session_id": session_id,
+                            "route": "semantic_budget",
+                            "status": "completed",
+                            "duration_ms": int((time.perf_counter() - semantic_started) * 1000),
+                        },
+                    )
+                else:
+                    error_message = _semantic_budget_failure_message(semantic_outcome)
+                    error_packet = {
+                        "_type": "AgentError",
+                        "_version": 1,
+                        "error_type": "SemanticBudgetGenerationFailed",
+                        "message": error_message,
+                        "details": {
+                            "runtime": "semantic_budget",
+                            "result": dict(semantic_outcome.get("resultPacket") or {}),
+                            "applyError": dict(semantic_outcome.get("applyError") or {}),
+                        },
+                    }
+                    events.append(_event_to_trace_event("AgentError", error_packet, len(events) + 1))
+                    yield _encode_sse("AgentError", error_packet)
+                    completed = False
+                should_run_coomi = False
 
             if should_run_coomi and not execution_handle.is_cancelled:
                 if tracker is not None:
@@ -2406,6 +3143,31 @@ async def _stream_coomi_sse_worker(
             event_name = str(mailbox_event.get("_type") or "FollowupUpdated")
             events.append(_event_to_trace_event(event_name, mailbox_event, len(events) + 1))
 
+        knowledge_projection = await asyncio.to_thread(
+            _reconcile_story_knowledge_projection,
+            workspace_root,
+        )
+        projection_event_name = str(
+            knowledge_projection.get("_type")
+            or ("KnowledgeProjectionUpdated" if knowledge_projection.get("ok") else "KnowledgeProjectionError")
+        )
+        events.append(
+            _event_to_trace_event(
+                projection_event_name,
+                knowledge_projection,
+                len(events) + 1,
+            )
+        )
+        yield _encode_sse(projection_event_name, knowledge_projection)
+        if not bool(knowledge_projection.get("ok")):
+            projection_error = str(
+                knowledge_projection.get("errorMessage")
+                or "Knowledge projection reconciliation failed."
+            )
+            if not error_message:
+                error_message = projection_error
+            completed = False
+
         if tracker is not None:
             for task_event_name, task_payload in tracker.start_version_task():
                 events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
@@ -2492,6 +3254,16 @@ async def _stream_coomi_sse_worker(
             record = payload_data.get("record")
             if isinstance(record, dict):
                 record["noRestorePoint"] = no_restore_point
+                record["knowledgeProjection"] = copy.deepcopy(knowledge_projection)
+                changed_paths = knowledge_projection.get("changedSourcePaths")
+                partial_failed = bool(
+                    status == "failed"
+                    and knowledge_projection.get("ok")
+                    and isinstance(changed_paths, list)
+                    and changed_paths
+                )
+                record["partialFailed"] = partial_failed
+                record["executionOutcome"] = "partial_failed" if partial_failed else status
             return payload_data
 
         def write_timing(payload: Dict[str, Any]) -> None:
@@ -2782,6 +3554,7 @@ def agent_list_coomi_models(payload: AgentCoomiModelListRequest, request: Reques
         result = get_storydex_coomi_agent_service().list_models(
             base_url=payload.base_url,
             api_key=payload.api_key,
+            provider_type=payload.provider_type,
         )
     except ValueError as exc:
         raise StorydexError(
@@ -4039,7 +4812,7 @@ async def _stream_agent_chat_request_sse(
         )
         contract_task = asyncio.create_task(
             asyncio.to_thread(
-                storydex_orchestration_service.build_turn_contract,
+                _build_turn_contract_with_active_model,
                 workspace_root,
                 prompt=payload.prompt,
                 active_file=payload.active_file,

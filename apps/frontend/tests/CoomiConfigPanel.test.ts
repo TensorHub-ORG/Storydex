@@ -101,6 +101,74 @@ describe("CoomiConfigPanel", () => {
     ]);
   });
 
+  it("creates an Anthropic preset with a key link and uses native model discovery", async () => {
+    api.fetchAgentCoomiModels.mockResolvedValue({
+      data: { endpoint: "https://api.anthropic.com/v1/models", models: ["claude-custom"] }
+    });
+    const wrapper = shallowMount(CoomiConfigPanel, { props: { visible: true } });
+    await flushPromises();
+
+    await wrapper.find(".coomi-provider-create-trigger").trigger("click");
+    expect(wrapper.find(".llm-provider-preset-option__icon").exists()).toBe(false);
+    const anthropicPreset = wrapper
+      .findAll(".llm-provider-preset-option")
+      .find((option) => option.find(".llm-provider-preset-option__name").text() === "Anthropic");
+    expect(anthropicPreset).toBeDefined();
+    await anthropicPreset!.trigger("click");
+
+    expect((wrapper.find('input[placeholder="deepseek"]').element as HTMLInputElement).value).toBe("anthropic");
+    expect((wrapper.find('input[placeholder="https://api.example.com/v1"]').element as HTMLInputElement).value).toBe(
+      "https://api.anthropic.com"
+    );
+    expect(wrapper.find(".coomi-provider-type-trigger").text()).toContain("Anthropic Messages");
+
+    const keyLink = wrapper.find(".coomi-api-key-link");
+    expect(keyLink.attributes("href")).toBe("https://console.anthropic.com/settings/keys");
+    expect(keyLink.attributes("target")).toBe("_blank");
+
+    const keyInput = wrapper.find("#coomi-api-key");
+    expect(keyInput.attributes("type")).toBe("password");
+    expect(keyInput.attributes("placeholder")).toBe("sk-ant-...");
+    await wrapper.find(".llm-input-action__button").trigger("click");
+    expect(keyInput.attributes("type")).toBe("text");
+
+    await keyInput.setValue("sk-ant-test");
+    await wrapper.find("input.coomi-model-input").setValue("private/claude-model");
+    await wrapper.find(".coomi-model-fetch-row button").trigger("click");
+    await flushPromises();
+
+    expect(api.fetchAgentCoomiModels).toHaveBeenCalledWith({
+      baseUrl: "https://api.anthropic.com",
+      apiKey: "sk-ant-test",
+      providerType: "anthropic_messages"
+    });
+    expect((wrapper.find("input.coomi-model-input").element as HTMLInputElement).value).toBe(
+      "private/claude-model"
+    );
+  });
+
+  it("offers provider presets when the config is empty", async () => {
+    api.fetchAgentCoomiConfig.mockResolvedValueOnce({
+      data: {
+        configPath: "C:/isolated/providers.json",
+        content: '{"version":1,"active":"","providers":{}}\n',
+        updatedAt: "2026-07-21T00:00:00Z"
+      }
+    });
+    const wrapper = shallowMount(CoomiConfigPanel, { props: { visible: true } });
+    await flushPromises();
+
+    const presetSelect = wrapper.find(".coomi-empty-provider-preset");
+    expect(presetSelect.exists()).toBe(true);
+    await presetSelect.setValue("deepseek");
+
+    expect(wrapper.find(".coomi-provider-picker").exists()).toBe(true);
+    expect((wrapper.find('input[placeholder="https://api.example.com/v1"]').element as HTMLInputElement).value).toBe(
+      "https://api.deepseek.com/v1"
+    );
+    expect(wrapper.find(".coomi-api-key-link").attributes("href")).toBe("https://platform.deepseek.com/api_keys");
+  });
+
   it("normalizes legacy provider aliases to Coomi 1.2.1 canonical modes", async () => {
     const wrapper = shallowMount(CoomiConfigPanel, { props: { visible: true } });
     await flushPromises();

@@ -1,11 +1,21 @@
 import { describe, expect, it } from "vitest";
+import { createPinia, setActivePinia } from "pinia";
 import { AgentApiError } from "@/api/agent";
-import { __agentStoreTestUtils } from "@/stores/agent";
+import { __agentStoreTestUtils, useAgentStore } from "@/stores/agent";
 
 const u = __agentStoreTestUtils!;
 const packet = (value: Record<string, unknown>) => value as never;
 
 describe("agent store deterministic helpers", () => {
+  it("uses the product chapter target as the initial generation default", () => {
+    setActivePinia(createPinia());
+    const store = useAgentStore();
+    expect(store.chapterWordCountTarget).toBe(3000);
+    expect(store.storyFragmentWordCount).toBe(3000);
+    expect(store.storyFragmentWordCountMin).toBe(3000);
+    expect(store.storyFragmentWordCountMax).toBe(3000);
+  });
+
   it("maps packet phase, status, detail, and waterfall variants", () => {
     const events = [
       ["ToolStart", { tool_name: "read" }], ["TextChunk", { content: "text" }],
@@ -71,7 +81,29 @@ describe("agent store deterministic helpers", () => {
     });
     expect(u.summarizeTurnContractPacket(contract)).toContain("chapters/2.md");
     expect(u.summarizeTurnContractPacket(contract)).toContain("章目标：1200 字");
-    expect(u.summarizeTurnContractPacket(contract)).toContain("可接受：900-1500 字");
+    expect(u.summarizeTurnContractPacket(contract)).toContain("可接受：840-1560 字");
+    const calibratedSummary = u.summarizeTurnContractPacket(packet({
+      status: "ready",
+      turnPlan: {
+        fragmentCount: 1,
+        chapterWordCountTarget: 3000,
+        wordCountPolicy: {
+          target: 3000,
+          modelReferenceWordCount: 2500,
+          acceptanceMinimum: 2100,
+          acceptanceMaximum: 3900,
+          calibration: {
+            status: "applied",
+            provider: "chy",
+            model: "deepseek-v4-flash",
+            sampleCount: 3
+          }
+        }
+      }
+    }));
+    expect(calibratedSummary).toContain("章目标：3000 字");
+    expect(calibratedSummary).toContain("模型参考：2500 字");
+    expect(calibratedSummary).toContain("校准：chy/deepseek-v4-flash · 3 个样本");
     const modifySummary = u.summarizeTurnContractPacket(packet({
       status: "ready",
       intentFrame: { primary: "story_generation", operationType: "modify_existing", complexity: "complex" }
@@ -100,7 +132,7 @@ describe("agent store deterministic helpers", () => {
       fragments: [{ path: "chapters/第1章/001.md", actualWordCount: 2173, difference: 0 }]
     }));
     expect(rangeValidationSummary).toContain("2173 字（目标 2000-2500）");
-    expect(rangeValidationSummary).toContain("本章 2173 字 · 章目标 2250 字 · 可接受 1500-3125 字");
+    expect(rangeValidationSummary).toContain("本章 2173 字 · 章目标 2250 字 · 可接受 1400-3250 字");
     expect(rangeValidationSummary).toContain("章节结构与模板不一致");
     expect(rangeValidationSummary).not.toContain("2173/0");
     const overBudgetSummary = u.summarizeStoryGenerationValidationPacket(packet({

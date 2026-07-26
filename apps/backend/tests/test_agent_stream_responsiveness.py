@@ -41,16 +41,29 @@ def test_stream_sends_acceptance_and_heartbeats_before_slow_intent_finishes(monk
             return {"_type": "GitAutoCommit", "status": "info", "created": False}
 
     class OrchestrationService:
+        def __init__(self):
+            self.contract_kwargs = {}
+
         def build_turn_contract(self, workspace_root, **kwargs):
+            self.contract_kwargs = kwargs
             return {"contextAssembly": {"budget": {"blockCount": 0}}, "turnPlan": {}}
+
+    class ActiveRuntime:
+        def get_status(self, **kwargs):
+            return {"providerId": "chy", "model": "deepseek-v4-flash"}
+
+        def cancel_execution(self, **kwargs):
+            return False
 
     async def fake_runtime(**kwargs):
         yield 'event: done\ndata: {"type":"done"}\n\n'
 
     intent_service = SlowIntentService()
+    orchestration_service = OrchestrationService()
     monkeypatch.setattr(routes_agent, "storydex_intent_service", intent_service)
     monkeypatch.setattr(routes_agent, "agent_git_autocommit_service", FastGitService())
-    monkeypatch.setattr(routes_agent, "storydex_orchestration_service", OrchestrationService())
+    monkeypatch.setattr(routes_agent, "storydex_orchestration_service", orchestration_service)
+    monkeypatch.setattr(routes_agent, "get_storydex_coomi_agent_service", lambda: ActiveRuntime())
     monkeypatch.setattr(routes_agent, "_resolve_agent_workspace_root", lambda payload: tmp_path)
     monkeypatch.setattr(routes_agent, "_stream_coomi_sse", fake_runtime)
     monkeypatch.setattr(routes_agent, "_PHASE_HEARTBEAT_SECONDS", 0.01)
@@ -88,6 +101,83 @@ def test_stream_sends_acceptance_and_heartbeats_before_slow_intent_finishes(monk
     assert heartbeat_packets[0]["elapsedMs"] < 50
     assert intent_packets[-1]["status"] == "success"
     assert intent_service.completed is True
+    assert orchestration_service.contract_kwargs["provider"] == "chy"
+    assert orchestration_service.contract_kwargs["model"] == "deepseek-v4-flash"
+    assert orchestration_service.contract_kwargs["story_generation"]["chapterWordCountTarget"] == 3000
+
+
+def test_stream_completes_when_active_model_status_is_unavailable(monkeypatch, tmp_path):
+    class FastIntentService:
+        async def classify_intent(self, **kwargs):
+            return {"primary": "general", "confidence": "medium", "signals": [], "method": "llm"}
+
+    class FastGitService:
+        def begin_turn(self, workspace_root):
+            return AgentGitSnapshot(workspace_root=workspace_root, available=False)
+
+        def finish_turn(self, snapshot, **kwargs):
+            return {"_type": "GitAutoCommit", "status": "info", "created": False}
+
+    class OrchestrationService:
+        def build_turn_contract(self, workspace_root, **kwargs):
+            assert kwargs["provider"] == ""
+            assert kwargs["model"] == ""
+            return {
+                "contextAssembly": {"budget": {"blockCount": 0}},
+                "turnPlan": {
+                    "wordCountPolicy": {
+                        "calibration": {
+                            "status": "fallback",
+                            "reason": "model_identity_unavailable",
+                        }
+                    }
+                },
+            }
+
+    class UnavailableRuntime:
+        def get_status(self, **kwargs):
+            raise RuntimeError("status unavailable")
+
+        def cancel_execution(self, **kwargs):
+            return False
+
+    captured_contract = {}
+
+    async def fake_runtime(**kwargs):
+        captured_contract.update(kwargs["turn_contract"])
+        yield 'event: done\ndata: {"type":"done"}\n\n'
+        kwargs["execution_handle"].reject_preflight("status_unavailable_test_complete")
+
+    monkeypatch.setattr(routes_agent, "storydex_intent_service", FastIntentService())
+    monkeypatch.setattr(routes_agent, "agent_git_autocommit_service", FastGitService())
+    monkeypatch.setattr(routes_agent, "storydex_orchestration_service", OrchestrationService())
+    monkeypatch.setattr(routes_agent, "get_storydex_coomi_agent_service", lambda: UnavailableRuntime())
+    monkeypatch.setattr(routes_agent, "_resolve_agent_workspace_root", lambda payload: tmp_path)
+    monkeypatch.setattr(routes_agent, "_stream_coomi_sse", fake_runtime)
+
+    payload = routes_agent.AgentChatRequest(
+        prompt="continue chapter",
+        activeFile="chapters/001.md",
+        workspaceRoot=str(tmp_path),
+        confirmNoSnapshot=True,
+    )
+
+    async def collect():
+        stream = routes_agent._stream_agent_chat_request_sse(
+            payload=payload,
+            request=_ConnectedRequest(),
+            trace_id="trace-status-unavailable",
+            session_id="session-status-unavailable",
+            cancellation_token=routes_agent._CancellationToken(),
+        )
+        return [chunk async for chunk in stream]
+
+    chunks = asyncio.run(collect())
+    assert captured_contract["turnPlan"]["wordCountPolicy"]["calibration"] == {
+        "status": "fallback",
+        "reason": "model_identity_unavailable",
+    }
+    assert _packet(chunks[-1]) == {"type": "done"}
 
 
 def test_task_planning_phase_is_emitted_before_planner_completes(monkeypatch, tmp_path):

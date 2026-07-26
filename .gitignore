@@ -114,8 +114,12 @@ Thumbs.db
 # ----- Internal / Non-public Workbench Assets -----
 experiments/
 playwright/
+.playwright-mcp/
 docs/archive/
 docs/superpowers/
+
+# Style preset R&D fixtures (copyright-sensitive excerpts + local tests)
+/preset-test/
 
 # Local-only drafts, plans, promotional pages, and handoff artifacts.
 # These directories intentionally never become part of the repository.
@@ -124,8 +128,24 @@ docs/superpowers/
 /CONTEXT.md
 /docs/adr/
 /docs/plans/
+/docs/fixes/
+/docs/*-context*.md
+/docs/*-plan*.md
+/docs/*计划*.md
+/docs/*报告*.md
+/docs/*实测*.md
+/*报告*.md
 /evals/
 /apps/backend/tests/fixtures/llm_replay/t3-*/
+# 评测与盲审的过程产物（提示词、结果复盘）
+/T2-*.md
+/docs/T2-*.md
+
+# Demo 预览入口与临时产物（不含生产组件）
+apps/frontend/src/components/demo/
+apps/frontend/*-demo.html
+apps/frontend/src/*-demo.ts
+demo-*.png
 
 # ----- Release -----
 release/

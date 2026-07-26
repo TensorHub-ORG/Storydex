@@ -26,6 +26,15 @@ export interface ForceLayoutOptions {
   height: number;
   iterations?: number;
   padding?: number;
+  /** 可放置节点的绝对画布区域；用于避开 HUD、图例等覆盖层。 */
+  safeRect?: ForceSafeRect;
+}
+
+export interface ForceSafeRect {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
 }
 
 interface MutablePoint {
@@ -43,8 +52,11 @@ export function computeForceLayout(
   const { width, height } = options;
   const iterations = options.iterations ?? 300;
   const padding = options.padding ?? 48;
-  const centerX = width / 2;
-  const centerY = height / 2;
+  const safeRect = normalizeSafeRect(options.safeRect, width, height);
+  const safeWidth = Math.max(1, safeRect.right - safeRect.left);
+  const safeHeight = Math.max(1, safeRect.bottom - safeRect.top);
+  const centerX = safeRect.left + safeWidth / 2;
+  const centerY = safeRect.top + safeHeight / 2;
 
   const count = nodes.length;
   if (count === 0) {
@@ -63,7 +75,7 @@ export function computeForceLayout(
     } else {
       // 未提供初值：沿圆环均匀铺开（确定性，不用随机）。
       const angle = (Math.PI * 2 * index) / count - Math.PI / 2;
-      const spread = Math.min(width, height) * 0.36;
+      const spread = Math.min(safeWidth, safeHeight) * 0.36;
       positions.set(node.id, {
         x: centerX + Math.cos(angle) * spread,
         y: centerY + Math.sin(angle) * spread,
@@ -75,6 +87,26 @@ export function computeForceLayout(
     (edge) => positions.has(edge.source) && positions.has(edge.target) && edge.source !== edge.target,
   );
 
+  // 无边图：斥力没有引力制衡，会把节点推到边界角落。
+  // 直接按圆环均匀铺开并居中，比跑完整迭代更稳定也更美观。
+  if (validEdges.length === 0) {
+    const maxRadius = Math.max(...nodes.map((node) => radii.get(node.id)!));
+    const ringSpread = Math.max(
+      maxRadius * 1.6,
+      Math.min(safeWidth, safeHeight) * (count <= 4 ? 0.24 : 0.34),
+    );
+    const result: Record<string, { x: number; y: number }> = {};
+    nodes.forEach((node, index) => {
+      const angle = (Math.PI * 2 * index) / count - Math.PI / 2;
+      const radius = radii.get(node.id)!;
+      result[node.id] = {
+        x: clamp(centerX + Math.cos(angle) * ringSpread, safeRect.left + padding + radius, safeRect.right - padding - radius),
+        y: clamp(centerY + Math.sin(angle) * ringSpread, safeRect.top + padding + radius, safeRect.bottom - padding - radius),
+      };
+    });
+    return result;
+  }
+
   // 连接度：度数高的节点被更强地拉向中心，孤立节点漂在外圈，主干结构自然居中。
   const degrees = new Map<string, number>();
   for (const edge of validEdges) {
@@ -82,7 +114,7 @@ export function computeForceLayout(
     degrees.set(edge.target, (degrees.get(edge.target) ?? 0) + 1);
   }
 
-  const area = width * height;
+  const area = safeWidth * safeHeight;
   const k = Math.sqrt(area / count) * 0.72; // 理想节点间距
   let temperature = Math.min(width, height) * 0.12;
   const cooling = 0.96;
@@ -110,7 +142,13 @@ export function computeForceLayout(
         }
         const minGap = (radii.get(nodeA.id)! + radii.get(nodeB.id)!) + 18;
         // 基础库仑斥力 + 近距离时的强碰撞分离力。
+        // 超过 2k 后斥力线性衰减到 0：已经足够远的节点不再互推，
+        // 避免松散子图被持续推向画布边角。
         let force = (k * k) / distance;
+        if (distance > k * 2) {
+          const falloff = Math.max(0, 1 - (distance - k * 2) / k);
+          force *= falloff * falloff;
+        }
         if (distance < minGap) {
           force += (minGap - distance) * 0.9;
         }
@@ -165,8 +203,8 @@ export function computeForceLayout(
         pos.y += (disp0.y / magnitude) * limited;
       }
       const radius = radii.get(node.id)!;
-      pos.x = clamp(pos.x, padding + radius, width - padding - radius);
-      pos.y = clamp(pos.y, padding + radius, height - padding - radius);
+      pos.x = clamp(pos.x, safeRect.left + padding + radius, safeRect.right - padding - radius);
+      pos.y = clamp(pos.y, safeRect.top + padding + radius, safeRect.bottom - padding - radius);
     }
 
     temperature = Math.max(minTemperature, temperature * cooling);
@@ -178,6 +216,14 @@ export function computeForceLayout(
     result[node.id] = { x: pos.x, y: pos.y };
   }
   return result;
+}
+
+function normalizeSafeRect(value: ForceSafeRect | undefined, width: number, height: number): ForceSafeRect {
+  const left = clamp(Number(value?.left ?? 0), 0, Math.max(0, width));
+  const top = clamp(Number(value?.top ?? 0), 0, Math.max(0, height));
+  const right = clamp(Number(value?.right ?? width), left, Math.max(left, width));
+  const bottom = clamp(Number(value?.bottom ?? height), top, Math.max(top, height));
+  return { left, top, right, bottom };
 }
 
 function clamp(value: number, min: number, max: number): number {
