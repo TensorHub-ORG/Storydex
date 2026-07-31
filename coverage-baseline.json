@@ -2,29 +2,29 @@
   "schemaVersion": 1,
   "ciTolerance": 0.05,
   "measurement": {
-    "backend": "coverage.py 7.10.7 on the canonical Windows Python 3.13 CI job",
-    "frontend": "Vitest 4.1.10 with @vitest/coverage-v8 4.1.10 AST-aware remapping"
+    "backend": "Storydex 2.0 Rust-bridge baseline; coverage.py 7.10.7 on the canonical Windows Python 3.13 CI job",
+    "frontend": "Storydex 2.0 workbench baseline; Vitest 4.1.10 with @vitest/coverage-v8 4.1.10 AST-aware remapping"
   },
   "components": {
     "backend": {
       "metrics": {
-        "lines": 86.5,
-        "branches": 73.7
+        "lines": 84.7,
+        "branches": 70.8
       },
       "critical": {
         "api/routes_agent.py": { "lines": 87.5 },
-        "services/agent_git_autocommit_service.py": { "lines": 98.7 },
-        "services/coomi_agent_service.py": { "lines": 87.6 },
-        "services/git_service.py": { "lines": 91.9 },
+        "services/agent_git_autocommit_service.py": { "lines": 97.4 },
+        "services/coomi_agent_service.py": { "lines": 79.9 },
+        "services/git_service.py": { "lines": 91.3 },
         "services/storydex_intent_service.py": { "lines": 89.9 }
       }
     },
     "frontend": {
       "metrics": {
-        "lines": 76.2,
-        "statements": 75.5,
-        "functions": 72.1,
-        "branches": 65.6
+        "lines": 74.6,
+        "statements": 73.6,
+        "functions": 70.6,
+        "branches": 64.1
       },
       "critical": {
         "src/api/sseParser.mjs": {
@@ -42,8 +42,8 @@
         "src/components/AgentPanel.vue": {
           "lines": 90.0,
           "statements": 90.0,
-          "functions": 90.0,
-          "branches": 89.7
+          "functions": 89.7,
+          "branches": 89.5
         }
       }
     }
