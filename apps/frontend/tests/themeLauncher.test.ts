@@ -58,7 +58,7 @@ describe("theme and project launcher composables", () => {
     launcher.createProjectName.value = "book";
     expect(launcher.newProjectTargetPath.value).toBe("C:\\stories\\book");
     await launcher.handleCreateProjectSubmit();
-    expect(store.createProject).toHaveBeenCalledWith("C:\\stories\\book");
+    expect(store.createProject).toHaveBeenCalledWith("C:\\stories\\book", "standard");
 
     launcher.openProjectDialog();
     expect(launcher.openProjectPathInput.value).toBe("C:\\stories\\current");

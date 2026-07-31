@@ -14,6 +14,8 @@ const transport = vi.hoisted(() => ({
 vi.mock("axios", () => ({ default: { create: () => transport, isAxiosError: () => false } }));
 
 import StoryStatePanel from "@/components/StoryStatePanel.vue";
+import { useAgentStore } from "@/stores/agent";
+import { useUiStore } from "@/stores/ui";
 
 function mountPanel(props: Record<string, unknown> = {}) {
   const pinia = createPinia(); setActivePinia(pinia);
@@ -30,75 +32,37 @@ afterEach(() => {
 });
 
 describe("StoryStatePanel deterministic graph and inspector behavior", () => {
-  it("polls a submitted WIKI Agent job and applies its completed result", async () => {
-    vi.useFakeTimers();
+  it("fills the Agent composer and expands the panel for WIKI workflows", async () => {
     const wrapper = mountPanel();
     const u = (wrapper.vm as any).__testUtils;
     await flushPromises();
-    transport.get.mockReset();
     transport.post.mockReset();
+    const agentStore = useAgentStore();
+    const uiStore = useUiStore();
+    uiStore.setAgentCollapsed(true);
 
-    const wiki = {
-      projectName: "Demo",
-      generatedAt: "2026-07-21T00:00:00Z",
-      generator: "agent-wiki",
-      summary: "Demo wiki",
-      entries: [],
-      graph: { nodes: [], edges: [] }
-    };
-    transport.post.mockResolvedValueOnce(envelope({ jobId: "job-1", workflow: "generate_wiki", status: "running" }));
-    transport.get
-      .mockResolvedValueOnce(envelope({ jobId: "job-1", workflow: "generate_wiki", status: "running" }))
-      .mockResolvedValueOnce(envelope({
-        jobId: "job-1",
-        workflow: "generate_wiki",
-        status: "completed",
-        result: { summary: "WIKI 生成完成", fallbackUsed: false, wiki }
-      }))
-      .mockResolvedValueOnce(envelope({ graph: wiki.graph, entries: [] }));
+    u.runWikiAgentWorkflow("generate");
 
-    const running = u.runWikiAgentWorkflow("generate");
-    await flushPromises();
-    expect(u.wikiAgentRunning.value).toBe(true);
-    expect(u.wikiAgentJobId.value).toBe("job-1");
-    expect(transport.post).toHaveBeenCalledWith("/story/wiki/agent/generate");
-
-    await vi.advanceTimersByTimeAsync(3000);
-    await flushPromises();
-    await running;
-
-    expect(u.wikiData.value).toEqual(wiki);
-    expect(u.wikiAgentTone.value).toBe("success");
-    expect(u.wikiAgentStatus.value).toBe("WIKI 生成完成");
-    expect(u.wikiAgentRunning.value).toBe(false);
+    expect(agentStore.promptInput).toContain("重新生成完整知识图谱与 WIKI");
+    expect(uiStore.agentCollapsed).toBe(false);
+    expect(u.wikiAgentTone.value).toBe("idle");
+    expect(u.wikiAgentStatus.value).toContain("已填入 Agent 输入框");
+    expect(transport.post).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 
-  it("shows failed jobs and server-side Agent busy errors as readable messages", async () => {
+  it("provides distinct incremental-update and review prompts without backend jobs", async () => {
     const wrapper = mountPanel();
     const u = (wrapper.vm as any).__testUtils;
     await flushPromises();
-    transport.get.mockReset();
     transport.post.mockReset();
+    const agentStore = useAgentStore();
 
-    transport.post.mockResolvedValueOnce(envelope({ jobId: "job-failed", workflow: "review_wiki", status: "running" }));
-    transport.get.mockResolvedValueOnce(envelope({
-      jobId: "job-failed",
-      workflow: "review_wiki",
-      status: "failed",
-      errorMessage: "persist failed"
-    }));
-    await u.runWikiAgentWorkflow("review");
-    expect(u.wikiAgentTone.value).toBe("error");
-    expect(u.wikiAgentStatus.value).toBe("persist failed");
-    expect(u.wikiAgentRunning.value).toBe(false);
-
-    const busy = Object.assign(new Error("Request failed with status code 409"), {
-      response: { data: { ok: false, error: { code: "agent_busy", message: "Agent 正忙，请等待当前执行完成。" } } }
-    });
-    transport.post.mockRejectedValueOnce(busy);
-    await u.runWikiAgentWorkflow("generate");
-    expect(u.wikiAgentStatus.value).toBe("Agent 正忙，请等待当前执行完成。");
+    u.runWikiAgentWorkflow("update");
+    expect(agentStore.promptInput).toContain("增量更新知识图谱与 WIKI");
+    u.runWikiAgentWorkflow("review");
+    expect(agentStore.promptInput).toContain("全面审阅当前 Storydex 项目的 WIKI");
+    expect(transport.post).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 
