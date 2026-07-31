@@ -58,7 +58,8 @@ Invoke-Step "Backend tests and coverage" {
 Invoke-Step "Frontend type check" { npm --prefix $frontend run type-check }
 Invoke-Step "Frontend Vitest coverage" { npm --prefix $frontend run test:coverage }
 Invoke-Step "Frontend coverage ratchet" {
-  & node (Join-Path $repoRoot "scripts/check_coverage.cjs") --component=frontend --report=(Join-Path $frontend "test-results/coverage/coverage-summary.json") --mode=$coverageMode
+  $frontendCoverageReport = Join-Path $frontend "test-results/coverage/coverage-summary.json"
+  & node (Join-Path $repoRoot "scripts/check_coverage.cjs") --component=frontend "--report=$frontendCoverageReport" --mode=$coverageMode
 }
 Invoke-Step "Frontend production build" { npm --prefix $frontend run build }
 Invoke-Step "Frontend Node regressions" { npm --prefix $frontend run test:regressions }
