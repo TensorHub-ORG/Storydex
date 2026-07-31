@@ -118,6 +118,17 @@ test("Python bootstrap prefers standard Python 3.9 before Conda fallback", () =>
   assert.match(candidateSource, /STORYDEX_PYTHON_SOURCE/);
 });
 
+test("Python bootstrap verifies every locked runtime dependency version", () => {
+  const source = fs.readFileSync(path.resolve(__dirname, "../../../scripts/bootstrap_python39.ps1"), "utf8");
+  const functionStart = source.indexOf("function Test-RequirementsInstalled");
+  const functionEnd = source.indexOf("function Install-RequirementsWithRetry", functionStart);
+  const verificationSource = source.slice(functionStart, functionEnd);
+
+  assert.match(verificationSource, /pip list[^\r\n]*--format=json/);
+  assert.match(verificationSource, /Get-Content \$requirementsLockFile/);
+  assert.match(verificationSource, /installedVersions\[\$lockedName\] -ne \$lockedVersion/);
+});
+
 test("embedded runtime validates the Rust bridge without a vendored Python Coomi wheel", () => {
   const source = fs.readFileSync(
     path.resolve(__dirname, "../scripts/validate-embedded-python.cjs"),
