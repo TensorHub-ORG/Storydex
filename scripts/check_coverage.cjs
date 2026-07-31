@@ -6,6 +6,10 @@ const defaultConfigPath = path.join(repoRoot, "coverage-baseline.json");
 
 class CoverageGateError extends Error {}
 
+function escapeWorkflowCommand(value) {
+  return String(value).replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+}
+
 function readJson(filePath, label) {
   if (!fs.existsSync(filePath)) {
     throw new CoverageGateError(`${label} is missing: ${filePath}`);
@@ -187,13 +191,18 @@ if (require.main === module) {
   try {
     run();
   } catch (error) {
-    console.error(error instanceof CoverageGateError ? error.message : error?.stack || String(error));
+    const message = error instanceof CoverageGateError ? error.message : error?.stack || String(error);
+    console.error(message);
+    if (process.env.GITHUB_ACTIONS === "true") {
+      console.error(`::error title=Coverage gate::${escapeWorkflowCommand(message)}`);
+    }
     process.exitCode = 1;
   }
 }
 
 module.exports = {
   CoverageGateError,
+  escapeWorkflowCommand,
   parseBackendReport,
   parseFrontendReport,
   run,

@@ -55,10 +55,13 @@ jobs:
         include:
           - os: ubuntu-latest
             python: "3.9"
+            coverage_ratchet: false
           - os: windows-latest
             python: "3.9"
+            coverage_ratchet: false
           - os: windows-latest
             python: "3.13"
+            coverage_ratchet: true
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -87,6 +90,7 @@ jobs:
           --cov-report=xml:test-results/coverage.xml
           --junitxml=test-results/pytest.xml
       - name: Enforce versioned coverage ratchet
+        if: matrix.coverage_ratchet
         working-directory: apps/backend
         run: >-
           node ../../scripts/check_coverage.cjs
