@@ -26,7 +26,7 @@
 </table>
 
 <p align="center">
-  <img alt="release" src="https://img.shields.io/badge/release-v1.0.0-2563eb?style=flat-square" />
+  <img alt="release" src="https://img.shields.io/badge/release-v2.0.0-2563eb?style=flat-square" />
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0%20%2B%20Commons%20Clause-0f766e?style=flat-square" />
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-f97316?style=flat-square" />
   <img alt="desktop" src="https://img.shields.io/badge/desktop-Electron%2034-47848f?style=flat-square&logo=electron&logoColor=white" />
@@ -89,6 +89,7 @@ Storydex/
 ├─ apps/frontend/        # Vue 工作台
 ├─ apps/backend/         # FastAPI 后端服务
 ├─ apps/desktop/         # Electron 桌面壳
+├─ vendor/coomi-rs/      # Storydex 专用 Coomi Rust Agent 基座
 ├─ assets/               # 项目 LOGO、吉祥物与组织 LOGO
 ├─ docs/guide/            # 内置使用指南
 ├─ docs/prompts/          # 指令仓库 Markdown 模板
@@ -114,6 +115,18 @@ Storydex/
 ## 作者与版权
 
 Copyright 2026 Septemc and Flowby.
+
+## v2.0.0
+
+v2.0.0 将 Storydex 的 Agent 基座完整升级为内置的 Storydex 专用 Coomi Rust 运行时，并同步重构创作工作台、项目架构、全文检索、编辑器和本地版本控制体验。
+
+- 旧 Python Coomi 运行时已移除，正式包改为内置 `vendor/coomi-rs` 构建的 `storydex-coomi-bridge`，Windows Agent 执行不再依赖 asyncio 子进程能力。
+- Coomi 上下文窗口支持 128K、256K、512K 和自定义配置，Storydex 默认值统一为 256K。
+- 资源管理器支持文件/文件夹多选与拖动，自由项目架构和规范项目分类视图可按创作习惯切换。
+- 全文搜索覆盖整个项目中的常用文本与源码格式，并补齐顶部高级搜索和文件内查找、高亮、上下定位。
+- 编辑器新增字体样式、可靠缩放、文件内搜索和 Agent 文件链接中栏跳转，长篇写作操作更集中。
+- 本地版本控制新增分支创建与切换，支持空仓库先创建分支，并加强提交错误诊断与 `.storydex` 运行缓存忽略规则。
+- Windows 发行继续提供安装包、便携包、blockmap、更新元数据、校验值、依赖清单和构建 manifest，且会校验 Rust bridge 确实进入最终封装。
 
 ## v1.0.0
 

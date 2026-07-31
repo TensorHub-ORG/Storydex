@@ -385,8 +385,8 @@ describe("AgentPanel", () => {
     expect(fileLink.attributes("href")).toBe("002.md");
     await fileLink.trigger("click");
 
-    expect(filePreview.openFilePreviewWindow).toHaveBeenCalledWith("chapters/002.md");
-    expect(workspace.openFile).not.toHaveBeenCalled();
+    expect(workspace.openFile).toHaveBeenCalledWith("chapters/002.md");
+    expect(filePreview.openFilePreviewWindow).not.toHaveBeenCalled();
     expect(openExternal).not.toHaveBeenCalled();
     wrapper.unmount();
   });
@@ -670,7 +670,8 @@ describe("AgentPanel", () => {
     const relativeAnchor = document.createElement("a"); relativeAnchor.href = "002.md"; relativeAnchor.setAttribute("href", "002.md");
     const relativeEvent = { target: relativeAnchor, preventDefault: vi.fn(), stopPropagation: vi.fn() } as any;
     utils.handleMarkdownLinkClick(relativeEvent);
-    expect(filePreview.openFilePreviewWindow).toHaveBeenCalledWith("chapters/002.md");
+    expect(workspace.openFile).toHaveBeenCalledWith("chapters/002.md");
+    expect(filePreview.openFilePreviewWindow).not.toHaveBeenCalled();
     const open = vi.spyOn(window, "open").mockImplementation(() => null);
     const external = document.createElement("a"); external.href = "https://example.com"; external.setAttribute("href", "https://example.com");
     utils.handleMarkdownLinkClick({ target: external, preventDefault: vi.fn(), stopPropagation: vi.fn() } as any); expect(open).toHaveBeenCalled();

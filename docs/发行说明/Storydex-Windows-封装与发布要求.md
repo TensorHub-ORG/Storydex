@@ -156,10 +156,10 @@ Invoke-WebRequest -UseBasicParsing -Method Head "$base/StorydexSetup-x64-1.0.0.e
 
 ## 9. 发布基线
 
-- 版本：`1.0.0`
-- 标签：`v1.0.0`
-- Release 标题：`Storydex v1.0.0`
-- 安装包：`StorydexSetup-x64-1.0.0.exe`
+- 版本：`2.0.0`
+- 标签：`v2.0.0`
+- Release 标题：`Storydex v2.0.0`
+- 安装包：`StorydexSetup-x64-2.0.0.exe`
 - 更新目录：`/www/wwwroot/updates.septemc.com/storydex/windows`
 - 更新元数据：`https://updates.septemc.com/storydex/windows/latest.yml`
 - 必须内置：`docs/guide`、`docs/prompts`、`docs/skills`

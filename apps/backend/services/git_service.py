@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import os
+import posixpath
 import re
 import threading
 import time
@@ -370,9 +371,13 @@ class GitService:
     def initialize_repository(self, workspace_root: Path) -> Dict[str, Any]:
         root = self._resolve_workspace_root(workspace_root)
         self._ensure_git_installed()
-        if not self.is_repository_initialized(root):
-            self._run_git(root, ["init"])
+        repository_root = self._repository_top_level(root)
+        if repository_root is None:
+            self._run_git_process(root, ["init"])
             self._ensure_branch_name(root)
+        elif not self._paths_refer_to_same_location(root, repository_root):
+            self._raise_repository_boundary_error(root, repository_root)
+        self._assert_repository_root(root)
         self._ensure_local_identity(root)
         self._ensure_gitignore(root)
         self._ensure_agent_runtime_untracked(root)
@@ -380,7 +385,7 @@ class GitService:
 
     @_serialized
     def list_branches(self, workspace_root: Path) -> Dict[str, Any]:
-        root = Path(workspace_root).resolve()
+        root = self._resolve_workspace_root(workspace_root)
         self.initialize_repository(root)
         current = self._read_current_branch(root)
         output = self._run_git(root, ["for-each-ref", "--format=%(refname:short)", "refs/heads/"])
@@ -391,7 +396,7 @@ class GitService:
 
     @_serialized
     def create_branch(self, workspace_root: Path, *, name: str, checkout: bool = True) -> Dict[str, Any]:
-        root = Path(workspace_root).resolve()
+        root = self._resolve_workspace_root(workspace_root)
         self.initialize_repository(root)
         branch = self._validate_branch_name(name)
         if branch == self._read_current_branch(root) or self._branch_exists(root, branch):
@@ -411,7 +416,7 @@ class GitService:
 
     @_serialized
     def switch_branch(self, workspace_root: Path, *, name: str) -> Dict[str, Any]:
-        root = Path(workspace_root).resolve()
+        root = self._resolve_workspace_root(workspace_root)
         self.initialize_repository(root)
         branch = self._validate_branch_name(name)
         current = self._read_current_branch(root)
