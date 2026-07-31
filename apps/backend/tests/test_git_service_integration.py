@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -253,3 +254,78 @@ def test_single_new_file_commit_appears_in_history(git_service: GitService, tmp_
     assert "user: single new file" in subjects
     # The client relies on this stamp to discard stale summary responses.
     assert float(summary["generatedAt"]) > 0
+
+
+def test_nested_project_refuses_parent_repository_without_staging_or_committing(
+    git_service: GitService,
+    tmp_path: Path,
+):
+    parent = tmp_path / "parent"
+    project = parent / "story-project"
+    project.mkdir(parents=True)
+    git_service.initialize_repository(parent)
+    (project / "chapter.md").write_text("outside the project repository boundary\n", encoding="utf-8")
+
+    with pytest.raises(GitServiceError, match="does not match") as summary_error:
+        git_service.read_summary(project)
+    assert Path(summary_error.value.details["projectRoot"]) == project.resolve()
+    assert Path(summary_error.value.details["gitTopLevel"]) == parent.resolve()
+
+    with pytest.raises(GitServiceError, match="does not match"):
+        git_service.commit_all(project, message="must not reach the parent repository")
+
+    assert not (project / ".git").exists()
+    assert git_service._run_git(parent, ["diff", "--cached", "--name-only"]) == ""
+    assert not git_service._has_head_commit(parent)
+
+
+def test_git_worktree_file_is_accepted_when_its_top_level_matches_project(
+    git_service: GitService,
+    tmp_path: Path,
+):
+    source = tmp_path / "source"
+    worktree = tmp_path / "linked-worktree"
+    source.mkdir()
+    (source / "seed.md").write_text("seed\n", encoding="utf-8")
+    git_service.commit_all(source, message="seed")
+    git_service._run_git(source, ["worktree", "add", "-b", "story-worktree", str(worktree)])
+
+    assert (worktree / ".git").is_file()
+    assert git_service.is_repository_initialized(worktree) is True
+    (worktree / "chapter.md").write_text("worktree chapter\n", encoding="utf-8")
+    result = git_service.commit_paths(worktree, paths=["chapter.md"], message="worktree commit")
+    assert result["created"] is True
+    assert git_service.read_summary(worktree)["clean"] is True
+
+
+def test_git_paths_cannot_escape_project_root(git_service: GitService, tmp_path: Path):
+    project = tmp_path / "project"
+    project.mkdir()
+    git_service.initialize_repository(project)
+    outside = tmp_path / "outside.md"
+    outside.write_text("private\n", encoding="utf-8")
+
+    for unsafe_path in ("../outside.md", "/outside.md", "C:\\outside.md", "safe/../../outside.md"):
+        with pytest.raises(GitServiceError, match="stay inside"):
+            git_service.commit_paths(project, paths=[unsafe_path], message="unsafe")
+        with pytest.raises(GitServiceError, match="stay inside"):
+            git_service.build_file_snapshot_diff(project, paths=[unsafe_path])
+
+    link = project / "outside-link.md"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        return
+    with pytest.raises(GitServiceError, match="resolves outside"):
+        git_service.build_file_snapshot_diff(project, paths=["outside-link.md"])
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows path comparison semantics")
+def test_windows_repository_path_comparison_accepts_case_variants(git_service: GitService, tmp_path: Path):
+    workspace = tmp_path / "MixedCaseStory"
+    workspace.mkdir()
+    git_service.initialize_repository(workspace)
+
+    case_variant = Path(str(workspace).swapcase())
+    assert git_service.is_repository_initialized(case_variant) is True
+    assert git_service._paths_refer_to_same_location(workspace, case_variant) is True

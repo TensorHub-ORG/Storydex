@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,7 @@ FOLLOWUP_MODES = {"queued", "steer"}
 FOLLOWUP_STATUSES = {"pending", "steering", "dispatching", "sent", "cancelled", "failed"}
 _EDITABLE_STATUSES = {"pending", "steering"}
 _MAX_EVENTS = 500
+_ATOMIC_REPLACE_RETRY_DELAYS = (0.01, 0.025, 0.05)
 
 
 class FollowupMailboxError(RuntimeError):
@@ -727,7 +729,14 @@ def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        for attempt in range(len(_ATOMIC_REPLACE_RETRY_DELAYS) + 1):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if attempt >= len(_ATOMIC_REPLACE_RETRY_DELAYS):
+                    raise
+                time.sleep(_ATOMIC_REPLACE_RETRY_DELAYS[attempt])
     finally:
         try:
             temporary.unlink()

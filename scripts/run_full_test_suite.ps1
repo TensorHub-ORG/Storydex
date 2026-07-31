@@ -25,9 +25,10 @@ $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
 $env:STORYDEX_DISABLE_NETWORK = "1"
 $env:STORYDEX_TESTING = "1"
-$env:STORYDEX_ENFORCE_COVERAGE = if ($Mode -eq "Release") { "1" } else { "0" }
+$coverageMode = if ($Mode -eq "Release") { "release" } else { "ci" }
 
 Invoke-Step "Encoding policy" { node (Join-Path $repoRoot "scripts/validate_text_encoding.cjs") }
+Invoke-Step "Coverage gate parser regressions" { node --test (Join-Path $repoRoot "scripts/tests/check-coverage.test.cjs") }
 Invoke-Step "Conflict markers" {
   $conflicts = & git -C $repoRoot grep -n -E '^(<<<<<<< .+|=======|>>>>>>> .+)$' -- . `
     ':(exclude)apps/desktop/app/**' `
@@ -48,17 +49,15 @@ Invoke-Step "Backend tests and coverage" {
   try {
     New-Item -ItemType Directory -Force -Path "test-results" | Out-Null
     & $python -m pytest -q --cov=api --cov=core --cov=services --cov-branch --cov-fail-under=0 --cov-report=term-missing --cov-report=json:test-results/coverage.json --cov-report=xml:test-results/coverage.xml --junitxml=test-results/pytest.xml
-    if ($LASTEXITCODE -eq 0) {
-      if ($Mode -eq "Release") {
-        & $python tests/assert_coverage.py test-results/coverage.json
-      } else {
-        & $python tests/assert_coverage.py test-results/coverage.json --warn-only
-      }
-    }
+    $testExitCode = $LASTEXITCODE
+    & node (Join-Path $repoRoot "scripts/check_coverage.cjs") --component=backend --report=test-results/coverage.json --mode=$coverageMode --test-exit-code=$testExitCode
   } finally { Pop-Location }
 }
 Invoke-Step "Frontend type check" { npm --prefix $frontend run type-check }
 Invoke-Step "Frontend Vitest coverage" { npm --prefix $frontend run test:coverage }
+Invoke-Step "Frontend coverage ratchet" {
+  & node (Join-Path $repoRoot "scripts/check_coverage.cjs") --component=frontend --report=(Join-Path $frontend "test-results/coverage/coverage-summary.json") --mode=$coverageMode
+}
 Invoke-Step "Frontend production build" { npm --prefix $frontend run build }
 Invoke-Step "Frontend Node regressions" { npm --prefix $frontend run test:regressions }
 Invoke-Step "Desktop unit tests" { npm --prefix $desktop run test:unit }

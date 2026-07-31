@@ -145,6 +145,12 @@ function copyMinGit() {
 
 function shouldCopyPythonEnv(sourcePath) {
   const normalized = String(sourcePath).replace(/\\/g, "/");
+  const sitePackage = normalized.match(/\/site-packages\/([^/]+)/i)?.[1] || "";
+  if (
+    /^(?:_?pytest(?:$|[-_.])|coverage(?:$|[-_.])|_coverage(?:$|[-_.])|hypothesis(?:$|[-_.])|iniconfig(?:$|[-_.])|pluggy(?:$|[-_.]))/i.test(
+      sitePackage
+    )
+  ) return false;
   if (/(^|\/)(test|tests)(\/|$)/i.test(normalized)) return false;
   if (normalized.includes("/__pycache__/")) return false;
   if (normalized.includes("/.pytest_cache/")) return false;

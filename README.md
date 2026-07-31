@@ -184,7 +184,7 @@ Coomi/OpenAI provider 的首次导入和客户端初始化已从 SSE 请求事�
 安装测试依赖后，可使用统一 PowerShell 入口：
 
 ```powershell
-.\.python39\Scripts\python.exe -m pip install -r apps/backend/requirements-test.txt
+.\.python39\Scripts\python.exe -m pip install --require-hashes -r apps/backend/requirements-test.lock
 npm ci --prefix apps/frontend
 npm ci --prefix apps/desktop
 .\scripts\run_full_test_suite.ps1 -Mode Fast
@@ -192,13 +192,26 @@ npm ci --prefix apps/desktop
 .\scripts\run_full_test_suite.ps1 -Mode Release
 ```
 
-- `Fast`：编码、冲突标记、版本、固定 Coomi 运行时、Python 编译、后端 pytest/覆盖率报告、前端类型/Vitest/回归/构建、桌面单元与发布配置检查。开发期覆盖率不足会告警但不掩盖测试失败。
+- `Fast`：编码、冲突标记、版本、固定 Coomi 运行时、Python 编译、后端 pytest/覆盖率门禁、前端类型/Vitest/覆盖率门禁/回归/构建、桌面单元与发布配置检查。
 - `Full`：在 Fast 基础上构建 `win-unpacked`，验证前端字体、后端、嵌入式 Python、MinGit 与更新配置，并运行隔离用户目录的 Electron E2E。
 - `Release`：在 Full 基础上生成并验证 NSIS installer、blockmap、`latest.yml` 和校验文件；任何阶段失败都会返回非零退出码。
 
 测试代码分别位于 `apps/backend/tests`、`apps/frontend/tests` 和 `apps/desktop/tests`。后端覆盖 unit、API contract、integration、security、SSE 性能、会话恢复和并发失败恢复；前端覆盖 SSE parser、Pinia store、AgentPanel 与字体状态机；桌面覆盖 Node 契约、打包资源、Electron 冷启动和更新元数据。所有自动化测试使用临时 HOME、临时项目和 fake/mock provider，不访问真实付费 LLM 或用户配置。
 
-`.github/workflows/ci.yml` 在 PR、main push 和手动触发时调用可复用的 `quality-gate.yml`。日常 CI 中，测试、类型检查、编译、构建、打包和 Electron E2E 仍是硬门禁，覆盖率阈值仅报告告警；`release-windows.yml` 会开启严格覆盖率阈值。质量门禁覆盖 Python 3.9（Windows/Ubuntu）、Python 3.13 Windows 兼容性、Node 20，并上传 JUnit、覆盖率和失败诊断产物。
+`.github/workflows/ci.yml` 在 PR、main push 和手动触发时调用可复用的 `quality-gate.yml`。日常 CI 和 `release-windows.yml` 都通过 `scripts/check_coverage.cjs` 读取 `coverage-baseline.json` 执行覆盖率 ratchet；普通 CI 只允许 0.05 个百分点的测量误差，发布门禁不允许误差。覆盖率提升时应同步上调基线；只有统计工具或纳入范围发生有意变化时才可显式重置基线，并在工程风险文档记录旧口径、新口径和原因。CI 不会自动改低基线，禁止为绕过缺失测试而降低。质量门禁覆盖 Python 3.9（Windows/Ubuntu）、Python 3.13 Windows 兼容性、Node 20，并上传 JUnit、覆盖率和失败诊断产物。
+
+本地执行与普通 CI 一致的覆盖率门禁：
+
+```powershell
+.\scripts\run_full_test_suite.ps1 -Mode Fast
+```
+
+仅复核已有报告时可运行：
+
+```powershell
+node scripts/check_coverage.cjs --component=backend --report=apps/backend/test-results/coverage.json --mode=ci
+node scripts/check_coverage.cjs --component=frontend --report=apps/frontend/test-results/coverage/coverage-summary.json --mode=ci
+```
 
 ## Windows 安装、便携包与应用内更新
 
