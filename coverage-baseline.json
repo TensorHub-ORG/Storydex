@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "ciTolerance": 0.05,
   "measurement": {
-    "backend": "coverage.py 7.10.7 on Python 3.9",
+    "backend": "coverage.py 7.10.7 on the canonical Windows Python 3.13 CI job",
     "frontend": "Vitest 4.1.10 with @vitest/coverage-v8 4.1.10 AST-aware remapping"
   },
   "components": {

@@ -28,8 +28,11 @@ function fixture() {
   return { root, configPath };
 }
 
-function run(args) {
-  return spawnSync(process.execPath, [script, ...args], { encoding: "utf8" });
+function run(args, env = {}) {
+  return spawnSync(process.execPath, [script, ...args], {
+    encoding: "utf8",
+    env: { ...process.env, ...env }
+  });
 }
 
 function backendSummary(lines, branches) {
@@ -78,6 +81,32 @@ test("coverage regression fails with actual, required, and adjustment instructio
   assert.equal(result.status, 1);
   assert.match(result.stderr, /actual 79\.00%, required 80\.00%/);
   assert.match(result.stderr, /edit .*baseline\.json explicitly/);
+});
+
+test("GitHub Actions failures expose the complete ratchet result as an annotation", (t) => {
+  const { root, configPath } = fixture();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const reportPath = path.join(root, "backend.json");
+  fs.writeFileSync(reportPath, JSON.stringify({
+    totals: backendSummary(79, 69),
+    files: { "services/core.py": { summary: backendSummary(84, 75) } }
+  }));
+
+  const result = run(
+    ["--component=backend", `--report=${reportPath}`, `--config=${configPath}`],
+    { GITHUB_ACTIONS: "true" }
+  );
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /::error title=Coverage gate::Coverage gate failed/);
+  assert.match(result.stderr, /actual 79\.00%25, required 80\.00%25/);
+  assert.match(result.stderr, /%0ATo adjust an intentional baseline increase/);
+});
+
+test("backend coverage ratchet has exactly one canonical CI matrix job", () => {
+  const workflow = fs.readFileSync(path.resolve(__dirname, "..", "..", ".github", "workflows", "quality-gate.yml"), "utf8");
+  assert.equal((workflow.match(/coverage_ratchet:\s*true/g) || []).length, 1);
+  assert.equal((workflow.match(/coverage_ratchet:\s*false/g) || []).length, 2);
+  assert.match(workflow, /if:\s*matrix\.coverage_ratchet/);
 });
 
 test("missing, malformed, and incomplete reports fail closed", (t) => {
