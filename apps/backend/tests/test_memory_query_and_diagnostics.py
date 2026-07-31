@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import json
-import subprocess
 import types
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from core.exceptions import StorydexError
-from services import diagnostics_service, fact_memory_store, relationship_memory_store, request_auth_service, storydex_coomi_runtime_tools, storydex_retrieval
+from services import diagnostics_service, fact_memory_store, relationship_memory_store, request_auth_service, storydex_retrieval
 
 
 def test_memory_catalog_diagnostic_governance_branches(tmp_path):
@@ -219,36 +218,3 @@ def test_request_auth_required_optional_and_authentication(monkeypatch):
     monkeypatch.setattr(request_auth_service, "get_auth_service", lambda: fake)
     assert request_auth_service.resolve_request_user_optional("Bearer abc") == {"token": "abc"}
     assert request_auth_service.resolve_request_bearer_token_optional("Bearer abc") == "abc"
-
-
-def test_workspace_bound_runtime_tools_normalization_shell_success_failures(monkeypatch, tmp_path):
-    tools = storydex_coomi_runtime_tools.create_workspace_bound_tool_overrides(tmp_path)
-    assert len(tools) == 7
-    read = tools[0]
-    normalized = read._normalized_arguments({"file_path": "a.md", "path": str((tmp_path / "abs").resolve()), "directory": ""})
-    assert normalized["file_path"] == (tmp_path / "a.md").as_posix()
-    read.set_workspace_root(tmp_path / "next")
-    assert read.workspace_root == (tmp_path / "next").resolve()
-    glob = tools[3]
-    grep = tools[4]
-    assert glob._normalized_arguments({})["path"] == tmp_path.resolve().as_posix()
-    assert grep._normalized_arguments({})["path"] == tmp_path.resolve().as_posix()
-
-    bash = tools[5]
-    monkeypatch.setattr(storydex_coomi_runtime_tools.subprocess, "run", lambda *args, **kwargs: types.SimpleNamespace(returncode=0, stdout="ok", stderr=""))
-    assert bash.run({"command": "echo ok"}).success is True
-    monkeypatch.setattr(storydex_coomi_runtime_tools.subprocess, "run", lambda *args, **kwargs: types.SimpleNamespace(returncode=2, stdout="", stderr="bad"))
-    failed = bash.run({"command": "bad"})
-    assert failed.success is False and "code 2" in failed.error
-    monkeypatch.setattr(storydex_coomi_runtime_tools.subprocess, "run", lambda *args, **kwargs: (_ for _ in ()).throw(subprocess.TimeoutExpired("x", 1)))
-    assert "timed out" in bash.run({"command": "slow"}).error
-    monkeypatch.setattr(storydex_coomi_runtime_tools.subprocess, "run", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
-    assert "RuntimeError" in bash.run({"command": "bad"}).error
-
-    powershell = tools[6]
-    monkeypatch.setattr(storydex_coomi_runtime_tools.subprocess, "run", lambda *args, **kwargs: types.SimpleNamespace(returncode=0, stdout="ok", stderr="warn"))
-    assert powershell.run({"command": "ok"}).success is True
-    monkeypatch.setattr(storydex_coomi_runtime_tools.subprocess, "run", lambda *args, **kwargs: types.SimpleNamespace(returncode=1, stdout="", stderr="bad"))
-    assert powershell.run({"command": "bad"}).success is False
-    monkeypatch.setattr(storydex_coomi_runtime_tools.subprocess, "run", lambda *args, **kwargs: (_ for _ in ()).throw(FileNotFoundError()))
-    assert "PowerShell not found" in powershell.run({"command": "x"}).error

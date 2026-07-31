@@ -76,6 +76,34 @@ describe("agent store deterministic helpers", () => {
     expect(u.segmentItemId([], "t", "reasoning")).toBe("t-reasoning-1");
   });
 
+  it("formats structured Coomi diagnostics for the Agent and Trace panels", () => {
+    const message = u.formatAgentErrorPacket(packet({
+      _type: "AgentError",
+      error_type: "CoomiBridgeError",
+      message: "Rust bridge could not start",
+      details: {
+        stage: "bridge_start",
+        runtime: "storydex-coomi-rs",
+        runtimeVersion: "2.0.0-storydex.1",
+        providerId: "opencode-go",
+        model: "deepseek-v4-pro",
+        traceId: "trace-1",
+        sessionId: "session-1",
+        origin: { file: "services/coomi_bridge_client.py", line: 101, function: "start" },
+        exceptionChain: [
+          { type: "CoomiBridgeError", message: "Rust bridge could not start" },
+          { type: "NotImplementedError", message: "" }
+        ]
+      }
+    }));
+    expect(message).toContain("Stage: bridge_start");
+    expect(message).toContain("services/coomi_bridge_client.py:101 in start");
+    expect(message).toContain("CoomiBridgeError");
+    expect(message).toContain("opencode-go / deepseek-v4-pro");
+    expect(message).toContain("Trace: trace-1");
+    expect(message).not.toContain("api_key");
+  });
+
   it("summarizes Git, contracts, presets, context, usage, and compression", () => {
     expect(u.summarizeGitAutoCommitPacket(packet({ _type: "GitCommitPrompt", changedFileCount: 2, workspaceRoot: "C:/story" }))).toContain("2");
     expect(u.summarizeGitAutoCommitPacket(packet({ _type: "GitCommitResult", created: true, shortHash: "abc", changedFileCount: 1 }))).toContain("abc");

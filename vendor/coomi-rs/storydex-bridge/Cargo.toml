@@ -1,0 +1,24 @@
+[package]
+name = "storydex-coomi-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "storydex-coomi-bridge"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+coomi-engine = { path = "../engine" }
+coomi-security = { path = "../security" }
+coomi-services = { path = "../services" }
+coomi-tools = { path = "../tools" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+uuid.workspace = true

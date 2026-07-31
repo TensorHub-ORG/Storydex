@@ -242,6 +242,7 @@ class GlobalConfigService:
                 minimum=MIN_PANE_FONT_SCALE,
                 maximum=MAX_PANE_FONT_SCALE,
             ),
+            "fontFamily": str(payload.get("fontFamily") or "system").strip() or "system",
             "fileFontSize": file_font_size,
             "playerFontSize": GlobalConfigService._clamp_int(
                 payload.get("playerFontSize"),

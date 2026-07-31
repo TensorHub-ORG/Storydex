@@ -568,6 +568,8 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { apiClient, describeTransportError, unwrapEnvelope } from "@/api/client";
 import { useStoryStore } from "@/stores/story";
+import { useAgentStore } from "@/stores/agent";
+import { useUiStore } from "@/stores/ui";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type { ApiEnvelope } from "@/types/api";
 import { computeForceLayout, type ForceEdge, type ForceNode } from "@/utils/forceLayout";
@@ -586,6 +588,8 @@ const props = withDefaults(defineProps<{
 
 const storyStore = useStoryStore();
 const workspaceStore = useWorkspaceStore();
+const agentStore = useAgentStore();
+const uiStore = useUiStore();
 
 interface ChangeEntry {
   chapter_id?: string;
@@ -1931,29 +1935,17 @@ async function rebuildWiki(): Promise<void> {
   }
 }
 
-async function runWikiAgentWorkflow(workflow: "generate" | "update" | "review"): Promise<void> {
-  stopWikiAgentPolling();
-  wikiAgentRunning.value = true;
+function runWikiAgentWorkflow(workflow: "generate" | "update" | "review"): void {
+  const prompts = {
+    generate: "请深度分析当前 Storydex 小说项目的全部章节、角色、设定、事件和关系，重新生成完整知识图谱与 WIKI。请先检查现有数据，保留有证据的内容，标注冲突与待确认项，并通过 Storydex 项目接口写入结果。",
+    update: "请扫描当前 Storydex 小说项目自上次 WIKI 更新后的所有改动，增量更新知识图谱与 WIKI。不要覆盖未受影响的人工内容；为新增或变化的角色、事件、关系补充来源证据，并标注冲突与待确认项。",
+    review: "请全面审阅当前 Storydex 项目的 WIKI 与知识图谱，对照章节原文检查事实、角色、时间线和关系。请列出缺失、矛盾、过期和证据不足的条目，并在确认可靠后通过 Storydex 项目接口修正。"
+  } as const;
+  agentStore.promptInput = prompts[workflow];
+  uiStore.setAgentCollapsed(false);
   wikiAgentTone.value = "idle";
-  wikiAgentStatus.value = workflow === "generate"
-    ? "Agent 正在深度生成 WIKI..."
-    : workflow === "update"
-      ? "Agent 正在增量更新 WIKI..."
-      : "Agent 正在审阅 WIKI...";
+  wikiAgentStatus.value = "指令已填入 Agent 输入框，可检查或补充后发送。";
   wikiErrorMessage.value = "";
-  try {
-    const response = await apiClient.post<ApiEnvelope<StoryWikiAgentJobResponse>>(WIKI_AGENT_ENDPOINTS[workflow]);
-    const data = unwrapEnvelope(response.data, "Story wiki agent job submission failed.");
-    wikiAgentJobId.value = data.data.jobId;
-    await pollWikiAgentJob(data.data.jobId);
-  } catch (error: unknown) {
-    wikiAgentTone.value = "error";
-    wikiAgentStatus.value = describeWikiAgentError(error, "Agent WIKI 流程失败。");
-    wikiErrorMessage.value = wikiAgentStatus.value;
-  } finally {
-    stopWikiAgentPolling();
-    wikiAgentRunning.value = false;
-  }
 }
 
 async function pollWikiAgentJob(jobId: string): Promise<void> {

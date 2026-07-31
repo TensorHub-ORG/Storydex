@@ -455,7 +455,7 @@ def test_record_replay_preserves_unicode_line_separator_inside_jsonl(monkeypatch
 
 
 def test_external_tool_record_replay_freezes_result_without_live_delegate(monkeypatch, tmp_path):
-    from coomi.tools.base import ToolResult
+    from services.storydex_tool_types import ToolResult
 
     monkeypatch.setenv("STORYDEX_LLM_FIXTURE_DIR", str(tmp_path))
     calls = []
@@ -480,7 +480,7 @@ def test_external_tool_record_replay_freezes_result_without_live_delegate(monkey
 
 
 def test_external_tool_replay_rejects_changed_arguments(monkeypatch, tmp_path):
-    from coomi.tools.base import ToolResult
+    from services.storydex_tool_types import ToolResult
 
     monkeypatch.setenv("STORYDEX_LLM_FIXTURE_DIR", str(tmp_path))
     monkeypatch.setenv("STORYDEX_LLM_MODE", "record")
@@ -501,7 +501,7 @@ def test_external_tool_replay_rejects_changed_arguments(monkeypatch, tmp_path):
 
 
 def test_external_tool_replay_matches_parallel_calls_by_arguments(monkeypatch, tmp_path):
-    from coomi.tools.base import ToolResult
+    from services.storydex_tool_types import ToolResult
 
     monkeypatch.setenv("STORYDEX_LLM_FIXTURE_DIR", str(tmp_path))
     monkeypatch.setenv("STORYDEX_LLM_MODE", "record")
@@ -533,7 +533,7 @@ def test_external_tool_replay_matches_parallel_calls_by_arguments(monkeypatch, t
 
 
 def test_external_tool_fixture_truncates_failed_prompt_tail(monkeypatch, tmp_path):
-    from coomi.tools.base import ToolResult
+    from services.storydex_tool_types import ToolResult
 
     monkeypatch.setenv("STORYDEX_LLM_FIXTURE_DIR", str(tmp_path))
     monkeypatch.setenv("STORYDEX_LLM_MODE", "record")
@@ -553,7 +553,7 @@ def test_external_tool_fixture_truncates_failed_prompt_tail(monkeypatch, tmp_pat
 
 
 def test_external_tool_replay_complete_rejects_unused_records(monkeypatch, tmp_path):
-    from coomi.tools.base import ToolResult
+    from services.storydex_tool_types import ToolResult
 
     monkeypatch.setenv("STORYDEX_LLM_FIXTURE_DIR", str(tmp_path))
     monkeypatch.setenv("STORYDEX_LLM_MODE", "record")

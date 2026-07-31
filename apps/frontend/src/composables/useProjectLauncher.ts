@@ -5,6 +5,7 @@ const dialogMode = ref<"create" | "open" | null>(null);
 const createBaseDirectory = ref("");
 const createProjectName = ref("");
 const openProjectPathInput = ref("");
+const createArchitecture = ref<"standard" | "free">("standard");
 
 export function useProjectLauncher() {
   const workspaceStore = useWorkspaceStore();
@@ -27,6 +28,7 @@ export function useProjectLauncher() {
   function openCreateProjectDialog(): void {
     dialogMode.value = "create";
     createProjectName.value = "";
+    createArchitecture.value = "standard";
     createBaseDirectory.value = defaultProjectBaseDirectory(
       workspaceStore.projectRootLabel,
       workspaceStore.recentProjects
@@ -103,7 +105,7 @@ export function useProjectLauncher() {
       return;
     }
     try {
-      await workspaceStore.createProject(newProjectTargetPath.value);
+      await workspaceStore.createProject(newProjectTargetPath.value, createArchitecture.value);
       closeDialog();
     } catch {
       // handled by store
@@ -126,6 +128,7 @@ export function useProjectLauncher() {
     createBaseDirectory,
     createProjectName,
     openProjectPathInput,
+    createArchitecture,
     newProjectTargetPath,
     createValidationMessage,
     canCreateProject,

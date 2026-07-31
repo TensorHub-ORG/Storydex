@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import os
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -370,11 +371,67 @@ class GitService:
         self._ensure_git_installed()
         if not self.is_repository_initialized(root):
             self._run_git(root, ["init"])
-        self._ensure_branch_name(root)
+            self._ensure_branch_name(root)
         self._ensure_local_identity(root)
         self._ensure_gitignore(root)
         self._ensure_agent_runtime_untracked(root)
         return self.read_summary(root)
+
+    @_serialized
+    def list_branches(self, workspace_root: Path) -> Dict[str, Any]:
+        root = Path(workspace_root).resolve()
+        self.initialize_repository(root)
+        current = self._read_current_branch(root)
+        output = self._run_git(root, ["for-each-ref", "--format=%(refname:short)", "refs/heads/"])
+        names = sorted({line.strip() for line in output.splitlines() if line.strip()})
+        if current and current not in names:
+            names.append(current)
+        return {"current": current, "branches": [{"name": name, "current": name == current} for name in names]}
+
+    @_serialized
+    def create_branch(self, workspace_root: Path, *, name: str, checkout: bool = True) -> Dict[str, Any]:
+        root = Path(workspace_root).resolve()
+        self.initialize_repository(root)
+        branch = self._validate_branch_name(name)
+        if branch == self._read_current_branch(root) or self._branch_exists(root, branch):
+            raise GitServiceError("Branch already exists.", details={"branch": branch})
+        if not self._has_head_commit(root):
+            if checkout:
+                # An unborn repository has no commit for `git branch` to copy.
+                # Point HEAD at the requested branch so the first commit lands there.
+                self._run_git(root, ["symbolic-ref", "HEAD", f"refs/heads/{branch}"])
+            else:
+                self._run_git(root, ["branch", branch], check=False)
+        else:
+            self._run_git(root, ["branch", branch])
+        if checkout and self._has_head_commit(root):
+            self._run_git(root, ["switch", branch])
+        return {**self.list_branches(root), "summary": self.read_summary(root)}
+
+    @_serialized
+    def switch_branch(self, workspace_root: Path, *, name: str) -> Dict[str, Any]:
+        root = Path(workspace_root).resolve()
+        self.initialize_repository(root)
+        branch = self._validate_branch_name(name)
+        current = self._read_current_branch(root)
+        if branch == current:
+            return {**self.list_branches(root), "summary": self.read_summary(root)}
+        if not self._branch_exists(root, branch):
+            raise GitServiceError("Branch does not exist.", details={"branch": branch})
+        if not self._is_worktree_clean(root):
+            raise GitServiceError(
+                "Cannot switch branches with uncommitted changes.",
+                details={"branch": branch, "hint": "Commit or discard changes first."},
+            )
+        self._run_git(root, ["switch", branch])
+        return {**self.list_branches(root), "summary": self.read_summary(root)}
+
+    @staticmethod
+    def _validate_branch_name(name: str) -> str:
+        branch = str(name or "").strip()
+        if not branch or len(branch) > 120 or branch.startswith("-") or ".." in branch or not re.fullmatch(r"[A-Za-z0-9._/-]+", branch):
+            raise GitServiceError("Invalid branch name.", details={"branch": branch})
+        return branch
 
     @_serialized
     def commit_all(self, workspace_root: Path, *, message: str = "") -> Dict[str, Any]:

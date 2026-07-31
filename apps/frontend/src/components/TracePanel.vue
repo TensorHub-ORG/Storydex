@@ -160,3 +160,10 @@ defineExpose({
   } : null
 });
 </script>
+
+<style scoped>
+.trace-error-message {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+</style>

@@ -46,7 +46,7 @@ class ProjectService:
     def current_project(self) -> Dict[str, Any]:
         return self.describe_project(self.workspace_root, opened_at=self._opened_at)
 
-    def create_project(self, project_path: str) -> Dict[str, Any]:
+    def create_project(self, project_path: str, architecture: str = "standard") -> Dict[str, Any]:
         target = self._normalize_path(project_path, must_exist=False)
         try:
             target.mkdir(parents=True, exist_ok=True)
@@ -55,7 +55,10 @@ class ProjectService:
                 "Unable to create project directory.",
                 details={"projectPath": target.as_posix(), "reason": str(exc)},
             ) from exc
-        self.ensure_project_structure(target)
+        if architecture == "free":
+            self.ensure_free_project_structure(target)
+        else:
+            self.ensure_project_structure(target)
         self._set_current_workspace_root(target)
         return self.current_project()
 
@@ -64,9 +67,10 @@ class ProjectService:
         self._set_current_workspace_root(target)
         return self.current_project()
 
-    def initialize_project(self, project_path: str = "") -> Dict[str, Any]:
+    def initialize_project(self, project_path: str = "", architecture: str = "standard") -> Dict[str, Any]:
         target = self.workspace_root if not project_path else self._normalize_path(project_path, must_exist=True)
-        self.ensure_project_structure(target)
+        if architecture == "free": self.ensure_free_project_structure(target)
+        else: self.ensure_project_structure(target)
         self._set_current_workspace_root(target)
         return self.current_project()
 
@@ -74,13 +78,17 @@ class ProjectService:
         path = Path(project_path).resolve()
         storydex_root = path / self.settings.storydex_dir_name
 
+        free_ready = (storydex_root / ".agent").is_dir() and (storydex_root / ".cache").is_dir()
+
         required_directories = manifest_paths(only_create_on_init=True, directories_only=True)
         missing_directories = [
             relative_dir
             for relative_dir in required_directories
             if not (path / relative_dir).exists()
         ]
-        has_storydex_config = not missing_directories
+        architecture = "standard" if not missing_directories else "free" if free_ready else "unconfigured"
+        has_storydex_config = architecture != "unconfigured"
+        if architecture == "free": missing_directories = []
         project_name = path.name or path.as_posix()
 
         return {
@@ -92,6 +100,7 @@ class ProjectService:
             "requiresInitialization": not has_storydex_config,
             "missingDirectories": missing_directories,
             "projectState": "ready" if has_storydex_config else "needs_init",
+            "architecture": architecture,
             "openedAt": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -130,6 +139,16 @@ class ProjectService:
                 file_path.write_text(content, encoding="utf-8")
 
         self._ensure_project_manifest(root)
+
+    def ensure_free_project_structure(self, project_path: Union[str, Path]) -> None:
+        root = Path(project_path).resolve()
+        (root / self.settings.storydex_dir_name / ".agent").mkdir(parents=True, exist_ok=True)
+        (root / self.settings.storydex_dir_name / ".cache").mkdir(parents=True, exist_ok=True)
+        ignore_path = root / ".gitignore"
+        lines = ignore_path.read_text(encoding="utf-8").splitlines() if ignore_path.exists() else []
+        for item in (".storydex/.agent/", ".storydex/.cache/"):
+            if item not in {line.strip() for line in lines}: lines.append(item)
+        ignore_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
 
     def _set_current_workspace_root(self, workspace_root: Path) -> None:
         normalized = workspace_root.resolve()

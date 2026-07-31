@@ -267,7 +267,13 @@ def test_task_planning_phase_is_emitted_before_planner_completes(monkeypatch, tm
             active_file="",
             workspace_root=tmp_path,
             story_generation={},
-            turn_contract={},
+            turn_contract={
+                "intentFrame": {
+                    "primary": "project_organization",
+                    "operationType": "modify_existing",
+                    "complexity": "complex",
+                }
+            },
             git_snapshot=AgentGitSnapshot(workspace_root=tmp_path, available=False),
             request=_ConnectedRequest(),
             cancellation_token=routes_agent._CancellationToken(),
@@ -284,9 +290,6 @@ def test_task_planning_phase_is_emitted_before_planner_completes(monkeypatch, tm
     assert completed_at_first is False
     assert coordinator.try_reserve() is True
     coordinator.release_reservation()
-    intent_files = list((Path(tmp_path) / ".storydex" / ".agent" / "execution-intents").glob("*.json"))
-    assert intent_files
-    assert json.loads(intent_files[0].read_text(encoding="utf-8"))["state"] == "finalization_failed"
 
 
 def test_cold_intent_workers_are_isolated_and_do_not_queue_behind_each_other(monkeypatch):

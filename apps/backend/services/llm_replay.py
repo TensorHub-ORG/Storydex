@@ -308,7 +308,7 @@ def _encode_external_tool_result(result: Any) -> dict[str, Any]:
 def _decode_external_tool_result(value: Any) -> Any:
     if not isinstance(value, dict):
         raise ReplayError("External tool replay result must be an object")
-    from coomi.tools.base import ToolResult
+    from services.storydex_tool_types import ToolResult
 
     error = value.get("error")
     return ToolResult(
@@ -367,9 +367,9 @@ def get_llm_metrics(trace_id: str | None = None) -> dict[str, Any]:
 
 def get_replayable_llm_provider(provider: Any = None) -> Any:
     if provider is None:
-        from coomi.services import get_llm_provider
+        from services.coomi_bridge_client import get_bridge_provider
 
-        provider = get_llm_provider()
+        provider = get_bridge_provider()
     provider = _apply_storydex_openai_user_agent(provider)
     return ReplayableLLMProvider(provider)
 
@@ -388,10 +388,9 @@ def _apply_storydex_openai_user_agent(provider: Any) -> Any:
     if not _OPENAI_SDK_USER_AGENT_RE.match(user_agent):
         return provider
 
-    try:
-        coomi_version = importlib.metadata.version("coomi-agent")
-    except importlib.metadata.PackageNotFoundError:
-        coomi_version = "unknown"
+    from services.coomi_bridge_client import STORYDEX_COOMI_RUNTIME_VERSION
+
+    coomi_version = STORYDEX_COOMI_RUNTIME_VERSION
     provider.client = client.with_options(
         default_headers={"User-Agent": f"Storydex-Coomi/{coomi_version}"}
     )
@@ -1235,13 +1234,13 @@ def _decode_chat_response(value: Any) -> Any:
     payload = value if isinstance(value, dict) else {}
     tool_calls_payload = payload.get("tool_calls")
     try:
-        from coomi.types import LLMResponse, ToolCall
+        from services.coomi_bridge_client import BridgeLLMResponse, BridgeToolCall
 
         tool_calls = None
         if isinstance(tool_calls_payload, list):
-            tool_calls = [ToolCall(**item) for item in tool_calls_payload if isinstance(item, dict)]
-        return LLMResponse(
-            content=payload.get("content"),
+            tool_calls = [BridgeToolCall(**item) for item in tool_calls_payload if isinstance(item, dict)]
+        return BridgeLLMResponse(
+            content=str(payload.get("content") or ""),
             tool_calls=tool_calls,
             usage=payload.get("usage") if isinstance(payload.get("usage"), dict) else None,
             reasoning_content=payload.get("reasoning_content"),

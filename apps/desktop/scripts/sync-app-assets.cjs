@@ -31,7 +31,15 @@ const embeddedPythonTarget = path.join(appRoot, "python-env");
 const desktopIconTarget = path.join(appRoot, "assets", "Storydex_icon", "storydex_icon_01.png");
 const requirementsSource = path.join(repoRoot, "requirements.txt");
 const requirementsLockSource = path.join(repoRoot, "requirements.lock");
-const pythonWheelSource = path.join(repoRoot, "vendor", "python");
+const coomiBridgeSource = path.join(
+  repoRoot,
+  "vendor",
+  "coomi-rs",
+  "target",
+  "release",
+  process.platform === "win32" ? "storydex-coomi-bridge.exe" : "storydex-coomi-bridge"
+);
+const coomiBridgeTarget = path.join(appRoot, "backend", "runtime", path.basename(coomiBridgeSource));
 
 function ensureSource(pathValue, label) {
   if (!fs.existsSync(pathValue)) {
@@ -104,10 +112,14 @@ function copyBackendSource() {
 function copyRuntimeDependencyManifests() {
   ensureSource(requirementsSource, "root Python requirements");
   ensureSource(requirementsLockSource, "hashed Python requirements lock");
-  ensureSource(pythonWheelSource, "vendored Python wheels");
   fs.copyFileSync(requirementsSource, path.join(backendTarget, "requirements-runtime.txt"));
   fs.copyFileSync(requirementsLockSource, path.join(backendTarget, "requirements-runtime.lock"));
-  fs.cpSync(pythonWheelSource, path.join(backendTarget, "vendor", "python"), { recursive: true });
+}
+
+function copyCoomiBridge() {
+  ensureSource(coomiBridgeSource, "Storydex Coomi Rust bridge");
+  fs.mkdirSync(path.dirname(coomiBridgeTarget), { recursive: true });
+  fs.copyFileSync(coomiBridgeSource, coomiBridgeTarget);
 }
 
 function copyHelpGuide() {
@@ -341,13 +353,14 @@ function run() {
   copyFrontendDist();
   copyBackendSource();
   copyRuntimeDependencyManifests();
+  copyCoomiBridge();
   copyHelpGuide();
   copyPromptRepository();
   copyBuiltinSkills();
   copyMinGit();
   copyEmbeddedPythonEnv();
   copyDesktopIcon();
-  console.log("[Storydex Desktop] Synced app assets (frontend, backend, dependency manifests, docs, MinGit, embedded python, icon) to apps/desktop/app.");
+  console.log("[Storydex Desktop] Synced app assets (frontend, backend, Rust bridge, dependency manifests, docs, MinGit, embedded python, icon) to apps/desktop/app.");
 }
 
 if (require.main === module) {
@@ -358,5 +371,6 @@ module.exports = {
   shouldCopyBackend,
   shouldCopyPythonBaseRuntime,
   shouldCopyPythonEnv,
-  shouldCopyPythonRuntime
+  shouldCopyPythonRuntime,
+  copyCoomiBridge
 };

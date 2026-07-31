@@ -27,6 +27,18 @@ class IndexService:
         if not candidate_files:
             return []
 
+        # Use an exact ripgrep pass first so short Chinese queries and files
+        # outside the legacy Storydex folders behave predictably.
+        if shutil.which("rg"):
+            ripgrep_hits = self._search_with_ripgrep(
+                workspace=workspace,
+                query=query,
+                keywords=tokenize(query),
+                limit=limit,
+            )
+            if ripgrep_hits:
+                return ripgrep_hits
+
         hybrid_results = hybrid_search(
             query=query,
             file_paths=candidate_files,
@@ -35,15 +47,6 @@ class IndexService:
         )
         if hybrid_results:
             return hybrid_results
-
-        if shutil.which("rg"):
-            ripgrep_hits = self._search_with_ripgrep(
-                workspace=workspace,
-                keywords=tokenize(query),
-                limit=limit,
-            )
-            if ripgrep_hits:
-                return ripgrep_hits
 
         bm25_results = bm25_search(
             query=query,
@@ -70,6 +73,7 @@ class IndexService:
         self,
         *,
         workspace: WorkspaceIO,
+        query: str,
         keywords: List[str],
         limit: int,
     ) -> List[Dict[str, Any]]:
@@ -83,6 +87,7 @@ class IndexService:
             "--line-number",
             "--hidden",
             "--smart-case",
+            "--fixed-strings",
             "--max-count",
             "3",
             "--glob",
@@ -91,9 +96,20 @@ class IndexService:
             "!**/node_modules/**",
             "--glob",
             "!**/__pycache__/**",
+            "--glob",
+            "!**/.storydex/.cache/**",
+            "--glob",
+            "!**/.storydex/.agent/**",
         ]
-        for keyword in keywords[:6]:
+        patterns = [str(query or "").strip(), *keywords]
+        seen_patterns: set[str] = set()
+        for keyword in patterns:
+            if not keyword or keyword in seen_patterns:
+                continue
+            seen_patterns.add(keyword)
             command.extend(["-e", keyword])
+            if len(seen_patterns) >= 7:
+                break
         command.extend(search_roots)
 
         try:
@@ -130,6 +146,8 @@ class IndexService:
             if not isinstance(path_payload, dict):
                 continue
             relative_path = str(path_payload.get("text") or "").replace("\\", "/")
+            if relative_path.startswith("./"):
+                relative_path = relative_path[2:]
             if not relative_path:
                 continue
             line_number = int(data.get("line_number") or 0)
@@ -176,14 +194,16 @@ class IndexService:
         return results[: max(1, min(limit, 20))]
 
     def _iter_candidate_files(self, workspace_root: Path):
-        include_roots = [
-            workspace_root / ".storydex",
-            workspace_root / "chapters",
-            workspace_root / "docs",
-        ]
-        include_suffixes = {".md", ".json", ".yaml", ".yml", ".txt"}
+        include_roots = [workspace_root]
+        include_suffixes = {
+            ".md", ".json", ".yaml", ".yml", ".txt", ".csv", ".toml",
+            ".py", ".ts", ".tsx", ".js", ".jsx", ".vue", ".css", ".html", ".rs"
+        }
         exclude_dirs = {
+            ".git",
             ".agent",
+            ".cache",
+            "node_modules",
             "autopilot",
             "file-history",
             "logs",
@@ -238,11 +258,7 @@ class IndexService:
 
     @staticmethod
     def _search_roots(workspace: WorkspaceIO) -> List[str]:
-        candidates = [
-            workspace.storydex_root,
-            workspace.workspace_root / "chapters",
-            workspace.workspace_root / "docs",
-        ]
+        candidates = [workspace.workspace_root]
         roots: List[str] = []
         for root in candidates:
             if root.exists():

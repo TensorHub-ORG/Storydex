@@ -450,16 +450,27 @@
 
             <label class="llm-field">
               <span class="llm-field__label">上下文窗口（tokens）</span>
-              <input
-                v-model="form.contextWindow"
+              <select
+                v-model="contextWindowPreset"
                 class="llm-input"
                 :disabled="loading || saving"
-                spellcheck="false"
+                @change="handleContextWindowPresetChange"
+              >
+                <option value="128000">128K</option>
+                <option value="256000">256K（默认）</option>
+                <option value="512000">512K</option>
+                <option value="custom">自定义</option>
+              </select>
+              <input
+                v-if="contextWindowPreset === 'custom'"
+                v-model="form.contextWindow"
+                class="llm-input coomi-context-custom-input"
+                :disabled="loading || saving"
                 inputmode="numeric"
-                placeholder="留空使用默认 256000"
+                placeholder="输入 tokens 数量"
                 @input="syncProviderFields"
               />
-              <span class="llm-field__hint">按模型实际窗口填写，压缩阈值随之生效。</span>
+              <span class="llm-field__hint">默认 256K；自定义值会直接写入当前 Provider。</span>
             </label>
           </div>
         </section>
@@ -599,6 +610,7 @@ const modelOptionHighlightedIndex = ref(-1);
 const modelFilterText = ref("");
 const showApiKey = ref(false);
 const form = reactive<ProviderForm>(emptyForm());
+const contextWindowPreset = ref("256000");
 
 const activeProviderId = computed(() => asString(configData.value.active) || "");
 
@@ -1243,6 +1255,17 @@ function loadForm(providerId: string): void {
     fastModel: asString(provider.fast_model) || "",
     contextWindow: provider.context_window ? String(provider.context_window) : ""
   });
+  const configuredWindow = Number.parseInt(form.contextWindow, 10);
+  contextWindowPreset.value = [128000, 256000, 512000].includes(configuredWindow)
+    ? String(configuredWindow)
+    : configuredWindow > 0 ? "custom" : "256000";
+}
+
+function handleContextWindowPresetChange(): void {
+  if (contextWindowPreset.value !== "custom") {
+    form.contextWindow = contextWindowPreset.value;
+  }
+  syncProviderFields();
 }
 
 function getProviders(): Record<string, unknown> {

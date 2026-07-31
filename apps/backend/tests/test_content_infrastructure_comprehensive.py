@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import struct
 import subprocess
 import types
@@ -240,6 +241,7 @@ def test_index_search_candidates_hybrid_ripgrep_bm25_and_snippets(monkeypatch, t
         storydex_root = tmp_path / ".storydex"
 
     monkeypatch.setattr(index_service, "WorkspaceIO", Workspace)
+    monkeypatch.setattr(index_service.shutil, "which", lambda name: None)
     monkeypatch.setattr(index_service, "hybrid_search", lambda **kwargs: [{"engine": "hybrid"}])
     assert service.search("dragon")[0]["engine"] == "hybrid"
 
@@ -265,3 +267,27 @@ def test_index_search_candidates_hybrid_ripgrep_bm25_and_snippets(monkeypatch, t
     Workspace.storydex_root = empty_root / ".storydex"
     assert service.search("dragon") == []
     assert service._search_roots(Workspace()) == ["."]
+
+
+def test_index_search_finds_literal_chinese_content_outside_legacy_roots(monkeypatch, tmp_path):
+    if not shutil.which("rg"):
+        pytest.skip("ripgrep is unavailable")
+
+    draft = tmp_path / "自由目录" / "片段.md"
+    draft.parent.mkdir(parents=True)
+    draft.write_text("风中出现了两股截然相反的气息。\n", encoding="utf-8")
+    runtime = tmp_path / ".storydex" / ".agent" / "private.md"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("两股截然相反，但这是运行时缓存。\n", encoding="utf-8")
+
+    class Workspace:
+        workspace_root = tmp_path
+        storydex_root = tmp_path / ".storydex"
+
+    monkeypatch.setattr(index_service, "WorkspaceIO", Workspace)
+    hits = index_service.IndexService().search("两股截然相反", limit=20)
+
+    assert hits
+    assert hits[0]["engine"] == "ripgrep"
+    assert hits[0]["relativePath"] == "自由目录/片段.md"
+    assert all(".storydex/.agent" not in item["relativePath"] for item in hits)

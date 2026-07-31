@@ -4,11 +4,10 @@ import json
 from pathlib import Path
 from typing import Any, Dict
 
-from coomi.tools.base import BaseTool, ToolAccess, ToolConcurrency, ToolResult
-
 from services.git_service import get_git_service
 from services.help_guide_service import get_help_guide_service
 from services.story_project_service import get_story_project_service
+from services.storydex_tool_types import BaseTool, ToolAccess, ToolConcurrency, ToolResult
 from services.story_word_count_service import STORY_WORD_COUNT_RULE
 
 

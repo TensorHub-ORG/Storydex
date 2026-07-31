@@ -100,10 +100,12 @@ test("Python bootstrap prefers standard Python 3.9 before Conda fallback", () =>
   assert.match(candidateSource, /STORYDEX_PYTHON_SOURCE/);
 });
 
-test("embedded Python validation accepts only the vendored wheel source", () => {
+test("embedded runtime validates the Rust bridge without a vendored Python Coomi wheel", () => {
   const source = fs.readFileSync(
     path.resolve(__dirname, "../scripts/validate-embedded-python.cjs"),
     "utf8"
   );
-  assert.match(source, /\^--find-links\\s\+vendor\\\/python\$/i);
+  assert.match(source, /storydex-coomi-bridge\.exe/);
+  assert.match(source, /spawnSync\(bridgeExecutable, \["--version"\]/);
+  assert.doesNotMatch(source, /vendor[\\/]python|--find-links/i);
 });

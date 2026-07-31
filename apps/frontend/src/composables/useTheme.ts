@@ -1,5 +1,6 @@
 import type { ThemeCode } from "@/constants/themes";
 import { paneFontScaleStyle } from "@/utils/paneFontScale";
+import { editorFontOptions } from "@/stores/ui";
 
 export function useTheme() {
   function applyTheme(theme: ThemeCode): void {
@@ -19,9 +20,15 @@ export function useTheme() {
     }
   }
 
+  function applyEditorFont(fontFamily = "system"): void {
+    const option = editorFontOptions.find((item) => item.id === fontFamily) || editorFontOptions[0];
+    document.documentElement.style.setProperty("--font-editor-user", option.css);
+  }
+
   return {
     applyTheme,
-    applyPaneFontScale
+    applyPaneFontScale,
+    applyEditorFont
   };
 }
 

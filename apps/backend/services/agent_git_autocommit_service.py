@@ -61,7 +61,7 @@ class AgentGitAutoCommitService:
             return AgentGitSnapshot(
                 workspace_root=root,
                 available=False,
-                error_message=str(exc),
+                error_message=self._format_git_error(exc),
             )
 
     def finish_turn(
@@ -138,7 +138,7 @@ class AgentGitAutoCommitService:
                 created=False,
                 status="error",
                 reason="commit_check_failed",
-                message=str(exc),
+                message=self._format_git_error(exc),
                 initial_commit=snapshot.initial_commit,
             )
 
@@ -203,7 +203,7 @@ class AgentGitAutoCommitService:
                 created=False,
                 status="error",
                 reason="git_unavailable",
-                message=str(exc),
+                message=self._format_git_error(exc),
             )
 
     def commit_current_changes(self, workspace_root: Path, *, message: str) -> Dict[str, Any]:
@@ -266,7 +266,7 @@ class AgentGitAutoCommitService:
                 created=False,
                 status="error",
                 reason="commit_failed",
-                message=str(exc),
+                message=self._format_git_error(exc),
             )
 
     def acknowledge_skip(
@@ -303,6 +303,25 @@ class AgentGitAutoCommitService:
             message="workspace: initial local snapshot",
         )
         return result.get("commit") if isinstance(result.get("commit"), dict) else None
+
+    @staticmethod
+    def _format_git_error(error: GitServiceError) -> str:
+        """Keep the actionable Git stderr visible in Agent commit prompts."""
+        details = error.details if isinstance(error.details, dict) else {}
+        stderr = str(details.get("stderr") or "").strip()
+        stdout = str(details.get("stdout") or "").strip()
+        args = details.get("args")
+        command = "git " + " ".join(str(item) for item in args) if isinstance(args, list) else ""
+        parts = [str(error).strip()]
+        if stderr:
+            parts.append(f"stderr: {stderr}")
+        elif stdout:
+            parts.append(f"output: {stdout}")
+        if command:
+            parts.append(f"command: {command}")
+        if details.get("returncode") is not None:
+            parts.append(f"exit code: {details['returncode']}")
+        return "\n".join(part for part in parts if part)
 
     @staticmethod
     def _status_map(changed_files: Any) -> Dict[str, str]:

@@ -82,6 +82,15 @@
               >
                 <span class="material-symbols-rounded">save</span>
               </button>
+              <button
+                class="explorer-toolbar-btn"
+                type="button"
+                :disabled="!canCategoryView"
+                :title="canCategoryView ? (categoryMode ? '显示完整目录树' : '按内容分类显示') : '自由架构项目无法切换分类视图'"
+                @click="categoryMode = !categoryMode"
+              >
+                <span class="material-symbols-rounded">{{ categoryMode ? 'account_tree' : 'category' }}</span>
+              </button>
               <button class="explorer-toolbar-btn explorer-problems-trigger" type="button" title="问题" @click="problemsOpen = !problemsOpen">
                 <span class="material-symbols-rounded">problem</span>
                 <small v-if="workspaceStore.diagnostics.length" class="explorer-problem-badge">{{ formatBadgeCount(workspaceStore.diagnostics.length) }}</small>
@@ -158,6 +167,7 @@
                 class="tree-row"
                 :class="{
                   active: row.node.relativePath === workspaceStore.activeFile,
+                  'is-selected': selectedPaths.has(nodePath(row.node)),
                   'is-folder': row.node.kind === 'directory',
                   'is-drop-target': isDirectoryDropTarget(row.node),
                   'has-diagnostics': hasDiagnostics(row.node),
@@ -169,7 +179,10 @@
                 }"
                 :disabled="workspaceStore.isFileLoading && row.node.kind === 'file'"
                 :title="rowTitle(row.node) || undefined"
-                @click.stop="handleRowClick(row.node)"
+                :draggable="!isCategoryNode(row.node)"
+                @click.stop="handleRowClick(row.node, $event)"
+                @dragstart.stop="handleInternalDragStart($event, row.node)"
+                @dragend.stop="handleInternalDragEnd"
                 @contextmenu.prevent.stop="openNodeContextMenu($event, row.node)"
                 @dragenter.prevent.stop="handleNodeDragEnter($event, row.node)"
                 @dragover.prevent.stop="handleNodeDragOver($event, row.node)"
@@ -335,6 +348,7 @@ import { useProjectLauncher } from "@/composables/useProjectLauncher";
 import { useAgentStore } from "@/stores/agent";
 import { useGitStore } from "@/stores/git";
 import { useWorkspaceStore } from "@/stores/workspace";
+import { moveWorkspacePath } from "@/api/workspace";
 import type { WorkspaceDiagnosticItem, WorkspaceGitChangedFile, WorkspaceTreeNode } from "@/types/workspace";
 
 interface TreeRow {
@@ -408,6 +422,9 @@ const pendingRenameInputRef = ref<HTMLInputElement | null>(null);
 const contextMenuRef = ref<HTMLDivElement | null>(null);
 const dragTargetPath = ref<string | null>(null);
 const dragDepth = ref(0);
+const selectedPaths = ref<Set<string>>(new Set());
+const selectionAnchor = ref("");
+const internalDragPaths = ref<string[]>([]);
 const problemsOpen = ref(false);
 const problemSeverity = ref<"all" | "error" | "warning" | "info">("all");
 const filteredProblems = computed(() => workspaceStore.diagnostics.filter(
@@ -424,7 +441,10 @@ const pendingRenameValue = computed({
   }
 });
 
-const rows = computed<TreeRow[]>(() => flattenTree(workspaceStore.tree, expandedPaths.value));
+const categoryMode = ref(false);
+const canCategoryView = computed(() => workspaceStore.currentProject?.architecture === "standard");
+const displayTree = computed(() => categoryMode.value && canCategoryView.value ? buildCategoryTree(workspaceStore.tree) : workspaceStore.tree);
+const rows = computed<TreeRow[]>(() => flattenTree(displayTree.value, expandedPaths.value));
 const projectLabel = computed(() => workspaceStore.currentProject?.projectName || workspaceStore.health?.projectName || "未打开项目");
 const toolbarDisabled = computed(
   () =>
@@ -436,6 +456,36 @@ const saveDisabled = computed(() => !workspaceStore.isDirty || workspaceStore.is
 
 function nodePath(node: WorkspaceTreeNode): string {
   return normalizeNodePath(node.relativePath);
+}
+
+function isCategoryNode(node: WorkspaceTreeNode): boolean {
+  return nodePath(node).startsWith("__category/");
+}
+
+function buildCategoryTree(nodes: WorkspaceTreeNode[]): WorkspaceTreeNode[] {
+  const categories = [
+    ["plot", "剧情", ["chapters"]],
+    ["characters", "角色", [".storydex/characters", "characters"]],
+    ["world", "世界背景", [".storydex/worldbook", "worldbook"]],
+    ["scripts", "剧本", ["scripts", "docs"]],
+    ["presets", "预设", [".storydex/presets", "presets"]],
+    ["templates", "模板", [".storydex/templates", "templates"]]
+  ] as const;
+  return categories.map(([id, name, paths]) => {
+    const children = paths.flatMap((path) => {
+      const node = findNodeByPath(nodes, path);
+      return node ? (node.kind === "directory" ? node.children : [node]) : [];
+    });
+    return { name, relativePath: `__category/${id}`, kind: "directory", children } as WorkspaceTreeNode;
+  }).filter((node) => node.children.length > 0);
+}
+
+function findNodeByPath(nodes: WorkspaceTreeNode[], path: string): WorkspaceTreeNode | null {
+  for (const node of nodes) {
+    if (node.relativePath === path) return node;
+    if (node.children?.length) { const found = findNodeByPath(node.children, path); if (found) return found; }
+  }
+  return null;
 }
 
 function normalizeNodePath(relativePath: string | null | undefined): string {
@@ -749,9 +799,28 @@ function handleSave(): void {
   void workspaceStore.saveActiveFile();
 }
 
-function handleRowClick(node: WorkspaceTreeNode): void {
+function handleRowClick(node: WorkspaceTreeNode, event?: MouseEvent): void {
   closeContextMenu();
   cancelPendingRename();
+  const path = nodePath(node);
+  if (path && (event?.ctrlKey || event?.metaKey)) {
+    const next = new Set(selectedPaths.value);
+    if (next.has(path)) next.delete(path); else next.add(path);
+    selectedPaths.value = next;
+    selectionAnchor.value = path;
+    return;
+  }
+  if (path && event?.shiftKey && selectionAnchor.value) {
+    const visible = rows.value.map((item) => nodePath(item.node)).filter(Boolean);
+    const start = visible.indexOf(selectionAnchor.value);
+    const end = visible.indexOf(path);
+    if (start >= 0 && end >= 0) {
+      const [from, to] = start < end ? [start, end] : [end, start];
+      selectedPaths.value = new Set(visible.slice(from, to + 1));
+      return;
+    }
+  }
+  if (path) { selectedPaths.value = new Set([path]); selectionAnchor.value = path; }
   if (node.kind === "directory") {
     toggleDirectory(node);
     return;
@@ -772,6 +841,7 @@ function handleChapterCompletionToggle(node: WorkspaceTreeNode, event: Event): v
 }
 
 function openNodeContextMenu(event: MouseEvent, node: WorkspaceTreeNode): void {
+  if (isCategoryNode(node)) return;
   openContextMenuAt(event, "node", node);
 }
 
@@ -874,6 +944,10 @@ function handleRootDragLeave(event: DragEvent): void {
 }
 
 async function handleRootDrop(event: DragEvent): Promise<void> {
+  if (internalDragPaths.value.length) {
+    await moveSelectedPaths(ROOT_PARENT_PATH);
+    return;
+  }
   if (!hasExternalFiles(event)) {
     return;
   }
@@ -916,12 +990,41 @@ function handleNodeDragLeave(event: DragEvent, node: WorkspaceTreeNode): void {
 }
 
 async function handleNodeDrop(event: DragEvent, node: WorkspaceTreeNode): Promise<void> {
+  if (node.kind === "directory" && internalDragPaths.value.length) {
+    await moveSelectedPaths(getDirectoryPath(node));
+    return;
+  }
   if (node.kind !== "directory" || !hasExternalFiles(event)) {
     return;
   }
   dragDepth.value = 0;
   dragTargetPath.value = null;
   await importDroppedFiles(event, getDirectoryPath(node));
+}
+
+function handleInternalDragStart(event: DragEvent, node: WorkspaceTreeNode): void {
+  const path = nodePath(node);
+  if (!path) return;
+  if (!selectedPaths.value.has(path)) selectedPaths.value = new Set([path]);
+  internalDragPaths.value = [...selectedPaths.value];
+  event.dataTransfer?.setData("application/x-storydex-paths", JSON.stringify(internalDragPaths.value));
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+}
+
+function handleInternalDragEnd(): void { internalDragPaths.value = []; dragTargetPath.value = null; }
+
+async function moveSelectedPaths(targetDirectory: string): Promise<void> {
+  const paths = [...internalDragPaths.value];
+  handleInternalDragEnd();
+  for (const source of paths) {
+    if (!source || source === targetDirectory || targetDirectory.startsWith(`${source}/`)) continue;
+    const name = source.split("/").pop() || source;
+    const target = joinRelativePath(targetDirectory, name);
+    try { await moveWorkspacePath({ fromRelativePath: source, toRelativePath: target }); }
+    catch (error) { workspaceStore.workspaceError = error instanceof Error ? error.message : "文件移动失败"; break; }
+  }
+  selectedPaths.value = new Set();
+  await workspaceStore.refreshTree({ silent: true });
 }
 
 function repositionContextMenu(anchorX: number, anchorY: number): void {
@@ -1497,6 +1600,15 @@ defineExpose({
   font-size: 12px;
   line-height: 1.6;
   letter-spacing: 0;
+}
+
+.tree-row.is-selected {
+  background: color-mix(in srgb, var(--accent-soft) 72%, transparent);
+  color: var(--text-main);
+}
+
+.tree-row.is-selected.active {
+  background: color-mix(in srgb, var(--accent) 24%, var(--accent-soft));
 }
 
 .explorer-header,

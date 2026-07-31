@@ -656,6 +656,8 @@ function compactText(value: unknown, limit = 1200): string {
   color: var(--danger);
   font-size: 14px;
   line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* 客观验收未通过等警告类提示，与上游 coomi-notice-text 同色调 */

@@ -64,6 +64,7 @@ export interface WorkspaceImportFilesRequest {
 
 export interface WorkspaceProjectPathRequest {
   projectPath: string;
+  architecture?: "standard" | "free";
 }
 
 export type StorySegmentExtension = ".md" | ".txt";
@@ -88,6 +89,7 @@ export interface WorkspaceProjectInfo {
   missingDirectories: string[];
   projectState: string;
   openedAt: string;
+  architecture?: "standard" | "free" | "unconfigured";
 }
 
 export interface WorkspaceRecentProject {
@@ -104,6 +106,7 @@ export interface WorkspaceTreeResponse {
   requiresInitialization: boolean;
   missingDirectories: string[];
   openedAt: string;
+  architecture?: "standard" | "free" | "unconfigured";
   defaultFile: string | null;
   roots: WorkspaceTreeNode[];
 }
@@ -263,6 +266,31 @@ export interface WorkspaceGitSummaryResponse {
   head?: WorkspaceGitCommitEntry | null;
   /** Server clock stamp used to discard out-of-order summary responses. */
   generatedAt?: number;
+}
+
+export interface WorkspaceGitBranchEntry {
+  name: string;
+  current: boolean;
+}
+
+export interface WorkspaceGitBranchesResponse {
+  current: string;
+  branches: WorkspaceGitBranchEntry[];
+  summary?: WorkspaceGitSummaryResponse;
+}
+
+export interface WorkspaceSearchItem {
+  relativePath: string;
+  snippet?: string;
+  lineNumber?: number;
+  matchCount?: number;
+  score?: number;
+  engine?: string;
+}
+
+export interface WorkspaceSearchResponse {
+  query: string;
+  items: WorkspaceSearchItem[];
 }
 
 export interface WorkspaceGitCommitResponse {

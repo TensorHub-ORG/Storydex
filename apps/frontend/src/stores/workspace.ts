@@ -702,13 +702,13 @@ export const useWorkspaceStore = defineStore("workspace", {
       return project;
     },
 
-    async createProject(projectPath: string): Promise<WorkspaceProjectInfo> {
+    async createProject(projectPath: string, architecture: "standard" | "free" = "standard"): Promise<WorkspaceProjectInfo> {
       this.isProjectCreating = true;
       this.workspaceError = "";
       this.lastProjectAction = "";
 
       try {
-        const result = await createWorkspaceProject({ projectPath });
+        const result = await createWorkspaceProject({ projectPath, architecture });
         this.launchScreenVisible = false;
         this.currentProject = result.data;
         this.rememberRecentProject(result.data);
@@ -1607,6 +1607,7 @@ export const useWorkspaceStore = defineStore("workspace", {
       requiresInitialization: boolean;
       missingDirectories: string[];
       openedAt: string;
+      architecture?: "standard" | "free" | "unconfigured";
     }): void {
       this.currentProject = {
         projectName: tree.projectName,
@@ -1617,6 +1618,7 @@ export const useWorkspaceStore = defineStore("workspace", {
         requiresInitialization: tree.requiresInitialization,
         missingDirectories: tree.missingDirectories,
         projectState: tree.requiresInitialization ? "needs_init" : "ready",
+        architecture: tree.architecture,
         openedAt: tree.openedAt
       };
     },

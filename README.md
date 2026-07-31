@@ -131,8 +131,8 @@ v0.4.0 为 Storydex 接入基于 Coomi 1.1.2 的专用 usage 适配版，重点�
 
 - 区分 Provider 上游报告、缺失、历史未知和本地估算 usage，避免把字符估算误记为真实用量。
 - 支持 OpenAI-compatible 与 Anthropic usage、缓存与推理 token，并正确折叠流式累计快照。
-- 项目 Python、全哈希依赖锁、桌面内嵌 Python 和安装包统一使用 `coomi-agent==1.1.2+storydex.usage1`。
-- 加强专用 wheel 的 SHA-256、运行时版本、桌面同步和打包资产校验。
+- 项目 Python 仅保留 Storydex HTTP/SSE 编排层；Agent 基座统一使用 `vendor/coomi-rs` 中的 `storydex-coomi-bridge` Rust 运行时。
+- Rust bridge、运行时版本、桌面同步和打包资产均由 Cargo lock 与 `--version` 预检统一校验。
 - 真实增长会话连续 3 轮、11 次 Provider 请求通过，usage 覆盖率 100%，录制/回放零差异。
 
 ## v0.3.10
@@ -157,7 +157,7 @@ v0.3.5 改进了大文件、长期记忆、文件诊断和桌面差分安装体�
 
 `.storydex/memory` 现在只保存变量、事实、人物状态、关系、时间线等长期记忆，历史会话仍位于 `.storydex/.agent/sessions`。memory 使用带模块目录、稳定 ID、schemaVersion、revision、变更账本和恢复点的受约束自适应布局；`.storydex/temp` 只是用户可见的普通临时工作台，不参与索引、诊断、自动清理或常规上下文注入。每个新项目都会在 memory README 中写入完整治理规范。
 
-资源浏览器增加统一问题面板和分级诊断：错误、警告、迁移提示与 Git 修改状态互相独立，UTF-8 BOM 可兼容读取并一键移除。Coomi 运行环境严格固定为 `coomi-agent==1.1.2`，开发、CI 和内嵌 Python 均验证实际安装版本。
+资源浏览器增加统一问题面板和分级诊断：错误、警告、迁移提示与 Git 修改状态互相独立，UTF-8 BOM 可兼容读取并一键移除。Coomi 运行环境严格固定为 Storydex 专用 Rust bridge，开发、CI 和内嵌 Python 均验证 bridge 实际版本。
 
 差分安装改由独立辅助窗口接管，持续显示等待退出、安装、成功或失败状态。安装锁会阻止半更新状态的主程序启动；完成后由用户选择立即启动或稍后启动，失败时保留旧版本及安装日志。
 

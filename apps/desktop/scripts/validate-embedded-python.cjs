@@ -21,6 +21,7 @@ const requirementsFile = path.resolve(
 const requirementsLockFile = path.resolve(
   process.env.STORYDEX_REQUIREMENTS_LOCK || path.join(repoRoot, "requirements.lock")
 );
+const bridgeExecutable = path.join(desktopRoot, "app", "backend", "runtime", "storydex-coomi-bridge.exe");
 
 const failures = [];
 
@@ -209,15 +210,6 @@ function normalizePackageName(value) {
   return String(value || "").toLowerCase().replace(/[_.]+/g, "-");
 }
 
-function readExpectedCoomiVersion(filePath) {
-  const content = fs.readFileSync(filePath, "utf8");
-  const matches = [...content.matchAll(/^\s*coomi-agent\s*==\s*([A-Za-z0-9_.+!-]+)\s*(?:#.*)?$/gim)];
-  if (matches.length !== 1) {
-    throw new Error(`requirements.txt must pin coomi-agent with == exactly once: ${filePath}`);
-  }
-  return matches[0][1];
-}
-
 function readLockedVersions(filePath) {
   const logicalLines = [];
   let current = "";
@@ -237,7 +229,6 @@ function readLockedVersions(filePath) {
   const versions = {};
   for (const line of logicalLines) {
     if (!line || line.startsWith("#")) continue;
-    if (/^--find-links\s+vendor\/python$/i.test(line)) continue;
     const match = line.match(/^([A-Za-z0-9_.-]+)(?:\[[^\]]+\])?==([^\s;\\]+)/);
     if (!match) throw new Error(`unrecognized locked requirement: ${line}`);
     const hashes = line.match(/--hash=sha256:[a-f0-9]{64}/gi) || [];
@@ -269,17 +260,9 @@ if (!exists(pythonRoot)) {
   }
 }
 
-let expectedCoomiVersion = "";
 let lockedVersions = {};
 try {
-  expectedCoomiVersion = readExpectedCoomiVersion(requirementsFile);
   lockedVersions = readLockedVersions(requirementsLockFile);
-  if (lockedVersions["coomi-agent"] !== expectedCoomiVersion) {
-    fail(
-      `requirements.lock coomi-agent ${lockedVersions["coomi-agent"] || "<missing>"} ` +
-        `does not match requirements.txt ${expectedCoomiVersion}`
-    );
-  }
 } catch (error) {
   fail(`Python dependency manifest validation failed: ${error.message}`);
 }
@@ -289,12 +272,10 @@ if (!failures.length) {
   const preflightCode = [
     "import json",
     "import sys",
-    "import coomi",
     "from importlib.metadata import PackageNotFoundError, version",
     `expected = json.loads(${JSON.stringify(lockedVersionsJson)})`,
-    `expected_coomi = ${JSON.stringify(expectedCoomiVersion)}`,
     "errors = []",
-    "modules = ('coomi', 'fastapi', 'uvicorn', 'anthropic', 'pydantic_settings', 'dotenv', 'bcrypt', 'greenlet', 'jiter', 'psycopg', 'pydantic_core', 'ssl', 'sqlite3', 'tiktoken')",
+    "modules = ('fastapi', 'uvicorn', 'anthropic', 'pydantic_settings', 'dotenv', 'bcrypt', 'greenlet', 'jiter', 'psycopg', 'pydantic_core', 'ssl', 'sqlite3', 'tiktoken')",
     "for name in modules: __import__(name)",
     "import ssl",
     "import sqlite3",
@@ -310,10 +291,6 @@ if (!failures.length) {
     "        continue",
     "    if actual_version != expected_version:",
     "        errors.append(f'{package_name} {actual_version} != locked {expected_version}')",
-    "if version('coomi-agent') != expected_coomi:",
-    "    errors.append(f\"coomi-agent metadata {version('coomi-agent')} != expected {expected_coomi}\")",
-    "if str(getattr(coomi, '__version__', '') or '') != expected_coomi:",
-    "    errors.append(f\"coomi.__version__ {getattr(coomi, '__version__', '')!r} != expected {expected_coomi}\")",
     "if errors:",
     "    print('\\n'.join(errors), file=sys.stderr)",
     "    raise SystemExit(1)",
@@ -329,6 +306,16 @@ if (!failures.length) {
   const output = `${result.stdout || ""}${result.stderr || ""}`.trim();
   if (result.status !== 0 || !output.includes("storydex-embedded-python-ok")) {
     fail(`Embedded Python preflight failed with exit=${result.status}:\n${output || result.error?.message || "no output"}`);
+  }
+}
+
+if (!exists(bridgeExecutable)) {
+  fail(`Storydex Coomi Rust bridge is missing: ${bridgeExecutable}`);
+} else {
+  const bridgeVersion = spawnSync(bridgeExecutable, ["--version"], { cwd: repoRoot, encoding: "utf8", windowsHide: true });
+  const bridgeOutput = `${bridgeVersion.stdout || ""}${bridgeVersion.stderr || ""}`;
+  if (bridgeVersion.status !== 0 || !/storydex-coomi-bridge\s+\S+/i.test(bridgeOutput)) {
+    fail(`Storydex Coomi Rust bridge preflight failed: ${bridgeOutput.trim() || bridgeVersion.error?.message || "no output"}`);
   }
 }
 
