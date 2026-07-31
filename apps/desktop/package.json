@@ -28,16 +28,27 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.53.1",
-    "concurrently": "^9.2.0",
-    "electron": "^34.5.8",
-    "electron-builder": "^25.1.8",
+    "concurrently": "^9.2.4",
+    "electron": "^40.10.6",
+    "electron-builder": "^26.15.3",
     "resedit": "^1.7.2",
     "wait-on": "^8.0.1"
+  },
+  "overrides": {
+    "js-yaml": "4.3.0"
   },
   "build": {
     "appId": "cn.tensorhub.storydex",
     "productName": "Storydex",
-    "asar": false,
+    "asar": true,
+    "asarUnpack": [
+      "app/backend/**/*",
+      "app/docs/**/*",
+      "app/python-env/**/*",
+      "app/mingit/**/*",
+      "app/assets/**/*",
+      "electron/update-helper.ps1"
+    ],
     "directories": {
       "output": "release"
     },

@@ -1,6 +1,7 @@
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
+const asar = require("@electron/asar");
 
 const desktopRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(desktopRoot, "..", "..");
@@ -29,6 +30,15 @@ function walk(directory) {
 }
 function sha256(filePath) {
   return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex").toUpperCase();
+}
+function sha256Buffer(content) {
+  return crypto.createHash("sha256").update(content).digest("hex").toUpperCase();
+}
+function containsPemPrivateKey(content) {
+  return /-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----/.test(content.toString("utf8"));
+}
+function archiveApiPath(entryName) {
+  return path.join(...String(entryName).replace(/^[/\\]+/, "").split(/[/\\]+/));
 }
 function requireDirectoryMatchesSource(label, sourceDirectory, packagedDirectory) {
   requireDirectory(label, packagedDirectory);
@@ -59,6 +69,36 @@ function requireDirectoryMatchesSource(label, sourceDirectory, packagedDirectory
     }
   }
 }
+function normalizeArchiveEntry(value) {
+  return `/${String(value || "").replace(/\\/g, "/").replace(/^\/+/, "")}`;
+}
+function requireArchiveFile(label, archiveEntries, entryName) {
+  const normalized = normalizeArchiveEntry(entryName);
+  if (!archiveEntries.has(normalized)) failures.push(`${label} missing from app.asar: ${normalized}`);
+}
+function requireArchiveDirectoryMatchesSource(label, archivePath, archiveEntries, sourceDirectory, archiveDirectory) {
+  if (!fs.existsSync(sourceDirectory) || !fs.statSync(sourceDirectory).isDirectory()) {
+    failures.push(`${label} source missing: ${sourceDirectory}`);
+    return;
+  }
+  const sourceFiles = walk(sourceDirectory)
+    .map((file) => path.relative(sourceDirectory, file).replace(/\\/g, "/"))
+    .sort();
+  for (const relative of sourceFiles) {
+    const entryName = `${archiveDirectory}/${relative}`;
+    const normalized = normalizeArchiveEntry(entryName);
+    if (!archiveEntries.has(normalized)) {
+      failures.push(`${label} missing from app.asar: ${normalized}`);
+      continue;
+    }
+    const sourceFile = path.join(sourceDirectory, ...relative.split("/"));
+    // @electron/asar expects native separators when resolving entries on Windows.
+    const archived = asar.extractFile(archivePath, archiveApiPath(entryName));
+    if (sha256(sourceFile) !== sha256Buffer(archived)) {
+      failures.push(`${label} content mismatch in app.asar: ${relative}`);
+    }
+  }
+}
 function readExpectedCoomiVersion() {
   const content = fs.readFileSync(path.join(repoRoot, "requirements.txt"), "utf8");
   const matches = [...content.matchAll(/^\s*coomi-agent\s*==\s*([A-Za-z0-9_.+!-]+)\s*(?:#.*)?$/gim)];
@@ -69,8 +109,13 @@ function readExpectedCoomiVersion() {
 requireFile("Storydex executable", path.join(unpacked, "Storydex.exe"));
 const resources = path.join(unpacked, "resources");
 requireDirectory("Electron resources", resources);
-const appRoot = fs.existsSync(path.join(resources, "app", "app")) ? path.join(resources, "app", "app") : path.join(resources, "app");
-requireFile("frontend index", path.join(appRoot, "frontend-dist", "index.html"));
+const archivePath = path.join(resources, "app.asar");
+requireFile("Electron app.asar", archivePath);
+const archiveEntries = fs.existsSync(archivePath)
+  ? new Set(asar.listPackage(archivePath).map(normalizeArchiveEntry))
+  : new Set();
+const appRoot = path.join(resources, "app.asar.unpacked", "app");
+requireArchiveFile("frontend index", archiveEntries, "app/frontend-dist/index.html");
 requireDirectory("backend source", path.join(appRoot, "backend"));
 requireFile("runtime requirements", path.join(appRoot, "backend", "requirements-runtime.txt"));
 requireFile("runtime requirements lock", path.join(appRoot, "backend", "requirements-runtime.lock"));
@@ -87,8 +132,15 @@ requireFile(
 requireDirectory("embedded Python", path.join(appRoot, "python-env"));
 requireDirectory("MinGit", path.join(appRoot, "mingit"));
 requireFile("updater config", path.join(resources, "app-update.yml"));
-requireFile("electron-updater entrypoint", path.join(resources, "app", "node_modules", "electron-updater", "out", "main.js"));
-requireFile("persistent update helper", path.join(resources, "app", "electron", "update-helper.ps1"));
+requireArchiveFile("electron-updater entrypoint", archiveEntries, "node_modules/electron-updater/out/main.js");
+requireFile("persistent update helper", path.join(resources, "app.asar.unpacked", "electron", "update-helper.ps1"));
+requireArchiveDirectoryMatchesSource(
+  "frontend build",
+  archivePath,
+  archiveEntries,
+  path.join(desktopRoot, "app", "frontend-dist"),
+  "app/frontend-dist"
+);
 for (const [label, directoryName] of [
   ["help guide", "guide"],
   ["prompt repository", "prompts"],
@@ -110,29 +162,54 @@ for (const [sourceName, packagedName] of [
     failures.push(`packaged ${packagedName} does not match root ${sourceName}`);
   }
 }
-const forbiddenPackageEntries = walk(appRoot).filter((file) => {
+const unpackedFiles = walk(appRoot);
+const forbiddenPackageEntries = unpackedFiles.filter((file) => {
   const relative = path.relative(appRoot, file).replace(/\\/g, "/");
   const base = path.basename(relative);
   return (
     /(^|\/)(tests?|test-results|htmlcov|coverage-html|\.pytest_cache|\.mypy_cache|\.ruff_cache|__pycache__)(\/|$)/i.test(relative) ||
+    /(^|\/)site-packages\/(?:_?pytest(?:\/|[-_.])|coverage(?:\/|[-_.])|_coverage(?:\/|[-_.])|hypothesis(?:\/|[-_.])|iniconfig(?:\/|[-_.])|pluggy(?:\/|[-_.]))/i.test(relative) ||
     /(^|\/)\.coverage(?:\.|$)/i.test(relative) ||
     /(^|\/)\.env(?:\.|$)/i.test(relative) ||
     /\.(pyc|log|tmp|temp)$/i.test(base)
   );
 });
-if (forbiddenPackageEntries.length) {
+const forbiddenArchiveEntries = [...archiveEntries].filter((entry) => {
+  const relative = entry.replace(/^\/+/, "");
+  const base = path.basename(relative);
+  return (
+    /(^|\/)(test-results|playwright-report|htmlcov|coverage-html|\.pytest_cache|\.mypy_cache|\.ruff_cache|__pycache__)(\/|$)/i.test(relative) ||
+    /(^|\/)\.coverage(?:\.|$)/i.test(relative) ||
+    /(^|\/)\.env(?:\.|$)/i.test(relative) ||
+    /\.(p12|pfx|key|kdbx|pyc|log|tmp|temp)$/i.test(base)
+  );
+});
+for (const file of unpackedFiles.filter((item) => /\.pem$/i.test(item))) {
+  if (containsPemPrivateKey(fs.readFileSync(file))) forbiddenPackageEntries.push(file);
+}
+for (const entry of [...archiveEntries].filter((item) => /\.pem$/i.test(item))) {
+  try {
+    if (containsPemPrivateKey(asar.extractFile(archivePath, archiveApiPath(entry)))) {
+      forbiddenArchiveEntries.push(entry);
+    }
+  } catch (error) {
+    failures.push(`unable to inspect PEM entry ${entry}: ${error.message}`);
+  }
+}
+if (forbiddenPackageEntries.length || forbiddenArchiveEntries.length) {
   failures.push(
-    `packaged application contains test/cache/private files: ${forbiddenPackageEntries
-      .slice(0, 20)
-      .map((file) => path.relative(appRoot, file).replace(/\\/g, "/"))
-      .join(", ")}`
+    `packaged application contains test/cache/private files: ${[
+      ...forbiddenPackageEntries.map((file) => path.relative(appRoot, file).replace(/\\/g, "/")),
+      ...forbiddenArchiveEntries
+    ].slice(0, 20).join(", ")}`
   );
 }
-const fonts = walk(path.join(appRoot, "frontend-dist")).filter((file) => /\.woff2?$/.test(file));
+const frontendBuild = path.join(desktopRoot, "app", "frontend-dist");
+const fonts = walk(frontendBuild).filter((file) => /\.woff2?$/.test(file));
 if (!fonts.some((file) => file.endsWith(".woff")) || !fonts.some((file) => file.endsWith(".woff2"))) {
   failures.push("frontend build must contain both Material Symbols woff and woff2 assets");
 }
-for (const cssFile of walk(path.join(appRoot, "frontend-dist")).filter((file) => file.endsWith(".css"))) {
+for (const cssFile of walk(frontendBuild).filter((file) => file.endsWith(".css"))) {
   const css = fs.readFileSync(cssFile, "utf8");
   if (/https?:\/\//i.test(css) && /font/i.test(css)) failures.push(`external font URL found in ${cssFile}`);
   for (const match of css.matchAll(/url\((['"]?)([^)'"?#]+)\1\)/g)) {
