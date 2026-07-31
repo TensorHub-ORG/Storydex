@@ -138,3 +138,11 @@ test("embedded runtime validates the Rust bridge without a vendored Python Coomi
   assert.match(source, /spawnSync\(bridgeExecutable, \["--version"\]/);
   assert.doesNotMatch(source, /vendor[\\/]python|--find-links/i);
 });
+
+test("packaged asset validation inspects the Electron asar archive", () => {
+  const source = fs.readFileSync(path.resolve(__dirname, "../scripts/validate-packaged-assets.cjs"), "utf8");
+  assert.match(source, /require\("@electron\/asar"\)/);
+  assert.match(source, /asar\.listPackage\(archivePath\)/);
+  assert.match(source, /asar\.extractFile\(archivePath/);
+  assert.match(source, /function requireArchiveDirectoryMatchesSource/);
+});

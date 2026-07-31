@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
+const asar = require("@electron/asar");
 
 const desktopRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(desktopRoot, "..", "..");
@@ -66,6 +67,35 @@ function requireDirectoryMatchesSource(label, sourceDirectory, packagedDirectory
     const packagedFile = path.join(packagedDirectory, ...relative.split("/"));
     if (sha256(sourceFile) !== sha256(packagedFile)) {
       failures.push(`${label} content mismatch: ${relative}`);
+    }
+  }
+}
+function normalizeArchiveEntry(value) {
+  return `/${String(value || "").replace(/\\/g, "/").replace(/^\/+/, "")}`;
+}
+function requireArchiveFile(label, archiveEntries, entryName) {
+  const normalized = normalizeArchiveEntry(entryName);
+  if (!archiveEntries.has(normalized)) failures.push(`${label} missing from app.asar: ${normalized}`);
+}
+function requireArchiveDirectoryMatchesSource(label, archivePath, archiveEntries, sourceDirectory, archiveDirectory) {
+  if (!fs.existsSync(sourceDirectory) || !fs.statSync(sourceDirectory).isDirectory()) {
+    failures.push(`${label} source missing: ${sourceDirectory}`);
+    return;
+  }
+  const sourceFiles = walk(sourceDirectory)
+    .map((file) => path.relative(sourceDirectory, file).replace(/\\/g, "/"))
+    .sort();
+  for (const relative of sourceFiles) {
+    const entryName = `${archiveDirectory}/${relative}`;
+    const normalized = normalizeArchiveEntry(entryName);
+    if (!archiveEntries.has(normalized)) {
+      failures.push(`${label} missing from app.asar: ${normalized}`);
+      continue;
+    }
+    const sourceFile = path.join(sourceDirectory, ...relative.split("/"));
+    const archived = asar.extractFile(archivePath, archiveApiPath(entryName));
+    if (sha256(sourceFile) !== sha256Buffer(archived)) {
+      failures.push(`${label} content mismatch in app.asar: ${relative}`);
     }
   }
 }
