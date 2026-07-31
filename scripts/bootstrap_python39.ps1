@@ -204,8 +204,29 @@ function Test-RequirementsInstalled {
         return $false
     }
 
-    & $pythonExe -c "import anthropic, fastapi, pydantic, pydantic_core, pydantic_settings, sqlalchemy, uvicorn"
-    if ($LASTEXITCODE -ne 0) {
+    try {
+        $installedPackages = & $pythonExe -m pip list --disable-pip-version-check --format=json | ConvertFrom-Json
+        if ($LASTEXITCODE -ne 0) {
+            return $false
+        }
+
+        $installedVersions = @{}
+        foreach ($package in $installedPackages) {
+            $normalizedName = ([string]$package.name).ToLowerInvariant() -replace '[_.]+', '-'
+            $installedVersions[$normalizedName] = [string]$package.version
+        }
+
+        foreach ($line in Get-Content $requirementsLockFile) {
+            if ($line -notmatch '^([A-Za-z0-9_.-]+)(?:\[[^\]]+\])?==([^\s\\]+)') {
+                continue
+            }
+            $lockedName = ([string]$Matches[1]).ToLowerInvariant() -replace '[_.]+', '-'
+            $lockedVersion = [string]$Matches[2]
+            if (-not $installedVersions.ContainsKey($lockedName) -or $installedVersions[$lockedName] -ne $lockedVersion) {
+                return $false
+            }
+        }
+    } catch {
         return $false
     }
 
