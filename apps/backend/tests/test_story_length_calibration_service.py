@@ -20,7 +20,7 @@ def test_generation_guidance_falls_back_to_product_target_without_samples(tmp_pa
     )
 
     assert guidance["productTargetWordCount"] == 3000
-    assert guidance["acceptanceMinimum"] == 2100
+    assert guidance["acceptanceMinimum"] == 2550
     assert guidance["acceptanceMaximum"] == 3900
     assert guidance["modelReferenceWordCount"] == 3000
     assert guidance["calibration"]["status"] == "fallback"
@@ -31,9 +31,9 @@ def test_generation_guidance_falls_back_to_product_target_without_samples(tmp_pa
 @pytest.mark.parametrize(
     ("target", "minimum", "maximum"),
     [
-        (1500, 1050, 1950),
-        (3000, 2100, 3900),
-        (5000, 3500, 6500),
+        (1500, 1275, 1950),
+        (3000, 2550, 3900),
+        (5000, 4250, 6500),
     ],
 )
 def test_product_acceptance_band_scales_with_target(
@@ -88,14 +88,113 @@ def test_three_same_grade_samples_adjust_only_the_model_reference(tmp_path: Path
     )
 
     assert guidance["productTargetWordCount"] == 3000
-    assert guidance["acceptanceMinimum"] == 2100
+    assert guidance["acceptanceMinimum"] == 2550
     assert guidance["acceptanceMaximum"] == 3900
-    assert guidance["modelReferenceWordCount"] == 2400
+    # Three samples show the bias but cannot size it, so only half of the
+    # measured 1.25 is applied: 1 + 0.25 * 0.5 = 1.125, and 3000 / 1.125 = 2667.
+    assert guidance["modelReferenceWordCount"] == 2667
     assert guidance["calibration"]["status"] == "applied"
     assert guidance["calibration"]["reason"] == "same_target_grade"
     assert guidance["calibration"]["sampleCount"] == 3
     assert guidance["calibration"]["medianRatio"] == pytest.approx(1.25)
+    assert guidance["calibration"]["appliedRatio"] == pytest.approx(1.125)
+    assert guidance["calibration"]["correctionStrength"] == pytest.approx(0.5)
+    assert guidance["calibration"]["attemptKind"] == "initial"
+
+
+def test_five_same_grade_samples_apply_the_full_measured_bias(tmp_path: Path) -> None:
+    service = StoryLengthCalibrationService()
+    contract = {
+        "turnPlan": {
+            "chapterWordCountTarget": 3000,
+            "wordCountPolicy": {
+                "scope": "chapter",
+                "target": 3000,
+                "modelReferenceWordCount": 3000,
+            },
+        }
+    }
+    for _ in range(5):
+        assert service.record_generation_result(
+            tmp_path,
+            turn_contract=contract,
+            validation={
+                "applicable": True,
+                "passed": True,
+                "structurePassed": True,
+                "chapterWordCountTarget": 3000,
+                "generatedWordCount": 3750,
+            },
+            provider="chy",
+            model="deepseek-v4-flash",
+        )
+
+    guidance = service.resolve_generation_guidance(
+        tmp_path,
+        product_target_word_count=3000,
+        provider="chy",
+        model="deepseek-v4-flash",
+    )
+
+    assert guidance["calibration"]["sampleCount"] == 5
+    assert guidance["calibration"]["correctionStrength"] == pytest.approx(1.0)
     assert guidance["calibration"]["appliedRatio"] == pytest.approx(1.25)
+    assert guidance["modelReferenceWordCount"] == 2400
+
+
+def test_one_adjustment_cannot_move_the_reference_beyond_thirty_percent(
+    tmp_path: Path,
+) -> None:
+    service = StoryLengthCalibrationService()
+    # A model that writes at half the reference would ask for a reference far
+    # above the target. One calibration step is capped at ±30% of the target
+    # regardless of what the median says.
+    for _ in range(5):
+        assert service.append_sample(
+            tmp_path,
+            product_target_word_count=3000,
+            model_reference_word_count=3000,
+            actual_word_count=1500,
+            provider="chy",
+            model="deepseek-v4-flash",
+        )
+
+    guidance = service.resolve_generation_guidance(
+        tmp_path,
+        product_target_word_count=3000,
+        provider="chy",
+        model="deepseek-v4-flash",
+    )
+
+    assert guidance["calibration"]["status"] == "applied"
+    assert guidance["modelReferenceWordCount"] == 3900
+
+
+def test_a_precision_revision_never_steers_the_model_reference(tmp_path: Path) -> None:
+    service = StoryLengthCalibrationService()
+    # Five revised chapters that all landed on target. If these were readable as
+    # unassisted output, calibration would conclude the model needs no help.
+    for _ in range(5):
+        assert service.append_sample(
+            tmp_path,
+            product_target_word_count=3000,
+            model_reference_word_count=3000,
+            actual_word_count=3000,
+            provider="chy",
+            model="deepseek-v4-flash",
+            attempt_kind="precision_revision",
+        )
+
+    guidance = service.resolve_generation_guidance(
+        tmp_path,
+        product_target_word_count=3000,
+        provider="chy",
+        model="deepseek-v4-flash",
+    )
+
+    assert guidance["calibration"]["status"] == "fallback"
+    assert guidance["calibration"]["sampleCount"] == 0
+    assert guidance["modelReferenceWordCount"] == 3000
 
 
 def test_product_target_selects_the_bucket_while_model_reference_measures_response(
@@ -133,7 +232,10 @@ def test_product_target_selects_the_bucket_while_model_reference_measures_respon
         model="deepseek-v4-flash",
     )
 
-    assert guidance["modelReferenceWordCount"] == 2400
+    # The ratio is measured against the model reference the samples were
+    # generated with (3000 / 2400 = 1.25), while the bucket is selected by the
+    # product target. Three samples apply half of that bias: 3000 / 1.125.
+    assert guidance["modelReferenceWordCount"] == 2667
     assert guidance["calibration"]["medianRatio"] == pytest.approx(1.25)
 
 
@@ -183,13 +285,15 @@ def test_extreme_response_ratios_are_excluded_from_generation_guidance(tmp_path:
         (12000, 2100),
     ],
 )
-def test_calibrated_reference_stays_inside_the_product_acceptance_band(
+def test_one_calibration_step_cannot_move_the_reference_past_the_cap(
     tmp_path: Path,
     actual_word_count: int,
     expected_reference: int,
 ) -> None:
     service = StoryLengthCalibrationService()
-    for _ in range(3):
+    # Five samples so the full measured bias applies and the cap is what binds,
+    # rather than the half-strength correction stopping short of it.
+    for _ in range(5):
         assert service.append_sample(
             tmp_path,
             product_target_word_count=3000,
@@ -207,6 +311,10 @@ def test_calibrated_reference_stays_inside_the_product_acceptance_band(
     )
 
     assert guidance["calibration"]["status"] == "applied"
+    assert guidance["calibration"]["correctionStrength"] == pytest.approx(1.0)
+    # An extreme ratio would otherwise ask for 4000 or 2000. The cap holds the
+    # step to ±30% of the target, which coincides with the normal band at this
+    # target but bounds a different thing.
     assert guidance["modelReferenceWordCount"] == expected_reference
     assert 2100 <= guidance["modelReferenceWordCount"] <= 3900
 
@@ -250,7 +358,10 @@ def test_generation_guidance_ignores_samples_older_than_ninety_days(tmp_path: Pa
         now="2026-07-26T00:00:00+00:00",
     )
 
-    assert guidance["modelReferenceWordCount"] == 2500
+    # Only the three recent samples are read, so the median is theirs (1.2) and
+    # not a blend with the expired 0.8 observations. Three samples apply half
+    # strength: 1 + 0.2 * 0.5 = 1.1, and 3000 / 1.1 = 2727.
+    assert guidance["modelReferenceWordCount"] == 2727
     assert guidance["calibration"]["sampleCount"] == 3
     assert guidance["calibration"]["medianRatio"] == pytest.approx(1.2)
 
@@ -447,7 +558,7 @@ def test_new_calibration_files_persist_product_target_and_model_reference_separa
     )
 
     payload = json.loads(service.calibration_path(tmp_path).read_text(encoding="utf-8"))
-    assert payload["_version"] == 2
+    assert payload["_version"] == 3
     assert payload["targetGradeSize"] == 500
     assert payload["buckets"] == [
         {
@@ -461,6 +572,10 @@ def test_new_calibration_files_persist_product_target_and_model_reference_separa
                     "actualWordCount": 3000,
                     "provider": "chy",
                     "model": "deepseek-v4-flash",
+                    # Which attempt produced this length is stored with the
+                    # sample: without it a revised total reads as unassisted
+                    # output, which is what polluted the v2 reference.
+                    "attemptKind": "initial",
                     "timestamp": "2026-07-26T00:00:00+00:00",
                 }
             ],
@@ -508,8 +623,13 @@ def test_v1_calibration_is_read_and_upgraded_on_the_next_write(tmp_path: Path) -
         model="deepseek-v4-flash",
         now="2026-07-26T00:00:00+00:00",
     )
-    assert guidance["modelReferenceWordCount"] == 2500
+    # Pre-v3 samples carry no attemptKind, so they cannot be proven to be
+    # unassisted drafts. They stay usable rather than cold-starting an existing
+    # project, but only at half strength: 1 + 0.2 * 0.5 = 1.1, 3000 / 1.1 = 2727.
+    assert guidance["modelReferenceWordCount"] == 2727
     assert guidance["calibration"]["sampleCount"] == 3
+    assert guidance["calibration"]["reason"] == "legacy_untagged_samples"
+    assert guidance["calibration"]["attemptKind"] == ""
 
     assert service.append_sample(
         tmp_path,
@@ -521,7 +641,7 @@ def test_v1_calibration_is_read_and_upgraded_on_the_next_write(tmp_path: Path) -
         timestamp="2026-07-26T00:00:00+00:00",
     )
     upgraded = json.loads(path.read_text(encoding="utf-8"))
-    assert upgraded["_version"] == 2
+    assert upgraded["_version"] == 3
     assert upgraded["targetGradeSize"] == 500
     assert "lengthGradeSize" not in upgraded
     bucket = upgraded["buckets"][0]
@@ -576,6 +696,7 @@ def test_samples_are_bucketed_by_provider_model_and_product_target_grade(tmp_pat
         "actualWordCount": 1920,
         "provider": "openai",
         "model": "gpt-test",
+        "attemptKind": "initial",
         "timestamp": "2026-07-25T01:00:00+00:00",
     }
     assert service.median_ratio(

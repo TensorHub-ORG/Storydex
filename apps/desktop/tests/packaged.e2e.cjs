@@ -72,6 +72,7 @@ function createFakeOpenAiServer() {
 
     if (!payload.stream) {
       await delay(1_250);
+      const executesPreviousAction = promptText.includes("执行");
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({
         id: "intent-e2e",
@@ -83,7 +84,22 @@ function createFakeOpenAiServer() {
           finish_reason: "stop",
           message: {
             role: "assistant",
-            content: JSON.stringify({ primary: "general", confidence: "high", signals: ["e2e_fake_provider"], reason: "deterministic test provider" })
+            content: JSON.stringify({
+              decision: "decided",
+              primary: "general",
+              secondary: "",
+              operationType: executesPreviousAction ? "modify_existing" : "inquiry",
+              effect: executesPreviousAction ? "execute" : "respond_only",
+              artifact: executesPreviousAction ? "project_files" : "general",
+              targetScope: "none",
+              targetValue: "",
+              explicitConstraints: [],
+              ambiguities: [],
+              evidence: executesPreviousAction ? ["执行"] : [],
+              complexity: "simple",
+              confidence: "high",
+              reason: "deterministic test provider"
+            })
           }
         }],
         usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 }
@@ -94,6 +110,7 @@ function createFakeOpenAiServer() {
     const content = promptText.includes("执行")
       ? "已承接上一轮变量整理操作。"
       : "变量更新已完成，是否需要执行变量整理？";
+    await delay(1_250);
     response.writeHead(200, {
       "content-type": "text/event-stream; charset=utf-8",
       "cache-control": "no-cache",
@@ -137,21 +154,25 @@ function writeFakeProviderConfig(globalRoot, baseUrl) {
   }, null, 2));
 }
 
-async function launchPackaged({ profile, workspace, globalRoot, logs }) {
+async function launchPackaged({ profile, workspace, globalRoot, logs, dynamicBackendPort = false }) {
   const debugPort = await reservePort();
-  const backendPort = await reservePort();
-  const backendBaseUrl = `http://127.0.0.1:${backendPort}/api/v1`;
+  const backendPort = dynamicBackendPort ? 0 : await reservePort();
+  const childEnvironment = {
+    ...process.env,
+    HOME: profile,
+    USERPROFILE: profile,
+    STORYDEX_GLOBAL_ROOT: globalRoot,
+    STORYDEX_WORKSPACE_ROOT: workspace,
+    STORYDEX_DISABLE_NETWORK: "1",
+    STORYDEX_TESTING: "1"
+  };
+  if (backendPort) {
+    childEnvironment.STORYDEX_BACKEND_PORT = String(backendPort);
+  } else {
+    delete childEnvironment.STORYDEX_BACKEND_PORT;
+  }
   const child = spawn(executable, [`--remote-debugging-port=${debugPort}`, `--user-data-dir=${path.join(profile, "chromium")}`], {
-    env: {
-      ...process.env,
-      HOME: profile,
-      USERPROFILE: profile,
-      STORYDEX_GLOBAL_ROOT: globalRoot,
-      STORYDEX_WORKSPACE_ROOT: workspace,
-      STORYDEX_BACKEND_PORT: String(backendPort),
-      STORYDEX_DISABLE_NETWORK: "1",
-      STORYDEX_TESTING: "1"
-    },
+    env: childEnvironment,
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true
   });
@@ -162,6 +183,7 @@ async function launchPackaged({ profile, workspace, globalRoot, logs }) {
   const context = browser.contexts()[0];
   const page = context.pages()[0] || await context.waitForEvent("page", { timeout: 30_000 });
   await page.waitForLoadState("domcontentloaded");
+  const backendBaseUrl = await page.evaluate(() => window.storydexDesktop.backendBaseUrl);
   return { child, browser, page, backendBaseUrl };
 }
 
@@ -231,6 +253,46 @@ test("packaged updater recovers when its entrypoint appears after a transient in
     clearInterval(restoreWatcher);
     restoreUpdater();
     if (app) await closePackaged(app, { force: false });
+    fs.rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
+  }
+});
+
+test("packaged backend avoids the occupied default port", { timeout: 90_000 }, async (t) => {
+  if (!fs.existsSync(executable)) return t.skip(`packaged executable not found: ${executable}`);
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), "storydex-port-fallback-"));
+  const workspace = path.join(profile, "workspace");
+  const globalRoot = path.join(profile, ".storydex");
+  const logs = [];
+  const blocker = net.createServer((socket) => socket.destroy());
+  let ownsBlockedPort = false;
+  let app = null;
+
+  fs.mkdirSync(workspace, { recursive: true });
+  await new Promise((resolve, reject) => {
+    blocker.once("error", (error) => {
+      if (error?.code === "EADDRINUSE") {
+        resolve();
+        return;
+      }
+      reject(error);
+    });
+    blocker.listen(18081, "127.0.0.1", () => {
+      ownsBlockedPort = true;
+      resolve();
+    });
+  });
+
+  try {
+    app = await launchPackaged({ profile, workspace, globalRoot, logs, dynamicBackendPort: true });
+    const resolvedPort = Number(new URL(app.backendBaseUrl).port);
+    assert.notEqual(resolvedPort, 18081, `backend did not leave the occupied port; logs=${logs.join("").slice(-4000)}`);
+    const response = await fetch(`${app.backendBaseUrl}/sys/health`);
+    assert.equal(response.ok, true, `fallback backend was unhealthy; logs=${logs.join("").slice(-4000)}`);
+  } finally {
+    if (app) await closePackaged(app, { force: false });
+    if (ownsBlockedPort) {
+      await new Promise((resolve) => blocker.close(resolve));
+    }
     fs.rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
   }
 });
@@ -375,6 +437,16 @@ test("packaged Electron validates icons, streaming responsiveness, session recov
       `events=${JSON.stringify(firstTurn.map((item) => ({ event: item.event, type: item.data?._type, message: item.data?.message })))}`
     );
 
+    const currentProjectResponse = await fetch(`${app.backendBaseUrl}/workspace/project`);
+    assert.equal(currentProjectResponse.status, 200);
+    const currentProject = await currentProjectResponse.json();
+    const currentWorkspace = fs.realpathSync.native(path.resolve(String(currentProject.data?.workspaceRoot || "")));
+    const temporaryWorkspace = fs.realpathSync.native(path.resolve(workspace));
+    assert.equal(
+      process.platform === "win32" ? currentWorkspace.toLowerCase() : currentWorkspace,
+      process.platform === "win32" ? temporaryWorkspace.toLowerCase() : temporaryWorkspace,
+      `refusing to run packaged E2E Git operations outside the temporary workspace: ${JSON.stringify(currentProject)}`
+    );
     const gitInit = await fetch(`${app.backendBaseUrl}/workspace/git/init`, { method: "POST" });
     assert.equal(gitInit.status, 200);
     const baselineFile = await fetch(`${app.backendBaseUrl}/workspace/file/create`, {
@@ -518,7 +590,9 @@ test("packaged Electron validates icons, streaming responsiveness, session recov
       stopWhen: (packet) => packet.data?._type === "done"
     });
     const contract = resumed.find((item) => item.data?._type === "TurnContract");
-    assert.equal(contract?.data?.intentFrame?.method, "deterministic_context");
+    assert.equal(contract?.data?.intentFrame?.method, "llm");
+    assert.equal(contract?.data?.intentFrame?.effect, "execute");
+    assert.equal(contract?.data?.intentFrame?.canWrite, true);
     assert.match(resumed.map((item) => item.data?.content || "").join(""), /承接上一轮变量整理/);
     assert.notEqual(contract?.data?.intentFrame?.primary, "story_generation");
     metrics.fakeProviderRequests = fakeProvider.requests.length;

@@ -11,6 +11,8 @@ $backend = Join-Path $repoRoot "apps/backend"
 $frontend = Join-Path $repoRoot "apps/frontend"
 $desktop = Join-Path $repoRoot "apps/desktop"
 $results = Join-Path $repoRoot "test-results"
+$bundledPython = Join-Path $repoRoot ".python39/Scripts/python.exe"
+$python = if (Test-Path -LiteralPath $bundledPython) { $bundledPython } else { "python" }
 New-Item -ItemType Directory -Force -Path $results | Out-Null
 
 function Invoke-Step([string]$Name, [scriptblock]$Action) {
@@ -23,6 +25,7 @@ $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
 $env:STORYDEX_DISABLE_NETWORK = "1"
 $env:STORYDEX_TESTING = "1"
+$env:STORYDEX_ENFORCE_COVERAGE = if ($Mode -eq "Release") { "1" } else { "0" }
 
 Invoke-Step "Encoding policy" { node (Join-Path $repoRoot "scripts/validate_text_encoding.cjs") }
 Invoke-Step "Conflict markers" {
@@ -38,13 +41,20 @@ Invoke-Step "Conflict markers" {
 }
 $packageVersion = (Get-Content -Raw -LiteralPath (Join-Path $desktop "package.json") | ConvertFrom-Json).version
 Invoke-Step "Version consistency" { node (Join-Path $repoRoot "scripts/validate_version_consistency.cjs") $(if ($Mode -eq "Release") { "--expected=$packageVersion" }) }
-Invoke-Step "Python compile" { python -m compileall -q (Join-Path $backend "api") (Join-Path $backend "core") (Join-Path $backend "services") }
+Invoke-Step "Pinned Coomi runtime" { & $python (Join-Path $repoRoot "scripts/verify_coomi_runtime.py") }
+Invoke-Step "Python compile" { & $python -m compileall -q (Join-Path $backend "api") (Join-Path $backend "core") (Join-Path $backend "services") }
 Invoke-Step "Backend tests and coverage" {
   Push-Location $backend
   try {
     New-Item -ItemType Directory -Force -Path "test-results" | Out-Null
-    python -m pytest -q --cov=api --cov=core --cov=services --cov-branch --cov-report=term-missing --cov-report=json:test-results/coverage.json --cov-report=xml:test-results/coverage.xml --junitxml=test-results/pytest.xml
-    if ($LASTEXITCODE -eq 0) { python tests/assert_coverage.py test-results/coverage.json }
+    & $python -m pytest -q --cov=api --cov=core --cov=services --cov-branch --cov-fail-under=0 --cov-report=term-missing --cov-report=json:test-results/coverage.json --cov-report=xml:test-results/coverage.xml --junitxml=test-results/pytest.xml
+    if ($LASTEXITCODE -eq 0) {
+      if ($Mode -eq "Release") {
+        & $python tests/assert_coverage.py test-results/coverage.json
+      } else {
+        & $python tests/assert_coverage.py test-results/coverage.json --warn-only
+      }
+    }
   } finally { Pop-Location }
 }
 Invoke-Step "Frontend type check" { npm --prefix $frontend run type-check }

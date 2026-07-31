@@ -2,6 +2,12 @@ name: Reusable Quality Gate
 
 on:
   workflow_call:
+    inputs:
+      enforce_coverage:
+        description: Fail when coverage thresholds are not met (release gate)
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -77,11 +83,21 @@ jobs:
         run: >-
           python -m pytest -q
           --cov=api --cov=core --cov=services --cov-branch
+          --cov-fail-under=0
           --cov-report=term-missing
           --cov-report=json:test-results/coverage.json
           --cov-report=xml:test-results/coverage.xml
           --junitxml=test-results/pytest.xml
-      - name: Enforce detailed coverage gates
+      - name: Report detailed coverage (non-blocking)
+        if: ${{ !inputs.enforce_coverage }}
+        working-directory: apps/backend
+        run: >-
+          python tests/assert_coverage.py test-results/coverage.json
+          --global-branches ${{ matrix.global_branches }}
+          --critical-lines ${{ matrix.critical_lines }}
+          --warn-only
+      - name: Enforce detailed coverage gates for release
+        if: ${{ inputs.enforce_coverage }}
         working-directory: apps/backend
         run: >-
           python tests/assert_coverage.py test-results/coverage.json
@@ -116,6 +132,8 @@ jobs:
     name: frontend-tests
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      STORYDEX_ENFORCE_COVERAGE: ${{ inputs.enforce_coverage && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

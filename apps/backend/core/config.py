@@ -102,5 +102,21 @@ FEATURE_FLAG_DEFAULTS: dict[str, object] = {
     "JIT_CONTEXT_LOADING_ENABLED": False,
     "TWO_PASS_GENERATION_ENABLED": False,
     "SEMANTIC_BUDGET_GENERATION_ENABLED": False,
+    # Keep semantic length tiers behind an explicit project/env opt-in. The
+    # controlled acceptance matrix must pass quality and separation gates before
+    # this can become a default product control.
+    "STORY_LENGTH_TIER_ENABLED": False,
+    # 有界正文路径：一次草稿 + 最多一次局部长度补丁 + 一次写入，替代
+    # Agent 工具回合里的「写入后再补写」。默认开启；精确字数开关另由
+    # TurnContract 的 wordCountPolicy.precision 控制，默认关闭。
+    "BOUNDED_STORY_GENERATION_ENABLED": True,
+    # New elastic manuscript protocol. Keep disabled until the full fixed-sample
+    # live acceptance run meets every length, quality, call and efficiency gate.
+    "ELASTIC_STORY_MANUSCRIPT_ENABLED": False,
+    # Asymmetric ordinary-mode gate with at most one independent whole-chapter
+    # second draft. It stays off until the isolated live acceptance run passes.
+    "ASYMMETRIC_STORY_LENGTH_ENABLED": False,
+    # 段数配额仅保留为显式实验分支；默认使用章级软字符目标和程序硬验收带。
+    "PARAGRAPH_QUOTA_GENERATION_ENABLED": False,
     "STREAMING_TOOL_LOOP_PROVIDER_AWARE": True,
 }

@@ -22,6 +22,8 @@ permissions:
 jobs:
   quality-gate:
     uses: ./.github/workflows/quality-gate.yml
+    with:
+      enforce_coverage: true
 
   release-windows:
     name: Build and publish Windows release

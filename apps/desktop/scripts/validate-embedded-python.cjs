@@ -1,6 +1,9 @@
 const fs = require("fs");
+const http = require("http");
+const net = require("net");
+const os = require("os");
 const path = require("path");
-const { spawnSync } = require("child_process");
+const { spawn, spawnSync } = require("child_process");
 
 const desktopRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(desktopRoot, "..", "..");
@@ -10,6 +13,8 @@ const pythonExecutable =
     ? path.join(pythonRoot, "python.exe")
     : path.join(pythonRoot, "bin", "python");
 const pyvenvConfig = path.join(pythonRoot, "pyvenv.cfg");
+const backendDirectory = path.join(desktopRoot, "app", "backend");
+const maxEmbeddedPythonBytes = 512 * 1024 * 1024;
 const requirementsFile = path.resolve(
   process.env.STORYDEX_REQUIREMENTS_FILE || path.join(repoRoot, "requirements.txt")
 );
@@ -25,6 +30,179 @@ function fail(message) {
 
 function exists(filePath) {
   return fs.existsSync(filePath);
+}
+
+function directoryStats(directoryPath) {
+  const pending = [directoryPath];
+  let bytes = 0;
+  let files = 0;
+  while (pending.length) {
+    const current = pending.pop();
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const target = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(target);
+      } else if (entry.isFile()) {
+        files += 1;
+        bytes += fs.statSync(target).size;
+      }
+    }
+  }
+  return { bytes, files };
+}
+
+function buildPythonEnvironment(runtimeRoot = "") {
+  const pathEntries =
+    process.platform === "win32"
+      ? [
+          pythonRoot,
+          path.join(pythonRoot, "Scripts"),
+          path.join(pythonRoot, "Library", "bin"),
+          path.join(pythonRoot, "Library", "usr", "bin"),
+          path.join(pythonRoot, "DLLs")
+        ]
+      : [path.join(pythonRoot, "bin")];
+  const environment = {
+    ...process.env,
+    PATH: [...pathEntries, String(process.env.PATH || "")].join(path.delimiter),
+    PYTHONHOME: pythonRoot,
+    PYTHONUTF8: "1",
+    PYTHONIOENCODING: "utf-8",
+    PYTHONUNBUFFERED: "1",
+    PYTHONNOUSERSITE: "1",
+    PYTHONDONTWRITEBYTECODE: "1"
+  };
+  if (runtimeRoot) {
+    environment.STORYDEX_WORKSPACE_ROOT = path.join(runtimeRoot, "workspace");
+    environment.STORYDEX_GLOBAL_ROOT = path.join(runtimeRoot, "global");
+    environment.STORYDEX_DISABLE_NETWORK = "1";
+  }
+  return environment;
+}
+
+function reservePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.once("error", reject);
+    server.listen({ host: "127.0.0.1", port: 0 }, () => {
+      const address = server.address();
+      const port = address && typeof address === "object" ? address.port : 0;
+      server.close((error) => (error ? reject(error) : resolve(port)));
+    });
+  });
+}
+
+function probeBackendHealth(port) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    const request = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        path: "/api/v1/sys/health",
+        method: "GET",
+        agent: false,
+        timeout: 1000
+      },
+      (response) => {
+        let body = "";
+        response.on("data", (chunk) => {
+          body = `${body}${chunk}`.slice(-4000);
+        });
+        response.on("end", () =>
+          finish({
+            ok: typeof response.statusCode === "number" && response.statusCode >= 200 && response.statusCode < 300,
+            statusCode: response.statusCode,
+            detail: body
+          })
+        );
+        response.on("error", (error) => finish({ ok: false, detail: error.message }));
+      }
+    );
+    request.on("timeout", () => {
+      request.destroy();
+      finish({ ok: false, detail: "health request timed out" });
+    });
+    request.on("error", (error) => finish({ ok: false, detail: error.message }));
+    request.end();
+  });
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function stopProcess(child) {
+  if (!child || child.exitCode !== null) return;
+  child.kill();
+  await Promise.race([
+    new Promise((resolve) => child.once("exit", resolve)),
+    delay(3000)
+  ]);
+}
+
+async function validateBackendHealth() {
+  const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "storydex-embedded-python-check-"));
+  const port = await reservePort();
+  let output = "";
+  let spawnError = null;
+  let lastProbe = { ok: false, detail: "health endpoint was not reached" };
+  const child = spawn(
+    pythonExecutable,
+    ["-u", "-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", String(port)],
+    {
+      cwd: backendDirectory,
+      env: buildPythonEnvironment(runtimeRoot),
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true
+    }
+  );
+  const appendOutput = (chunk) => {
+    output = `${output}${chunk.toString("utf8")}`.slice(-16000);
+  };
+  child.stdout.on("data", appendOutput);
+  child.stderr.on("data", appendOutput);
+  child.on("error", (error) => {
+    spawnError = error;
+  });
+
+  try {
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline) {
+      if (spawnError) {
+        throw new Error(`backend spawn failed: ${spawnError.message}`);
+      }
+      if (child.exitCode !== null) {
+        throw new Error(`backend exited with code ${child.exitCode}`);
+      }
+      lastProbe = await probeBackendHealth(port);
+      if (lastProbe.ok) {
+        return;
+      }
+      await delay(200);
+    }
+    throw new Error(
+      `backend did not become healthy on port ${port}; last probe=${lastProbe.statusCode || "none"} ${lastProbe.detail || ""}`
+    );
+  } catch (error) {
+    throw new Error(`${error.message}\n${output.trim() || "backend produced no output"}`);
+  } finally {
+    await stopProcess(child);
+    fs.rmSync(runtimeRoot, { recursive: true, force: true });
+  }
+}
+
+function reportFailures() {
+  console.error("[Storydex Desktop] Embedded Python validation failed:");
+  for (const failure of failures) {
+    console.error(`- ${failure}`);
+  }
 }
 
 function normalizePackageName(value) {
@@ -82,6 +260,13 @@ if (!exists(pythonRoot)) {
   if (!exists(pythonExecutable)) {
     fail(`Embedded Python executable is missing: ${pythonExecutable}`);
   }
+  const stats = directoryStats(pythonRoot);
+  if (stats.bytes > maxEmbeddedPythonBytes) {
+    fail(
+      `Embedded Python is unexpectedly large: ${(stats.bytes / 1024 / 1024).toFixed(1)} MB across ${stats.files} files ` +
+        `(limit ${(maxEmbeddedPythonBytes / 1024 / 1024).toFixed(0)} MB). Check for copied Conda/CUDA/MKL payloads.`
+    );
+  }
 }
 
 let expectedCoomiVersion = "";
@@ -109,8 +294,14 @@ if (!failures.length) {
     `expected = json.loads(${JSON.stringify(lockedVersionsJson)})`,
     `expected_coomi = ${JSON.stringify(expectedCoomiVersion)}`,
     "errors = []",
-    "modules = ('coomi', 'fastapi', 'uvicorn', 'anthropic', 'pydantic_settings', 'dotenv')",
+    "modules = ('coomi', 'fastapi', 'uvicorn', 'anthropic', 'pydantic_settings', 'dotenv', 'bcrypt', 'greenlet', 'jiter', 'psycopg', 'pydantic_core', 'ssl', 'sqlite3', 'tiktoken')",
     "for name in modules: __import__(name)",
+    "import ssl",
+    "import sqlite3",
+    "ssl.create_default_context()",
+    "with sqlite3.connect(':memory:') as connection:",
+    "    if connection.execute('select 1').fetchone() != (1,):",
+    "        errors.append('sqlite3 runtime query failed')",
     "for package_name, expected_version in expected.items():",
     "    try:",
     "        actual_version = version(package_name)",
@@ -131,15 +322,9 @@ if (!failures.length) {
     "print(sys.prefix)"
   ].join("\n");
   const result = spawnSync(pythonExecutable, ["-c", preflightCode], {
-    cwd: path.join(desktopRoot, "app", "backend"),
+    cwd: backendDirectory,
     encoding: "utf8",
-    env: {
-      ...process.env,
-      PYTHONUTF8: "1",
-      PYTHONIOENCODING: "utf-8",
-      PYTHONNOUSERSITE: "1",
-      PYTHONDONTWRITEBYTECODE: "1"
-    }
+    env: buildPythonEnvironment()
   });
   const output = `${result.stdout || ""}${result.stderr || ""}`.trim();
   if (result.status !== 0 || !output.includes("storydex-embedded-python-ok")) {
@@ -148,11 +333,18 @@ if (!failures.length) {
 }
 
 if (failures.length) {
-  console.error("[Storydex Desktop] Embedded Python validation failed:");
-  for (const failure of failures) {
-    console.error(`- ${failure}`);
-  }
+  reportFailures();
   process.exit(1);
 }
 
-console.log(`[Storydex Desktop] Embedded Python is relocatable and passes preflight: ${pythonExecutable}`);
+validateBackendHealth()
+  .then(() => {
+    console.log(
+      `[Storydex Desktop] Embedded Python is relocatable and serves the backend health endpoint: ${pythonExecutable}`
+    );
+  })
+  .catch((error) => {
+    fail(`Embedded Python backend health check failed:\n${error.message}`);
+    reportFailures();
+    process.exitCode = 1;
+  });

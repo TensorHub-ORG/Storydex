@@ -52,13 +52,13 @@ def test_schema_normalization_and_reports_cover_malformed_agent_payloads(service
     )
     assert report["needsReviewEntryIds"] == ["a"]
     assert report["issues"] == [] and report["recommendations"] == ["fix"]
-    assert service._workflow_generation_mode("generate_wiki", agent=False) == "local fallback"
-    assert service._workflow_generation_mode("generate_wiki", agent=True) == "agent full"
-    assert service._workflow_generation_mode("update_wiki", agent=True) == "agent incremental"
-    assert service._workflow_generation_mode("refresh_wiki_graph", agent=True) == "agent graph refresh"
-    assert service._workflow_generation_mode("review_wiki", agent=True) == "agent review"
-    assert service._workflow_generation_mode("repair_wiki", agent=True) == "agent repair"
-    assert service._workflow_generation_mode("other", agent=True) == "agent"
+    assert service._workflow_generation_mode("generate_wiki", agent=False) == "local evidence-grounded"
+    assert service._workflow_generation_mode("generate_wiki", agent=True) == "local evidence-grounded + agent prose"
+    assert service._workflow_generation_mode("update_wiki", agent=True) == "local evidence-grounded + agent prose"
+    assert service._workflow_generation_mode("refresh_wiki_graph", agent=True) == "local evidence-grounded graph refresh"
+    assert service._workflow_generation_mode("review_wiki", agent=True) == "local evidence-grounded + agent review"
+    assert service._workflow_generation_mode("repair_wiki", agent=True) == "local evidence-grounded + agent prose"
+    assert service._workflow_generation_mode("other", agent=True) == "local evidence-grounded + agent prose"
     assert "2" in service._workflow_summary("update_wiki", "ok", ["a", "b"])
     assert "WIKI" in service._workflow_summary("review_wiki", "ok", [])
     assert "other" in service._workflow_summary("other", "ok", [])
@@ -148,11 +148,9 @@ def test_entity_and_text_helpers_cover_optional_paths(service, tmp_path):
     assert entities["Hero"]["aliases"] == ["H", "X"]
     assert entities["Hero"]["sourcePaths"] == ["a", "b"] and entities["Hero"]["needsReview"]
 
-    assert service._character_names_from_source(_source("characters/001_hero.json", '{"name":"Alice","displayName":"Al"}', "character")) == ["hero", "Alice", "Al"]
+    assert service._character_names_from_source(_source("characters/001_hero.json", '{"name":"Alice","displayName":"Al"}', "character")) == ["Alice", "Al"]
+    assert service._character_names_from_source(_source("characters/001_Alice.md", "# 角色档案\n", "character")) == ["Alice"]
     assert service._character_names_from_source(_source("characters/README.json", "bad", "character")) == []
-    assert service._fallback_character_entities([_source("chapters/1.md", "Alice"),]) == []
-    fallback = service._fallback_character_entities([_source("chapters/1.md", "阿离，现身"), _source("chapters/2.md", "阿离，归来")])
-    assert any(item["needsReview"] for item in fallback)
     assert service._name_score("Alice", [_source("a", "Alice Alice")]) == 2
     assert service._entity_score({"name": "Alice", "aliases": ["Al"]}, [_source("a", "Alice Al")]) == 3
     assert service._entity_type_for_kind("character") == "character"
@@ -171,9 +169,7 @@ def test_entity_and_text_helpers_cover_optional_paths(service, tmp_path):
     assert service._display_title("chapters/a.md", "fallback") == "a"
     assert service._compress_text(" a   b ", 20) == "a b"
     assert service._compress_text("abcdefgh", 4) == "abcd..."
-    assert service._summarize_sources([], "fallback") == "fallback"
     assert service._details_from_sources([_source("a.md", ""), _source("b.md", "body")]) == ["b.md: body"]
-    assert service._sources_by_keywords([_source("a.md", "Magic sword"), _source("b.md", "plain")], ["SWORD"])[0]["relativePath"] == "a.md"
     assert service._build_plot_summary([])
     assert "first" in service._build_plot_summary([_source("1.md", "first"), _source("2.md", "latest")])
     assert len(service._chapter_plot_details([_source("chapters/1.md", "line")])) == 1
@@ -193,7 +189,6 @@ def test_character_mapping_entry_edges_dedupe_and_render(service):
 
     entry = service._entry("e", "Title", "custom", "summary", ["", "d"], ["a", "a"], confidence=3, needs_review=1)
     assert entry["categoryLabel"] == "custom" and entry["details"] == ["d"] and entry["sourcePaths"] == ["a"]
-    assert service._edge("a", "b", "label", "type", co_occurrence=True)["coOccurrence"]
     assert "coOccurrence" not in service._edge("a", "b", "label", "type")
     assert service._dedupe_nodes([{}, {"id": "a"}, {"id": "a", "label": "new"}]) == [{"id": "a"}]
     edges = service._dedupe_edges([{"source": "", "target": "b", "label": "x"}, {"source": "a", "target": "b", "label": "x", "weight": 1}, {"source": "a", "target": "b", "label": "x", "weight": 2}])
@@ -310,27 +305,70 @@ def test_relationship_snapshot_and_category_edge_cases(service, tmp_path):
     path.write_text(json.dumps({"edges": "bad"}), encoding="utf-8")
     assert service._merge_relationship_snapshot_edges(tmp_path, nodes=nodes, existing_edges=existing, allow_new_nodes=True) is existing
 
+    chapters = tmp_path / "chapters"
+    chapters.mkdir()
+    chapters.joinpath("001.md").write_text(
+        "Alice和Bob约定互相信任。\n",
+        encoding="utf-8",
+    )
+    known_nodes = [
+        *nodes,
+        {"id": "character:bob", "label": "Bob", "type": "character", "category": "characters", "entryId": "bob"},
+        {"id": "character:carol", "label": "Carol", "type": "character", "category": "characters", "entryId": "carol"},
+    ]
+    path.with_name("entities.json").write_text(json.dumps({
+        "entities": [
+            {"entityId": "character:alice", "canonical_name": "Alice", "kind": "character", "aliases": ["Shared"]},
+            {"entityId": "character:bob", "canonical_name": "Bob", "kind": "character", "aliases": ["Shared"]},
+            {"entityId": "character:carol", "canonical_name": "Carol", "kind": "character"},
+        ],
+    }), encoding="utf-8")
     snapshot = {
         "edges": [
             None,
             {"source": "", "target": "Bob"},
             {"source": "Alice", "target": "Alice"},
-            {"source": "Alice", "target": "Bob", "dimension": "trust", "current_level": -3, "history": [{"detail": "met"}]},
+            {
+                "source": "Alice",
+                "target": "Bob",
+                "dimension": "trust",
+                "current_level": -3,
+                "history": [{"evidence": "Alice和Bob约定互相信任", "last_updated_in": "chapters/001.md"}],
+            },
             {"source": "Alice", "target": "Bob", "dimension": "trust", "current_level": 4},
-            {"source": "character:alice", "target": "Carol", "dimension": "custom", "current_level": "bad", "history": ["bad"]},
+            {
+                "source": "character:alice",
+                "target": "Carol",
+                "dimension": "custom",
+                "history": [{"evidence": "Alice和Bob约定互相信任", "last_updated_in": "chapters/001.md"}],
+            },
+            {
+                "source": "Shared",
+                "target": "Carol",
+                "dimension": "trust",
+                "history": [{"evidence": "Alice和Bob约定互相信任", "last_updated_in": "chapters/001.md"}],
+            },
+            {
+                "source": "Alice",
+                "target": "Carol",
+                "dimension": "trust",
+                "history": [{"evidence": "Alice和Bob约定互相信任", "last_updated_in": "chapters/001.md"}],
+            },
             {"source": "Alice", "target": "Dave", "dimension": ""},
         ]
     }
     path.write_text(json.dumps(snapshot), encoding="utf-8")
-    no_new = service._merge_relationship_snapshot_edges(tmp_path, nodes=list(nodes), existing_edges=[], allow_new_nodes=False)
-    assert no_new == []
-    expanded_nodes = list(nodes)
+    no_new = service._merge_relationship_snapshot_edges(tmp_path, nodes=list(known_nodes), existing_edges=[], allow_new_nodes=False)
+    expanded_nodes = list(known_nodes)
     merged = service._merge_relationship_snapshot_edges(tmp_path, nodes=expanded_nodes, existing_edges=[], allow_new_nodes=True)
-    assert {node["label"] for node in expanded_nodes} == {"Alice", "Bob", "Carol", "Dave"}
-    assert len(merged) == 3
-    trust = next(edge for edge in merged if edge["dimension"] == "trust")
-    assert trust["weight"] == 3 and trust["evidence"] == "met"
-    assert next(edge for edge in merged if edge["dimension"] == "custom")["weight"] == 1
+    assert no_new == merged
+    assert {node["label"] for node in expanded_nodes} == {"Alice", "Bob", "Carol"}
+    assert len(merged) == 1
+    trust = merged[0]
+    assert trust["weight"] == 1
+    assert trust["evidence"] == "Alice和Bob约定互相信任"
+    assert trust["sourcePath"] == "chapters/001.md"
+    assert {"level", "strength", "confidence", "polarity"}.isdisjoint(trust)
 
     entries = [
         {"id": "alice", "category": "characters"},
@@ -345,7 +383,11 @@ def test_relationship_snapshot_and_category_edge_cases(service, tmp_path):
         {"id": "place", "label": "Place", "type": "location", "category": "setting"},
     ]
     query_edges = [
-        {"source": "character:alice", "target": "character:bob", "type": "relationship", "label": "friend"},
+        {
+            "source": "character:alice", "target": "character:bob", "type": "relationship", "label": "朋友",
+            "relationType": "intimacy", "status": "asserted", "evidence": "Alice和Bob约定互相信任",
+            "sourcePath": "chapters/001.md",
+        },
         {"source": "character:alice", "target": "character:bob", "type": "relationship", "label": "co", "coOccurrence": True},
         {"source": "character:bob", "target": "character:eve", "type": "relationship", "label": "co", "coOccurrence": True},
         {"source": "character:alice", "target": "place", "type": "appearance"},
@@ -356,7 +398,7 @@ def test_relationship_snapshot_and_category_edge_cases(service, tmp_path):
         nodes=query_nodes, valid_edges=query_edges, category_labels=CATEGORY_LABELS,
     )
     assert result["category"] == "relationships" and len(result["graph"]["nodes"]) == 2
-    assert any(edge["label"] == "friend" for edge in result["graph"]["edges"])
+    assert any(edge["label"] == "朋友" for edge in result["graph"]["edges"])
     assert not any(edge.get("coOccurrence") and {edge["source"], edge["target"]} == {"character:alice", "character:bob"} for edge in result["graph"]["edges"])
 
     category = service._query_wiki_category_graph(

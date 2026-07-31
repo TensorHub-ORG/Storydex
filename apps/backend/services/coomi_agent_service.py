@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -18,6 +19,10 @@ from uuid import uuid4
 
 from services.context_policy import ContextPolicy, context_policy_from_turn_contract
 from services.story_project_service import DEFAULT_CHAPTER_WORD_COUNT_TARGET
+from services.story_word_count_service import (
+    chapter_length_tier_prompt,
+    normalize_chapter_length_tier,
+)
 
 
 STORYDEX_COOMI_HOME = Path.home() / ".storydex"
@@ -33,10 +38,28 @@ _COOMI_ENDPOINT_COMPAT_INSTALLED = False
 _COOMI_HOME_REDIRECTS_INSTALLED = False
 _COOMI_REDIRECT_INSTALL_LOCK = threading.Lock()
 _LOGGER = logging.getLogger(__name__)
+_SEMANTIC_STORY_TOOL_NAME = "submit_story_scene"
+_SEMANTIC_STORY_PARAGRAPH_IDEAL_CHARS = 100
+_SEMANTIC_STORY_PARAGRAPH_MINIMUM = 3
+_SEMANTIC_STORY_PARAGRAPH_MAXIMUM = 14
+_SEMANTIC_STORY_LENGTH_MIN_RATIO = 0.75
+_SEMANTIC_STORY_LENGTH_MAX_RATIO = 1.20
 
 
 class StorydexCoomiUnavailable(RuntimeError):
     pass
+
+
+class StorydexCoomiEmptyResponse(RuntimeError):
+    pass
+
+
+class StorydexToolCallRejected(RuntimeError):
+    """A required tool call reached Storydex without usable arguments."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = str(reason)
 
 
 def _coomi_binding_path(workspace_root: Path, storydex_session_id: str) -> Path:
@@ -517,6 +540,7 @@ class StorydexCoomiAgentService:
                     session=session,
                     workspace_root=workspace_root,
                     app_context=app_context,
+                    turn_contract=turn_contract,
                 )
                 return agent, session
 
@@ -578,6 +602,7 @@ class StorydexCoomiAgentService:
                 session=session,
                 workspace_root=workspace_root,
                 app_context=app_context,
+                turn_contract=turn_contract,
             )
             self._sessions[runtime_key] = session
             self._agents[runtime_key] = agent
@@ -619,6 +644,7 @@ class StorydexCoomiAgentService:
             session=session,
             workspace_root=workspace_root,
             app_context=None,
+            turn_contract=turn_contract,
         )
         status = self.get_status(workspace_root=workspace_root)
         yield _agent_started(session_id=session_id, prompt=prompt, status=status, mode="coomi")
@@ -1110,15 +1136,390 @@ def _resolve_context_window() -> int:
     return DEFAULT_CONTEXT_WINDOW
 
 
-async def _call_provider_chat(provider: Any, messages: list[Dict[str, Any]], options: Any) -> Any:
+def _completion_cap_kwargs(
+    provider: Any,
+    max_completion_tokens: int,
+) -> tuple[Dict[str, int], bool]:
+    """Return a cap only when the concrete Provider declares it explicitly.
+
+    Coomi's generic OpenAI-compatible providers accept ``**kwargs`` but do not
+    forward them. Treating a variadic parameter as support would therefore
+    report a limit that never reached the HTTP request.
+    """
+
+    limit = max(0, int(max_completion_tokens or 0))
+    if limit <= 0:
+        return {}, False
+    concrete = getattr(provider, "_provider", provider)
+    chat = getattr(concrete, "chat", None)
+    if chat is None:
+        return {}, False
+    try:
+        parameters = inspect.signature(chat).parameters
+    except (TypeError, ValueError):
+        return {}, False
+    for name in ("max_completion_tokens", "max_tokens"):
+        parameter = parameters.get(name)
+        if parameter is not None and parameter.kind is not inspect.Parameter.VAR_KEYWORD:
+            return {name: limit}, True
+    return {}, False
+
+
+def _required_tool_choice_kwargs(provider: Any) -> tuple[Dict[str, str], bool]:
+    """Force the single revision tool only when the concrete adapter exposes it."""
+
+    concrete = getattr(provider, "_provider", provider)
+    chat = getattr(concrete, "chat", None)
+    if chat is None:
+        return {}, False
+    try:
+        parameter = inspect.signature(chat).parameters.get("tool_choice")
+    except (TypeError, ValueError):
+        return {}, False
+    if parameter is None or parameter.kind is inspect.Parameter.VAR_KEYWORD:
+        return {}, False
+    return {"tool_choice": "required"}, True
+
+
+async def _call_provider_chat(
+    provider: Any,
+    messages: list[Dict[str, Any]],
+    tools: Any,
+    **kwargs: Any,
+) -> Any:
     chat = getattr(provider, "chat")
     if inspect.iscoroutinefunction(chat):
-        return await chat(messages, options)
+        return await chat(messages, tools, **kwargs)
 
-    response = await asyncio.to_thread(chat, messages, options)
+    response = await asyncio.to_thread(chat, messages, tools, **kwargs)
     if inspect.isawaitable(response):
         return await response
     return response
+
+
+class _OpenAICompatibleCompletionCapAdapter:
+    """Expose a real ``max_tokens`` seam for Coomi's generic chat Provider.
+
+    Coomi's generic OpenAI-compatible ``chat`` accepts variadic kwargs but drops
+    them before constructing the HTTP request.  Storydex keeps that compatibility
+    detail here, next to the bounded Provider adapter: uncapped calls delegate to
+    Coomi unchanged, while a bounded revision makes one direct request through
+    the same Provider client and reuses its response parser.
+    """
+
+    def __init__(self, provider: Any) -> None:
+        object.__setattr__(self, "_provider", provider)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._provider, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "_provider":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._provider, name, value)
+
+    @staticmethod
+    def storydex_revision_budget_policy() -> Dict[str, Any]:
+        # Chat Completions is non-streaming here: unlike prose streaming, no
+        # partial tool arguments are available before the whole response lands.
+        return {
+            "name": "openai_compatible_non_streaming",
+            "deadlineRatio": 1.25,
+            "deadlineMinimumSeconds": 30,
+            "deadlineMaximumSeconds": 60,
+        }
+
+    async def chat(
+        self,
+        messages: list[Dict[str, Any]],
+        tools: Any = None,
+        max_tokens: int | None = None,
+        tool_choice: str = "auto",
+    ) -> Any:
+        limit = max(0, int(max_tokens or 0))
+        if limit <= 0:
+            return await _call_provider_chat(self._provider, messages, tools)
+
+        params = self._provider._build_params(  # noqa: SLF001 - Provider capability seam
+            messages,
+            tools,
+            stream=False,
+            tool_choice=tool_choice,
+        )
+        request = dict(params) if isinstance(params, dict) else {}
+        request["max_tokens"] = limit
+        if tools and "deepseek" in str(getattr(self._provider, "model", "")).casefold():
+            extra_body = (
+                dict(request.get("extra_body"))
+                if isinstance(request.get("extra_body"), dict)
+                else {}
+            )
+            extra_body["thinking"] = {"type": "disabled"}
+            request["extra_body"] = extra_body
+        response = await self._provider.client.chat.completions.create(**request)
+        parsed = self._provider._parse_response(  # noqa: SLF001 - preserve Coomi parsing
+            response,
+            tools_enabled=bool(tools),
+        )
+        choices = list(getattr(response, "choices", None) or [])
+        finish_reason = (
+            getattr(choices[0], "finish_reason", None) if choices else None
+        )
+        if finish_reason is not None:
+            # Coomi's normalized response intentionally omits finish_reason.
+            # Storydex needs only this non-sensitive fact to distinguish a
+            # truncated required-tool JSON object from a genuine empty object.
+            setattr(parsed, "finish_reason", str(finish_reason))
+        return parsed
+
+
+def _adapt_story_generation_provider(provider: Any) -> Any:
+    """Wrap only Providers whose concrete HTTP seam can enforce a real cap."""
+
+    build_params = getattr(provider, "_build_params", None)
+    parse_response = getattr(provider, "_parse_response", None)
+    client = getattr(provider, "client", None)
+    chat = getattr(client, "chat", None)
+    completions = getattr(chat, "completions", None)
+    create = getattr(completions, "create", None)
+    if callable(build_params) and callable(parse_response) and callable(create):
+        return _OpenAICompatibleCompletionCapAdapter(provider)
+    return provider
+
+
+def _semantic_story_output_tool(
+    purpose: str,
+    metadata: Dict[str, Any],
+) -> tuple[list[Dict[str, Any]] | None, int]:
+    if purpose not in {"semantic_budget_scene", "semantic_budget_revision"}:
+        return None, 0
+    try:
+        desired = int(metadata.get("desiredWordCount") or 0)
+    except (TypeError, ValueError):
+        return None, 0
+    if desired <= 0:
+        return None, 0
+
+    paragraph_count = max(
+        _SEMANTIC_STORY_PARAGRAPH_MINIMUM,
+        min(
+            _SEMANTIC_STORY_PARAGRAPH_MAXIMUM,
+            int(round(desired / _SEMANTIC_STORY_PARAGRAPH_IDEAL_CHARS)),
+        ),
+    )
+    per_paragraph = desired / paragraph_count
+    minimum_length = max(
+        20,
+        int(per_paragraph * _SEMANTIC_STORY_LENGTH_MIN_RATIO),
+    )
+    maximum_length = max(
+        minimum_length,
+        int(math.ceil(per_paragraph * _SEMANTIC_STORY_LENGTH_MAX_RATIO)),
+    )
+
+    properties: Dict[str, Any] = {}
+    required: list[str] = []
+    for index in range(1, paragraph_count + 1):
+        name = f"paragraph_{index}"
+        required.append(name)
+        if index == 1:
+            role = "承接紧邻前文并建立当前场景的直接压力，不复述背景"
+        elif index == paragraph_count:
+            role = "明确执行场景计划的 exitHook，形成自然离场或衔接"
+        elif index == paragraph_count - 1:
+            role = "写清行动结果、代价和人物反应，不引入新支线"
+        else:
+            role = "推进 development 中的因果动作、冲突和人物反应"
+        properties[name] = {
+            "type": "string",
+            "minLength": minimum_length,
+            "maxLength": maximum_length,
+            "description": f"第 {index} 个自然段：{role}；只写一到两句中文小说正文。",
+        }
+
+    return (
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": _SEMANTIC_STORY_TOOL_NAME,
+                    "description": (
+                        f"按顺序提交恰好 {paragraph_count} 个自然段的当前小说场景；"
+                        "字段内容拼接后就是最终正文。"
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": properties,
+                        "required": required,
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        ],
+        paragraph_count,
+    )
+
+
+def _semantic_story_tool_messages(
+    messages: list[Dict[str, str]],
+) -> list[Dict[str, str]]:
+    prepared = [dict(message) for message in messages]
+    instruction = (
+        f"如本次请求提供 {_SEMANTIC_STORY_TOOL_NAME} 工具，必须调用该工具提交正文；"
+        "工具字段只是传输结构，不得在字段中输出标题、编号或解释。"
+    )
+    for message in prepared:
+        if message.get("role") == "system":
+            message["content"] = f"{message.get('content') or ''}{instruction}"
+            break
+    else:
+        prepared.insert(0, {"role": "system", "content": instruction})
+    return prepared
+
+
+def _semantic_story_response_content(response: Any, paragraph_count: int) -> str:
+    for call in list(getattr(response, "tool_calls", None) or []):
+        if str(getattr(call, "name", "") or "") != _SEMANTIC_STORY_TOOL_NAME:
+            continue
+        arguments = getattr(call, "arguments", None)
+        if not isinstance(arguments, dict):
+            continue
+        paragraphs = [
+            str(arguments.get(f"paragraph_{index}") or "").strip()
+            for index in range(1, paragraph_count + 1)
+        ]
+        content = "\n\n".join(paragraph for paragraph in paragraphs if paragraph)
+        if content:
+            return content
+    return str(getattr(response, "content", "") or "")
+
+
+def _tool_call_arguments(
+    response: Any,
+    tool_name: str,
+    *,
+    completion_cap_hit: bool = False,
+) -> Dict[str, Any] | None:
+    """Return one named tool call's arguments, or ``None`` if it is absent.
+
+    Providers differ in whether arguments arrive already decoded or as a JSON
+    string, so both are accepted. Anything else — prose instead of a call, a
+    different tool, unparseable arguments — is reported as absent rather than
+    guessed at, because the caller's only safe reaction is to keep its draft.
+    """
+
+    wanted = str(tool_name or "")
+    for call in list(getattr(response, "tool_calls", None) or []):
+        name = str(getattr(call, "name", "") or "")
+        if not name:
+            function = getattr(call, "function", None)
+            name = str(getattr(function, "name", "") or "")
+        if name != wanted:
+            continue
+        arguments = getattr(call, "arguments", None)
+        if arguments is None:
+            function = getattr(call, "function", None)
+            arguments = getattr(function, "arguments", None)
+        parse_error = getattr(call, "parse_error", None)
+        if parse_error:
+            finish_reason = str(
+                getattr(response, "finish_reason", None)
+                or getattr(response, "finishReason", None)
+                or ""
+            ).strip().casefold()
+            reason = (
+                "tool_arguments_truncated"
+                if finish_reason == "length" or completion_cap_hit
+                else "tool_arguments_invalid_json"
+            )
+            raise StorydexToolCallRejected(reason)
+        if arguments is None or (
+            isinstance(arguments, str) and not arguments.strip()
+        ):
+            raise StorydexToolCallRejected("tool_arguments_empty")
+        if isinstance(arguments, dict):
+            if not arguments:
+                raise StorydexToolCallRejected("tool_arguments_empty")
+            return arguments
+        if isinstance(arguments, str) and arguments.strip():
+            try:
+                decoded = json.loads(arguments)
+            except ValueError:
+                finish_reason = str(
+                    getattr(response, "finish_reason", None)
+                    or getattr(response, "finishReason", None)
+                    or ""
+                ).strip().casefold()
+                reason = (
+                    "tool_arguments_truncated"
+                    if finish_reason == "length" or completion_cap_hit
+                    else "tool_arguments_invalid_json"
+                )
+                raise StorydexToolCallRejected(reason)
+            if isinstance(decoded, dict):
+                if not decoded:
+                    raise StorydexToolCallRejected("tool_arguments_empty")
+                return decoded
+            raise StorydexToolCallRejected("tool_arguments_invalid_patch")
+        raise StorydexToolCallRejected("tool_arguments_invalid_patch")
+    return None
+
+
+def _tool_call_diagnostics(
+    response: Any,
+    tool_name: str,
+    *,
+    cap_applied: bool,
+    max_completion_tokens: int,
+    completion_tokens: int | None,
+) -> Dict[str, Any]:
+    """Return response facts safe for events; never include argument text."""
+
+    wanted = str(tool_name or "")
+    target_call: Any = None
+    for call in list(getattr(response, "tool_calls", None) or []):
+        name = str(getattr(call, "name", "") or "")
+        if not name:
+            name = str(getattr(getattr(call, "function", None), "name", "") or "")
+        if name == wanted:
+            target_call = call
+            break
+
+    arguments = getattr(target_call, "arguments", None) if target_call is not None else None
+    if arguments is None and target_call is not None:
+        arguments = getattr(getattr(target_call, "function", None), "arguments", None)
+    raw_arguments = (
+        getattr(target_call, "raw_arguments", None) if target_call is not None else None
+    )
+    parse_error = getattr(target_call, "parse_error", None) if target_call is not None else None
+    finish_reason = str(
+        getattr(response, "finish_reason", None)
+        or getattr(response, "finishReason", None)
+        or ""
+    )
+    limit = max(0, int(max_completion_tokens or 0))
+    cap_hit = bool(
+        cap_applied
+        and limit > 0
+        and completion_tokens is not None
+        and int(completion_tokens) >= limit
+    )
+    return {
+        "finishReason": finish_reason,
+        "targetToolPresent": target_call is not None,
+        "rawArgumentsLength": len(raw_arguments) if isinstance(raw_arguments, str) else None,
+        "toolArgumentsEmpty": bool(
+            target_call is not None
+            and (
+                arguments is None
+                or (isinstance(arguments, dict) and not arguments)
+                or (isinstance(arguments, str) and not arguments.strip())
+            )
+        ),
+        "parseErrorPresent": bool(parse_error),
+        "completionCapHit": cap_hit,
+    }
 
 
 class CoomiStoryGenerationAdapter:
@@ -1134,18 +1535,64 @@ class CoomiStoryGenerationAdapter:
         *,
         trace_id: str,
         provider_id: str = "",
+        provider: Any = None,
         maximum_transport_retries: int = 1,
         event_sink: Callable[[str, Dict[str, Any]], None] | None = None,
         sleep: Callable[[float], Any] = asyncio.sleep,
+        attempt_event_name: str = "SemanticBudgetProviderAttempt",
     ) -> None:
         self.trace_id = str(trace_id or "semantic-budget")
         self.provider_id = str(provider_id or "").strip()
         self.maximum_transport_retries = max(0, min(2, int(maximum_transport_retries)))
         self.event_sink = event_sink
         self.sleep = sleep
+        # Attempt events are named per caller so a bounded story turn does not
+        # report semantic-budget attempts it never made.
+        self.attempt_event_name = str(attempt_event_name or "SemanticBudgetProviderAttempt")
         self.provider_attempts = 0
         self.provider_retries = 0
         self._provider: Any = None
+        self._provider_override = provider
+        self.last_cap_applied = False
+        self.last_completion_tokens: int | None = None
+        self.last_usage: Dict[str, Any] | None = None
+
+    def _capture_response_usage(self, response: Any) -> None:
+        from services.llm_replay import normalize_llm_usage
+
+        usage = normalize_llm_usage(
+            getattr(response, "usage", None),
+            source="provider_response",
+        )
+        self.last_usage = dict(usage) if isinstance(usage, dict) else None
+        output_tokens = usage.get("outputTokens") if isinstance(usage, dict) else None
+        self.last_completion_tokens = (
+            int(output_tokens) if output_tokens is not None else None
+        )
+
+    async def _resolve_provider(self) -> Any:
+        with _storydex_coomi_home():
+            from coomi.services import get_llm_provider
+            from services.llm_replay import get_replayable_llm_provider
+
+            if self._provider is None:
+                raw_provider = self._provider_override
+                if raw_provider is None:
+                    raw_provider = get_llm_provider(self.provider_id or None)
+                raw_provider = _adapt_story_generation_provider(raw_provider)
+                self._provider = get_replayable_llm_provider(raw_provider)
+        return self._provider
+
+    async def revision_budget_policy(self) -> Dict[str, Any]:
+        """Return the bounded deadline capability of the concrete Provider."""
+
+        provider = await self._resolve_provider()
+        concrete = getattr(provider, "_provider", provider)
+        resolver = getattr(concrete, "storydex_revision_budget_policy", None)
+        if not callable(resolver):
+            return {}
+        policy = resolver()
+        return dict(policy) if isinstance(policy, dict) else {}
 
     async def complete(
         self,
@@ -1154,36 +1601,46 @@ class CoomiStoryGenerationAdapter:
         purpose: str,
         metadata: Dict[str, Any],
     ) -> str:
+        tools, paragraph_count = _semantic_story_output_tool(purpose, metadata)
+        provider_messages = (
+            _semantic_story_tool_messages(messages) if tools is not None else messages
+        )
+        attempt_metadata = dict(metadata)
+        if tools is not None:
+            attempt_metadata["structuredOutputParagraphCount"] = paragraph_count
         for retry_index in range(self.maximum_transport_retries + 1):
             self.provider_attempts += 1
             try:
                 with _storydex_coomi_home():
-                    from coomi.services import get_llm_provider
-                    from services.llm_replay import (
-                        get_replayable_llm_provider,
-                        llm_purpose,
-                        llm_trace,
-                    )
+                    from services.llm_replay import llm_purpose, llm_trace
 
-                    if self._provider is None:
-                        raw_provider = get_llm_provider(self.provider_id or None)
-                        self._provider = get_replayable_llm_provider(raw_provider)
+                    provider = await self._resolve_provider()
                     with llm_trace(self.trace_id), llm_purpose(purpose):
-                        response = await _call_provider_chat(self._provider, messages, None)
+                        response = await _call_provider_chat(
+                            provider,
+                            provider_messages,
+                            tools,
+                        )
+                self._capture_response_usage(response)
+                content = _semantic_story_response_content(response, paragraph_count)
+                if tools is not None and not content.strip():
+                    raise StorydexCoomiEmptyResponse(
+                        "Provider returned no semantic story content"
+                    )
                 self._emit_attempt(
                     purpose=purpose,
-                    metadata=metadata,
+                    metadata=attempt_metadata,
                     attempt=retry_index + 1,
                     outcome="success",
                 )
-                return str(getattr(response, "content", "") or "")
+                return content
             except Exception as exc:
                 retryable = _semantic_provider_error_retryable(exc)
                 should_retry = retryable and retry_index < self.maximum_transport_retries
                 delay = _semantic_provider_retry_delay(exc) if should_retry else 0
                 self._emit_attempt(
                     purpose=purpose,
-                    metadata=metadata,
+                    metadata=attempt_metadata,
                     attempt=retry_index + 1,
                     outcome="error",
                     error=exc,
@@ -1197,6 +1654,126 @@ class CoomiStoryGenerationAdapter:
                 if inspect.isawaitable(sleep_result):
                     await sleep_result
         raise RuntimeError("semantic Provider retry loop exited unexpectedly")
+
+    async def complete_tool_call(
+        self,
+        *,
+        messages: list[Dict[str, str]],
+        tool: Dict[str, Any],
+        purpose: str,
+        tool_name: str,
+        max_completion_tokens: int = 0,
+        metadata: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any] | None:
+        """Run one request that must answer with ``tool_name``'s arguments.
+
+        Used by the bounded length revision, which needs structured operations
+        rather than prose. A Provider that cannot take a tool schema raises
+        ``NotImplementedError`` so the caller reports the revision unavailable
+        instead of silently downgrading to a free-text chapter rewrite.
+
+        This method deliberately does not retry: the length patch is the second
+        of at most two logical calls in a turn, and a retry here would spend a
+        third request on a chapter that already has a committable draft.
+        """
+
+        attempt_metadata = dict(metadata or {})
+        attempt_metadata["toolName"] = str(tool_name)
+        attempt_metadata["capApplied"] = False
+        attempt_metadata["completionTokens"] = None
+        self.last_cap_applied = False
+        self.last_completion_tokens = None
+        self.last_usage = None
+        if int(max_completion_tokens or 0) > 0:
+            attempt_metadata["maxCompletionTokens"] = int(max_completion_tokens)
+        tools = [{"type": "function", "function": dict(tool)}]
+        self.provider_attempts += 1
+        try:
+            with _storydex_coomi_home():
+                from services.llm_replay import llm_purpose, llm_trace
+
+                provider = await self._resolve_provider()
+                if not hasattr(provider, "chat"):
+                    raise NotImplementedError("provider does not expose a chat interface")
+                cap_kwargs, cap_applied = _completion_cap_kwargs(
+                    provider,
+                    max_completion_tokens,
+                )
+                tool_choice_kwargs, tool_choice_applied = _required_tool_choice_kwargs(
+                    provider
+                )
+                self.last_cap_applied = cap_applied
+                attempt_metadata["capApplied"] = cap_applied
+                attempt_metadata["toolChoiceApplied"] = tool_choice_applied
+                with llm_trace(self.trace_id), llm_purpose(purpose):
+                    response = await _call_provider_chat(
+                        provider,
+                        messages,
+                        tools,
+                        **cap_kwargs,
+                        **tool_choice_kwargs,
+                    )
+                self._capture_response_usage(response)
+                attempt_metadata["completionTokens"] = self.last_completion_tokens
+        except asyncio.CancelledError as exc:
+            # ``asyncio.wait_for`` cancels the in-flight HTTP coroutine at the
+            # bounded deadline.  Record that single attempt before propagating
+            # cancellation so it cannot look like an unstarted or retried call.
+            self._emit_attempt(
+                purpose=purpose,
+                metadata=attempt_metadata,
+                attempt=1,
+                outcome="error",
+                error=exc,
+            )
+            raise
+        except Exception as exc:
+            # Raised, not swallowed: the controller owns the decision to keep the
+            # draft, and it needs the exception type to tell "no tool support"
+            # apart from a transport failure.
+            self._emit_attempt(
+                purpose=purpose,
+                metadata=attempt_metadata,
+                attempt=1,
+                outcome="error",
+                error=exc,
+            )
+            raise
+
+        diagnostics = _tool_call_diagnostics(
+            response,
+            tool_name,
+            cap_applied=self.last_cap_applied,
+            max_completion_tokens=max_completion_tokens,
+            completion_tokens=self.last_completion_tokens,
+        )
+        attempt_metadata.update(diagnostics)
+        try:
+            arguments = _tool_call_arguments(
+                response,
+                tool_name,
+                completion_cap_hit=bool(diagnostics["completionCapHit"]),
+            )
+            if arguments is None:
+                raise StorydexToolCallRejected("tool_call_absent")
+        except StorydexToolCallRejected as exc:
+            attempt_metadata["toolCallStatus"] = exc.reason
+            self._emit_attempt(
+                purpose=purpose,
+                metadata=attempt_metadata,
+                attempt=1,
+                outcome="error",
+                error=exc,
+            )
+            raise
+        attempt_metadata["toolCallStatus"] = "success"
+        self._emit_attempt(
+            purpose=purpose,
+            metadata=attempt_metadata,
+            attempt=1,
+            outcome="success",
+        )
+        return arguments
 
     def _emit_attempt(
         self,
@@ -1212,9 +1789,9 @@ class CoomiStoryGenerationAdapter:
         if self.event_sink is None:
             return
         self.event_sink(
-            "SemanticBudgetProviderAttempt",
+            self.attempt_event_name,
             {
-                "_type": "SemanticBudgetProviderAttempt",
+                "_type": self.attempt_event_name,
                 "_version": 1,
                 "purpose": purpose,
                 "metadata": dict(metadata),
@@ -1828,12 +2405,35 @@ def _normalize_permission_path(value: str) -> str:
     return str(value or "").strip().replace("\\", "/").casefold()
 
 
+def _turn_contract_allows_project_writes(turn_contract: Dict[str, Any] | None) -> bool:
+    """Resolve the contract's write capability with legacy compatibility."""
+
+    if not isinstance(turn_contract, dict):
+        return True
+    execution = (
+        turn_contract.get("executionPolicy")
+        if isinstance(turn_contract.get("executionPolicy"), dict)
+        else {}
+    )
+    if "directFileWrites" in execution:
+        return bool(execution.get("directFileWrites"))
+    intent = (
+        turn_contract.get("intentFrame")
+        if isinstance(turn_contract.get("intentFrame"), dict)
+        else {}
+    )
+    from services.storydex_intent_service import intent_frame_allows_project_writes
+
+    return intent_frame_allows_project_writes(intent)
+
+
 def _sync_coomi_runtime_workspace(
     *,
     agent: Any,
     session: Any,
     workspace_root: Path,
     app_context: Any,
+    turn_contract: Dict[str, Any] | None = None,
 ) -> None:
     workspace = Path(workspace_root).resolve()
     workspace_text = workspace.as_posix()
@@ -1845,7 +2445,12 @@ def _sync_coomi_runtime_workspace(
     if tool_executor is not None:
         setattr(tool_executor, "project_path", workspace)
         setattr(tool_executor, "app_context", app_context)
-        setattr(tool_executor, "read_only_mode", False)
+        setattr(
+            tool_executor,
+            "read_only_mode",
+            bool(getattr(agent, "plan_mode", False))
+            or not _turn_contract_allows_project_writes(turn_contract),
+        )
         _sync_storydex_tools_workspace(getattr(tool_executor, "tool_registry", None), workspace)
         permission_system = getattr(tool_executor, "permission_system", None)
         if permission_system is not None:
@@ -1900,6 +2505,52 @@ def _create_storydex_tool_registry(
     registry.register(StorydexSyncWikiTool(workspace_root=root))
     registry.register(StorydexWordCountTool(workspace_root=root))
     registry.register(StorydexApplyStoryIncrementTool(workspace_root=root, turn_contract=turn_contract))
+    can_write = _turn_contract_allows_project_writes(turn_contract)
+    execution = (
+        turn_contract.get("executionPolicy")
+        if isinstance(turn_contract, dict)
+        and isinstance(turn_contract.get("executionPolicy"), dict)
+        else {}
+    )
+    allowed_write_roots = (
+        [str(item or "").strip() for item in execution.get("allowedWriteRoots", []) if str(item or "").strip()]
+        if isinstance(execution.get("allowedWriteRoots"), list)
+        else []
+    )
+    if not can_write:
+        from coomi.tools.base import ToolAccess
+        from coomi.tools.registry import ToolRegistry
+
+        read_only_registry = ToolRegistry()
+        for tool in registry.list_tools():
+            if getattr(tool, "access", None) == ToolAccess.READ_ONLY:
+                read_only_registry.register(tool)
+        registry = read_only_registry
+    elif allowed_write_roots:
+        from coomi.tools.base import ToolAccess
+        from coomi.tools.registry import ToolRegistry
+
+        intent = (
+            turn_contract.get("intentFrame")
+            if isinstance(turn_contract, dict)
+            and isinstance(turn_contract.get("intentFrame"), dict)
+            else {}
+        )
+        primary = str(intent.get("primary") or "").strip().lower()
+        operation_type = str(intent.get("operationType") or "").strip().lower()
+        allowed_mutators = {"Write", "Edit"}
+        if primary == "story_generation" and operation_type == "create_new":
+            allowed_mutators.add("StorydexApplyStoryIncrement")
+        if primary == "wiki_work":
+            allowed_mutators.add("StorydexSyncWiki")
+        scoped_registry = ToolRegistry()
+        for tool in registry.list_tools():
+            if (
+                getattr(tool, "access", None) == ToolAccess.READ_ONLY
+                or str(getattr(tool, "name", "")) in allowed_mutators
+            ):
+                scoped_registry.register(tool)
+        registry = scoped_registry
     return registry
 
 
@@ -1975,6 +2626,26 @@ async def _build_coomi_system_prompt(
     skills_dir = (workspace_root / ".storydex" / ".agent" / "skills").as_posix()
     contract_intent = _dict_value(_dict_value(turn_contract).get("intentFrame"))
     contract_operation_type = str(contract_intent.get("operationType") or "").strip().lower()
+    contract_execution = _dict_value(_dict_value(turn_contract).get("executionPolicy"))
+    turn_can_write = bool(contract_execution.get("directFileWrites", True))
+    contract_primary = str(contract_intent.get("primary") or "").strip().lower()
+    domain_tool_names = [
+        "StorydexRuntimePresetStatus",
+        "StorydexVersionStatus",
+        "StorydexHelpGuideSearch",
+        "StorydexWordCount",
+    ]
+    if context_policy.active_retrieval_tools:
+        domain_tool_names.extend(["StorydexProjectSearch", "StorydexWikiQuery"])
+    if not isinstance(turn_contract, dict) or not contract_execution:
+        domain_tool_names.extend(["StorydexSyncWiki", "StorydexApplyStoryIncrement"])
+    elif turn_can_write and contract_primary == "story_generation" and contract_operation_type == "create_new":
+        domain_tool_names.append("StorydexApplyStoryIncrement")
+    elif turn_can_write and contract_primary == "wiki_work":
+        domain_tool_names.append("StorydexSyncWiki")
+    domain_tools_line = "Available Storydex domain tools this turn: " + ", ".join(
+        f"`{name}`" for name in domain_tool_names
+    ) + ". "
     story_options = _render_story_generation_options(
         story_generation,
         operation_type=contract_operation_type,
@@ -1982,9 +2653,8 @@ async def _build_coomi_system_prompt(
     )
     contract_options = _render_turn_contract(turn_contract)
     retrieval_tools_prompt = (
-        "Storydex registers domain tools outside Coomi: `StorydexRuntimePresetStatus`, "
-        "`StorydexVersionStatus`, `StorydexHelpGuideSearch`, `StorydexProjectSearch`, "
-        "`StorydexWikiQuery`, `StorydexSyncWiki`, `StorydexWordCount`, and `StorydexApplyStoryIncrement`. "
+        domain_tools_line
+        +
         "When the user asks how to use Storydex, where a feature is, or how a menu/settings/WIKI/version workflow works, "
         "call `StorydexHelpGuideSearch` before answering and ground the answer in the guide.\n"
         "Retrieval policy for story continuity: before referencing earlier plot details, foreshadowing, "
@@ -1996,8 +2666,8 @@ async def _build_coomi_system_prompt(
         "when confidence is low or needsReview is true, confirm against chapters, character files, or variable memory.\n"
         if context_policy.active_retrieval_tools
         else
-        "Storydex registers domain tools outside Coomi, but active story retrieval is disabled for this execution: "
-        "`StorydexProjectSearch` and `StorydexWikiQuery` are not available. Other Storydex tools remain available. "
+        domain_tools_line
+        + "Active story retrieval is disabled for this execution: `StorydexProjectSearch` and `StorydexWikiQuery` are not available. "
         "Do not claim to have called either disabled tool; rely only on the assembled context and ordinary workspace reads.\n"
     )
     storydex_runtime_prompt = (
@@ -2005,8 +2675,14 @@ async def _build_coomi_system_prompt(
         + f"Storydex project skills live under `{skills_dir}`. "
         + "When a Storydex skill is needed, read the matching skill file from that directory before applying it. "
         + "Do not treat hardcoded prompt text as the skill source of truth.\n"
-        + "Authorized Storydex project file edits are direct writes. Do not create preview/pending-write approval artifacts. "
-        + "At the end of the turn, Storydex records project file changes with a local Git commit automatically; never push to a remote.\n"
+        + (
+            "Authorized Storydex project file edits are direct writes. Do not create preview/pending-write approval artifacts. "
+            "At the end of the turn, Storydex records project file changes with a local Git commit automatically; never push to a remote.\n"
+            if turn_can_write
+            else
+            "This turn is strictly read-only. Respond, discuss, analyse, and use read-only retrieval tools as useful, "
+            "but do not call any state-changing tool, write/edit files, run shell commands, sync WIKI, or apply story increments.\n"
+        )
         + retrieval_tools_prompt
         + "Storydex memory governance: `.storydex/memory/` is only for durable story memory and variables. Never write chat history, "
         + "session transcripts, execution logs, plans, tool output, or temporary drafts there; sessions belong under `.storydex/.agent/sessions/`. "
@@ -2015,7 +2691,7 @@ async def _build_coomi_system_prompt(
         + "`.storydex/temp/` is only a plain optional creative scratch folder: do not inspect or inject it during normal work unless the user asks or the active task explicitly depends on it.\n"
         + "For story creation or continuation turns, use `StorydexApplyStoryIncrement` after drafting fragments to apply structured increments: "
         + "fragments, variableThoughts or variableNotes as readable Markdown, characterUpdates/newCharacters, "
-        + "itemUpdates/newItems, factUpdates, relationshipUpdates, chapterSummary (a 150-300 character rolling "
+        + "itemUpdates/newItems, factUpdates, relationshipUpdates, chapterSummary (a concise rolling "
         + "summary of the chapter so far — pass it every continuation turn to keep mid-range plot context fresh), "
         + "and optional WIKI sync. "
         + "Do not force variable thinking into fixed JSON path/value entries; variableUpdates are optional machine operations only "
@@ -2028,9 +2704,9 @@ async def _build_coomi_system_prompt(
         + "If WIKI is not automatic, ask after variables are applied before passing applyWiki=true. "
         + "All newly mentioned characters must be included in newCharacters or characterUpdates, even when every unknown field is only `未知`.\n"
         + "For story turns, never write or edit `chapters/` with generic Write/Edit tools. The selected fragment count and chapter template "
-        + "are binding execution constraints. Chapter length is a program-measured target rather than a hard per-fragment quota. "
-        + "`StorydexApplyStoryIncrement` validates the whole chapter with the same non-whitespace character counter as the editor. "
-        + "Use returned measurements for any requested revision, and use `StorydexWordCount` to inspect an existing chapter file.\n"
+        + "are binding execution constraints. Chapter length uses one short/medium/long semantic tier and one complete draft. "
+        + "Never add a numeric length, paragraph count, beat quota, continuation, compression, rewrite, or second candidate for a tier miss. "
+        + "Storydex measures the completed chapter internally; use `StorydexWordCount` only to inspect an existing chapter file.\n"
         + story_options
         + contract_options
     )
@@ -2055,10 +2731,18 @@ def _render_story_generation_options(
 ) -> str:
     payload = value if isinstance(value, dict) else {}
     fragment_count = _positive_int(payload.get("fragmentCount"), default=1)
-    chapter_target, accept_min, accept_max = _story_word_count_prompt_values(payload)
+    raw_tier = payload.get("chapterLengthTier", payload.get("chapter_length_tier"))
+    tier_mode = raw_tier is not None
+    chapter_target, accept_min, accept_max = (
+        (0, 0, 0)
+        if tier_mode
+        else _story_word_count_prompt_values(payload)
+    )
     chapter_template = str(payload.get("chapterTemplateId") or payload.get("chapterTemplate") or "").strip()
     length_line = (
-        f"- chapterLengthGuidance: target about {chapter_target} non-whitespace characters; "
+        f"- chapterLengthTier: {chapter_length_tier_prompt(raw_tier)}"
+        if tier_mode and include_length
+        else f"- chapterLengthGuidance: target about {chapter_target} non-whitespace characters; "
         f"{accept_min}-{accept_max} is acceptable"
         if include_length
         else ""
@@ -2110,8 +2794,16 @@ def _render_turn_contract(value: Dict[str, Any] | None) -> str:
         intent_line += f"; matching skills: {', '.join(intent_skills)}"
     status = str(contract.get("status") or "ready")
     fragment_count = _positive_int(turn_plan.get("fragmentCount"), default=1)
-    chapter_target, accept_min, accept_max = _story_word_count_prompt_values(turn_plan)
     word_count_policy = _dict_value(turn_plan.get("wordCountPolicy"))
+    tier_mode = str(word_count_policy.get("mode") or "").strip().lower() == "tier"
+    chapter_length_tier = normalize_chapter_length_tier(
+        turn_plan.get("chapterLengthTier", word_count_policy.get("tier"))
+    )
+    chapter_target, accept_min, accept_max = (
+        (0, 0, 0)
+        if tier_mode
+        else _story_word_count_prompt_values(turn_plan)
+    )
     calibration = _dict_value(word_count_policy.get("calibration"))
     reference_label = (
         "calibrated generation reference"
@@ -2171,22 +2863,39 @@ def _render_turn_contract(value: Dict[str, Any] | None) -> str:
             minimum=0,
             maximum=20000,
         )
-        if reference > 0:
+        if reference > 0 and not tier_mode:
             reference_labels.append(f"{index + 1}:{str(item.get('path') or '')}~{reference}")
-    if fragment_count > 1 and reference_labels:
-        lines.append(
-            "- softFragmentReferences: "
-            + ", ".join(reference_labels)
-            + " non-whitespace characters each; planning references only, never hard per-fragment limits."
+    if not tier_mode and fragment_count > 1 and reference_labels:
+        # 段数模式下不回流每片段字数，否则模型又拿到了一个字数目标。
+        paragraph_quota = _bounded_int(
+            word_count_policy.get("paragraphQuota"), default=0, minimum=0, maximum=1000
         )
+        if paragraph_quota > 0 and target_paths:
+            shares = _split_paragraph_quota(paragraph_quota, len(target_paths))
+            lines.append(
+                "- softFragmentParagraphReferences: "
+                + ", ".join(
+                    f"{index + 1}:{path}~{share}"
+                    for index, (path, share) in enumerate(zip(target_paths, shares))
+                )
+                + " paragraphs each; planning references only. Only the chapter-level "
+                "paragraphQuota below is binding."
+            )
+        else:
+            lines.append(
+                "- softFragmentReferences: "
+                + ", ".join(reference_labels)
+                + " non-whitespace characters each; planning references only, never hard per-fragment limits."
+            )
     # operationType 决定"新建 vs 修改"的执行纪律。这是修复"重构被当成新建、
     # 不断生成新片段"的核心提示词约束。
     if operation_type == "modify_existing":
-        lines.append(
-            f"- wordCountGuidance: {reference_label} is about {chapter_target} Storydex non-whitespace "
-            f"characters; edited chapter content should finish within {accept_min}-{accept_max} when applicable. "
-            "Treat this as a soft editing guide, not a mandate to create new text."
-        )
+        if not tier_mode:
+            lines.append(
+                f"- wordCountGuidance: {reference_label} is about {chapter_target} Storydex non-whitespace "
+                f"characters; edited chapter content should finish within {accept_min}-{accept_max} when applicable. "
+                "Treat this as a soft editing guide, not a mandate to create new text."
+            )
         lines.append(
             "- operationDiscipline (modify_existing): the user wants to restructure/reorganize/rewrite/adjust "
             "or clean up files that ALREADY exist. First READ and understand the relevant existing files "
@@ -2196,23 +2905,51 @@ def _render_turn_contract(value: Dict[str, Any] | None) -> str:
             "authoritative new fragment paths this turn; chapter length is a soft guide for edited content, "
             "not a hard new-fragment quota. StorydexApplyStoryIncrement's new-fragment validation is not enforced."
         )
-    elif primary == "story_generation":
-        lines.append(
-            "- operationDiscipline (create_new): generate new story content into the authoritative fragment paths above. "
-            "The fragment count and chapter template are binding creation constraints; chapter length remains guidance."
+    elif primary == "story_generation" and operation_type in {"", "create_new"}:
+        paragraph_quota_line = (
+            "" if tier_mode else _story_paragraph_quota_prompt_line(word_count_policy)
         )
         lines.append(
-            f"- wordCountGuidance: {reference_label} is about {chapter_target} Storydex non-whitespace "
-            f"characters; the completed chapter should finish within {accept_min}-{accept_max}. "
-            "Complete the core turn, then close naturally near the reference; compress repeated explanation first "
-            "while preserving necessary action, character thought, dialogue, and causal transitions. "
-            "Never pad, repeat, mention the word count, or cut off a scene merely to hit length."
+            "- operationDiscipline (create_new): generate new story content into the authoritative fragment paths above. "
+            "The fragment count and chapter template are binding creation constraints; "
+            + (
+                "chapter length follows the semantic tier below."
+                if tier_mode
+                else
+                "chapter length is set by the paragraphQuota below."
+                if paragraph_quota_line
+                else "chapter length remains guidance."
+            )
+        )
+        if tier_mode:
+            lines.append(chapter_length_tier_prompt(chapter_length_tier))
+        elif paragraph_quota_line:
+            lines.append(paragraph_quota_line)
+        else:
+            lines.append(
+                f"- wordCountGuidance: {reference_label} is about {chapter_target} Storydex non-whitespace "
+                f"characters; the completed chapter should finish within {accept_min}-{accept_max}. "
+                "Complete the core turn, then close naturally near the reference; compress repeated explanation first "
+                "while preserving necessary action, character thought, dialogue, and causal transitions. "
+                "Never pad, repeat, mention the word count, or cut off a scene merely to hit length."
+            )
+    elif operation_type in {"inquiry", "greeting", "other"}:
+        lines.append(
+            "- operationDiscipline (read_only): answer or discuss the request without changing project state. "
+            "Do not create fragment targets, write/edit files, execute shell commands, sync WIKI, or apply story increments."
         )
 
     lines.append(
         "- context: inject active or compiled-safe presets only; use recent active characters and relevant facts, "
         "not a full memory dump. The active preset block below contains binding creative rules for this turn; "
         "follow it faithfully when writing story content."
+        + (
+            " Presets do not decide chapter length: they decide paragraph shape and prose density, "
+            "while the paragraphQuota above decides how many paragraphs the chapter has. Ignore any "
+            "preset wording that claims priority over it or states a target character/word count."
+            if _story_paragraph_quota_prompt_line(word_count_policy)
+            else ""
+        )
     )
     skill_summary = _skill_registry_summary(skill_registry)
     if skill_summary:
@@ -2417,6 +3154,9 @@ def _story_word_count_prompt_values(payload: Dict[str, Any]) -> tuple[int, int, 
         minimum=50,
         maximum=25000,
     )
+    # Legacy/raw prompt fallback only. Current v4 TurnContract payloads carry an
+    # explicit acceptanceMinimum from the product gate (0.85T in target mode), so
+    # this historical 0.70 range is not allowed to override them.
     default_accept_min = max(50, round(minimum * 0.70))
     default_accept_max = round(maximum * 1.30)
     accept_min = _bounded_int(
@@ -2434,6 +3174,50 @@ def _story_word_count_prompt_values(payload: Dict[str, Any]) -> tuple[int, int, 
     if accept_min > accept_max:
         accept_min, accept_max = accept_max, accept_min
     return chapter_target, accept_min, accept_max
+
+
+def _story_paragraph_quota_prompt_line(policy: Dict[str, Any]) -> str:
+    """Render the paragraph quota that replaces character-count guidance.
+
+    Chapter length is delivered as a paragraph count because the model has no
+    representation of character counts but follows a paragraph quota reliably.
+    Chapter size factors as ``paragraphs x characters per paragraph``; the quota
+    claims only the first factor and explicitly hands the second to the active
+    preset, so the two instruction sources cannot contradict each other.
+    Returns an empty string when the turn carries no quota, which lets the
+    caller fall back to the legacy character guidance.
+    """
+
+    quota = _bounded_int(policy.get("paragraphQuota"), default=0, minimum=0, maximum=1000)
+    if quota <= 0:
+        return ""
+    minimum = _bounded_int(
+        policy.get("paragraphQuotaMinimum"), default=quota, minimum=1, maximum=1000
+    )
+    maximum = _bounded_int(
+        policy.get("paragraphQuotaMaximum"), default=quota, minimum=1, maximum=1000
+    )
+    if minimum > maximum:
+        minimum, maximum = maximum, minimum
+    return (
+        f"- paragraphQuota: write the completed chapter as {minimum}-{maximum} paragraphs separated "
+        f"by blank lines (aim for {quota}). This paragraph count is the ONLY length instruction that "
+        "applies this turn: do not aim at any character or word count, and never mention the count "
+        "in the prose. How long each paragraph runs is a style decision owned by the active preset — "
+        "follow the preset for paragraph shape and prose density, and let paragraph lengths vary "
+        "naturally. Never split a sentence across paragraphs to reach the count, and never pad, "
+        "repeat, or summarise to fill one. If the turn's events resolve early, develop action, "
+        "sensory detail, character thought and dialogue instead of restating what already happened."
+    )
+
+
+def _split_paragraph_quota(total: int, parts: int) -> list[int]:
+    """Spread a chapter paragraph quota over fragment files, largest share first."""
+
+    count = max(1, int(parts))
+    base = max(0, int(total)) // count
+    remainder = max(0, int(total)) - base * count
+    return [base + (1 if index < remainder else 0) for index in range(count)]
 
 
 class _StorydexApprovalContext:

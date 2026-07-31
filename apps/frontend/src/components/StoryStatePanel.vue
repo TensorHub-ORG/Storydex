@@ -700,6 +700,7 @@ interface StoryWikiEntry {
   sourcePaths?: string[];
   confidence?: number;
   needsReview?: boolean;
+  knowledgeStatus?: string;
   updatedAt?: string;
 }
 
@@ -720,6 +721,7 @@ interface StoryWikiNodePayload {
   count?: number;
   needsReviewCount?: number;
   needsReview?: boolean;
+  knowledgeStatus?: string;
 }
 
 interface StoryWikiEdgePayload {
@@ -733,6 +735,10 @@ interface StoryWikiEdgePayload {
   coOccurrence?: boolean;
   level?: number;
   dimension?: string;
+  relationType?: string;
+  polarity?: string;
+  strength?: number;
+  status?: string;
 }
 
 interface StoryWikiData {
@@ -743,6 +749,12 @@ interface StoryWikiData {
   lastUpdatedAt?: string;
   lastWorkflow?: string;
   lastWorkflowStatus?: string;
+  schemaVersion?: number;
+  knowledgeRevision?: number;
+  builtFromRevision?: number;
+  lastSuccessfulRevision?: number;
+  status?: string;
+  diagnostics?: Array<Record<string, unknown>>;
   changedSourcePaths?: string[];
   agent?: {
     attempted?: boolean;
@@ -769,6 +781,11 @@ interface StoryWikiGraphQueryResponse {
   nodeId: string;
   depth: number;
   limit: number;
+  schemaVersion?: number;
+  knowledgeRevision?: number;
+  builtFromRevision?: number;
+  lastSuccessfulRevision?: number;
+  status?: string;
   entries: StoryWikiEntry[];
   graph: {
     nodes: StoryWikiNodePayload[];
@@ -834,6 +851,7 @@ interface WikiGraphEdge {
   id: string;
   label: string;
   displayLabel: string;
+  semanticsLabel: string;
   type: string;
   evidence: string;
   synthetic: boolean;
@@ -865,6 +883,8 @@ const wikiGraphQueryData = ref<StoryWikiGraphQueryResponse | null>(null);
 const wikiGraphLoading = ref(false);
 const wikiGraphSearchInput = ref("");
 const wikiGraphSearchQuery = ref("");
+const wikiKnowledgeStatusFilter = ref("all");
+const wikiSyncErrorMessage = ref("");
 const selectedWikiCategory = ref<StoryWikiCategory>("relationships");
 const selectedWikiEntryId = ref("");
 const selectedWikiNodeId = ref("");
@@ -1117,8 +1137,27 @@ const selectedWikiCategoryEntries = computed(() => {
   return wikiEntries.value.filter((entry) => entry.category === category);
 });
 
+function matchesWikiKnowledgeStatus(status: unknown): boolean {
+  const filter = wikiKnowledgeStatusFilter.value;
+  return filter === "all" || String(status || "") === filter;
+}
+
 const visibleWikiEntries = computed(() => {
-  return wikiGraphQueryData.value?.entries ?? selectedWikiCategoryEntries.value;
+  const entries = wikiGraphQueryData.value?.entries ?? selectedWikiCategoryEntries.value;
+  return entries.filter((entry) => matchesWikiKnowledgeStatus(entry.knowledgeStatus));
+});
+
+const wikiProjectionStatus = computed(() => (
+  wikiGraphQueryData.value?.status || wikiData.value?.status || "ready"
+));
+
+const wikiRevisionLabel = computed(() => {
+  const knowledgeRevision = wikiGraphQueryData.value?.knowledgeRevision ?? wikiData.value?.knowledgeRevision;
+  const builtFromRevision = wikiGraphQueryData.value?.builtFromRevision ?? wikiData.value?.builtFromRevision;
+  if (typeof knowledgeRevision !== "number" || typeof builtFromRevision !== "number") {
+    return "";
+  }
+  return `版本 ${knowledgeRevision}/${builtFromRevision}`;
 });
 
 const selectedWikiEntry = computed<StoryWikiEntry | null>(() => {
@@ -1154,7 +1193,15 @@ const selectedWikiRelationEdge = computed<WikiGraphEdge | null>(() => {
 // 节点连接度：驱动节点大小与布局向心力，主干角色一眼可辨。
 const wikiGraphDegrees = computed<Map<string, number>>(() => {
   const degrees = new Map<string, number>();
+  const visibleNodeIds = new Set(
+    (wikiGraphQueryData.value?.graph?.nodes ?? [])
+      .filter((node) => matchesWikiKnowledgeStatus(node.knowledgeStatus))
+      .map((node) => node.id),
+  );
   (wikiGraphQueryData.value?.graph?.edges ?? []).forEach((edge) => {
+    if (!visibleNodeIds.has(edge.source) || !visibleNodeIds.has(edge.target)) {
+      return;
+    }
     degrees.set(edge.source, (degrees.get(edge.source) ?? 0) + 1);
     degrees.set(edge.target, (degrees.get(edge.target) ?? 0) + 1);
   });
@@ -1164,7 +1211,11 @@ const wikiGraphDegrees = computed<Map<string, number>>(() => {
 const wikiIsolatedRawGraphNodes = computed<StoryWikiNodePayload[]>(() => {
   const rawNodes = wikiGraphQueryData.value?.graph?.nodes ?? [];
   const degrees = wikiGraphDegrees.value;
-  return rawNodes.filter((node) => !node.synthetic && (degrees.get(node.id) ?? 0) === 0);
+  return rawNodes.filter((node) => (
+    matchesWikiKnowledgeStatus(node.knowledgeStatus)
+    && !node.synthetic
+    && (degrees.get(node.id) ?? 0) === 0
+  ));
 });
 
 const wikiShouldLimitIsolatedNodes = computed(() => (
@@ -1179,7 +1230,8 @@ const wikiHiddenIsolatedNodeCount = computed(() => (
 ));
 
 const wikiVisibleRawGraphNodes = computed<StoryWikiNodePayload[]>(() => {
-  const rawNodes = wikiGraphQueryData.value?.graph?.nodes ?? [];
+  const rawNodes = (wikiGraphQueryData.value?.graph?.nodes ?? [])
+    .filter((node) => matchesWikiKnowledgeStatus(node.knowledgeStatus));
   if (!wikiShouldLimitIsolatedNodes.value) {
     return rawNodes;
   }
@@ -1201,7 +1253,52 @@ function wikiNodeRadius(node: StoryWikiNodePayload, degree: number): number {
 
 function wikiNodeLabel(value: string): string {
   const trimmed = String(value || "").trim();
-  return trimmed.length <= 12 ? trimmed : `${trimmed.slice(0, 11)}…`;
+  // 优化：从 12 字符提升到 15 字符，减少截断
+  return trimmed.length <= 15 ? trimmed : `${trimmed.slice(0, 14)}…`;
+}
+
+function resolveWikiDisplayLabel(value: unknown): string {
+  const label = normalizeRelationshipGraphText(value);
+  if (!label || /^(?:entity|character|char|event|mention|rel|unresolved):/i.test(label)) {
+    return "未解析实体";
+  }
+  return label;
+}
+
+const WIKI_RELATION_TYPE_LABELS: Record<string, string> = {
+  professional_collaboration: "专业合作",
+  family: "家族",
+  trust: "信任",
+  intimacy: "亲密",
+  hostility: "敌对",
+  loyalty: "忠诚",
+  alliance: "同盟",
+  rivalry: "竞争",
+};
+
+const WIKI_RELATION_POLARITY_LABELS: Record<string, string> = {
+  positive: "正向",
+  neutral: "中立",
+  negative: "负向",
+};
+
+function wikiRelationshipSemanticsLabel(edge: Partial<StoryWikiEdgePayload>): string {
+  const relationType = normalizeRelationshipGraphText(edge.relationType).toLowerCase();
+  const dimension = normalizeRelationshipGraphText(edge.dimension).toLowerCase();
+  const label = WIKI_RELATION_TYPE_LABELS[relationType]
+    || RELATIONSHIP_DIMENSION_LABELS[dimension]
+    || normalizeRelationshipGraphText(edge.label)
+    || "关系";
+  const parts = [label];
+  const polarity = normalizeRelationshipGraphText(edge.polarity).toLowerCase();
+  if (WIKI_RELATION_POLARITY_LABELS[polarity]) {
+    parts.push(WIKI_RELATION_POLARITY_LABELS[polarity]);
+  }
+  if (typeof edge.strength === "number" && Number.isFinite(edge.strength)) {
+    const strength = Math.abs(edge.strength);
+    parts.push(strength >= 0.75 ? "高强度" : strength >= 0.4 ? "中等强度" : "低强度");
+  }
+  return parts.join(" · ");
 }
 
 function recomputeWikiLayout(): void {
@@ -1243,7 +1340,7 @@ const wikiGraphNodes = computed<WikiGraphNode[]>(() => {
   const centerY = wikiCanvasSize.value.height / 2;
   const spread = Math.max(80, Math.min(centerX, centerY) * 0.62);
   return rawNodes.map((node, index) => {
-    const label = normalizeRelationshipGraphText(node.label || node.id);
+    const label = resolveWikiDisplayLabel(node.label || node.id);
     const degree = degrees.get(node.id) ?? 0;
     const angle = (Math.PI * 2 * index) / Math.max(1, rawNodes.length) - Math.PI / 2;
     const fallback = {
@@ -1291,8 +1388,13 @@ const wikiGraphEdges = computed<WikiGraphEdge[]>(() => {
     const parallelIndex = pairSeen.get(pairKey) ?? 0;
     pairSeen.set(pairKey, parallelIndex + 1);
     const label = normalizeRelationshipGraphText(edge.label || edge.type || "关联");
+    const semanticsLabel = edge.type === "relationship"
+      ? wikiRelationshipSemanticsLabel(edge)
+      : label;
     const level = typeof edge.level === "number" ? edge.level : null;
-    const displayLabel = level !== null ? `${label} ${level > 0 ? "+" : ""}${level}` : label;
+    const displayLabel = edge.type === "relationship"
+      ? semanticsLabel.split(" · ")[0]
+      : label;
     const dx = target.x - source.x;
     const dy = target.y - source.y;
     const distance = Math.hypot(dx, dy) || 1;
@@ -1318,6 +1420,7 @@ const wikiGraphEdges = computed<WikiGraphEdge[]>(() => {
       id,
       label,
       displayLabel,
+      semanticsLabel,
       type: normalizeRelationshipGraphText(edge.type || "related").replace(/\s+/g, "-"),
       evidence: normalizeRelationshipGraphText(edge.evidence || ""),
       synthetic: Boolean(edge.synthetic),
@@ -1424,13 +1527,13 @@ const wikiInspectorEmptyHint = computed(() => {
     return `正在展示“${wikiGraphSearchQuery.value}”的搜索结果，点击节点或连线查看详情。`;
   }
   if (selectedWikiCategory.value === "relationships") {
-    return "实线是写作过程中沉淀的真实关系，虚线表示章节共现。点击节点聚焦它的邻居，点击连线查看关系详情。";
+    return "仅展示有项目证据的角色关系。点击节点聚焦它的邻居，点击连线查看关系详情。";
   }
   return "点击节点或连线查看详情；半透明小节点是跨分类的关联上下文。";
 });
 
 const wikiGenerationModeLabel = computed(() => {
-  const mode = wikiData.value?.generationMode || wikiData.value?.generator || "local fallback";
+  const mode = wikiData.value?.generationMode || wikiData.value?.generator || "local evidence-grounded";
   return `生成方式: ${mode}`;
 });
 
@@ -1446,7 +1549,9 @@ const selectedWikiSourceLabel = computed(() => {
   if (!generator) {
     return "";
   }
-  return generator === "local-fallback-wiki" ? "本地推断" : "Agent 生成";
+  return ["local-fallback-wiki", "local-evidence-grounded-wiki"].includes(generator)
+    ? "本地证据"
+    : "Agent 整理";
 });
 
 const wikiWorkflowLabel = computed(() => {
@@ -1949,6 +2054,8 @@ async function syncWiki(): Promise<void> {
     return;
   }
   wikiSyncing.value = true;
+  const previousSyncError = wikiSyncErrorMessage.value;
+  wikiSyncErrorMessage.value = "";
   try {
     const response = await apiClient.post<ApiEnvelope<StoryWikiData>>("/story/wiki/sync");
     const data = unwrapEnvelope(response.data, "Story wiki sync failed.");
@@ -1957,8 +2064,24 @@ async function syncWiki(): Promise<void> {
       ensureWikiSelection();
       await loadWikiGraph(currentWikiGraphQueryParams());
     }
-  } catch {
-    // 自动同步失败静默处理：不打扰创作，手动按钮仍可用。
+    if (previousSyncError && wikiAgentStatus.value === previousSyncError) {
+      wikiAgentStatus.value = "";
+      wikiAgentTone.value = "idle";
+    }
+  } catch (error: unknown) {
+    const reason = describeTransportError(error, "同步请求失败。");
+    wikiSyncErrorMessage.value = `知识图谱自动同步失败：${reason}`;
+    wikiAgentStatus.value = wikiSyncErrorMessage.value;
+    wikiAgentTone.value = "warning";
+    if (wikiData.value) {
+      wikiData.value = {
+        ...wikiData.value,
+        status: "stale",
+        lastSuccessfulRevision: wikiData.value.lastSuccessfulRevision
+          ?? wikiData.value.knowledgeRevision
+          ?? 0,
+      };
+    }
   } finally {
     wikiSyncing.value = false;
     if (wikiSyncPending) {
@@ -2502,6 +2625,8 @@ defineExpose({
     wikiCategoryTabs,
     selectedWikiCategoryEntries,
     visibleWikiEntries,
+    wikiProjectionStatus,
+    wikiRevisionLabel,
     selectedWikiEntry,
     selectedWikiCategoryLabel,
     selectedWikiNode,
@@ -2535,6 +2660,8 @@ defineExpose({
     wikiGraphQueryData,
     wikiGraphSearchInput,
     wikiGraphSearchQuery,
+    wikiKnowledgeStatusFilter,
+    wikiSyncErrorMessage,
     selectedWikiCategory,
     selectedWikiEntryId,
     selectedWikiNodeId,
@@ -2554,6 +2681,8 @@ defineExpose({
     relationshipNodeOverrides,
     wikiNodeRadius,
     wikiNodeLabel,
+    resolveWikiDisplayLabel,
+    wikiRelationshipSemanticsLabel,
     recomputeWikiLayout,
     isWikiNodeDimmed,
     isWikiEdgeDimmed,
@@ -2580,6 +2709,7 @@ defineExpose({
     runWikiAgentWorkflow,
     pollWikiAgentJob,
     refreshPanel,
+    syncWiki,
     ensureWikiSelection,
     ensureWikiGraphSelection,
     normalizeWikiCategory,
@@ -2999,8 +3129,11 @@ defineExpose({
 .ssp-wiki-node-dot {
   fill: var(--wiki-node-color, var(--text-muted));
   stroke: color-mix(in srgb, var(--bg-editor) 85%, transparent);
-  stroke-width: 1.5;
-  transition: fill 140ms ease;
+  stroke-width: 2.5; /* 优化：从 1.5 增加到 2.5 */
+  transition: fill 140ms ease, filter 140ms ease; /* 优化：添加 filter 过渡 */
+}
+.ssp-wiki-node.active .ssp-wiki-node-dot {
+  filter: brightness(1.15) drop-shadow(0 2px 6px var(--wiki-node-color)); /* 优化：添加激活态发光效果 */
 }
 .ssp-wiki-node.needs-review .ssp-wiki-node-dot {
   stroke: color-mix(in srgb, var(--warn, #d9a441) 82%, var(--wiki-node-color, var(--text-muted)));
@@ -3015,7 +3148,7 @@ defineExpose({
 }
 .ssp-wiki-node text {
   fill: var(--text-soft);
-  font-size: 11px;
+  font-size: 13px; /* 优化：从 11px 增加到 13px */
   font-weight: 600;
   paint-order: stroke;
   stroke: color-mix(in srgb, var(--bg-editor) 90%, transparent);
@@ -3023,11 +3156,12 @@ defineExpose({
   stroke-linejoin: round;
   pointer-events: none;
   transition: fill 140ms ease;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.15); /* 优化：增加文本阴影 */
 }
 .ssp-wiki-node:hover .ssp-wiki-node-halo,
 .ssp-wiki-node.active .ssp-wiki-node-halo {
   stroke: color-mix(in srgb, var(--wiki-node-color, var(--accent)) 80%, transparent);
-  fill: color-mix(in srgb, var(--wiki-node-color, var(--accent)) 14%, transparent);
+  fill: color-mix(in srgb, var(--wiki-node-color, var(--accent)) 20%, transparent); /* 优化：从 14% 提升到 20% */
 }
 .ssp-wiki-node:hover text,
 .ssp-wiki-node.active text {

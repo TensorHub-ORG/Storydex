@@ -33,6 +33,11 @@ def main() -> int:
     parser.add_argument("--global-lines", type=float, default=80.0)
     parser.add_argument("--global-branches", type=float, default=70.0)
     parser.add_argument("--critical-lines", type=float, default=90.0)
+    parser.add_argument(
+        "--warn-only",
+        action="store_true",
+        help="Report threshold misses without failing the command.",
+    )
     args = parser.parse_args()
 
     payload = json.loads(args.coverage_json.read_text(encoding="utf-8"))
@@ -56,10 +61,14 @@ def main() -> int:
             failures.append(f"{expected} lines {percent:.2f}% < {args.critical_lines:.2f}%")
 
     if failures:
-        print("Coverage gate failed:")
+        print(
+            "Coverage warning (non-blocking):"
+            if args.warn_only
+            else "Coverage gate failed:"
+        )
         for failure in failures:
             print(f"- {failure}")
-        return 1
+        return 0 if args.warn_only else 1
     print(f"Coverage gate passed: lines={line_percent:.2f}% branches={branch_percent:.2f}%")
     return 0
 

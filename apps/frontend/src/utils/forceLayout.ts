@@ -50,7 +50,7 @@ export function computeForceLayout(
   options: ForceLayoutOptions,
 ): Record<string, { x: number; y: number }> {
   const { width, height } = options;
-  const iterations = options.iterations ?? 300;
+  const iterations = options.iterations ?? 400; // 优化：从 300 提升到 400
   const padding = options.padding ?? 48;
   const safeRect = normalizeSafeRect(options.safeRect, width, height);
   const safeWidth = Math.max(1, safeRect.right - safeRect.left);
@@ -140,17 +140,17 @@ export function computeForceLayout(
           dy = (j - i) || 1;
           distance = Math.hypot(dx, dy);
         }
-        const minGap = (radii.get(nodeA.id)! + radii.get(nodeB.id)!) + 18;
+        const minGap = (radii.get(nodeA.id)! + radii.get(nodeB.id)!) + 28; // 优化：从 18 增加到 28
         // 基础库仑斥力 + 近距离时的强碰撞分离力。
         // 超过 2k 后斥力线性衰减到 0：已经足够远的节点不再互推，
         // 避免松散子图被持续推向画布边角。
         let force = (k * k) / distance;
-        if (distance > k * 2) {
-          const falloff = Math.max(0, 1 - (distance - k * 2) / k);
+        if (distance > k * 1.8) { // 优化：从 2.0 降低到 1.8
+          const falloff = Math.max(0, 1 - (distance - k * 1.8) / k);
           force *= falloff * falloff;
         }
         if (distance < minGap) {
-          force += (minGap - distance) * 0.9;
+          force += (minGap - distance) * 1.1; // 优化：从 0.9 提升到 1.1
         }
         const ux = dx / distance;
         const uy = dy / distance;

@@ -24,7 +24,10 @@ class RelationshipStatement:
 
 
 _DIMENSION_TOKENS = (
-    ("hostility", ("hostility", "enemy", "hostile", "敌对", "仇", "怨")),
+    (
+        "hostility",
+        ("hostility", "enemy", "hostile", "敌对", "敌人", "仇敌", "宿敌", "对立", "欺负", "羞辱", "厌恶", "憎恨", "仇怨", "结怨"),
+    ),
     ("rivalry", ("rivalry", "rival", "竞争", "对手", "较量", "冲突")),
     # 专业关系必须先于泛化的 alliance/“合作”命中。
     (
@@ -45,16 +48,42 @@ _DIMENSION_TOKENS = (
             "上司",
             "下属",
             "同事",
+            "同僚",
+            "合伙人",
         ),
     ),
     ("alliance", ("alliance", "ally", "partner", "同盟", "盟友", "合作", "结盟", "联手", "伙伴")),
-    ("trust", ("trust", "trusted", "信任", "信赖", "不会轻易害人", "托付")),
+    ("trust", ("trust", "trusted", "信任", "信赖", "托付")),
     ("loyalty", ("loyalty", "loyal", "忠诚", "效忠", "追随")),
-    ("intimacy", ("intimacy", "friend", "亲密", "朋友", "友人", "故交", "亲近")),
+    (
+        "intimacy",
+        ("intimacy", "friend", "亲密", "朋友", "挚友", "友人", "故交", "亲近", "爱人", "恋人", "暗恋", "爱慕", "伴侣"),
+    ),
     (
         "family",
-        ("family", "家人", "亲属", "父亲", "母亲", "兄", "弟", "姐", "妹", "妻", "夫", "叔", "姑", "舅", "姨"),
+        (
+            "family", "家人", "亲属", "血亲", "亲生", "家族",
+            "父亲", "母亲", "爸爸", "妈妈", "哥哥", "弟弟", "姐姐", "妹妹",
+            "兄长", "胞兄", "胞弟", "胞姐", "胞妹", "姐弟", "兄妹",
+            "妻子", "丈夫", "夫妻", "叔叔", "姑姑", "舅舅", "姨妈", "姨母",
+        ),
     ),
+)
+
+_UNCERTAINTY_TOKENS = (
+    "可能", "或许", "疑似", "据说", "看似", "待定", "未知", "不确定", "尚不明确", "尚未确认",
+    "如果", "假如", "若是", "计划成为", "希望成为", "打算成为",
+    "maybe", "possibly", "uncertain", "unconfirmed", "rumored",
+)
+
+_NEGATION_TOKENS = (
+    "不是", "并非", "没有", "不存在", "从未", "未曾", "未形成", "不构成", "不再是",
+    "互不", "否认", "无怨无仇", "not ", "no relationship", "never ", "unrelated", "stranger",
+)
+
+_NON_CURRENT_TOKENS = (
+    "曾经是", "曾是", "过去是", "此前是", "原同事", "前同事", "前任同事", "已分手", "已经分手",
+    "former ", "used to be", "ex-",
 )
 
 
@@ -80,6 +109,17 @@ def semantics_for_dimension(dimension: str) -> RelationshipSemantics:
 
 def classify_relationship(description: str) -> RelationshipSemantics:
     normalized = _compact_text(description).lower()
+    dimension_tokens = (
+        token
+        for _dimension, tokens in _DIMENSION_TOKENS
+        for token in tokens
+    )
+    if any(token in normalized for token in (*_UNCERTAINTY_TOKENS, *_NON_CURRENT_TOKENS)):
+        return semantics_for_dimension("unknown")
+    if any(token in normalized for token in _NEGATION_TOKENS) and any(
+        token in normalized for token in dimension_tokens
+    ):
+        return semantics_for_dimension("unknown")
     for dimension, tokens in _DIMENSION_TOKENS:
         if any(token in normalized for token in tokens):
             return semantics_for_dimension(dimension)

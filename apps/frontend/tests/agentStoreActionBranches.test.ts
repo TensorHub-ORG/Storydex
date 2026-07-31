@@ -190,6 +190,7 @@ describe("agent store action fallbacks with an empty workspace", () => {
 
   it("resumes queued follow-ups through executePromptRequest using empty-workspace inputs", async () => {
     const store = useAgentStore();
+    store.setStoryGenerationOptions({ chapterLengthTier: "long" });
     store.currentSessionId = "";
     store.currentTraceId = "";
     store.isRunning = false;
@@ -203,10 +204,14 @@ describe("agent store action fallbacks with an empty workspace", () => {
       expect(request.sourceFollowupMessageId).toBe("resume-1");
       expect(request.sourceFollowupExpectedTraceId).toBe("");
       expect(request.storyGeneration.chapterTemplateId).toBeTruthy();
+      expect(request.storyGeneration.chapterLengthTier).toBe("long");
+      expect(request.storyGeneration).not.toHaveProperty("chapterWordCountTarget");
+      expect(request.storyGeneration).not.toHaveProperty("preciseWordCountEnabled");
       onPacket({ _type: "AgentCompleted" });
     });
     await store.resumeFollowups();
     expect(api.streamAgentPrompt).toHaveBeenCalledTimes(1);
+    expect(api.streamAgentPrompt.mock.calls[0][0].storyGeneration.chapterLengthTier).toBe("long");
 
     // If a run is active after applying the mailbox, resume returns early.
     api.resumeAgentFollowups.mockResolvedValueOnce(mailbox([followupMessage({ messageId: "resume-2" })]));
@@ -228,6 +233,7 @@ describe("agent store action fallbacks with an empty workspace", () => {
 
   it("runs runPrompt and executePromptRequest through the empty-workspace request builder", async () => {
     const store = useAgentStore();
+    store.setStoryGenerationOptions({ chapterLengthTier: "short" });
     store.currentSessionId = "";
     store.promptInput = "  write a chapter  ";
     api.streamAgentPrompt.mockImplementationOnce(async (request: any, onPacket: (packet: any) => void) => {
@@ -235,6 +241,9 @@ describe("agent store action fallbacks with an empty workspace", () => {
       expect(request.workspaceRoot).toBe("");
       expect(request.activeFile).toBe("");
       expect(request.storyGeneration.chapterTemplateId).toBeTruthy();
+      expect(request.storyGeneration.chapterLengthTier).toBe("short");
+      expect(request.storyGeneration).not.toHaveProperty("chapterWordCountTarget");
+      expect(request.storyGeneration).not.toHaveProperty("preciseWordCountEnabled");
       onPacket({ _type: "AgentCompleted" });
     });
     await store.runPrompt();

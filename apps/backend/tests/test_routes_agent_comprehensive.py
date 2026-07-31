@@ -54,22 +54,17 @@ def test_request_workspace_story_options_lock_git_and_sse_helpers(monkeypatch, t
 
     assert routes._normalize_story_generation_options(None) == {
         "fragmentCount": 1,
-        "fragmentWordCount": 3000,
-        "fragmentWordCountMin": 3000,
-        "fragmentWordCountMax": 3000,
-        "chapterWordCountTarget": 3000,
         "chapterTemplateId": "",
+        "preciseWordCountEnabled": False,
     }
     normalized = routes._normalize_story_generation_options(
         {"segmentCount": 99, "segmentWords": "bad", "chapter_template": "serial"}
     )
     assert normalized == {
         "fragmentCount": 99,
-        "fragmentWordCount": 3000,
-        "fragmentWordCountMin": 3000,
-        "fragmentWordCountMax": 3000,
-        "chapterWordCountTarget": 3000,
+        "chapterLengthTier": "medium",
         "chapterTemplateId": "serial",
+        "preciseWordCountEnabled": False,
     }
     assert routes._apply_turn_contract_story_generation_defaults(normalized, {"turnPlan": {}}) is normalized
     applied = routes._apply_turn_contract_story_generation_defaults(normalized, {"turnPlan": {"selectedChapterTemplate": "book"}})
@@ -1504,11 +1499,9 @@ def test_normalize_story_generation_options_reads_snake_and_camel():
     )
     assert normalized == {
         "fragmentCount": 4,
-        "fragmentWordCount": 2000,
-        "fragmentWordCountMin": 1000,
-        "fragmentWordCountMax": 2000,
-        "chapterWordCountTarget": None,
+        "chapterLengthTier": "short",
         "chapterTemplateId": "serial",
+        "preciseWordCountEnabled": False,
     }
     # None payload uses defaults.
     assert routes._normalize_story_generation_options(None)["fragmentCount"] == 1

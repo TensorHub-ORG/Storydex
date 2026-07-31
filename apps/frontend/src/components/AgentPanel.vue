@@ -197,18 +197,21 @@
                 @input="updateStoryFragmentCount"
               />
             </label>
-            <label class="coomi-story-field">
-              <span>每章目标字数</span>
-              <input
-                type="number"
-                min="100"
-                max="20000"
-                step="100"
-                :value="agentStore.chapterWordCountTarget"
-                title="本章正文合计目标字数（Storydex 非空白字符统计）"
-                @input="updateChapterWordCountTarget"
-              />
-            </label>
+            <div v-if="storyLengthTierEnabled" class="coomi-story-field coomi-story-tier-field">
+              <span>本次续写篇幅</span>
+              <div class="coomi-story-tier-control" role="radiogroup" aria-label="本次续写篇幅">
+                <button
+                  v-for="option in chapterLengthTierOptions"
+                  :key="option.value"
+                  type="button"
+                  :class="{ active: agentStore.chapterLengthTier === option.value }"
+                  :aria-pressed="agentStore.chapterLengthTier === option.value"
+                  @click="updateChapterLengthTier(option.value)"
+                >
+                  {{ option.label }}
+                </button>
+              </div>
+            </div>
             <label class="coomi-story-field coomi-story-template-field">
               <span>章节模板</span>
               <select
@@ -233,9 +236,6 @@
             </small>
             <small v-else-if="storyChapterTemplateErrorMessage" class="coomi-story-template-hint error">
               {{ storyChapterTemplateErrorMessage }}
-            </small>
-            <small class="coomi-story-template-hint">
-              3000 是默认目标值。章级正文合计在目标值 ±30% 内均可接受；偏长正文仍会落盘并标记，供作者按需裁剪。Storydex 忽略空白后，每个 Unicode 字符计 1 字。
             </small>
           </div>
         </div>
@@ -595,6 +595,7 @@ import type {
   CoomiWaterfallItemStatus,
   CoomiWaterfallItemType
 } from "@/types/agent";
+import type { ChapterLengthTier } from "@/types/workspace";
 
 type DisplayEntry =
   | { kind: "item"; id: string; item: CoomiWaterfallItem }
@@ -622,6 +623,12 @@ type PendingWriteLike = {
 type PermissionChoice = "plan_mode" | "ask_approval" | "approve_for_me" | "full_access";
 type ReasoningChoice = "auto" | "low" | "medium" | "high";
 type ApprovalDraft = { value: string; text: string };
+
+const chapterLengthTierOptions: Array<{ value: ChapterLengthTier; label: string }> = [
+  { value: "short", label: "短" },
+  { value: "medium", label: "中" },
+  { value: "long", label: "长" }
+];
 
 const TOOL_CHUNK_SIZE = 5;
 const agentStore = useAgentStore();
@@ -803,8 +810,13 @@ const selectedReasoningOption = computed(
   () => reasoningOptions.find((option) => option.value === selectedReasoningMode.value) || reasoningOptions[0]
 );
 const reasoningLabel = computed(() => `推理：${selectedReasoningOption.value.shortLabel}`);
-const storyOptionsLabel = computed(
-  () => `${agentStore.storyFragmentCount}段/章目标${agentStore.chapterWordCountTarget}字`
+const storyLengthTierEnabled = computed(
+  () => workspaceStore.storySettings.storyLengthTierEnabled === true
+);
+const storyOptionsLabel = computed(() =>
+  storyLengthTierEnabled.value
+    ? `${agentStore.storyFragmentCount}片段/${chapterLengthTierLabel(agentStore.chapterLengthTier)}`
+    : `${agentStore.storyFragmentCount}片段`
 );
 const selectedChapterTemplate = computed(() =>
   agentStore.storyChapterTemplates.find((template) => template.id === agentStore.storyChapterTemplateId) || null
@@ -821,7 +833,7 @@ const selectedChapterTemplateDescription = computed(() => {
   const parts = [
     template.description,
     template.segmentNaming ? `文件：${template.segmentNaming}` : "",
-    template.contentMode === "single_file" ? "片段数量固定为 1" : "片段数量不受每章 3 段限制"
+    template.contentMode === "single_file" ? "片段数量固定为 1" : "片段数量不受每章 3 片段限制"
   ].filter(Boolean);
   return parts.join(" · ");
 });
@@ -1073,7 +1085,7 @@ watch(
   () => [
     workspaceStore.currentProject?.workspaceRoot || "",
     workspaceStore.storySettings.storyFragmentCount,
-    workspaceStore.storySettings.chapterWordCountTarget,
+    workspaceStore.storySettings.chapterLengthTier,
     workspaceStore.storySettings.storyChapterTemplateId
   ],
   () => {
@@ -1211,9 +1223,12 @@ function updateStoryFragmentCount(event: Event): void {
   void persistStoryGenerationOptions({ fragmentCount: Number(target?.value || 1) });
 }
 
-function updateChapterWordCountTarget(event: Event): void {
-  const target = event.target as HTMLInputElement | null;
-  void persistStoryGenerationOptions({ chapterWordCountTarget: Number(target?.value || 3000) });
+function chapterLengthTierLabel(tier: ChapterLengthTier): string {
+  return tier === "short" ? "短档" : tier === "long" ? "长档" : "中档";
+}
+
+function updateChapterLengthTier(tier: ChapterLengthTier): void {
+  void persistStoryGenerationOptions({ chapterLengthTier: tier });
 }
 
 function updateStoryChapterTemplate(event: Event): void {
@@ -1233,16 +1248,21 @@ function syncStoryGenerationOptionsFromProjectSettings(): void {
   }
   agentStore.setStoryGenerationOptions({
     fragmentCount: workspaceStore.storySettings.storyFragmentCount,
-    chapterWordCountTarget: workspaceStore.storySettings.chapterWordCountTarget,
+    chapterLengthTier: workspaceStore.storySettings.chapterLengthTier,
     chapterTemplateId: workspaceStore.storySettings.storyChapterTemplateId || "default_chapter_directory"
   });
 }
 
 async function persistStoryGenerationOptions(options: {
   fragmentCount?: number;
-  chapterWordCountTarget?: number;
+  chapterLengthTier?: ChapterLengthTier;
   chapterTemplateId?: string;
 }): Promise<void> {
+  const previousOptions = {
+    fragmentCount: agentStore.storyFragmentCount,
+    chapterLengthTier: agentStore.chapterLengthTier,
+    chapterTemplateId: agentStore.storyChapterTemplateId
+  };
   storyOptionsEditing.value = true;
   agentStore.setStoryGenerationOptions(options);
   if (workspaceStore.launchScreenVisible || !workspaceStore.currentProject) {
@@ -1251,10 +1271,11 @@ async function persistStoryGenerationOptions(options: {
   try {
     await workspaceStore.updateStorySettings({
       storyFragmentCount: agentStore.storyFragmentCount,
-      chapterWordCountTarget: agentStore.chapterWordCountTarget,
+      chapterLengthTier: agentStore.chapterLengthTier,
       storyChapterTemplateId: agentStore.storyChapterTemplateId
     });
   } catch (error: unknown) {
+    agentStore.setStoryGenerationOptions(previousOptions);
     console.warn("Failed to persist Storydex story generation options.", error);
   }
 }
@@ -2070,7 +2091,7 @@ defineExpose({
     toggleStoryOptions,
     handleDocumentPointerDown,
     updateStoryFragmentCount,
-    updateChapterWordCountTarget,
+    updateChapterLengthTier,
     updateStoryChapterTemplate,
     syncStoryGenerationOptionsFromProjectSettings,
     persistStoryGenerationOptions,
@@ -3156,8 +3177,42 @@ defineExpose({
   text-overflow: ellipsis;
 }
 
+.coomi-story-tier-control {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--bg-input) 86%, black);
+}
+
+.coomi-story-tier-control button {
+  min-width: 0;
+  height: 100%;
+  padding: 0 6px;
+  border: 0;
+  border-right: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.coomi-story-tier-control button:last-child {
+  border-right: 0;
+}
+
+.coomi-story-tier-control button.active {
+  background: color-mix(in srgb, var(--accent) 22%, var(--bg-input));
+  color: var(--text-main);
+}
+
 .coomi-story-field input:focus,
-.coomi-story-field select:focus {
+.coomi-story-field select:focus,
+.coomi-story-tier-control:focus-within {
   border-color: var(--accent);
 }
 

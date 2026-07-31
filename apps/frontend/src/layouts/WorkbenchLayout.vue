@@ -50,7 +50,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import ActivityBar from "@/components/ActivityBar.vue";
 import AgentPanel from "@/components/AgentPanel.vue";
 import EditorPane from "@/components/EditorPane.vue";
@@ -82,8 +82,21 @@ const MIN_EDITOR_WIDTH = 480;
 const MIN_SIDEBAR_WIDTH = 220;
 const MIN_AGENT_WIDTH = 320;
 
+const viewportWidth = ref(Math.max(0, window.innerWidth));
+const compactViewport = computed(
+  () => viewportWidth.value
+    < ACTIVITY_BAR_WIDTH
+      + uiStore.sidebarWidth
+      + SPLITTER_WIDTH
+      + MIN_EDITOR_WIDTH
+      + AGENT_SPLITTER_WIDTH
+      + MIN_AGENT_WIDTH
+);
+
 const relationshipGraphMode = computed(() => uiStore.activeActivity === "relationships");
-const showStorydexSidebar = computed(() => !uiStore.sidebarCollapsed && !relationshipGraphMode.value);
+const showStorydexSidebar = computed(
+  () => !compactViewport.value && !uiStore.sidebarCollapsed && !relationshipGraphMode.value
+);
 const showAgentPanel = computed(() => !uiStore.agentCollapsed && !workspaceStore.launchScreenVisible);
 const sidebarComponent = computed(() => {
   if (uiStore.activeActivity === "source-control") {
@@ -107,7 +120,7 @@ const workspaceStyle = computed(() => {
   const leadColumns = showStorydexSidebar.value
     ? [`${ACTIVITY_BAR_WIDTH}px`, `${sidebarWidth}px`, `${SPLITTER_WIDTH}px`]
     : [`${ACTIVITY_BAR_WIDTH}px`];
-  const editorMinWidth = relationshipGraphMode.value ? 0 : MIN_EDITOR_WIDTH;
+  const editorMinWidth = compactViewport.value || relationshipGraphMode.value ? 0 : MIN_EDITOR_WIDTH;
   const editorColumn = `minmax(${editorMinWidth}px, 1fr)`;
 
   if (!showAgentPanel.value) {
@@ -116,9 +129,31 @@ const workspaceStyle = computed(() => {
     };
   }
 
+  const leadWidth = ACTIVITY_BAR_WIDTH
+    + (showStorydexSidebar.value ? sidebarWidth + SPLITTER_WIDTH : 0);
+  const availableAgentWidth = Math.max(
+    0,
+    viewportWidth.value - leadWidth - AGENT_SPLITTER_WIDTH - editorMinWidth
+  );
+  const renderedAgentWidth = Math.min(agentWidth, availableAgentWidth);
+
   return {
-    gridTemplateColumns: [...leadColumns, editorColumn, `${AGENT_SPLITTER_WIDTH}px`, `min(${agentWidth}px, 100vw)`].join(" ")
+    gridTemplateColumns: [
+      ...leadColumns,
+      editorColumn,
+      `${AGENT_SPLITTER_WIDTH}px`,
+      `${renderedAgentWidth}px`
+    ].join(" ")
   };
+});
+
+function updateViewportWidth(): void {
+  viewportWidth.value = Math.max(0, window.innerWidth);
+}
+
+onMounted(() => {
+  updateViewportWidth();
+  window.addEventListener("resize", updateViewportWidth, { passive: true });
 });
 
 watch(
@@ -184,6 +219,7 @@ function startResize(target: "sidebar" | "agent", event: PointerEvent): void {
 
 onBeforeUnmount(() => {
   document.body.classList.remove("is-resizing-panels");
+  window.removeEventListener("resize", updateViewportWidth);
 });
 
 function clamp(value: number, min: number, max: number): number {

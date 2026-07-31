@@ -29,3 +29,30 @@ def test_relationship_semantics_keep_professional_and_unknown_distinct():
     assert unresolved.polarity == "unknown"
     assert unresolved.strength is None
     assert unresolved.status == "unresolved"
+
+
+def test_uncertain_relationship_claim_is_not_promoted_even_with_known_keyword():
+    uncertain = classify_relationship("据说两人可能是朋友，尚未确认")
+    romantic = classify_relationship("她一直暗恋对方")
+
+    assert uncertain.relation_type == "unknown"
+    assert uncertain.status == "unresolved"
+    assert romantic.relation_type == "intimacy"
+    assert romantic.status == "asserted"
+
+
+def test_negated_or_ambiguous_relationship_text_is_not_promoted():
+    for description in (
+        "两人不是朋友，只是互不认识的陌生人",
+        "她并非他的敌人",
+        "他们不再是同事",
+        "双方没有合作，也不存在信任",
+        "二人无怨无仇",
+        "两人曾经是朋友",
+        "他们计划成为合作伙伴",
+    ):
+        semantics = classify_relationship(description)
+        assert semantics.relation_type == "unknown"
+        assert semantics.status == "unresolved"
+
+    assert classify_relationship("共同练习功夫").relation_type == "unknown"

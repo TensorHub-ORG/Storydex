@@ -159,3 +159,97 @@ def test_unavailable_and_command_failure_paths(monkeypatch, tmp_path: Path):
     with pytest.raises(GitServiceError) as started:
         service._run_git(workspace, ["status"])
     assert started.value.code == "git_service_error"
+
+
+def test_summary_head_tracks_real_head_after_restore(git_service: GitService, tmp_path: Path):
+    """`head` must come from HEAD, never from the newest `log --all` entry.
+
+    History is read with `--all` so restore backups stay recoverable, but that
+    makes the newest logged commit unrelated to what is checked out. Deriving
+    `head` from the log made the panel mark the wrong row as current and report a
+    stale "latest commit" after any restore.
+    """
+    workspace = tmp_path / "restore"
+    workspace.mkdir()
+    ids = []
+    for index in range(4):
+        (workspace / f"c{index}.md").write_text(f"body {index}\n", encoding="utf-8")
+        ids.append(git_service.commit_all(workspace, message=f"c{index}")["commit"]["id"])
+
+    target_id = ids[1]
+    git_service.restore_to_commit(workspace, commit_id=target_id, create_backup=True)
+
+    summary = git_service.read_summary(workspace)
+    real_head = git_service._run_git(workspace, ["rev-parse", "HEAD"]).strip()
+    assert summary["head"]["id"] == real_head == target_id
+    # The abandoned commits stay listed (recoverable) but are tagged as off-branch
+    # so the panel can group them instead of implying they are current history.
+    # Do not assert their position: commits created in the same second can be
+    # ordered differently by `git log --all` across Git versions and platforms.
+    on_branch = [item for item in summary["recentCommits"] if item["onCurrentBranch"]]
+    off_branch = [item for item in summary["recentCommits"] if not item["onCurrentBranch"]]
+    assert {item["id"] for item in on_branch} == set(ids[:2])
+    assert {item["id"] for item in off_branch} == set(ids[2:])
+    # Exactly one row can be "current".
+    assert sum(1 for item in summary["recentCommits"] if item["id"] == summary["head"]["id"]) == 1
+
+
+def test_concurrent_commits_do_not_lose_changes(git_service: GitService, tmp_path: Path):
+    """Parallel commits must not drop files or collide on the index.
+
+    A worktree has one index, so unsynchronized `add -A`/`commit` pairs raced:
+    callers hit `index.lock` failures and files were left uncommitted. That is
+    why committing a single new file often produced no history entry while
+    pasting many files did — the small change lost the race.
+    """
+    import threading
+
+    workspace = tmp_path / "parallel"
+    workspace.mkdir()
+    (workspace / "seed.md").write_text("seed\n", encoding="utf-8")
+    git_service.commit_all(workspace, message="seed")
+
+    errors: list[str] = []
+    expected_files = [f"file-{index}.md" for index in range(12)]
+
+    def worker(name: str) -> None:
+        try:
+            (workspace / name).write_text(f"content {name}\n", encoding="utf-8")
+            git_service.commit_all(workspace, message=f"commit {name}")
+        except Exception as exc:  # noqa: BLE001 - the assertion below reports it
+            errors.append(f"{name}: {exc}")
+
+    threads = [threading.Thread(target=worker, args=(name,)) for name in expected_files]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    summary = git_service.read_summary(workspace)
+    assert summary["clean"] is True
+    assert summary["changedFiles"] == []
+    # Every file must be tracked by HEAD; `commit_all` may legitimately batch
+    # several files into one commit, but nothing may be left behind.
+    tracked = set(git_service._run_git(workspace, ["ls-tree", "-r", "--name-only", "HEAD"]).splitlines())
+    assert set(expected_files) <= tracked
+
+
+def test_single_new_file_commit_appears_in_history(git_service: GitService, tmp_path: Path):
+    """The reported symptom: one new file must produce a visible commit."""
+    workspace = tmp_path / "single"
+    workspace.mkdir()
+    (workspace / "start.md").write_text("start\n", encoding="utf-8")
+    git_service.commit_all(workspace, message="start")
+
+    (workspace / "brand-new.md").write_text("just created\n", encoding="utf-8")
+    result = git_service.commit_all(workspace, message="user: single new file")
+    assert result["created"] is True
+
+    summary = git_service.read_summary(workspace)
+    assert summary["head"]["subject"] == "user: single new file"
+    assert summary["clean"] is True
+    subjects = [item["subject"] for item in summary["recentCommits"]]
+    assert "user: single new file" in subjects
+    # The client relies on this stamp to discard stale summary responses.
+    assert float(summary["generatedAt"]) > 0

@@ -6,7 +6,7 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Request
@@ -14,6 +14,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from api.response import ApiEnvelope, ApiTrace, success_response
 from core.bounded_text_io import read_text_preview as read_bounded_text_preview
+from core.config import FEATURE_FLAG_DEFAULTS
+from core.feature_flags import FeatureFlags
 from services.project_service import get_project_service
 from services.story_relationship_semantics import (
     classify_relationship,
@@ -24,6 +26,7 @@ from services.story_project_service import (
     DEFAULT_CHAPTER_WORD_COUNT_TARGET,
     get_story_project_service,
 )
+from services.story_word_count_service import DEFAULT_CHAPTER_LENGTH_TIER
 
 router = APIRouter(tags=["story"])
 project_service = get_project_service()
@@ -37,10 +40,19 @@ class StoryProjectSettingsResponse(BaseModel):
     segment_naming_mode: str = Field(alias="segmentNamingMode")
     max_segments_per_chapter: int = Field(alias="maxSegmentsPerChapter")
     story_fragment_count: int = Field(default=1, alias="storyFragmentCount")
+    story_length_tier_enabled: bool = Field(
+        default=False,
+        alias="storyLengthTierEnabled",
+    )
+    chapter_length_tier: Literal["short", "medium", "long"] = Field(
+        default=DEFAULT_CHAPTER_LENGTH_TIER,
+        alias="chapterLengthTier",
+    )
     chapter_word_count_target: int = Field(default=DEFAULT_CHAPTER_WORD_COUNT_TARGET, alias="chapterWordCountTarget")
     story_fragment_word_count: int = Field(default=DEFAULT_CHAPTER_WORD_COUNT_TARGET, alias="storyFragmentWordCount")
     story_fragment_word_count_min: int = Field(default=DEFAULT_CHAPTER_WORD_COUNT_TARGET, alias="storyFragmentWordCountMin")
     story_fragment_word_count_max: int = Field(default=DEFAULT_CHAPTER_WORD_COUNT_TARGET, alias="storyFragmentWordCountMax")
+    precise_word_count_enabled: bool = Field(default=False, alias="preciseWordCountEnabled")
     story_chapter_template_id: str = Field(default="default_chapter_directory", alias="storyChapterTemplateId")
     auto_update_variables: bool = Field(default=False, alias="autoUpdateVariables")
     auto_update_wiki: bool = Field(default=False, alias="autoUpdateWiki")
@@ -66,10 +78,15 @@ class StoryProjectSettingsUpdateRequest(BaseModel):
     segment_naming_mode: Optional[str] = Field(default=None, alias="segmentNamingMode")
     max_segments_per_chapter: Optional[int] = Field(default=None, alias="maxSegmentsPerChapter")
     story_fragment_count: Optional[int] = Field(default=None, alias="storyFragmentCount")
+    chapter_length_tier: Optional[Literal["short", "medium", "long"]] = Field(
+        default=None,
+        alias="chapterLengthTier",
+    )
     chapter_word_count_target: Optional[int] = Field(default=None, alias="chapterWordCountTarget")
     story_fragment_word_count: Optional[int] = Field(default=None, alias="storyFragmentWordCount")
     story_fragment_word_count_min: Optional[int] = Field(default=None, alias="storyFragmentWordCountMin")
     story_fragment_word_count_max: Optional[int] = Field(default=None, alias="storyFragmentWordCountMax")
+    precise_word_count_enabled: Optional[bool] = Field(default=None, alias="preciseWordCountEnabled")
     story_chapter_template_id: Optional[str] = Field(default=None, alias="storyChapterTemplateId")
     auto_update_variables: Optional[bool] = Field(default=None, alias="autoUpdateVariables")
     auto_update_wiki: Optional[bool] = Field(default=None, alias="autoUpdateWiki")
@@ -184,6 +201,10 @@ def _settings_response_payload() -> StoryProjectSettingsResponse:
     settings = story_project_service.read_project_settings(root)
     return StoryProjectSettingsResponse(
         **settings,
+        storyLengthTierEnabled=FeatureFlags(
+            root,
+            FEATURE_FLAG_DEFAULTS,
+        ).get_bool("STORY_LENGTH_TIER_ENABLED"),
         settingsPath=story_project_service.project_settings_path(root).relative_to(root).as_posix(),
         chapterProgressPath=story_project_service.chapter_progress_path(root).relative_to(root).as_posix(),
         snapshotRoot=(story_project_service.storydex_root(root) / "memory" / "chapters").relative_to(root).as_posix(),

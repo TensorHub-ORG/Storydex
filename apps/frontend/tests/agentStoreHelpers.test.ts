@@ -7,13 +7,21 @@ const u = __agentStoreTestUtils!;
 const packet = (value: Record<string, unknown>) => value as never;
 
 describe("agent store deterministic helpers", () => {
-  it("uses the product chapter target as the initial generation default", () => {
+  it("uses the medium tier as the generation default and keeps legacy migration local", () => {
     setActivePinia(createPinia());
     const store = useAgentStore();
+    expect(store.chapterLengthTier).toBe("medium");
     expect(store.chapterWordCountTarget).toBe(3000);
     expect(store.storyFragmentWordCount).toBe(3000);
     expect(store.storyFragmentWordCountMin).toBe(3000);
     expect(store.storyFragmentWordCountMax).toBe(3000);
+    expect(store.preciseWordCountEnabled).toBe(false);
+    store.setStoryGenerationOptions({ chapterWordCountTarget: 2000 });
+    expect(store.chapterLengthTier).toBe("short");
+    store.setStoryGenerationOptions({ chapterLengthTier: "long", chapterWordCountTarget: 1000 });
+    expect(store.chapterLengthTier).toBe("long");
+    store.setStoryGenerationOptions({ preciseWordCountEnabled: true });
+    expect(store.preciseWordCountEnabled).toBe(false);
   });
 
   it("maps packet phase, status, detail, and waterfall variants", () => {
@@ -145,6 +153,25 @@ describe("agent store deterministic helpers", () => {
     }));
     expect(overBudgetSummary).toContain("建议作者按需裁剪");
     expect(u.statusForPacket("StoryGenerationValidation", packet({ passed: true, overBudget: true }))).toBe("warning");
+    const tierSummary = u.summarizeStoryGenerationValidationPacket(packet({
+      passed: true,
+      writeToolApplied: true,
+      chapterLengthTier: "short",
+      actualWordCount: 1500,
+      tierHit: false,
+      structurePassed: true,
+      machineQualityPassed: true
+    }));
+    expect(tierSummary).toContain("章节已写入 · 本次续写：1500 字");
+    expect(tierSummary).toContain("短档");
+    expect(tierSummary).toContain("档位未命中");
+    expect(tierSummary).not.toContain("目标");
+    expect(tierSummary).not.toContain("可接受");
+    expect(u.statusForPacket("StoryGenerationValidation", packet({
+      passed: true,
+      chapterLengthTier: "short",
+      tierHit: false
+    }))).toBe("warning");
     expect(u.summarizePresetCompileFailures({ notes: [] })).toBe("");
     expect(u.summarizePresetCompileFailures({ notes: ["preset_compile_failed:", "preset_compile_failed: one", "preset_compile_failed: two", "preset_compile_failed: three"] })).toBeTruthy();
     expect(u.summarizeContextAssembly({})).toBe("");
@@ -154,6 +181,118 @@ describe("agent store deterministic helpers", () => {
     expect(u.summarizeCompressionPacket(packet({ status: "completed", before_tokens: 100, after_tokens: 50, summary: "short" }))).toBeTruthy();
     expect(u.summarizeCompressionPacket(packet({ action: "start" }))).toBeTruthy();
     expect(u.extractCompressionMeta(packet({ compression: { before: 1 }, before_tokens: 2 }))).toBeTruthy();
+  });
+
+  it("shows a committed short draft as a visible warning", () => {
+    const validation = packet({
+      _type: "StoryGenerationValidation",
+      passed: true,
+      belowBudget: true,
+      overBudget: false,
+      generatedWordCount: 1900,
+      chapterWordCountTarget: 3000,
+      acceptWordCountMin: 2100,
+      acceptWordCountMax: 3900
+    });
+
+    expect(u.statusForPacket("StoryGenerationValidation", validation)).toBe("warning");
+    expect(u.summarizeStoryGenerationValidationPacket(validation)).toContain("已保留结构完整首稿");
+  });
+
+  it("shows a precise miss as a written chapter warning, not a generation failure", () => {
+    const validation = packet({
+      _type: "StoryGenerationValidation",
+      passed: true,
+      writeToolApplied: true,
+      finalWordCount: 3707,
+      canonicalWordCount: 3707,
+      chapterWordCountTarget: 3000,
+      preciseWordCountEnabled: true,
+      normalBandPassed: true,
+      precisionAchieved: false,
+      lengthControlStrategy: "elastic_manuscript_v1",
+      selectedEditIds: [],
+      lengthFallbackReason: "repair_outside_band",
+      generatedOverheadRatio: null
+    });
+
+    expect(u.statusForPacket("StoryGenerationValidation", validation)).toBe("warning");
+    const summary = u.summarizeStoryGenerationValidationPacket(validation);
+    expect(summary).toContain("章节已写入，字数 3707");
+    expect(summary).toContain("未达到精确范围 2700-3300");
+    expect(summary).not.toContain("生成失败");
+    expect(summary).not.toContain("待复核");
+  });
+
+  it("shows whole-chapter measurements, revision outcome, and prose-only call accounting", () => {
+    const tierDraft = u.streamPacketToWaterfallItem("tier-trace", packet({
+      _type: "StoryDraftMeasured",
+      wordCountScope: "candidate",
+      actualWordCount: 1200,
+      initialWordCount: 1200,
+      generatedWordCount: 1200,
+      retainedWordCount: 2600,
+      resultingWordCount: 3800,
+      chapterLengthTier: "short",
+      tierHit: true
+    }), []);
+    expect(tierDraft?.content).toContain("本次续写：1200 字");
+    expect(tierDraft?.content).toContain("落盘后本章：3800 字");
+    expect(tierDraft?.content).not.toContain("首稿整章");
+
+    const draft = u.streamPacketToWaterfallItem("trace", packet({
+      _type: "StoryDraftMeasured",
+      initialWordCount: 2860,
+      retainedWordCount: 2600,
+      generatedWordCount: 260
+    }), []);
+    expect(draft?.content).toContain("首稿整章：2860 字");
+    expect(draft?.content).toContain("保留正文：2600 字");
+    expect(draft?.content).toContain("本轮新增：260 字");
+
+    const revision = u.streamPacketToWaterfallItem("trace", packet({
+      _type: "StoryLengthRevisionResult",
+      candidateWordCount: 350,
+      accepted: true
+    }), []);
+    expect(revision?.content).toContain("字数修订：已触发");
+    expect(revision?.content).toContain("候选新增正文：350 字");
+
+    const validation = u.summarizeStoryGenerationValidationPacket(packet({
+      passed: true,
+      initialWordCount: 2860,
+      finalWordCount: 2950,
+      revisionApplied: true,
+      callAccounting: { lengthRevisionCalls: 1 }
+    }));
+    expect(validation).toContain("首稿整章 2860 字");
+    expect(validation).toContain("最终整章 2950 字");
+    expect(validation).toContain("字数修订：已触发并采用");
+
+    const noRevision = u.summarizeStoryGenerationValidationPacket(packet({
+      passed: true,
+      initialWordCount: 3010,
+      finalWordCount: 3010,
+      revisionApplied: false,
+      callAccounting: { lengthRevisionCalls: 0 }
+    }));
+    expect(noRevision).toContain("字数修订：未触发");
+
+    const accounting = u.streamPacketToWaterfallItem("trace", packet({
+      _type: "StoryCallAccounting",
+      logicalStoryCalls: 2,
+      initialGenerationCalls: 1,
+      lengthRevisionCalls: 1,
+      providerAttempts: 3,
+      transportRetries: 1,
+      nonProseCalls: { intent_recognition: 1 }
+    }), []);
+    expect(accounting?.content).toContain("正文逻辑调用：2 次");
+    expect(accounting?.content).toContain("首稿 1");
+    expect(accounting?.content).toContain("长度修订 1");
+    expect(accounting?.content).toContain("正文 Provider 尝试：3 次");
+    expect(accounting?.content).toContain("传输重试：1 次");
+    expect(accounting?.content).not.toContain("意图识别");
   });
 
   it("removes tool markup and DSML without hiding ordinary model text", () => {

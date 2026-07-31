@@ -184,8 +184,61 @@ function shouldCopyPythonRuntime(sourcePath) {
   if (!shouldCopyPythonEnv(sourcePath)) return false;
   const normalized = String(sourcePath).replace(/\\/g, "/").toLowerCase();
   if (normalized.endsWith("/pyvenv.cfg")) return false;
-  if (normalized.includes("/lib/site-packages/")) return false;
+  if (/(^|\/)lib\/site-packages(?:\/|$)/i.test(normalized)) return false;
   return true;
+}
+
+const PYTHON_LIBRARY_BIN_ALLOWLIST = [
+  /^(?:lib)?(?:crypto|ssl)[^/]*\.dll$/i,
+  /^(?:lib)?(?:bz2|expat|ffi|iconv|intl|lzma|mpdec|sqlite3?|uuid|zlib|zstd)[^/]*\.dll$/i
+];
+
+function shouldCopyPythonBaseRuntime(sourcePath, sourceRoot) {
+  if (!shouldCopyPythonRuntime(sourcePath)) return false;
+
+  const relative = path.relative(sourceRoot, sourcePath).replace(/\\/g, "/");
+  if (!relative || relative === "." || relative.startsWith("../") || path.isAbsolute(relative)) {
+    return false;
+  }
+
+  const parts = relative.split("/");
+  const topLevel = parts[0].toLowerCase();
+  if (parts.length === 1) {
+    if (["dlls", "lib", "library"].includes(topLevel)) {
+      return true;
+    }
+    return (
+      /^(?:python(?:w)?(?:\d+)?\.exe|python(?:\d+)?\.dll|python\d+\.zip)$/i.test(parts[0]) ||
+      /^(?:api-ms-win-[^.]+|concrt\d+|msvcp\d+(?:_[a-z0-9]+)*|ucrtbase|vcamp\d+|vccorlib\d+|vcomp\d+|vcruntime\d+(?:_[a-z0-9]+)*|zlib)\.dll$/i.test(parts[0]) ||
+      /^license(?:_python)?(?:\.txt)?$/i.test(parts[0])
+    );
+  }
+
+  if (topLevel === "dlls") {
+    return true;
+  }
+
+  if (topLevel === "lib") {
+    if (parts.some((part) => /^(?:x64|win32)$/i.test(part))) return false;
+    if (/\.(?:dll|exp|lib|obj|pdb)$/i.test(parts[parts.length - 1])) return false;
+    return true;
+  }
+
+  if (topLevel !== "library") {
+    return false;
+  }
+
+  const librarySection = String(parts[1] || "").toLowerCase();
+  if (librarySection === "ssl") {
+    return true;
+  }
+  if (librarySection !== "bin") {
+    return false;
+  }
+  if (parts.length === 2) return true;
+  if (parts.length !== 3) return false;
+
+  return PYTHON_LIBRARY_BIN_ALLOWLIST.some((pattern) => pattern.test(parts[2]));
 }
 
 function resolveSitePackagesDirectory(rootPath) {
@@ -219,6 +272,33 @@ function hasRootPythonExecutable(rootPath) {
   return candidates.some((candidate) => fs.existsSync(candidate));
 }
 
+function copyPortablePythonDistribution(baseRoot, sourceRoot, targetRoot) {
+  resetDirectory(targetRoot);
+  copyDirectoryContents(baseRoot, targetRoot, (sourcePath) =>
+    shouldCopyPythonBaseRuntime(sourcePath, baseRoot)
+  );
+
+  const sourceSitePackages = resolveSitePackagesDirectory(sourceRoot);
+  const relativeSitePackages = sourceSitePackages ? path.relative(sourceRoot, sourceSitePackages) : "";
+  const targetSitePackages = relativeSitePackages ? path.join(targetRoot, relativeSitePackages) : "";
+  if (
+    !sourceSitePackages ||
+    !targetSitePackages ||
+    relativeSitePackages.startsWith("..") ||
+    path.isAbsolute(relativeSitePackages)
+  ) {
+    throw new Error(
+      `[Storydex Desktop] Failed to resolve site-packages while packaging embedded Python. source=${sourceSitePackages || "(missing)"} target=${targetSitePackages || "(missing)"}`
+    );
+  }
+  fs.mkdirSync(targetSitePackages, { recursive: true });
+  copyDirectoryContents(sourceSitePackages, targetSitePackages, shouldCopyPythonEnv);
+
+  if (fs.existsSync(path.join(targetRoot, "pyvenv.cfg"))) {
+    throw new Error("[Storydex Desktop] Embedded Python target still contains pyvenv.cfg after portable runtime sync.");
+  }
+}
+
 function copyPortablePythonFromVenv(sourceRoot, targetRoot) {
   const baseRoot = readPyvenvHome(sourceRoot);
   if (!baseRoot) {
@@ -237,21 +317,7 @@ function copyPortablePythonFromVenv(sourceRoot, targetRoot) {
     throw new Error(`[Storydex Desktop] Refusing to copy venv base runtime from inside the venv itself: ${baseRoot}`);
   }
 
-  resetDirectory(targetRoot);
-  copyDirectoryContents(baseRoot, targetRoot, shouldCopyPythonRuntime);
-
-  const sourceSitePackages = resolveSitePackagesDirectory(sourceRoot);
-  const targetSitePackages = resolveSitePackagesDirectory(targetRoot);
-  if (!sourceSitePackages || !targetSitePackages) {
-    throw new Error(
-      `[Storydex Desktop] Failed to resolve site-packages while packaging embedded Python. source=${sourceSitePackages || "(missing)"} target=${targetSitePackages || "(missing)"}`
-    );
-  }
-  copyDirectoryContents(sourceSitePackages, targetSitePackages, shouldCopyPythonEnv);
-
-  if (fs.existsSync(path.join(targetRoot, "pyvenv.cfg"))) {
-    throw new Error("[Storydex Desktop] Embedded Python target still contains pyvenv.cfg after portable runtime sync.");
-  }
+  copyPortablePythonDistribution(baseRoot, sourceRoot, targetRoot);
 }
 
 function copyEmbeddedPythonEnv() {
@@ -261,8 +327,7 @@ function copyEmbeddedPythonEnv() {
     return;
   }
 
-  resetDirectory(embeddedPythonTarget);
-  copyDirectoryContents(embeddedPythonSource, embeddedPythonTarget, shouldCopyPythonRuntime);
+  copyPortablePythonDistribution(embeddedPythonSource, embeddedPythonSource, embeddedPythonTarget);
 }
 
 function copyDesktopIcon() {
@@ -291,6 +356,7 @@ if (require.main === module) {
 
 module.exports = {
   shouldCopyBackend,
+  shouldCopyPythonBaseRuntime,
   shouldCopyPythonEnv,
   shouldCopyPythonRuntime
 };

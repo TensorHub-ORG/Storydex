@@ -95,6 +95,90 @@ describe("git store", () => {
   });
 });
 
+// These lock down the "committed but no history / refresh button does nothing"
+// report: every one of them fails against the previous implementation, which
+// returned early while `isLoading` was true and let a slow response win.
+describe("git store refresh sequencing", () => {
+  const deferSummary = () => {
+    let release: (() => void) | null = null;
+    const pending = new Promise((resolve) => {
+      release = () => resolve(result(gitSummary));
+    });
+    workspaceApi.fetchWorkspaceGitSummary.mockImplementationOnce(() => pending);
+    return () => release?.();
+  };
+
+  it("applies fresh state for a refresh that overlaps an in-flight read", async () => {
+    const store = useGitStore(); store.reset();
+    const release = deferSummary();
+    const first = store.refreshSummary({ silent: true });
+    const second = store.refreshSummary({ silent: true });
+    release();
+    await Promise.all([first, second]);
+    expect(store.summary).toEqual(gitSummary);
+    expect(store.lastSyncedAt).toBeGreaterThan(0);
+  });
+
+  it("always reaches the backend when a refresh is forced", async () => {
+    const store = useGitStore(); store.reset();
+    const release = deferSummary();
+    const background = store.refreshSummary({ silent: true });
+    workspaceApi.fetchWorkspaceGitSummary.mockClear();
+    await store.refreshSummary({ force: true });
+    expect(workspaceApi.fetchWorkspaceGitSummary).toHaveBeenCalledTimes(1);
+    release(); await background;
+  });
+
+  it("ignores a slow response that lost the race to a newer one", async () => {
+    const store = useGitStore(); store.reset();
+    let releaseStale: (() => void) | null = null;
+    const stale = { ...gitSummary, recentCommits: [{ id: "stale", subject: "stale" }] };
+    const fresh = { ...gitSummary, recentCommits: [{ id: "fresh", subject: "fresh" }] };
+    workspaceApi.fetchWorkspaceGitSummary.mockImplementationOnce(
+      () => new Promise((resolve) => { releaseStale = () => resolve(result(stale)); })
+    );
+    const slow = store.refreshSummary({ silent: true });
+    workspaceApi.fetchWorkspaceGitSummary.mockResolvedValueOnce(result(fresh));
+    await store.refreshSummary({ force: true });
+    expect(store.recentCommits[0].id).toBe("fresh");
+    releaseStale?.(); await slow;
+    expect(store.recentCommits[0].id).toBe("fresh");
+  });
+
+  it("keeps refreshing after a commit lands mid-read", async () => {
+    const store = useGitStore(); store.reset();
+    const release = deferSummary();
+    const pending = store.refreshSummary({ silent: true });
+    expect(await store.commitAll("mid-read commit")).toBe(true);
+    release(); await pending;
+    workspaceApi.fetchWorkspaceGitSummary.mockClear();
+    await store.refreshSummary({ silent: true });
+    expect(workspaceApi.fetchWorkspaceGitSummary).toHaveBeenCalledTimes(1);
+  });
+
+  it("splits history into current-branch and restore-backup commits", async () => {
+    const store = useGitStore(); store.reset();
+    workspaceApi.fetchWorkspaceGitSummary.mockResolvedValueOnce(result({
+      ...gitSummary,
+      recentCommits: [
+        { id: "a", subject: "on branch", onCurrentBranch: true },
+        { id: "b", subject: "parked", onCurrentBranch: false },
+        { id: "c", subject: "legacy payload" }
+      ]
+    }));
+    await store.refreshSummary();
+    expect(store.branchCommits.map((item) => item.id)).toEqual(["a", "c"]);
+    expect(store.backupCommits.map((item) => item.id)).toEqual(["b"]);
+  });
+
+  it("surfaces a failed background poll instead of hiding it", async () => {
+    const store = useGitStore(); store.reset();
+    workspaceApi.fetchWorkspaceGitSummary.mockRejectedValueOnce(new Error("git exploded"));
+    await store.refreshSummary({ silent: true });
+    expect(store.error).toContain("git exploded");
+  });
+});
+
 describe("preset store", () => {
   it("covers list/load/edit/compile/save/patch/activation and errors", async () => {
     const store = usePresetStore(); await store.refreshList(); await store.loadActiveDocument(); await store.loadDocument("preset.md");

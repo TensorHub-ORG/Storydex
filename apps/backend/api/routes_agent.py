@@ -45,7 +45,37 @@ from services.story_project_service import (
     DEFAULT_CHAPTER_WORD_COUNT_TARGET,
     get_story_project_service,
 )
-from services.story_length_calibration_service import get_story_length_calibration_service
+from services.story_bounded_generation_service import BoundedStoryGeneration
+from services.story_call_accounting import (
+    STORY_INITIAL_GENERATION_PURPOSE,
+    STORY_LENGTH_REVISION_PURPOSE,
+    STORY_SECOND_DRAFT_PURPOSE,
+    StoryCallAccounting,
+)
+from services.story_chapter_action_service import validate_chapter_plan
+from services.story_generation_pipeline import get_story_generation_pipeline
+from services.story_length_calibration_service import (
+    INITIAL_ATTEMPT_KIND,
+    PRECISION_REVISION_ATTEMPT_KIND,
+    get_story_length_calibration_service,
+)
+from services.story_length_tier_calibration_service import (
+    get_story_length_tier_calibration_service,
+)
+from services.story_length_precision_controller import (
+    get_story_length_precision_controller,
+)
+from services.story_word_count_service import (
+    DEFAULT_CHAPTER_LENGTH_TIER,
+    STORY_OVER_BUDGET_KEEP_MESSAGE,
+    STORY_UNDER_BUDGET_KEEP_MESSAGE,
+    STORY_WORD_COUNT_RULE,
+    WORD_COUNT_POLICY_VERSION,
+    chapter_normal_band,
+    chapter_precision_band,
+    migrate_chapter_word_count_target,
+    normalize_chapter_length_tier,
+)
 from services.story_semantic_budget_context import read_scene_constraint_context
 from services.story_semantic_budget_controller import (
     SEMANTIC_BUDGET_STRATEGY,
@@ -70,16 +100,26 @@ storydex_intent_service = get_storydex_intent_service()
 git_service = get_git_service()
 story_project_service = get_story_project_service()
 story_length_calibration_service = get_story_length_calibration_service()
+story_length_tier_calibration_service = get_story_length_tier_calibration_service()
 execution_coordinator = get_execution_coordinator()
 followup_mailbox_service = get_followup_mailbox_service()
 
 _PHASE_HEARTBEAT_SECONDS = 0.6
 _COMMIT_MESSAGE_TIMEOUT_SECONDS = 2.0
-# Keep headroom below the externally observable two-second acceptance bound;
-# asyncio timeout wake-up and SSE serialization still consume a few milliseconds.
-_INTENT_STAGE_TIMEOUT_SECONDS = 1.8
+# The configured DeepSeek-compatible metadata route commonly needs 2-3 seconds
+# even for a compact JSON response. The stream already emits heartbeats, so give
+# the classifier enough time to answer accurately while keeping a hard bound.
+_INTENT_STAGE_TIMEOUT_SECONDS = 5.0
 _PLANNER_TIMEOUT_SECONDS = 3.0
+# Legacy contracts only. Current chapter-scoped word-count contracts run the
+# bounded path, which resolves length before the single write instead of using a
+# write-then-append correction continuation.
 _STORY_GENERATION_MAX_CORRECTIONS = 1
+BOUNDED_STORY_GENERATION_STRATEGY = "bounded_story_generation"
+# The bounded path needs both a chapter-scoped policy and the current word-count
+# policy version; version alone cannot select it, since other gates still decide
+# whether this turn may bypass the legacy Agent tool loop.
+BOUNDED_WORD_COUNT_POLICY_VERSION = WORD_COUNT_POLICY_VERSION
 _LOGGER = logging.getLogger(__name__)
 _BACKGROUND_EXECUTION_TASKS: set[asyncio.Task[Any]] = set()
 
@@ -144,16 +184,9 @@ async def _classify_intent_without_blocking_event_loop(**kwargs: Any) -> Dict[st
             timeout=_INTENT_STAGE_TIMEOUT_SECONDS,
         )
     except (asyncio.TimeoutError, TimeoutError):
-        from services.storydex_intent_service import heuristic_intent_frame
+        from services.storydex_intent_service import safe_fallback_intent_frame
 
-        frame = heuristic_intent_frame(
-            prompt=str(kwargs.get("prompt") or ""),
-            active_file=str(kwargs.get("active_file") or ""),
-        )
-        frame["method"] = "heuristic_deadline_fallback"
-        frame.setdefault("assetTargets", [])
-        frame.setdefault("matchedSkills", [])
-        return frame
+        return safe_fallback_intent_frame(reason="intent_stage_deadline_exceeded")
 
 
 class AgentChatRequest(BaseModel):
@@ -616,31 +649,34 @@ def _normalize_story_generation_options(value: Dict[str, Any] | None) -> Dict[st
         payload.get("fragmentCount", payload.get("fragment_count", payload.get("segmentCount"))),
         default=1,
     )
-    fragment_word_count_min, fragment_word_count_max = _resolve_story_word_count_range(payload)
-    raw_chapter_target = payload.get(
+    explicit_tier = payload.get(
+        "chapterLengthTier",
+        payload.get("chapter_length_tier"),
+    )
+    legacy_target = payload.get(
         "chapterWordCountTarget",
         payload.get("chapter_word_count_target"),
     )
-    has_legacy_range = any(
-        payload.get(key) is not None
-        for key in (
-            "fragmentWordCountMin",
-            "fragment_word_count_min",
-            "fragmentWordCountMax",
-            "fragment_word_count_max",
+    if legacy_target is None:
+        legacy_target = payload.get(
+            "fragmentWordCount",
+            payload.get(
+                "fragment_word_count",
+                payload.get(
+                    "fragmentWordCountMax",
+                    payload.get(
+                        "fragment_word_count_max",
+                        payload.get("segmentWords"),
+                    ),
+                ),
+            ),
         )
-    )
-    chapter_word_count_target = (
-        _bounded_int(
-            raw_chapter_target,
-            default=DEFAULT_CHAPTER_WORD_COUNT_TARGET,
-            minimum=100,
-            maximum=20000,
-        )
-        if raw_chapter_target is not None
+    chapter_length_tier = (
+        normalize_chapter_length_tier(explicit_tier)
+        if explicit_tier is not None
+        else migrate_chapter_word_count_target(legacy_target)
+        if legacy_target is not None
         else None
-        if has_legacy_range
-        else fragment_word_count_max
     )
     chapter_template_id = str(
         payload.get(
@@ -652,20 +688,21 @@ def _normalize_story_generation_options(value: Dict[str, Any] | None) -> Dict[st
         )
         or ""
     ).strip()
-    generation_strategy = str(
-        payload.get("generationStrategy", payload.get("generation_strategy", "")) or ""
-    ).strip().lower()
     normalized = {
         "fragmentCount": fragment_count,
-        # 保留旧字段以向后兼容：等于区间上界
-        "fragmentWordCount": fragment_word_count_max,
-        "fragmentWordCountMin": fragment_word_count_min,
-        "fragmentWordCountMax": fragment_word_count_max,
-        "chapterWordCountTarget": chapter_word_count_target,
         "chapterTemplateId": chapter_template_id,
+        # Retired switches are explicit false in the normalized request so no
+        # downstream consumer can revive a numeric correction path.
+        "preciseWordCountEnabled": False,
     }
-    if generation_strategy in {"legacy_agent", SEMANTIC_BUDGET_STRATEGY}:
-        normalized["generationStrategy"] = generation_strategy
+    if chapter_length_tier is not None:
+        normalized["chapterLengthTier"] = chapter_length_tier
+    generation_strategy = str(
+        payload.get("generationStrategy", payload.get("generation_strategy", ""))
+        or ""
+    ).strip().lower()
+    if generation_strategy == SEMANTIC_BUDGET_STRATEGY:
+        normalized["generationStrategy"] = SEMANTIC_BUDGET_STRATEGY
     return normalized
 
 
@@ -727,6 +764,26 @@ def _apply_turn_contract_story_generation_defaults(
 
     next_story_generation = dict(story_generation)
     next_story_generation["fragmentCount"] = _positive_int(turn_plan.get("fragmentCount"), default=1)
+    policy = (
+        turn_plan.get("wordCountPolicy")
+        if isinstance(turn_plan.get("wordCountPolicy"), dict)
+        else {}
+    )
+    if str(policy.get("mode") or "").strip().lower() == "tier":
+        next_story_generation["chapterLengthTier"] = normalize_chapter_length_tier(
+            turn_plan.get("chapterLengthTier", policy.get("tier"))
+        )
+        next_story_generation["preciseWordCountEnabled"] = False
+        for legacy_key in (
+            "fragmentWordCount",
+            "fragmentWordCountMin",
+            "fragmentWordCountMax",
+            "chapterWordCountTarget",
+        ):
+            next_story_generation.pop(legacy_key, None)
+        next_story_generation["chapterTemplateId"] = selected_template
+        next_story_generation["chapterTemplate"] = selected_template
+        return next_story_generation
     raw_min = turn_plan.get("fragmentWordCountMin")
     raw_max = turn_plan.get("fragmentWordCountMax")
     if raw_min is None and raw_max is None:
@@ -1000,6 +1057,8 @@ def _status_for_event(event_name: str, payload: Dict[str, Any]) -> str:
     if event_name == "TurnContract":
         return "warning" if str(payload.get("status") or "") == "needs_user_input" else "info"
     if event_name == "StoryGenerationValidation":
+        if bool(payload.get("passed")) and str(payload.get("status") or "").lower() == "warning":
+            return "warning"
         return "success" if bool(payload.get("passed")) else "error"
     if event_name == "SemanticBudgetProviderAttempt":
         if str(payload.get("outcome") or "") == "success":
@@ -1535,17 +1594,12 @@ def _story_generation_correction_prompt(
     correction_attempt: int,
 ) -> str:
     fragments = validation.get("fragments") if isinstance(validation.get("fragments"), list) else []
-    current_word_count = int(validation.get("generatedWordCount") or 0)
-    accept_min = int(validation.get("acceptWordCountMin") or 0)
-    missing_word_count = max(0, accept_min - current_word_count)
     failures = [
         {
             "order": int(item.get("order") or index + 1),
             "path": str(item.get("path") or ""),
             "exists": bool(item.get("exists")),
             "writeMode": str(item.get("writeMode") or "replace"),
-            "baselineWordCount": int(item.get("baselineWordCount") or 0),
-            "generatedWordCount": int(item.get("generatedWordCount") or 0),
         }
         for index, item in enumerate(fragments)
         if isinstance(item, dict) and str(item.get("status") or "") != "passed"
@@ -1554,20 +1608,18 @@ def _story_generation_correction_prompt(
         "correctionAttempt": correction_attempt,
         "maximumCorrectionAttempts": _STORY_GENERATION_MAX_CORRECTIONS,
         "algorithm": str(validation.get("algorithm") or "storydex_visible_characters_v1"),
-        "countingRule": str(validation.get("countingRule") or "count every non-whitespace Unicode character"),
-        "currentProgramWordCount": current_word_count,
-        "additionalWordCountNeeded": missing_word_count,
+        "countingRule": str(validation.get("countingRule") or STORY_WORD_COUNT_RULE),
         "chapterContentMode": str(validation.get("chapterContentMode") or ""),
         "structurePassed": bool(validation.get("structurePassed")),
         "writeToolApplied": bool(validation.get("writeToolApplied")),
-        "expansionDirections": ["场景细节", "人物心理", "推动情节的对话"],
+        "expansionDirections": ["当前冲突的直接后果", "角色的下一步决定", "必要的场景收束"],
         "failures": failures,
     }
     return (
-        f"Storydex 程序计数显示，本章当前约 {current_word_count} 字，"
-        f"还需补写约 {missing_word_count} 字才能达到可接受下界。"
-        "请基于已有正文做一次定向扩写，优先补充与情节相关的场景细节、人物心理和推动情节的对话，"
-        "避免重复既有信息，并以叙事完整为先。"
+        "Storydex 检测到本轮正文偏短，将进行一次定向补写。\n"
+        "在不改变既定剧情计划、不新增无关支线、不重复已有信息的前提下，"
+        "补充与本轮核心事件直接相关的动作后果、角色下一步决定和必要的场景收束。\n"
+        "不要写摘要、留言或任何正文之外的内容——它们不计入字数。\n"
         "请保持当前 TurnContract 约定的章节路径、文件数量和写入模式，"
         "完成扩写后再次调用 StorydexApplyStoryIncrement。\n"
         "禁止使用普通 Write/Edit 工具写 chapters/ 正文。\n"
@@ -1590,17 +1642,6 @@ def _rebuild_story_generation_contract_for_correction(
 
     next_contract = copy.deepcopy(turn_contract) if isinstance(turn_contract, dict) else {}
     turn_plan = next_contract.get("turnPlan") if isinstance(next_contract.get("turnPlan"), dict) else {}
-    word_count_policy = (
-        turn_plan.get("wordCountPolicy")
-        if isinstance(turn_plan.get("wordCountPolicy"), dict)
-        else {}
-    )
-    if (
-        str(word_count_policy.get("scope") or "").strip().lower() == "chapter"
-        and bool(validation.get("belowBudget"))
-    ):
-        word_count_policy["allowBelowMinimumAfterCorrection"] = True
-        turn_plan["wordCountPolicy"] = word_count_policy
     targets = turn_plan.get("fragmentTargets") if isinstance(turn_plan.get("fragmentTargets"), list) else []
     if not targets:
         return next_contract
@@ -1651,11 +1692,157 @@ def _has_successful_story_generation_write(
 
 
 def _story_generation_needs_length_correction(validation: Dict[str, Any]) -> bool:
+    # 只有章级偏短触发补写。超上限已降级为告警，不再阻断补写判定：
+    # 多章场景下另一章偏长，不该让偏短的这一章失去唯一一次补写机会。
     return (
         str(validation.get("wordCountScope") or "").strip().lower() == "chapter"
         and bool(validation.get("belowBudget"))
-        and not bool(validation.get("overBudget"))
     )
+
+
+def _supports_correction_continuation(turn_contract: Dict[str, Any] | None) -> bool:
+    """Whether this contract may still use the append-based correction round.
+
+    Only legacy contracts may. A current chapter-scoped word-count contract
+    belongs to the bounded path, where a short draft is handled *before* the
+    single write; letting it also run the Agent continuation would restore the
+    double write this work removed: the first draft already on disk, with a
+    correction appended after it.
+
+    Reaching this function with a current bounded-capable contract means the
+    bounded gate declined the turn for some other reason (feature flag off, no
+    authoritative chapter path). Such a turn keeps its one draft: writing more
+    prose is not a safe recovery when the reason the bounded path declined is
+    unknown here.
+    """
+
+    contract = turn_contract if isinstance(turn_contract, dict) else {}
+    plan = contract.get("turnPlan") if isinstance(contract.get("turnPlan"), dict) else {}
+    policy = plan.get("wordCountPolicy") if isinstance(plan.get("wordCountPolicy"), dict) else {}
+    return int(policy.get("version") or 0) < BOUNDED_WORD_COUNT_POLICY_VERSION
+
+
+def _recorded_story_call_accounting(events: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return the last ledger the bounded path emitted, if this turn used it.
+
+    The bounded path increments its counters at the moment it decides to spend a
+    call, so its ledger states what happened. Later events win over earlier ones
+    only because a turn emits at most one of these; taking the last is simply the
+    safe reading if that ever changes.
+    """
+
+    recorded: Dict[str, Any] = {}
+    for item in events:
+        if str(item.get("event") or "") != "StoryCallAccounting":
+            continue
+        data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        if "logicalStoryCalls" in data:
+            recorded = dict(data)
+    return recorded
+
+
+def story_call_accounting_payload(
+    events: List[Dict[str, Any]],
+    *,
+    turn_contract: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Report the three call numbers for one finished story turn.
+
+    An audit needs to tell one prose call from three, and the HTTP request count
+    cannot answer that: a single logical call that retried twice on a 429 is
+    still one call against the budget.
+
+    The bounded path counts its own calls as it makes them and emits the ledger
+    as a ``StoryCallAccounting`` event, so that event is authoritative whenever it
+    is present. Only legacy Agent-loop turns fall back to deriving the numbers
+    from trace signals:
+
+    * each ``AgentStarted`` opens one logical prose call (the segment loop emits
+      one per draft and one per correction continuation);
+    * each ``ConnectionRetry`` is a transport retry inside the call it belongs to;
+    * Provider attempts are logical calls plus those retries.
+
+    Derivation is a reconstruction, not a measurement: it cannot see a call the
+    loop made without announcing it. That is why the bounded path records instead
+    of inferring, and why this function prefers its ledger.
+
+    ``contractViolations`` is what makes an unexpected second prose call visible
+    instead of merely expensive.
+    """
+
+    plan = (
+        turn_contract.get("turnPlan")
+        if isinstance(turn_contract, dict) and isinstance(turn_contract.get("turnPlan"), dict)
+        else {}
+    )
+    policy = plan.get("wordCountPolicy") if isinstance(plan.get("wordCountPolicy"), dict) else {}
+    precision = policy.get("precision") if isinstance(policy.get("precision"), dict) else {}
+    precision_enabled = bool(precision.get("enabled"))
+    asymmetric = policy.get("asymmetric") if isinstance(policy.get("asymmetric"), dict) else {}
+    asymmetric_enabled = bool(asymmetric.get("enabled"))
+
+    recorded = _recorded_story_call_accounting(events)
+    if recorded:
+        return {
+            "_type": "StoryCallAccounting",
+            "_version": 1,
+            "preciseWordCountEnabled": bool(
+                recorded.get("preciseWordCountEnabled", precision_enabled)
+            ),
+            "asymmetricLengthEnabled": bool(
+                recorded.get("asymmetricLengthEnabled", asymmetric_enabled)
+            ),
+            "source": "recorded",
+            "logicalStoryCalls": int(recorded.get("logicalStoryCalls") or 0),
+            "providerAttempts": int(recorded.get("providerAttempts") or 0),
+            "transportRetries": int(recorded.get("transportRetries") or 0),
+            "initialGenerationCalls": int(recorded.get("initialGenerationCalls") or 0),
+            "lengthRevisionCalls": int(recorded.get("lengthRevisionCalls") or 0),
+            "secondDraftCalls": int(recorded.get("secondDraftCalls") or 0),
+            "nonProseCalls": dict(recorded.get("nonProseCalls") or {}),
+            "contractViolations": [
+                str(item) for item in list(recorded.get("contractViolations") or [])
+            ],
+        }
+
+    accounting = StoryCallAccounting()
+    seen_initial = False
+    for item in events:
+        name = str(item.get("event") or "")
+        if name == "AgentStarted":
+            purpose = (
+                STORY_INITIAL_GENERATION_PURPOSE
+                if not seen_initial
+                else STORY_SECOND_DRAFT_PURPOSE
+                if asymmetric_enabled
+                else STORY_LENGTH_REVISION_PURPOSE
+            )
+            seen_initial = True
+            accounting.record_logical_call(purpose)
+            accounting.record_provider_attempt(purpose)
+        elif name == "ConnectionRetry" and seen_initial:
+            purpose = (
+                STORY_SECOND_DRAFT_PURPOSE
+                if accounting.second_draft_calls
+                else
+                STORY_LENGTH_REVISION_PURPOSE
+                if accounting.length_revision_calls
+                else STORY_INITIAL_GENERATION_PURPOSE
+            )
+            accounting.record_transport_retry(purpose)
+            accounting.record_provider_attempt(purpose)
+
+    return {
+        "_type": "StoryCallAccounting",
+        "_version": 1,
+        "preciseWordCountEnabled": precision_enabled,
+        "asymmetricLengthEnabled": asymmetric_enabled,
+        **accounting.payload(),
+        "contractViolations": accounting.contract_violations(
+            precision_enabled=precision_enabled,
+            asymmetric_enabled=asymmetric_enabled,
+        ),
+    }
 
 
 def _semantic_budget_gate(
@@ -1674,8 +1861,8 @@ def _semantic_budget_gate(
         return {"requested": False, "enabled": False, "reason": "not_requested"}
     if str(intent.get("primary") or "").strip().lower() != "story_generation":
         return {"requested": True, "enabled": False, "reason": "not_story_generation"}
-    if str(turn_plan.get("operationType") or "").strip().lower() == "modify_existing":
-        return {"requested": True, "enabled": False, "reason": "modify_existing_not_supported"}
+    if str(turn_plan.get("operationType") or "").strip().lower() != "create_new":
+        return {"requested": True, "enabled": False, "reason": "operation_not_create_new"}
     flags = FeatureFlags(Path(workspace_root).resolve(), FEATURE_FLAG_DEFAULTS)
     if not flags.get_bool("SEMANTIC_BUDGET_GENERATION_ENABLED"):
         return {"requested": True, "enabled": False, "reason": "feature_flag_disabled"}
@@ -1993,6 +2180,566 @@ def _semantic_budget_failure_message(outcome: Dict[str, Any]) -> str:
         "failed_length": "候选正文未进入章节字数放行区间，项目未写入。",
     }
     return labels.get(status, "语义场景候选未能安全写入项目。")
+
+
+def _bounded_story_generation_gate(
+    workspace_root: Path,
+    turn_contract: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Decide whether this turn runs the bounded prose path (plan §5.1, §8.1).
+
+    The gate is narrow on purpose. ``wordCountPolicy.version`` alone cannot
+    select it, so the turn must additionally use the current chapter contract
+    or the tier contract's candidate scope, with authoritative fragment paths
+    the planner validated. Anything else keeps the Agent tool loop untouched.
+    """
+
+    intent = turn_contract.get("intentFrame") if isinstance(turn_contract.get("intentFrame"), dict) else {}
+    turn_plan = turn_contract.get("turnPlan") if isinstance(turn_contract.get("turnPlan"), dict) else {}
+    policy = turn_plan.get("wordCountPolicy") if isinstance(turn_plan.get("wordCountPolicy"), dict) else {}
+    tier_mode = str(policy.get("mode") or "").strip().lower() == "tier"
+    control = (
+        turn_plan.get("generationControl")
+        if isinstance(turn_plan.get("generationControl"), dict)
+        else {}
+    )
+    if str(intent.get("primary") or "").strip().lower() != "story_generation":
+        return {"enabled": False, "reason": "not_story_generation"}
+    if str(control.get("strategy") or "").strip().lower() == SEMANTIC_BUDGET_STRATEGY:
+        return {"enabled": False, "reason": "semantic_budget_requested"}
+    if int(policy.get("version") or 0) < BOUNDED_WORD_COUNT_POLICY_VERSION:
+        return {"enabled": False, "reason": "legacy_word_count_policy"}
+    word_count_scope = str(policy.get("scope") or "").strip().lower()
+    if not (
+        word_count_scope == "chapter"
+        or (tier_mode and word_count_scope == "candidate")
+    ):
+        return {"enabled": False, "reason": "not_chapter_scoped"}
+    if str(turn_plan.get("operationType") or "").strip().lower() != "create_new":
+        return {"enabled": False, "reason": "operation_not_create_new"}
+
+    def close_plan(
+        reason: str,
+        issues: List[str],
+        *,
+        validation: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return {
+            "enabled": False,
+            "terminal": True,
+            "reason": reason,
+            "error": {
+                "type": "ChapterPlanValidationFailed",
+                "issues": list(dict.fromkeys(str(item) for item in issues if str(item))),
+                "validation": dict(validation or {}),
+            },
+        }
+
+    targets = (
+        turn_plan.get("fragmentTargets")
+        if isinstance(turn_plan.get("fragmentTargets"), list)
+        else []
+    )
+    if not targets:
+        return close_plan("no_fragment_targets", ["missing_fragment_paths"])
+    # The chapter decision is a pre-prose hard gate: without an authoritative
+    # path the draft could land in the wrong chapter, and its length would then
+    # describe something other than the planned one.
+    if not str(turn_plan.get("authoritativeChapterPath") or "").strip():
+        return close_plan(
+            "no_authoritative_chapter_path",
+            ["missing_authoritative_chapter_path"],
+        )
+
+    action = str(turn_plan.get("chapterAction") or "").strip()
+    target_chapter_number = int(turn_plan.get("targetChapterNumber") or 0)
+    authoritative_chapter_path = str(
+        turn_plan.get("authoritativeChapterPath") or ""
+    ).strip()
+    authoritative_fragment_paths = [
+        str(item or "").strip().replace("\\", "/").lstrip("/")
+        for item in list(turn_plan.get("authoritativeFragmentPaths") or [])
+    ]
+    target_paths = [
+        str(item.get("path") or "").strip().replace("\\", "/").lstrip("/")
+        for item in targets
+        if isinstance(item, dict)
+    ]
+    published_validation = (
+        turn_plan.get("chapterPlanValidation")
+        if isinstance(turn_plan.get("chapterPlanValidation"), dict)
+        else {}
+    )
+    if not published_validation:
+        return close_plan(
+            "chapter_plan_validation_missing",
+            ["missing_published_chapter_plan_validation"],
+        )
+    if not bool(published_validation.get("passed")):
+        published_issues = (
+            published_validation.get("issues")
+            if isinstance(published_validation.get("issues"), list)
+            else []
+        )
+        return close_plan(
+            "chapter_plan_validation_failed",
+            [str(item) for item in published_issues]
+            or ["published_chapter_plan_validation_failed"],
+            validation=published_validation,
+        )
+
+    published_matches = bool(
+        str(published_validation.get("action") or "") == action
+        and int(published_validation.get("targetChapterNumber") or 0)
+        == target_chapter_number
+        and str(published_validation.get("authoritativeChapterPath") or "").strip()
+        == authoritative_chapter_path
+        and list(published_validation.get("authoritativeFragmentPaths") or [])
+        == authoritative_fragment_paths
+        and target_paths == authoritative_fragment_paths
+    )
+    if not published_matches:
+        return close_plan(
+            "chapter_plan_contract_mismatch",
+            ["published_chapter_plan_mismatch"],
+            validation=published_validation,
+        )
+
+    chapter_states = story_project_service.list_chapter_states(workspace_root)
+    runtime_validation = validate_chapter_plan(
+        workspace_root,
+        action=action,
+        target_chapter_number=target_chapter_number,
+        authoritative_chapter_path=authoritative_chapter_path,
+        fragment_paths=authoritative_fragment_paths,
+        chapter_numbers=tuple(state.chapter_number for state in chapter_states),
+    )
+    if not bool(runtime_validation.get("passed")):
+        return close_plan(
+            "chapter_plan_runtime_validation_failed",
+            [str(item) for item in list(runtime_validation.get("issues") or [])],
+            validation=runtime_validation,
+        )
+
+    runtime_retained = (
+        story_project_service.count_chapter_story_words(
+            workspace_root,
+            authoritative_chapter_path,
+        )
+        if action in {"continue_current_chapter", "continue_current_fragment"}
+        else 0
+    )
+    published_retained = max(0, int(policy.get("retainedWordCount") or 0))
+    target_word_count = max(0, int(policy.get("target") or 0))
+    runtime_remaining = max(0, target_word_count - runtime_retained)
+    published_remaining = max(0, int(policy.get("remainingWordCount") or 0))
+    state_changed = (
+        published_retained != runtime_retained
+        if tier_mode
+        else published_retained != runtime_retained
+        or published_remaining != runtime_remaining
+    )
+    if state_changed:
+        state_validation = {
+            **runtime_validation,
+            "retainedWordCount": runtime_retained,
+        }
+        if not tier_mode:
+            state_validation["remainingWordCount"] = runtime_remaining
+        return close_plan(
+            "chapter_word_count_state_changed",
+            ["chapter_word_count_state_changed"],
+            validation=state_validation,
+        )
+    if not tier_mode and target_word_count > 0 and runtime_remaining <= 0:
+        return {
+            "enabled": False,
+            "terminal": True,
+            "reason": "chapter_target_already_reached",
+            "error": {
+                "type": "ChapterWordCountTargetReached",
+                "issues": ["no_remaining_chapter_budget"],
+                "retainedWordCount": runtime_retained,
+                "remainingWordCount": runtime_remaining,
+                "targetWordCount": target_word_count,
+            },
+        }
+    flags = FeatureFlags(Path(workspace_root).resolve(), FEATURE_FLAG_DEFAULTS)
+    if not flags.get_bool("BOUNDED_STORY_GENERATION_ENABLED"):
+        return {"enabled": False, "reason": "feature_flag_disabled"}
+    precision = policy.get("precision") if isinstance(policy.get("precision"), dict) else {}
+    return {
+        "enabled": True,
+        "reason": "enabled",
+        "chapterLengthTier": (
+            normalize_chapter_length_tier(policy.get("tier"))
+            if tier_mode
+            else ""
+        ),
+        "precisionEnabled": bool(precision.get("enabled")) and not tier_mode,
+    }
+
+
+async def _execute_bounded_story_generation(
+    *,
+    prompt: str,
+    trace_id: str,
+    active_file: str,
+    workspace_root: Path,
+    turn_contract: Dict[str, Any],
+    event_sink: Callable[[str, Dict[str, Any]], None],
+    commit_state: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Run one bounded turn and validate the result (plan §5.2, §7.3, §8.1).
+
+    Both adapters use zero transport retries. One user generation may spend one
+    draft plus one bounded revision or one independent second draft, but a
+    transport retry must not turn that contract into a hidden third Provider
+    request.
+    """
+
+    draft_adapter = CoomiStoryGenerationAdapter(
+        trace_id=trace_id,
+        maximum_transport_retries=0,
+        event_sink=event_sink,
+        attempt_event_name="StoryProviderAttempt",
+    )
+    revision_adapter = CoomiStoryGenerationAdapter(
+        trace_id=trace_id,
+        maximum_transport_retries=0,
+        event_sink=event_sink,
+        attempt_event_name="StoryProviderAttempt",
+    )
+    elastic_enabled = FeatureFlags(
+        Path(workspace_root).resolve(),
+        FEATURE_FLAG_DEFAULTS,
+    ).get_bool("ELASTIC_STORY_MANUSCRIPT_ENABLED")
+    runner = BoundedStoryGeneration(
+        adapter=draft_adapter,
+        pipeline=get_story_generation_pipeline(),
+        controller=get_story_length_precision_controller(),
+        revision_adapter=revision_adapter,
+        event_sink=event_sink,
+        commit_state=commit_state,
+        elastic_enabled=elastic_enabled,
+    )
+    try:
+        result = await runner.run(
+            workspace_root,
+            trace_id=trace_id,
+            turn_contract=turn_contract,
+            prompt=prompt,
+            active_file=active_file,
+        )
+    except Exception as exc:  # noqa: BLE001 - a failed draft ends the turn cleanly
+        rejection_reason = str(getattr(exc, "reason", "") or "").strip()
+        rejection_issues = [
+            str(item)
+            for item in list(getattr(exc, "issues", ()) or ())
+            if str(item)
+        ]
+        return {
+            "ok": False,
+            "result": {},
+            "callAccounting": runner.accounting.payload(),
+            "error": {
+                "type": "StoryDraftGenerationFailed",
+                "causeType": type(exc).__name__,
+                **({"reason": rejection_reason} if rejection_reason else {}),
+                **({"issues": rejection_issues} if rejection_issues else {}),
+            },
+        }
+
+    if not bool(result.get("committed")):
+        return {
+            "ok": False,
+            "result": result,
+            "callAccounting": dict(result.get("callAccounting") or {}),
+            "error": {"type": "StoryGenerationApplyRejected"},
+        }
+
+    validation = await asyncio.to_thread(
+        story_project_service.validate_story_generation_turn,
+        workspace_root,
+        turn_contract,
+    )
+    validation = dict(validation) if isinstance(validation, dict) else {}
+    return {
+        "ok": bool(validation.get("passed")),
+        "result": result,
+        "validation": validation,
+        "callAccounting": dict(result.get("callAccounting") or {}),
+        "error": (
+            {} if bool(validation.get("passed")) else {"type": "StoryGenerationValidationFailed"}
+        ),
+    }
+
+
+def _bounded_story_validation_packet(
+    *,
+    validation: Dict[str, Any],
+    result: Dict[str, Any],
+    trace_id: str,
+    session_id: str,
+    provider: str,
+    model: str,
+) -> Dict[str, Any]:
+    """Extend StoryGenerationValidation with the bounded path's own facts (§10)."""
+
+    selection = result.get("selection") if isinstance(result.get("selection"), dict) else {}
+    tier_mode = bool(
+        result.get("chapterLengthTier") or selection.get("chapterLengthTier")
+    )
+    if not validation and isinstance(selection.get("draftValidation"), dict):
+        validation = dict(selection["draftValidation"])
+    revision = (
+        result.get("revisionOutcome") if isinstance(result.get("revisionOutcome"), dict) else {}
+    )
+    accounting = (
+        result.get("callAccounting")
+        if isinstance(result.get("callAccounting"), dict)
+        else {}
+    )
+    selected_source = str(selection.get("source") or "")
+    selected_status_key = (
+        "secondDraftStatus" if selected_source == "second_draft" else "draftStatus"
+    )
+    selected_status = (
+        selection.get(selected_status_key)
+        if isinstance(selection.get(selected_status_key), dict)
+        else {}
+    )
+    asymmetric_enabled = bool(
+        result.get("asymmetricLengthEnabled", validation.get("asymmetricLengthEnabled"))
+    )
+    hard_minimum_passed = (
+        validation.get("hardMinimumPassed")
+        if "hardMinimumPassed" in validation
+        else selected_status.get("hardMinimumPassed")
+    )
+    above_soft_maximum = (
+        validation.get("aboveSoftMaximum")
+        if "aboveSoftMaximum" in validation
+        else selected_status.get("aboveSoftMaximum")
+    )
+    runtime_safety_exceeded = (
+        validation.get("runtimeSafetyExceeded")
+        if "runtimeSafetyExceeded" in validation
+        else selected_status.get("runtimeSafetyExceeded")
+    )
+    runtime_safety_maximum = (
+        validation.get("runtimeSafetyMaximum")
+        if "runtimeSafetyMaximum" in validation
+        else selected_status.get("runtimeSafetyMaximum")
+    )
+    precision_enabled = bool(result.get("precisionEnabled"))
+    precision_achieved = (
+        result.get("precisionAchieved")
+        if "precisionAchieved" in result
+        else selection.get("precisionAchieved")
+    )
+    normal_band_passed = (
+        result.get("normalBandPassed")
+        if "normalBandPassed" in result
+        else selection.get("normalBandPassed")
+    )
+    overhead_ratio = (
+        result.get("generatedOverheadRatio")
+        if "generatedOverheadRatio" in result
+        else selection.get("generatedOverheadRatio")
+    )
+    passed = bool(validation.get("passed"))
+    if tier_mode:
+        passed = bool(
+            passed
+            and selection.get("draftQualityPassed") is True
+            and result.get("committed")
+        )
+    message = str(validation.get("message") or "")
+    if passed and bool(validation.get("overBudget")):
+        message = STORY_OVER_BUDGET_KEEP_MESSAGE
+    elif passed and bool(validation.get("belowBudget")):
+        message = STORY_UNDER_BUDGET_KEEP_MESSAGE
+    packet = {
+        **validation,
+        "passed": passed,
+        "status": (
+            "warning"
+            if passed
+            and (
+                bool(validation.get("belowBudget"))
+                or bool(validation.get("overBudget"))
+                or (tier_mode and not bool(selection.get("tierHit")))
+                or (precision_enabled and not bool(precision_achieved))
+            )
+            else "success"
+            if passed
+            else "error"
+        ),
+        "message": message,
+        # The write happened through the pipeline's single apply, not through an
+        # Agent tool call, so the tool-based signal is reported as satisfied here
+        # rather than being inferred from a ToolDone event that never arrives.
+        "writeToolApplied": bool(result.get("committed")),
+        "traceId": trace_id,
+        "sessionId": session_id,
+        "strategy": BOUNDED_STORY_GENERATION_STRATEGY,
+        "chapterLengthTier": str(
+            result.get("chapterLengthTier")
+            or selection.get("chapterLengthTier")
+            or validation.get("chapterLengthTier")
+            or ""
+        ),
+        "tierHit": (
+            bool(selection.get("tierHit")) if tier_mode else None
+        ),
+        "tierDeviation": (
+            str(selection.get("tierDeviation") or "") if tier_mode else ""
+        ),
+        "machineQualityPassed": (
+            bool(selection.get("draftQualityPassed")) if tier_mode else None
+        ),
+        "preciseWordCountEnabled": precision_enabled,
+        "asymmetricLengthEnabled": asymmetric_enabled,
+        "initialWordCount": int(result.get("draftWordCount") or 0),
+        "finalWordCount": int(selection.get("finalWordCount") or 0),
+        "revisionApplied": str(selection.get("source") or "") == "revision",
+        "revisionOutcomeReason": str(selection.get("reason") or ""),
+        "hardMinimumPassed": (
+            bool(hard_minimum_passed) if hard_minimum_passed is not None else None
+        ),
+        "aboveSoftMaximum": (
+            bool(above_soft_maximum) if above_soft_maximum is not None else None
+        ),
+        "runtimeSafetyExceeded": (
+            bool(runtime_safety_exceeded)
+            if runtime_safety_exceeded is not None
+            else None
+        ),
+        "runtimeSafetyMaximum": (
+            int(runtime_safety_maximum) if runtime_safety_maximum is not None else None
+        ),
+        "secondDraftWordCount": int(
+            result.get("secondDraftWordCount")
+            or selection.get("secondDraftWordCount")
+            or 0
+        ),
+        "secondDraftApplied": selected_source == "second_draft",
+        "asymmetricLengthLoss": selection.get("asymmetricLengthLoss"),
+        "secondDraftCalls": int(accounting.get("secondDraftCalls") or 0),
+        "lengthControlStrategy": str(
+            result.get("lengthControlStrategy")
+            or selection.get("lengthControlStrategy")
+            or ""
+        ),
+        "canonicalWordCount": int(
+            result.get("canonicalWordCount")
+            or selection.get("canonicalWordCount")
+            or result.get("draftWordCount")
+            or 0
+        ),
+        "normalBandPassed": (
+            bool(normal_band_passed) if normal_band_passed is not None else None
+        ),
+        "precisionAchieved": (
+            bool(precision_achieved) if precision_enabled else None
+        ),
+        "selectedEditIds": [
+            str(item)
+            for item in list(
+                result.get("selectedEditIds")
+                or selection.get("selectedEditIds")
+                or []
+            )
+        ],
+        "rejectedEditIds": [
+            str(item)
+            for item in list(
+                result.get("rejectedEditIds")
+                or selection.get("rejectedEditIds")
+                or []
+            )
+        ],
+        "rejectedEditReasonCounts": {
+            str(key): int(value)
+            for key, value in dict(
+                result.get("rejectedEditReasonCounts")
+                or selection.get("rejectedEditReasonCounts")
+                or {}
+            ).items()
+        },
+        "evaluatedCombinationCount": int(
+            result.get("evaluatedCombinationCount")
+            or selection.get("evaluatedCombinationCount")
+            or 0
+        ),
+        "lengthFallbackReason": str(
+            result.get("lengthFallbackReason")
+            or selection.get("lengthFallbackReason")
+            or ""
+        ),
+        "generatedOverheadRatio": (
+            float(overhead_ratio)
+            if isinstance(overhead_ratio, (int, float))
+            else None
+        ),
+        "revisionRejectionReasons": [
+            str(item) for item in list(revision.get("qualityIssues") or [])
+        ],
+        "attemptKind": (
+            PRECISION_REVISION_ATTEMPT_KIND
+            if str(selection.get("source") or "") == "revision"
+            else INITIAL_ATTEMPT_KIND
+        ),
+        "callAccounting": dict(result.get("callAccounting") or {}),
+        "contractViolations": [str(item) for item in list(result.get("contractViolations") or [])],
+        "providerCalls": int(
+            dict(result.get("callAccounting") or {}).get("logicalStoryCalls") or 0
+        ),
+    }
+    if tier_mode:
+        # Tier SSE exposes the selected semantic tier, objective result and hit
+        # status. Numeric bands remain internal observability data rather than a
+        # user-facing promise.
+        for key in (
+            "chapterWordCountTarget",
+            "targetWordCount",
+            "targetWordCountMin",
+            "targetWordCountMax",
+            "acceptWordCountMin",
+            "acceptWordCountMax",
+            "preferredMinimum",
+            "preferredMaximum",
+            "softMaximum",
+            "precisionMinimum",
+            "precisionMaximum",
+        ):
+            packet.pop(key, None)
+        packet["actualWordCount"] = int(result.get("draftWordCount") or 0)
+        packet["initialWordCount"] = int(result.get("draftWordCount") or 0)
+        packet["finalWordCount"] = (
+            int(selection.get("finalWordCount") or 0)
+            if bool(result.get("committed"))
+            else 0
+        )
+        packet["revisionApplied"] = False
+        packet["secondDraftApplied"] = False
+        packet["normalBandPassed"] = bool(selection.get("tierHit"))
+        packet["precisionAchieved"] = None
+    return packet
+
+
+def _bounded_story_failure_message(outcome: Dict[str, Any]) -> str:
+    error = outcome.get("error") if isinstance(outcome.get("error"), dict) else {}
+    labels = {
+        "StoryDraftGenerationFailed": "正文草稿的 Provider 请求失败，项目未写入。",
+        "StoryGenerationApplyRejected": "项目服务拒绝本轮正文写入，暂存候选已保留。",
+        "StoryGenerationValidationFailed": "正文已写入，但未通过 Storydex 客观校验。",
+    }
+    return labels.get(
+        str(error.get("type") or ""),
+        "有界正文路径未能安全完成本轮写入。",
+    )
 
 
 def _should_create_task_checklist(intent_frame: Dict[str, Any]) -> bool:
@@ -2327,6 +3074,7 @@ async def _stream_coomi_sse_worker(
     planning_task: asyncio.Task[List[Dict[str, Any]]] | None = None
     planning_started = 0.0
     knowledge_projection: Dict[str, Any] = {}
+    completed_after_commit_cancellation = False
 
     def finish_git_turn() -> Dict[str, Any]:
         nonlocal git_finished
@@ -2632,6 +3380,500 @@ async def _stream_coomi_sse_worker(
                     completed = False
                 should_run_coomi = False
 
+            bounded_gate = (
+                _bounded_story_generation_gate(workspace_root, turn_contract)
+                if should_run_coomi
+                else {"enabled": False, "reason": "turn_not_runnable"}
+            )
+            if bounded_gate.get("terminal") and should_run_coomi:
+                gate_error = (
+                    bounded_gate.get("error")
+                    if isinstance(bounded_gate.get("error"), dict)
+                    else {}
+                )
+                error_type = str(gate_error.get("type") or "ChapterPlanValidationFailed")
+                error_message = (
+                    "本章已达到目标字数。请明确要求超写，或续写下一章。"
+                    if error_type == "ChapterWordCountTargetReached"
+                    else "章节写入计划已失效，Storydex 已在生成正文前停止执行。"
+                )
+                followup_mailbox_service.pause(
+                    workspace_root=workspace_root,
+                    session_id=session_id,
+                    reason="chapter_plan_validation_failed",
+                )
+                error_packet = {
+                    "_type": "AgentError",
+                    "_version": 1,
+                    "error_type": error_type,
+                    "message": error_message,
+                    "details": {
+                        "runtime": BOUNDED_STORY_GENERATION_STRATEGY,
+                        "reason": str(bounded_gate.get("reason") or ""),
+                        "issues": list(gate_error.get("issues") or []),
+                        "validation": dict(gate_error.get("validation") or {}),
+                        "providerCalls": 0,
+                    },
+                }
+                events.append(
+                    _event_to_trace_event("AgentError", error_packet, len(events) + 1)
+                )
+                yield _encode_sse("AgentError", error_packet)
+                completed = False
+                should_run_coomi = False
+            if bounded_gate.get("enabled") and not execution_handle.is_cancelled:
+                if replacement is not None and not replacement.accepted:
+                    await asyncio.to_thread(replacement.accept)
+                if tracker is not None:
+                    for task_event_name, task_payload in tracker.start_next():
+                        events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
+                        yield _encode_sse(task_event_name, task_payload)
+                bounded_started = time.perf_counter()
+                yield _encode_sse(
+                    "TurnPhase",
+                    _turn_phase_packet(
+                        trace_id=trace_id,
+                        session_id=session_id,
+                        phase="model_execution",
+                        label="正在生成本章正文",
+                        status="running",
+                        phase_started=bounded_started,
+                    ),
+                )
+                provider_status = get_storydex_coomi_agent_service().get_status(
+                    workspace_root=workspace_root
+                )
+                bounded_provider = str(provider_status.get("providerId") or "")
+                bounded_model = str(provider_status.get("model") or "")
+                started_packet = {
+                    "_type": "AgentStarted",
+                    "_version": 1,
+                    "session_id": session_id,
+                    "mode": BOUNDED_STORY_GENERATION_STRATEGY,
+                    "query": prompt,
+                    "llmModel": bounded_model,
+                    "llmProvider": bounded_provider,
+                    "chapterLengthTier": str(
+                        bounded_gate.get("chapterLengthTier") or ""
+                    ),
+                    "preciseWordCountEnabled": bool(bounded_gate.get("precisionEnabled")),
+                    "coomiStatus": provider_status,
+                }
+                events.append(_event_to_trace_event("AgentStarted", started_packet, len(events) + 1))
+                yield _encode_sse("AgentStarted", started_packet)
+
+                bounded_events: asyncio.Queue[tuple[str, Dict[str, Any]]] = asyncio.Queue()
+                bounded_commit_state: Dict[str, Any] = {
+                    "started": False,
+                    "finished": False,
+                }
+
+                def bounded_event_sink(name: str, packet: Dict[str, Any]) -> None:
+                    bounded_events.put_nowait((name, dict(packet)))
+
+                bounded_task = asyncio.create_task(
+                    _execute_bounded_story_generation(
+                        prompt=prompt,
+                        trace_id=trace_id,
+                        active_file=active_file,
+                        workspace_root=workspace_root,
+                        turn_contract=turn_contract,
+                        event_sink=bounded_event_sink,
+                        commit_state=bounded_commit_state,
+                    ),
+                    name=f"storydex-bounded-story-{trace_id}",
+                )
+                bounded_outcome: Dict[str, Any] = {}
+                bounded_cancelled = False
+                bounded_cancel_deferred = False
+                try:
+                    while not bounded_task.done() or not bounded_events.empty():
+                        if execution_handle.is_cancelled or cancellation_token.is_cancelled():
+                            if bool(bounded_commit_state.get("started")):
+                                # Once the atomic commit begins, its result owns
+                                # the terminal status. Cancelling the coroutine
+                                # here could report "cancelled" after the files
+                                # were already replaced.
+                                bounded_cancel_deferred = True
+                            else:
+                                bounded_cancelled = True
+                                bounded_task.cancel()
+                                break
+                        try:
+                            bounded_event_name, bounded_packet = await asyncio.wait_for(
+                                bounded_events.get(),
+                                timeout=_PHASE_HEARTBEAT_SECONDS,
+                            )
+                        except asyncio.TimeoutError:
+                            yield _encode_sse(
+                                "TurnPhase",
+                                _turn_phase_packet(
+                                    trace_id=trace_id,
+                                    session_id=session_id,
+                                    phase="model_execution",
+                                    label="正在生成本章正文",
+                                    status="running",
+                                    phase_started=bounded_started,
+                                    heartbeat=True,
+                                ),
+                            )
+                            continue
+                        events.append(
+                            _event_to_trace_event(
+                                bounded_event_name,
+                                bounded_packet,
+                                len(events) + 1,
+                            )
+                        )
+                        yield _encode_sse(bounded_event_name, bounded_packet)
+                    if bounded_cancelled:
+                        await asyncio.gather(bounded_task, return_exceptions=True)
+                    else:
+                        bounded_outcome = await bounded_task
+                        if bounded_cancel_deferred:
+                            completed_after_commit_cancellation = True
+                finally:
+                    if not bounded_task.done():
+                        bounded_task.cancel()
+                        await asyncio.gather(bounded_task, return_exceptions=True)
+
+                bounded_result = (
+                    bounded_outcome.get("result")
+                    if isinstance(bounded_outcome.get("result"), dict)
+                    else {}
+                )
+                if bounded_cancelled:
+                    terminal_event = (
+                        "AgentCancelled",
+                        {
+                            "_type": "AgentCancelled",
+                            "_version": 1,
+                            "session_id": session_id,
+                            "reason": execution_handle.cancel_reason or "cancelled",
+                        },
+                    )
+                    completed = False
+                else:
+                    validation_packet = _bounded_story_validation_packet(
+                        validation=dict(bounded_outcome.get("validation") or {}),
+                        result=bounded_result,
+                        trace_id=trace_id,
+                        session_id=session_id,
+                        provider=bounded_provider,
+                        model=bounded_model,
+                    )
+                    if bool(validation_packet.get("applicable")):
+                        events.append(
+                            _event_to_trace_event(
+                                "StoryGenerationValidation",
+                                validation_packet,
+                                len(events) + 1,
+                            )
+                        )
+                        yield _encode_sse("StoryGenerationValidation", validation_packet)
+                        turn_policy = dict(
+                            (turn_contract.get("turnPlan") or {}).get(
+                                "wordCountPolicy"
+                            )
+                            or {}
+                        )
+                        if str(turn_policy.get("mode") or "") == "tier":
+                            accounting = dict(
+                                bounded_result.get("callAccounting") or {}
+                            )
+                            story_length_tier_calibration_service.record_sample(
+                                workspace_root,
+                                provider=bounded_provider,
+                                model=bounded_model,
+                                tier=turn_policy.get("tier"),
+                                prompt_version=str(
+                                    turn_policy.get("promptVersion") or ""
+                                ),
+                                actual_word_count=int(
+                                    bounded_result.get("draftWordCount")
+                                    or validation_packet.get("actualWordCount")
+                                    or 0
+                                ),
+                                tier_hit=bool(validation_packet.get("tierHit")),
+                                structure_passed=bool(
+                                    validation_packet.get("structurePassed")
+                                ),
+                                machine_quality_passed=bool(
+                                    validation_packet.get(
+                                        "machineQualityPassed"
+                                    )
+                                ),
+                                word_count_scope=str(
+                                    validation_packet.get("wordCountScope")
+                                    or ""
+                                ),
+                                attempt_kind=INITIAL_ATTEMPT_KIND,
+                                logical_prose_calls=int(
+                                    accounting.get("logicalStoryCalls") or 0
+                                ),
+                                completion_tokens=(
+                                    int(bounded_result["draftCompletionTokens"])
+                                    if bounded_result.get("draftCompletionTokens")
+                                    is not None
+                                    else None
+                                ),
+                                duration_ms=(
+                                    int(bounded_result["draftDurationMs"])
+                                    if bounded_result.get("draftDurationMs")
+                                    is not None
+                                    else None
+                                ),
+                                trace_id=trace_id,
+                            )
+                        else:
+                            story_length_calibration_service.record_paragraph_generation_result(
+                                workspace_root,
+                                turn_contract=turn_contract,
+                                validation=validation_packet,
+                                provider=bounded_provider,
+                                model=bounded_model,
+                            )
+                            story_length_calibration_service.record_generation_result(
+                                workspace_root,
+                                turn_contract=turn_contract,
+                                validation={
+                                    **validation_packet,
+                                    "attemptKind": INITIAL_ATTEMPT_KIND,
+                                    "generatedWordCount": int(
+                                        bounded_result.get("draftWordCount")
+                                        or validation_packet.get("generatedWordCount")
+                                        or 0
+                                    ),
+                                },
+                                provider=bounded_provider,
+                                model=bounded_model,
+                            )
+                    accounting_packet = {
+                        "_type": "StoryCallAccounting",
+                        "_version": 1,
+                        "traceId": trace_id,
+                        "sessionId": session_id,
+                        "chapterLengthTier": str(
+                            bounded_result.get("chapterLengthTier") or ""
+                        ),
+                        "preciseWordCountEnabled": bool(bounded_result.get("precisionEnabled")),
+                        "asymmetricLengthEnabled": bool(
+                            bounded_result.get("asymmetricLengthEnabled")
+                        ),
+                        **dict(bounded_outcome.get("callAccounting") or {}),
+                        "contractViolations": [
+                            str(item)
+                            for item in list(bounded_result.get("contractViolations") or [])
+                        ],
+                    }
+                    events.append(
+                        _event_to_trace_event(
+                            "StoryCallAccounting",
+                            accounting_packet,
+                            len(events) + 1,
+                        )
+                    )
+                    yield _encode_sse("StoryCallAccounting", accounting_packet)
+
+                    if bool(bounded_outcome.get("ok")):
+                        selection = (
+                            bounded_result.get("selection")
+                            if isinstance(bounded_result.get("selection"), dict)
+                            else {}
+                        )
+                        chapter_path = str(
+                            (turn_contract.get("turnPlan") or {}).get("authoritativeChapterPath")
+                            or ""
+                        )
+                        final_word_count = int(selection.get("finalWordCount") or 0)
+                        turn_plan = (
+                            turn_contract.get("turnPlan")
+                            if isinstance(turn_contract.get("turnPlan"), dict)
+                            else {}
+                        )
+                        word_count_policy = (
+                            turn_plan.get("wordCountPolicy")
+                            if isinstance(turn_plan.get("wordCountPolicy"), dict)
+                            else {}
+                        )
+                        tier_mode = (
+                            str(word_count_policy.get("mode") or "") == "tier"
+                        )
+                        count_summary = (
+                            f"本次续写 {final_word_count} 字"
+                            if tier_mode
+                            else f"字数 {final_word_count}"
+                        )
+                        reply = (
+                            f"章节已写入 {chapter_path}，{count_summary}"
+                            if chapter_path
+                            else f"章节已写入，{count_summary}"
+                        )
+                        if tier_mode:
+                            tier_labels = {
+                                "short": "短档",
+                                "medium": "中档",
+                                "long": "长档",
+                            }
+                            tier_label = tier_labels.get(
+                                str(validation_packet.get("chapterLengthTier") or ""),
+                                "所选档位",
+                            )
+                            reply += (
+                                f"，{tier_label}已命中"
+                                if bool(validation_packet.get("tierHit"))
+                                else f"，{tier_label}未命中，正文按原稿保留"
+                            )
+                        elif bool(validation_packet.get("preciseWordCountEnabled")) and not bool(
+                            validation_packet.get("precisionAchieved")
+                        ):
+                            product_target = max(
+                                1,
+                                int(
+                                    word_count_policy.get("target")
+                                    or turn_plan.get("chapterWordCountTarget")
+                                    or 1
+                                ),
+                            )
+                            precision_low, precision_high = chapter_precision_band(
+                                product_target
+                            )
+                            reply += (
+                                f"，未达到精确范围 {precision_low}-{precision_high}"
+                            )
+                        elif validation_packet.get("normalBandPassed") is False:
+                            product_target = max(
+                                1,
+                                int(
+                                    word_count_policy.get("target")
+                                    or turn_plan.get("chapterWordCountTarget")
+                                    or 1
+                                ),
+                            )
+                            normal_low, normal_high = chapter_normal_band(product_target)
+                            reply += f"，未达到正常范围 {normal_low}-{normal_high}"
+                        reply += "。"
+                        if not tier_mode and bool(validation_packet.get("overBudget")):
+                            reply = f"{reply}{STORY_OVER_BUDGET_KEEP_MESSAGE}"
+                        reply_packet = {
+                            "_type": "TextChunk",
+                            "_version": 1,
+                            "content": reply,
+                        }
+                        reply_chunks.append(reply)
+                        events.append(
+                            _event_to_trace_event("TextChunk", reply_packet, len(events) + 1)
+                        )
+                        yield _encode_sse("TextChunk", reply_packet)
+                        completed = True
+                        terminal_event = (
+                            "AgentCompleted",
+                            {
+                                "_type": "AgentCompleted",
+                                "_version": 1,
+                                "session_id": session_id,
+                                "route": BOUNDED_STORY_GENERATION_STRATEGY,
+                                "status": "completed",
+                                "duration_ms": int(
+                                    (time.perf_counter() - bounded_started) * 1000
+                                ),
+                                "message": (
+                                    STORY_OVER_BUDGET_KEEP_MESSAGE
+                                    if not tier_mode
+                                    and bool(validation_packet.get("overBudget"))
+                                    else reply
+                                ),
+                                "finalWordCount": final_word_count,
+                                "wordCountScope": str(
+                                    validation_packet.get("wordCountScope") or ""
+                                ),
+                                "actualWordCount": int(
+                                    validation_packet.get("actualWordCount") or 0
+                                ),
+                                "generatedWordCount": int(
+                                    validation_packet.get("generatedWordCount") or 0
+                                ),
+                                "retainedWordCount": int(
+                                    validation_packet.get("retainedWordCount") or 0
+                                ),
+                                "resultingWordCount": int(
+                                    validation_packet.get("resultingWordCount") or 0
+                                ),
+                                "chapterLengthTier": str(
+                                    validation_packet.get("chapterLengthTier") or ""
+                                ),
+                                "tierHit": validation_packet.get("tierHit"),
+                                "tierDeviation": str(
+                                    validation_packet.get("tierDeviation") or ""
+                                ),
+                                "preciseWordCountEnabled": bool(
+                                    validation_packet.get("preciseWordCountEnabled")
+                                ),
+                                "lengthControlStrategy": str(
+                                    validation_packet.get("lengthControlStrategy") or ""
+                                ),
+                                "canonicalWordCount": int(
+                                    validation_packet.get("canonicalWordCount") or 0
+                                ),
+                                "normalBandPassed": validation_packet.get(
+                                    "normalBandPassed"
+                                ),
+                                "precisionAchieved": validation_packet.get(
+                                    "precisionAchieved"
+                                ),
+                                "selectedEditIds": [
+                                    str(item)
+                                    for item in list(
+                                        validation_packet.get("selectedEditIds") or []
+                                    )
+                                ],
+                                "lengthFallbackReason": str(
+                                    validation_packet.get("lengthFallbackReason") or ""
+                                ),
+                                "generatedOverheadRatio": validation_packet.get(
+                                    "generatedOverheadRatio"
+                                ),
+                                **(
+                                    {
+                                        "overBudget": True,
+                                        "message": STORY_OVER_BUDGET_KEEP_MESSAGE,
+                                    }
+                                    if not tier_mode
+                                    and bool(validation_packet.get("overBudget"))
+                                    else {}
+                                ),
+                            },
+                        )
+                    else:
+                        error_message = _bounded_story_failure_message(bounded_outcome)
+                        followup_mailbox_service.pause(
+                            workspace_root=workspace_root,
+                            session_id=session_id,
+                            reason="story_generation_validation_failed",
+                        )
+                        error_packet = {
+                            "_type": "AgentError",
+                            "_version": 1,
+                            "error_type": "BoundedStoryGenerationFailed",
+                            "message": error_message,
+                            "details": {
+                                "runtime": BOUNDED_STORY_GENERATION_STRATEGY,
+                                "error": dict(bounded_outcome.get("error") or {}),
+                                "validation": validation_packet,
+                                # Staged candidates survive a failed write so the
+                                # chapter can be recovered without a new call.
+                                "stagedCandidates": dict(
+                                    bounded_result.get("stagedCandidates") or {}
+                                ),
+                            },
+                        }
+                        events.append(
+                            _event_to_trace_event("AgentError", error_packet, len(events) + 1)
+                        )
+                        yield _encode_sse("AgentError", error_packet)
+                        completed = False
+                should_run_coomi = False
+
             if should_run_coomi and not execution_handle.is_cancelled:
                 if tracker is not None:
                     for task_event_name, task_payload in tracker.start_next():
@@ -2913,14 +4155,10 @@ async def _stream_coomi_sse_worker(
                                 start_index=segment_event_start,
                             )
                             correction_applied = story_correction_attempts > 0 and write_tool_applied
-                            corrected_below_minimum = bool(
-                                correction_applied
-                                and _story_generation_needs_length_correction(validation_packet)
-                                and validation_packet.get("structurePassed")
-                            )
                             validation_passed = bool(
                                 write_tool_applied
-                                and (validation_packet.get("passed") or corrected_below_minimum)
+                                and validation_packet.get("passed")
+                                and not validation_packet.get("belowBudget")
                             )
                             validation_message = str(validation_packet.get("message") or "")
                             if not write_tool_applied:
@@ -2928,13 +4166,8 @@ async def _stream_coomi_sse_worker(
                                     "本轮没有成功调用 StorydexApplyStoryIncrement，"
                                     "不能把磁盘上的既有正文误判为本轮生成结果。"
                                 )
-                            elif corrected_below_minimum:
-                                validation_message = (
-                                    f"已完成一次定向补写并落盘；本章当前生成 "
-                                    f"{int(validation_packet.get('generatedWordCount') or 0)} 字，仍低于可接受下界 "
-                                    f"{int(validation_packet.get('acceptWordCountMin') or 0)} 字，"
-                                    "已按单轮修订上限放行并保留 belowBudget 标记。"
-                                )
+                            elif validation_passed and bool(validation_packet.get("overBudget")):
+                                validation_message = STORY_OVER_BUDGET_KEEP_MESSAGE
                             validation_packet = {
                                 **validation_packet,
                                 "passed": validation_passed,
@@ -2948,6 +4181,20 @@ async def _stream_coomi_sse_worker(
                                 "maximumCorrectionAttempts": _STORY_GENERATION_MAX_CORRECTIONS,
                                 "correctionApplied": correction_applied,
                             }
+                            if (
+                                validation_passed
+                                and bool(validation_packet.get("overBudget"))
+                                and terminal_event is not None
+                                and terminal_event[0] == "AgentCompleted"
+                            ):
+                                terminal_event = (
+                                    terminal_event[0],
+                                    {
+                                        **terminal_event[1],
+                                        "overBudget": True,
+                                        "message": STORY_OVER_BUDGET_KEEP_MESSAGE,
+                                    },
+                                )
                             events.append(
                                 _event_to_trace_event(
                                     "StoryGenerationValidation",
@@ -2956,6 +4203,15 @@ async def _stream_coomi_sse_worker(
                                 )
                             )
                             yield _encode_sse("StoryGenerationValidation", validation_packet)
+                            # 段落形态样本与字数是否达标无关；只在 passed 时采样会让
+                            # 一个偏掉的密度档永远无法自我纠正。
+                            story_length_calibration_service.record_paragraph_generation_result(
+                                workspace_root,
+                                turn_contract=turn_contract,
+                                validation=validation_packet,
+                                provider=story_generation_provider,
+                                model=story_generation_model,
+                            )
                             if validation_passed:
                                 story_length_calibration_service.record_generation_result(
                                     workspace_root,
@@ -2966,7 +4222,8 @@ async def _stream_coomi_sse_worker(
                                 )
                             if not bool(validation_packet.get("passed")):
                                 if (
-                                    story_correction_attempts < _STORY_GENERATION_MAX_CORRECTIONS
+                                    _supports_correction_continuation(turn_contract)
+                                    and story_correction_attempts < _STORY_GENERATION_MAX_CORRECTIONS
                                     and _story_generation_needs_length_correction(validation_packet)
                                 ):
                                     story_correction_attempts += 1
@@ -3009,6 +4266,13 @@ async def _stream_coomi_sse_worker(
                                     error_message = (
                                         "正文完成一次定向补写后仍未形成可验收的本轮写入，"
                                         "Storydex 已停止自动修订。"
+                                    )
+                                elif not _supports_correction_continuation(turn_contract):
+                                    # 本轮合同属于有界正文路径，长度修订只发生在写入之前；
+                                    # 说明具体原因，避免让作者以为还有一次补写没被用掉。
+                                    error_message = (
+                                        "正文未通过 Storydex 客观校验；本轮不再追加补写正文，"
+                                        "长度修订只在写入前进行。"
                                     )
                                 else:
                                     error_message = (
@@ -3278,7 +4542,10 @@ async def _stream_coomi_sse_worker(
             completed=completed,
             error_message=error_message,
             error_code="coomi_agent_error" if error_message else "",
-            cancelled=execution_handle.is_cancelled or cancellation_token.is_cancelled(),
+            cancelled=(
+                execution_handle.is_cancelled or cancellation_token.is_cancelled()
+            )
+            and not completed_after_commit_cancellation,
         )
         context = ExecutionFinalizationContext(
             finish_git=finish_git_turn,

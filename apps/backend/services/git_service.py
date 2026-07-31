@@ -2,12 +2,49 @@ from __future__ import annotations
 
 import subprocess
 import os
+import threading
+import time
 from datetime import datetime, timezone
-from functools import lru_cache
+from functools import lru_cache, wraps
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, TypeVar
 
 from core.exceptions import GitServiceError
+
+_WORKTREE_LOCKS: Dict[str, threading.RLock] = {}
+_WORKTREE_LOCKS_GUARD = threading.Lock()
+
+_T = TypeVar("_T")
+
+
+def _worktree_lock(workspace_root: Path) -> threading.RLock:
+    """Return the process-wide re-entrant lock guarding one worktree.
+
+    A Git worktree has exactly one index, so `add`/`commit` pairs from
+    different threads corrupt each other: the second `add -A` stages the
+    first caller's files, and whichever `commit` runs first sweeps changes it
+    never intended to record. Serializing per worktree keeps every public
+    operation atomic. The lock is re-entrant because the mutating helpers
+    call each other (`commit_all` -> `initialize_repository` -> `read_summary`).
+    """
+    key = str(workspace_root).lower()
+    with _WORKTREE_LOCKS_GUARD:
+        lock = _WORKTREE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _WORKTREE_LOCKS[key] = lock
+        return lock
+
+
+def _serialized(method: Callable[..., _T]) -> Callable[..., _T]:
+    """Serialize a GitService method on the worktree it operates on."""
+
+    @wraps(method)
+    def wrapper(self: "GitService", workspace_root: Path, *args: Any, **kwargs: Any) -> _T:
+        with _worktree_lock(Path(workspace_root).resolve()):
+            return method(self, workspace_root, *args, **kwargs)
+
+    return wrapper
 
 
 class GitService:
@@ -20,6 +57,7 @@ class GitService:
     SAFE_GITIGNORE_LINES = [".storydex/.agent/", ".storydex/.cache/"]
     AGENT_RUNTIME_PREFIX = ".storydex/.agent/"
 
+    @_serialized
     def restore_to_commit(
         self,
         workspace_root: Path,
@@ -117,6 +155,12 @@ class GitService:
         branch, changed_files = self._parse_status(status_output)
         commits = self._read_recent_commits(root, limit=history_limit)
         graph_lines = self._read_graph_lines(root, limit=min(history_limit, 16))
+        # HEAD must come from HEAD, not from the newest entry in the history
+        # list: history is read with `--all`, so a backup branch or a restored
+        # older HEAD makes commits[0] a different commit than the one actually
+        # checked out. That mismatch is what made the panel mark the wrong row
+        # as "current" and show a stale "latest commit".
+        head = self._read_head_commit(root)
 
         summary.update(
             {
@@ -125,7 +169,10 @@ class GitService:
                 "changedFiles": changed_files,
                 "recentCommits": commits,
                 "graphLines": graph_lines,
-                "head": commits[0] if commits else None,
+                "head": head,
+                # Monotonic-ish stamp so the client can drop a stale response
+                # that lands after a newer one (see stores/git.ts).
+                "generatedAt": time.time(),
             }
         )
         return summary
@@ -317,6 +364,7 @@ class GitService:
             "message": "",
         }
 
+    @_serialized
     def initialize_repository(self, workspace_root: Path) -> Dict[str, Any]:
         root = Path(workspace_root).resolve()
         self._ensure_git_installed()
@@ -328,6 +376,7 @@ class GitService:
         self._ensure_agent_runtime_untracked(root)
         return self.read_summary(root)
 
+    @_serialized
     def commit_all(self, workspace_root: Path, *, message: str = "") -> Dict[str, Any]:
         root = Path(workspace_root).resolve()
         self.initialize_repository(root)
@@ -350,6 +399,7 @@ class GitService:
             "summary": self.read_summary(root),
         }
 
+    @_serialized
     def commit_paths(self, workspace_root: Path, *, paths: Iterable[str], message: str = "") -> Dict[str, Any]:
         root = Path(workspace_root).resolve()
         normalized_paths = self._normalize_paths(paths)
@@ -456,12 +506,20 @@ class GitService:
     def _read_recent_commits(self, workspace_root: Path, *, limit: int) -> List[Dict[str, Any]]:
         if not self._has_head_commit(workspace_root):
             return []
+        root = Path(workspace_root).resolve()
+        window = max(1, int(limit or self.HISTORY_LIMIT))
+        # History is read with `--all` so commits parked on a restore backup
+        # branch stay recoverable. Because `git log` sorts by date, those
+        # commits interleave with the current branch's own history and the list
+        # reads as if unrelated work appeared out of nowhere. Tagging each entry
+        # with its reachability lets the panel group them explicitly instead.
+        reachable = self._read_head_reachable_ids(root, limit=window * 8)
         output = self._run_git(
-            Path(workspace_root).resolve(),
+            root,
             [
                 "log",
                 "--all",
-                f"-n{max(1, int(limit or self.HISTORY_LIMIT))}",
+                f"-n{window}",
                 "--decorate=short",
                 "--date=iso-strict",
                 "--pretty=format:%H%x1f%h%x1f%an%x1f%ad%x1f%D%x1f%s",
@@ -473,17 +531,30 @@ class GitService:
             if len(parts) != 6:
                 continue
             commit_id, short_id, author_name, authored_at, refs, subject = parts
+            normalized_id = commit_id.strip()
             commits.append(
                 {
-                    "id": commit_id.strip(),
+                    "id": normalized_id,
                     "shortId": short_id.strip(),
                     "authorName": author_name.strip(),
                     "authoredAt": authored_at.strip(),
                     "refs": refs.strip(),
                     "subject": subject.strip(),
+                    # Empty `reachable` means the lookup failed; assume the
+                    # commit belongs to the current line rather than banishing
+                    # the whole history into a "backup" bucket.
+                    "onCurrentBranch": normalized_id in reachable if reachable else True,
                 }
             )
         return commits
+
+    def _read_head_reachable_ids(self, workspace_root: Path, *, limit: int) -> set[str]:
+        output = self._run_git(
+            Path(workspace_root).resolve(),
+            ["rev-list", f"-n{max(1, int(limit or 200))}", "HEAD"],
+            check=False,
+        )
+        return {line.strip() for line in output.splitlines() if line.strip()}
 
     def _read_graph_lines(self, workspace_root: Path, *, limit: int) -> List[str]:
         if not self._has_head_commit(workspace_root):

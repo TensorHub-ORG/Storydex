@@ -247,11 +247,9 @@ def test_agent_event_and_generation_helpers_cover_boundaries():
     assert routes_agent._bounded_int("bad", default=3, minimum=1, maximum=20) == 3
     assert routes_agent._normalize_story_generation_options({"segmentCount": 2, "segmentWords": 800}) == {
         "fragmentCount": 2,
-        "fragmentWordCount": 800,
-        "fragmentWordCountMin": 800,
-        "fragmentWordCountMax": 800,
-        "chapterWordCountTarget": 800,
+        "chapterLengthTier": "short",
         "chapterTemplateId": "",
+        "preciseWordCountEnabled": False,
     }
     assert routes_agent._phase_for_event("ToolDone") == "tool"
     assert routes_agent._phase_for_event("TextChunk") == "model"

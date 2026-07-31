@@ -1,4 +1,5 @@
 import type { ApiAuditRecord, ApiTrace } from "@/types/api";
+import type { ChapterLengthTier } from "@/types/workspace";
 
 export interface AgentChatRequest {
   prompt: string;
@@ -21,8 +22,10 @@ export interface AgentPendingSnapshotConfirmation {
 
 export interface AgentStoryGenerationOptions {
   fragmentCount: number;
-  chapterWordCountTarget: number;
-  fragmentWordCount: number;
+  chapterLengthTier: ChapterLengthTier;
+  chapterWordCountTarget?: number;
+  preciseWordCountEnabled?: boolean;
+  fragmentWordCount?: number;
   fragmentWordCountMin?: number;
   fragmentWordCountMax?: number;
   chapterTemplateId?: string;
@@ -178,6 +181,9 @@ export type AgentStreamPacketType =
   | "TaskSkipped"
   | "TaskPlanUpdated"
   | "TurnContract"
+  | "StoryDraftMeasured"
+  | "StoryLengthRevisionResult"
+  | "StoryCallAccounting"
   | "StoryGenerationValidation"
   | "TurnPhase"
   | "StageOutput"
@@ -290,7 +296,7 @@ export interface AgentStreamPacket {
   details?: Record<string, unknown>;
   noRestorePoint?: boolean;
   created?: boolean;
-  target?: string;
+  target?: string | number;
   targetLabel?: string;
   workspaceRoot?: string;
   changedFileCount?: number;
@@ -316,7 +322,18 @@ export interface AgentStreamPacket {
   targetWordCountMin?: number;
   targetWordCountMax?: number;
   generatedWordCount?: number;
+  retainedWordCount?: number;
+  resultingWordCount?: number;
+  wordCountScope?: "candidate" | "chapter" | "fragment" | string;
+  initialWordCount?: number;
+  finalWordCount?: number;
+  candidateWordCount?: number;
   chapterWordCountTarget?: number;
+  chapterLengthTier?: ChapterLengthTier;
+  tierHit?: boolean | null;
+  tierDeviation?: string;
+  actualWordCount?: number;
+  machineQualityPassed?: boolean | null;
   acceptWordCountMin?: number;
   acceptWordCountMax?: number;
   belowBudget?: boolean;
@@ -324,6 +341,39 @@ export interface AgentStreamPacket {
   chapterContentMode?: string;
   structurePassed?: boolean;
   writeToolApplied?: boolean;
+  preciseWordCountEnabled?: boolean;
+  revisionApplied?: boolean;
+  lengthControlStrategy?: string;
+  canonicalWordCount?: number;
+  precisionAchieved?: boolean | null;
+  selectedEditIds?: string[];
+  rejectedEditIds?: string[];
+  rejectedEditReasonCounts?: Record<string, number>;
+  evaluatedCombinationCount?: number;
+  lengthFallbackReason?: string;
+  generatedOverheadRatio?: number | null;
+  accepted?: boolean;
+  outcome?: string;
+  rejectionReasons?: string[];
+  revisionOutcomeReason?: string;
+  revisionRejectionReasons?: string[];
+  completionTokens?: number | null;
+  capApplied?: boolean;
+  providerDurationMs?: number;
+  normalBand?: number[];
+  precisionBand?: number[];
+  normalBandPassed?: boolean | null;
+  precisionBandPassed?: boolean;
+  calibrationStatus?: string;
+  logicalStoryCalls?: number;
+  providerAttempts?: number;
+  transportRetries?: number;
+  initialGenerationCalls?: number;
+  lengthRevisionCalls?: number;
+  secondDraftCalls?: number;
+  nonProseCalls?: Record<string, number>;
+  contractViolations?: string[];
+  callAccounting?: Record<string, unknown>;
   correctionAttempt?: number;
   maximumCorrectionAttempts?: number;
   fragments?: Record<string, unknown>[];

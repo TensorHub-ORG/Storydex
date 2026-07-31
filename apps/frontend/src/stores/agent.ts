@@ -47,7 +47,7 @@ import type {
   CoomiWaterfallItemStatus,
   CoomiWaterfallItemType
 } from "@/types/agent";
-import type { StoryChapterTemplate } from "@/types/workspace";
+import type { ChapterLengthTier, StoryChapterTemplate } from "@/types/workspace";
 
 interface AgentState {
   promptInput: string;
@@ -86,7 +86,9 @@ interface AgentState {
   isCommittingGit: boolean;
   commitActionLabel: string;
   storyFragmentCount: number;
+  chapterLengthTier: ChapterLengthTier;
   chapterWordCountTarget: number;
+  preciseWordCountEnabled: boolean;
   storyFragmentWordCount: number;
   storyFragmentWordCountMin: number;
   storyFragmentWordCountMax: number;
@@ -151,7 +153,9 @@ export const useAgentStore = defineStore("agent", {
     isCommittingGit: false,
     commitActionLabel: "",
     storyFragmentCount: 1,
+    chapterLengthTier: "medium",
     chapterWordCountTarget: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
+    preciseWordCountEnabled: false,
     storyFragmentWordCount: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
     storyFragmentWordCountMin: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
     storyFragmentWordCountMax: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
@@ -443,12 +447,23 @@ export const useAgentStore = defineStore("agent", {
 
     setStoryGenerationOptions(options: {
       fragmentCount?: number;
+      chapterLengthTier?: ChapterLengthTier;
       chapterWordCountTarget?: number;
+      preciseWordCountEnabled?: boolean;
       fragmentWordCount?: number;
       fragmentWordCountMin?: number;
       fragmentWordCountMax?: number;
       chapterTemplateId?: string;
     }): void {
+      if (options.chapterLengthTier !== undefined) {
+        this.chapterLengthTier = normalizeChapterLengthTier(
+          options.chapterLengthTier
+        );
+      } else if (options.chapterWordCountTarget !== undefined) {
+        this.chapterLengthTier = migrateLegacyChapterLengthTier(
+          options.chapterWordCountTarget
+        );
+      }
       if (options.chapterTemplateId !== undefined) {
         this.storyChapterTemplateId = String(options.chapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID).trim();
       }
@@ -463,6 +478,7 @@ export const useAgentStore = defineStore("agent", {
       } else if (isSingleFileTemplate) {
         this.storyFragmentCount = 1;
       }
+      this.preciseWordCountEnabled = false;
       if (options.chapterWordCountTarget !== undefined) {
         const target = clampInteger(
           options.chapterWordCountTarget,
@@ -773,10 +789,7 @@ export const useAgentStore = defineStore("agent", {
             workspaceRoot: workspaceStore.currentProject?.workspaceRoot || workspaceStore.health?.workspaceRoot || "",
             storyGeneration: {
               fragmentCount: this.storyFragmentCount,
-              chapterWordCountTarget: this.chapterWordCountTarget,
-              fragmentWordCount: this.storyFragmentWordCount,
-              fragmentWordCountMin: this.storyFragmentWordCountMin,
-              fragmentWordCountMax: this.storyFragmentWordCountMax,
+              chapterLengthTier: this.chapterLengthTier,
               chapterTemplateId: this.storyChapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID
             },
             sourceFollowupMessageId: next.messageId,
@@ -879,10 +892,7 @@ export const useAgentStore = defineStore("agent", {
         workspaceRoot: workspaceStore.currentProject?.workspaceRoot || workspaceStore.health?.workspaceRoot || "",
         storyGeneration: {
           fragmentCount: this.storyFragmentCount,
-          chapterWordCountTarget: this.chapterWordCountTarget,
-          fragmentWordCount: this.storyFragmentWordCount,
-          fragmentWordCountMin: this.storyFragmentWordCountMin,
-          fragmentWordCountMax: this.storyFragmentWordCountMax,
+          chapterLengthTier: this.chapterLengthTier,
           chapterTemplateId: this.storyChapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID
         },
         replaceLatestTraceId: expectedTraceId
@@ -1004,10 +1014,7 @@ export const useAgentStore = defineStore("agent", {
         workspaceRoot: workspaceStore.currentProject?.workspaceRoot || workspaceStore.health?.workspaceRoot || "",
         storyGeneration: {
           fragmentCount: this.storyFragmentCount,
-          chapterWordCountTarget: this.chapterWordCountTarget,
-          fragmentWordCount: this.storyFragmentWordCount,
-          fragmentWordCountMin: this.storyFragmentWordCountMin,
-          fragmentWordCountMax: this.storyFragmentWordCountMax,
+          chapterLengthTier: this.chapterLengthTier,
           chapterTemplateId: this.storyChapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID
         }
       };
@@ -1297,6 +1304,12 @@ export const useAgentStore = defineStore("agent", {
         const toolRegistry = toRecord(visiblePacket.toolRegistry) || {};
         const contextAssembly = toRecord(visiblePacket.contextAssembly) || {};
         const contextBudget = toRecord(contextAssembly.budget) || {};
+        if (turnPlan.chapterLengthTier !== undefined) {
+          this.chapterLengthTier = normalizeChapterLengthTier(
+            turnPlan.chapterLengthTier
+          );
+          this.preciseWordCountEnabled = false;
+        }
         nextRun.audit = [
           ...nextRun.audit,
           {
@@ -1307,10 +1320,7 @@ export const useAgentStore = defineStore("agent", {
             complexity: String(intentFrame.complexity || ""),
             requiresChapterTemplateSelection: Boolean(turnPlan.requiresChapterTemplateSelection),
             fragmentCount: Number(turnPlan.fragmentCount || 0),
-            chapterWordCountTarget: Number(turnPlan.chapterWordCountTarget || 0),
-            fragmentWordCount: Number(turnPlan.fragmentWordCount || 0),
-            fragmentWordCountMin: Number(turnPlan.fragmentWordCountMin || 0),
-            fragmentWordCountMax: Number(turnPlan.fragmentWordCountMax || 0),
+            chapterLengthTier: String(turnPlan.chapterLengthTier || ""),
             skillCount: Number(skillRegistry.skillCount || 0),
             toolCount: Number(toolRegistry.toolCount || 0),
             contextBlockCount: Number(contextBudget.blockCount || 0),
@@ -1328,11 +1338,17 @@ export const useAgentStore = defineStore("agent", {
             exact: Boolean(visiblePacket.exact),
             fragmentCount: Number(visiblePacket.fragmentCount || 0),
             generatedWordCount: Number(visiblePacket.generatedWordCount || 0),
-            chapterWordCountTarget: Number(visiblePacket.chapterWordCountTarget || 0),
-            acceptWordCountMin: Number(visiblePacket.acceptWordCountMin || 0),
-            acceptWordCountMax: Number(visiblePacket.acceptWordCountMax || 0),
+            actualWordCount: Number(
+              visiblePacket.actualWordCount
+                || visiblePacket.finalWordCount
+                || visiblePacket.generatedWordCount
+                || 0
+            ),
+            chapterLengthTier: String(visiblePacket.chapterLengthTier || ""),
+            tierHit: visiblePacket.tierHit === true,
+            tierDeviation: String(visiblePacket.tierDeviation || ""),
+            machineQualityPassed: visiblePacket.machineQualityPassed === true,
             overBudget: Boolean(visiblePacket.overBudget),
-            targetWordCount: Number(visiblePacket.targetWordCount || 0),
             chapterContentMode: String(visiblePacket.chapterContentMode || ""),
             structurePassed: Boolean(visiblePacket.structurePassed),
             writeToolApplied: Boolean(visiblePacket.writeToolApplied),
@@ -1616,6 +1632,38 @@ function streamPacketToWaterfallItem(
       raw
     });
   }
+  if (eventName === "StoryDraftMeasured") {
+    return createWaterfallItem({
+      id: `${traceId}-story-draft-measured`,
+      type: "system",
+      status: "success",
+      title: "Storydex 首稿字数",
+      content: summarizeStoryDraftMeasuredPacket(packet),
+      raw
+    });
+  }
+  if (eventName === "StoryLengthRevisionResult") {
+    const status = statusForPacket(eventName, packet);
+    return createWaterfallItem({
+      id: `${traceId}-story-length-revision`,
+      type: status === "warning" ? "notice" : "system",
+      status,
+      title: "Storydex 字数修订",
+      content: summarizeStoryLengthRevisionPacket(packet),
+      raw
+    });
+  }
+  if (eventName === "StoryCallAccounting") {
+    const status = statusForPacket(eventName, packet);
+    return createWaterfallItem({
+      id: `${traceId}-story-call-accounting`,
+      type: status === "warning" ? "notice" : "system",
+      status,
+      title: "Storydex 正文调用",
+      content: summarizeStoryCallAccountingPacket(packet),
+      raw
+    });
+  }
   if (eventName === "StoryGenerationValidation") {
     const status = statusForPacket(eventName, packet);
     return createWaterfallItem({
@@ -1735,7 +1783,13 @@ function phaseForEvent(eventName: string): string {
   if (eventName === "TextChunk" || eventName === "ReasoningChunk" || eventName === "ConnectionRetry") return "model";
   if (eventName === "GitAutoCommit" || eventName === "GitCommitPrompt" || eventName === "GitCommitResult") return "version_control";
   if (eventName.startsWith("Task")) return "planning";
-  if (eventName === "TurnContract" || eventName === "StoryGenerationValidation") return "orchestration";
+  if (
+    eventName === "TurnContract"
+    || eventName === "StoryDraftMeasured"
+    || eventName === "StoryLengthRevisionResult"
+    || eventName === "StoryCallAccounting"
+    || eventName === "StoryGenerationValidation"
+  ) return "orchestration";
   if (eventName === "RunAccepted" || eventName === "UsageUpdate" || eventName === "CompressionEvent" || eventName === "TurnPhase") return "runtime";
   if (eventName.startsWith("Agent")) return "agent";
   return "runtime";
@@ -1759,8 +1813,17 @@ function statusForPacket(eventName: string, packet: AgentStreamPacket): CoomiWat
     return String(packet.status || "") === "needs_user_input" ? "warning" : "info";
   }
   if (eventName === "StoryGenerationValidation") {
-    // 未通过是"待复核提示"而非硬错误：降级为 warning，避免渲染成红色报错。
-    return packet.passed && !packet.overBudget ? "success" : "warning";
+    if (!packet.passed) return "error";
+    if (packet.chapterLengthTier && packet.tierHit === false) return "warning";
+    const precisionMiss = packet.preciseWordCountEnabled === true && packet.precisionAchieved === false;
+    return packet.passed && !packet.belowBudget && !packet.overBudget && !precisionMiss ? "success" : "warning";
+  }
+  if (eventName === "StoryDraftMeasured") return "success";
+  if (eventName === "StoryLengthRevisionResult") return packet.accepted ? "success" : "warning";
+  if (eventName === "StoryCallAccounting") {
+    return Array.isArray(packet.contractViolations) && packet.contractViolations.length > 0
+      ? "warning"
+      : "success";
   }
   if (eventName === "ConnectionRetry") return "warning";
   if (eventName === "AgentCancelled") return "warning";
@@ -1784,6 +1847,9 @@ function detailForPacket(eventName: string, packet: AgentStreamPacket): string {
   if (eventName === "AgentError") return String(packet.message || "Coomi error");
   if (eventName === "GitAutoCommit" || eventName === "GitCommitPrompt" || eventName === "GitCommitResult") return summarizeGitAutoCommitPacket(packet);
   if (eventName === "TurnContract") return summarizeTurnContractPacket(packet);
+  if (eventName === "StoryDraftMeasured") return summarizeStoryDraftMeasuredPacket(packet);
+  if (eventName === "StoryLengthRevisionResult") return summarizeStoryLengthRevisionPacket(packet);
+  if (eventName === "StoryCallAccounting") return summarizeStoryCallAccountingPacket(packet);
   if (eventName === "StoryGenerationValidation") return summarizeStoryGenerationValidationPacket(packet);
   if (eventName === "RunAccepted" || eventName === "TurnPhase") return String(packet.detail || packet.label || eventName);
   if (eventName === "AgentCompleted") return `tokens ${Number(packet.total_tokens || 0)}`;
@@ -1821,6 +1887,10 @@ function summarizeTurnContractPacket(packet: AgentStreamPacket): string {
   const complexity = firstString(intentFrame, ["complexity"]);
   const fragmentCount = firstNumber(turnPlan, ["fragmentCount"]) ?? 1;
   const wordCountPolicy = toRecord(turnPlan.wordCountPolicy) || {};
+  const chapterLengthTier = normalizeChapterLengthTier(
+    turnPlan.chapterLengthTier ?? wordCountPolicy.tier
+  );
+  const tierMode = String(wordCountPolicy.mode || "") === "tier";
   const calibration = toRecord(wordCountPolicy.calibration) || {};
   const modelReferenceWordCount = firstNumber(wordCountPolicy, ["modelReferenceWordCount"]);
   const calibrationStatus = firstString(calibration, ["status"]);
@@ -1864,12 +1934,18 @@ function summarizeTurnContractPacket(packet: AgentStreamPacket): string {
   }
   pieces.push(
     `片段：${fragmentCount} 条`,
-    `章目标：${chapterWordCountTarget} 字`,
-    `可接受：${acceptWordCountMin}-${acceptWordCountMax} 字`,
+    ...(tierMode
+      ? [`本次续写篇幅：${chapterLengthTierLabel(chapterLengthTier)}`]
+      : [
+          `章目标：${chapterWordCountTarget} 字`,
+          `可接受：${acceptWordCountMin}-${acceptWordCountMax} 字`
+        ]),
     `直接写入：${Boolean(executionPolicy.directFileWrites) ? "开启" : "关闭"}`,
     `小说项目 Git：${Boolean(executionPolicy.localGitAutoCommit) ? "自动提交" : "未开启"}`
   );
-  if (calibrationStatus === "applied" && modelReferenceWordCount !== null) {
+  if (tierMode) {
+    pieces.push(`档位观测：${calibrationStatus || "cold_start"}`);
+  } else if (calibrationStatus === "applied" && modelReferenceWordCount !== null) {
     const modelIdentity = [calibrationProvider, calibrationModel].filter(Boolean).join("/");
     pieces.push(`模型参考：${modelReferenceWordCount} 字`);
     pieces.push(`校准：${modelIdentity || "未知模型"} · ${calibrationSampleCount} 个样本`);
@@ -1911,7 +1987,94 @@ function summarizeTurnContractPacket(packet: AgentStreamPacket): string {
   return pieces.join(" · ");
 }
 
+function summarizeStoryDraftMeasuredPacket(packet: AgentStreamPacket): string {
+  const record = packet as unknown as Record<string, unknown>;
+  const initialWordCount = firstNumber(record, ["initialWordCount", "draftWordCount"]) ?? 0;
+  const actualWordCount = firstNumber(record, [
+    "actualWordCount",
+    "generatedWordCount",
+    "draftGeneratedWordCount",
+    "initialWordCount",
+    "draftWordCount"
+  ]) ?? 0;
+  const retainedWordCount = firstNumber(record, ["retainedWordCount"]);
+  const resultingWordCount = firstNumber(record, ["resultingWordCount"]);
+  const generatedWordCount = firstNumber(record, ["generatedWordCount", "draftGeneratedWordCount"]);
+  const tier = packet.chapterLengthTier
+    ? ` · ${chapterLengthTierLabel(packet.chapterLengthTier)}`
+    : "";
+  const hit = packet.chapterLengthTier
+    ? packet.tierHit === true ? " · 已命中" : " · 未命中"
+    : "";
+  const tierCandidate = Boolean(
+    packet.chapterLengthTier || String(record.wordCountScope || "") === "candidate"
+  );
+  const pieces = [
+    tierCandidate
+      ? `本次续写：${actualWordCount} 字${tier}${hit}`
+      : `首稿整章：${initialWordCount} 字${tier}${hit}`
+  ];
+  if (retainedWordCount !== null) {
+    pieces.push(`保留正文：${retainedWordCount} 字`);
+  }
+  if (tierCandidate && resultingWordCount !== null) {
+    pieces.push(`落盘后本章：${resultingWordCount} 字`);
+  } else if (generatedWordCount !== null) {
+    pieces.push(`本轮新增：${generatedWordCount} 字`);
+  }
+  return pieces.join(" · ");
+}
+
+function summarizeStoryLengthRevisionPacket(packet: AgentStreamPacket): string {
+  const record = packet as unknown as Record<string, unknown>;
+  const candidateWordCount = firstNumber(record, ["candidateWordCount"]);
+  const pieces = ["字数修订：已触发"];
+  if (candidateWordCount !== null) {
+    pieces.push(`候选新增正文：${candidateWordCount} 字`);
+  }
+  pieces.push(packet.accepted ? "候选质量门禁：通过" : "候选质量门禁：未通过");
+  const rejectionReasons = Array.isArray(packet.rejectionReasons)
+    ? packet.rejectionReasons.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  if (rejectionReasons.length > 0) {
+    pieces.push(`原因：${rejectionReasons.slice(0, 3).join("；")}`);
+  }
+  return pieces.join(" · ");
+}
+
+function summarizeStoryCallAccountingPacket(packet: AgentStreamPacket): string {
+  const record = packet as unknown as Record<string, unknown>;
+  const logicalStoryCalls = firstNumber(record, ["logicalStoryCalls"]) ?? 0;
+  const initialGenerationCalls = firstNumber(record, ["initialGenerationCalls"]) ?? 0;
+  const lengthRevisionCalls = firstNumber(record, ["lengthRevisionCalls"]) ?? 0;
+  const secondDraftCalls = firstNumber(record, ["secondDraftCalls"]) ?? 0;
+  const providerAttempts = firstNumber(record, ["providerAttempts"]) ?? logicalStoryCalls;
+  const transportRetries = firstNumber(record, ["transportRetries"]) ?? 0;
+  return [
+    `正文逻辑调用：${logicalStoryCalls} 次（首稿 ${initialGenerationCalls}，长度修订 ${lengthRevisionCalls}，第二稿 ${secondDraftCalls}）`,
+    `正文 Provider 尝试：${providerAttempts} 次`,
+    `传输重试：${transportRetries} 次`
+  ].join(" · ");
+}
+
 function summarizeStoryGenerationValidationPacket(packet: AgentStreamPacket): string {
+  const packetRecord = packet as unknown as Record<string, unknown>;
+  if (packet.chapterLengthTier) {
+    const actualWordCount = firstNumber(packetRecord, [
+      "actualWordCount",
+      "finalWordCount",
+      "initialWordCount",
+      "generatedWordCount"
+    ]) ?? 0;
+    const tierLabel = chapterLengthTierLabel(packet.chapterLengthTier);
+    const writeStatus = packet.passed && packet.writeToolApplied !== false
+      ? "章节已写入"
+      : "候选未写入";
+    const hitStatus = packet.tierHit === true ? "档位已命中" : "档位未命中";
+    const structureStatus = packet.structurePassed === false ? "章节结构未通过" : "章节结构通过";
+    const qualityStatus = packet.machineQualityPassed === false ? "质量门禁未通过" : "质量门禁通过";
+    return `${writeStatus} · 本次续写：${actualWordCount} 字 · ${tierLabel} · ${hitStatus} · ${structureStatus} · ${qualityStatus}`;
+  }
   const fragments = Array.isArray(packet.fragments) ? packet.fragments : [];
   const packetTargetMin = Number(packet.targetWordCountMin ?? packet.targetWordCount ?? 0);
   const packetTargetMax = Number(packet.targetWordCountMax ?? packet.targetWordCount ?? 0);
@@ -1952,17 +2115,55 @@ function summarizeStoryGenerationValidationPacket(packet: AgentStreamPacket): st
   if (fragments.length > summaries.length) {
     summaries.push(`另有 ${fragments.length - summaries.length} 个片段`);
   }
-  const result = packet.passed ? "已通过" : "待复核";
-  const chapterSummary = generatedWordCount || chapterWordCountTarget
-    ? `本章 ${generatedWordCount} 字${chapterWordCountTarget ? ` · 章目标 ${chapterWordCountTarget} 字` : ""}${acceptWordCountMin && acceptWordCountMax ? ` · 可接受 ${acceptWordCountMin}-${acceptWordCountMax} 字` : ""}`
+  const initialWordCount = firstNumber(packetRecord, ["initialWordCount"]);
+  const finalWordCount = firstNumber(packetRecord, ["finalWordCount"]);
+  const displayedWordCount = finalWordCount ?? generatedWordCount;
+  const written = packet.passed === true && packet.writeToolApplied !== false;
+  const result = written && finalWordCount !== null
+    ? `章节已写入，字数 ${displayedWordCount}`
+    : packet.passed
+      ? "已通过"
+      : "待复核";
+  const chapterSummary = displayedWordCount || chapterWordCountTarget
+    ? `本章 ${displayedWordCount} 字${chapterWordCountTarget ? ` · 章目标 ${chapterWordCountTarget} 字` : ""}${acceptWordCountMin && acceptWordCountMax ? ` · 可接受 ${acceptWordCountMin}-${acceptWordCountMax} 字` : ""}`
     : "Storydex 非空白字符统计验收";
   const structure = packet.structurePassed === false ? "；章节结构与模板不一致" : "";
   const writeTool = packet.writeToolApplied === false ? "；本轮未成功执行受约束正文写入" : "";
+  const belowBudget = packet.belowBudget
+    ? "；正文低于建议放行带，已保留结构完整首稿"
+    : "";
   const overBudget = packet.overBudget
     ? "；正文已超出建议放行带并正常落盘，已标记 overBudget，建议作者按需裁剪"
     : "";
+  const precisionMinimum = chapterWordCountTarget
+    ? Math.max(50, Math.round(chapterWordCountTarget * 0.90))
+    : 0;
+  const precisionMaximum = chapterWordCountTarget
+    ? Math.round(chapterWordCountTarget * 1.10)
+    : 0;
+  const precisionNotice = packet.preciseWordCountEnabled === true
+    && packet.precisionAchieved === false
+    && precisionMinimum
+    && precisionMaximum
+    ? `；未达到精确范围 ${precisionMinimum}-${precisionMaximum}`
+    : "";
+  const callAccounting = toRecord(packet.callAccounting) || {};
+  const lengthRevisionCalls = firstNumber(callAccounting, ["lengthRevisionCalls"]);
+  let revisionSummary = "";
+  if (lengthRevisionCalls !== null) {
+    revisionSummary = lengthRevisionCalls > 0
+      ? packet.revisionApplied
+        ? "已触发并采用"
+        : "已触发但未采用"
+      : "未触发";
+  } else if (packet.revisionApplied === true) {
+    revisionSummary = "已触发并采用";
+  }
+  const boundedMeasurement = initialWordCount !== null || finalWordCount !== null
+    ? `；首稿整章 ${initialWordCount ?? generatedWordCount} 字 · 最终整章 ${finalWordCount ?? generatedWordCount} 字${revisionSummary ? ` · 字数修订：${revisionSummary}` : ""}`
+    : "";
   const detail = summaries.length ? `；${summaries.join("；")}` : "";
-  return `${result}：${chapterSummary}${structure}${writeTool}${overBudget}${detail}`;
+  return `${result}：${chapterSummary}${boundedMeasurement}${structure}${writeTool}${precisionNotice}${belowBudget}${overBudget}${detail}`;
 }
 
 function summarizePresetCompileFailures(contextAssembly: Record<string, unknown>): string {
@@ -3131,6 +3332,26 @@ function normalizePositiveInteger(value: unknown, fallback: number): number {
   return Math.max(1, parsed);
 }
 
+function normalizeChapterLengthTier(value: unknown): ChapterLengthTier {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return normalized === "short" || normalized === "long" ? normalized : "medium";
+}
+
+function migrateLegacyChapterLengthTier(value: unknown): ChapterLengthTier {
+  const target = Number.parseInt(String(value ?? "").trim(), 10);
+  if (!Number.isFinite(target)) {
+    return "medium";
+  }
+  if (target <= 2000) {
+    return "short";
+  }
+  return target <= 4000 ? "medium" : "long";
+}
+
+function chapterLengthTierLabel(value: ChapterLengthTier): string {
+  return value === "short" ? "短档" : value === "long" ? "长档" : "中档";
+}
+
 // Deterministic normalization helpers are exposed only to Vitest. Keeping these
 // assertions close to the store lets security-sensitive path/session behavior be
 // tested directly without changing the production component API.
@@ -3146,6 +3367,8 @@ export const __agentStoreTestUtils = import.meta.env.MODE === "test" ? {
   summarizeGitAutoCommitPacket,
   summarizeTurnContractPacket,
   summarizeStoryGenerationValidationPacket,
+  normalizeChapterLengthTier,
+  migrateLegacyChapterLengthTier,
   summarizePresetCompileFailures,
   summarizeContextAssembly,
   stripDsmlToolText,

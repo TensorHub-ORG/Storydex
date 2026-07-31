@@ -2,7 +2,7 @@
 
 覆盖：
 1. LLM 结构化分类正常路径（JSON 解析、标签校验、置信度归一）。
-2. LLM 异常 / 超时 / 非法输出时回退关键词启发式。
+2. LLM 异常 / 超时 / 非法输出时关闭写权限并安全降级。
 3. 确定性短路（slash 命令、空输入）。
 4. orchestration 注入 intent_frame 与无效注入的兜底。
 5. 项目语义接地：意图目录合并 skill registry、assetTargets/matchedSkills
@@ -39,6 +39,39 @@ class _FakeResponse:
         self.content = content
 
 
+def _v2_intent_json(
+    *,
+    primary: str,
+    operation_type: str,
+    effect: str,
+    artifact: str,
+    evidence: str,
+    target_scope: str = "named_asset",
+    complexity: str = "simple",
+    secondary: str = "",
+    constraints: list[str] | None = None,
+) -> str:
+    return json.dumps(
+        {
+            "decision": "decided",
+            "primary": primary,
+            "secondary": secondary,
+            "operationType": operation_type,
+            "effect": effect,
+            "artifact": artifact,
+            "targetScope": target_scope,
+            "targetValue": "",
+            "explicitConstraints": list(constraints or []),
+            "ambiguities": [],
+            "evidence": [evidence],
+            "complexity": complexity,
+            "confidence": "high",
+            "reason": "test intent",
+        },
+        ensure_ascii=False,
+    )
+
+
 def _install_fake_provider(monkeypatch, provider) -> None:
     fake_services = types.ModuleType("coomi.services")
     fake_services.get_llm_provider = lambda: provider
@@ -63,7 +96,15 @@ def test_classify_intent_uses_llm_structured_output(monkeypatch):
             assert options is None
             assert messages[0]["role"] == "system"
             assert "worldbook_work" in messages[0]["content"]
-            return _FakeResponse('{"primary": "worldbook_work", "confidence": "high", "reason": "设计世界观条目"}')
+            return _FakeResponse(
+                _v2_intent_json(
+                    primary="worldbook_work",
+                    operation_type="modify_existing",
+                    effect="modify",
+                    artifact="worldbook",
+                    evidence="完善一下大陆的魔法体系设定",
+                )
+            )
 
     _install_fake_provider(monkeypatch, FakeProvider())
     service = StorydexIntentService()
@@ -106,7 +147,7 @@ def test_intent_metadata_provider_uses_short_low_reasoning_chat_request():
     )
 
     assert captured["response_format"] == {"type": "json_object"}
-    assert captured["max_completion_tokens"] == 160
+    assert captured["max_completion_tokens"] == 384
     assert captured["reasoning_effort"] == "low"
     assert "temperature" not in captured
     assert getattr(response, "content")
@@ -144,11 +185,136 @@ def test_intent_metadata_provider_uses_strict_openai_responses_schema():
     assert response_format["name"] == "storydex_intent"
     assert response_format["strict"] is True
     assert response_format["schema"]["additionalProperties"] is False
-    assert captured["max_output_tokens"] == 160
+    assert captured["max_output_tokens"] == 384
     assert captured["reasoning"] == {"effort": "low"}
     assert captured["store"] is False
     assert "temperature" not in captured
     assert getattr(response, "content")
+
+
+def test_intent_metadata_provider_disables_deepseek_thinking_in_one_request():
+    captured = {}
+    calls = 0
+
+    class Completions:
+        async def create(self, **kwargs):
+            nonlocal calls
+            calls += 1
+            captured.update(kwargs)
+            return types.SimpleNamespace(
+                choices=[
+                    types.SimpleNamespace(
+                        message=types.SimpleNamespace(
+                            content=(
+                                '{"decision":"decided","primary":"story_generation",'
+                                '"secondary":"","operationType":"create_new","effect":"create",'
+                                '"artifact":"chapter_prose","targetScope":"next_chapter",'
+                                '"targetValue":"","explicitConstraints":[],"ambiguities":[],'
+                                '"evidence":["写下一章"],"complexity":"simple",'
+                                '"confidence":"high","reason":"明确要求下一章正文"}'
+                            ),
+                            reasoning_content="",
+                        )
+                    )
+                ]
+            )
+
+    provider = types.SimpleNamespace(
+        config=types.SimpleNamespace(type="openai_compatible"),
+        model="deepseek-v4-flash",
+        client=types.SimpleNamespace(chat=types.SimpleNamespace(completions=Completions())),
+    )
+
+    response = asyncio.run(
+        _BoundedIntentProvider(provider).chat(
+            [{"role": "system", "content": "Return JSON."}, {"role": "user", "content": "写下一章"}]
+        )
+    )
+
+    assert calls == 1
+    assert captured["max_tokens"] == 384
+    assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert captured["temperature"] == 0
+    assert "reasoning_effort" not in captured
+    assert getattr(response, "content")
+
+
+def test_structured_effect_makes_plot_discussion_explicitly_read_only(monkeypatch):
+    class FakeProvider:
+        async def chat(self, messages, options):
+            return _FakeResponse(
+                '{"decision":"decided","primary":"script_work","secondary":"story_generation",'
+                '"operationType":"inquiry","effect":"respond_only","artifact":"plot_plan",'
+                '"targetScope":"next_chapter","targetValue":"",'
+                '"explicitConstraints":["no_project_write"],"ambiguities":[],'
+                '"evidence":["只分析方案","不要写入或修改任何文件"],'
+                '"complexity":"simple","confidence":"high","reason":"只讨论规划"}'
+            )
+
+    _install_fake_provider(monkeypatch, FakeProvider())
+    frame = asyncio.run(
+        StorydexIntentService().classify_intent(
+            prompt="我们先讨论一下下一章的剧情规划，只分析方案，不要写入或修改任何文件。",
+            active_file="chapters/第一章/001.md",
+        )
+    )
+
+    assert frame["primary"] == "script_work"
+    assert frame["artifact"] == "plot_plan"
+    assert frame["effect"] == "respond_only"
+    assert frame["operationType"] == "inquiry"
+    assert frame["decision"] == "decided"
+    assert frame["canWrite"] is False
+    assert frame["assetTargets"] == []
+
+
+def test_structured_intent_matrix_compiles_effects_without_keyword_rules():
+    labels = set(build_intent_catalog())
+    cases = [
+        ("写下一章", "story_generation", "create", "chapter_prose", "next_chapter", [], True),
+        ("设计并保存一个反派角色卡", "character_work", "create", "character", "named_asset", [], True),
+        ("分析这个角色是否合理", "character_work", "respond_only", "character", "named_asset", [], False),
+        ("设计魔法体系并写入世界书", "worldbook_work", "create", "worldbook", "named_asset", [], True),
+        ("世界书里的魔法体系合理吗", "worldbook_work", "respond_only", "worldbook", "named_asset", [], False),
+        (
+            "讨论下一章怎么安排，不要写入",
+            "script_work",
+            "create",  # 即便模型的 effect 自相矛盾，显式约束仍必须关闭写入。
+            "plot_plan",
+            "next_chapter",
+            ["no_project_write"],
+            False,
+        ),
+    ]
+
+    for prompt, primary, effect, artifact, scope, constraints, expected_write in cases:
+        payload = {
+            "decision": "decided",
+            "primary": primary,
+            "secondary": "",
+            "operationType": "create_new" if effect == "create" else "inquiry",
+            "effect": effect,
+            "artifact": artifact,
+            "targetScope": scope,
+            "targetValue": "",
+            "explicitConstraints": constraints,
+            "ambiguities": [],
+            "evidence": [prompt],
+            "complexity": "simple",
+            "confidence": "high",
+            "reason": "test",
+        }
+        frame = _parse_intent_frame(
+            json.dumps(payload, ensure_ascii=False),
+            valid_labels=labels,
+            prompt=prompt,
+        )
+
+        assert frame is not None
+        assert frame["artifact"] == artifact
+        assert frame["targetScope"] == scope
+        assert frame["canWrite"] is expected_write
+        assert frame["operationType"] == ("create_new" if expected_write else "inquiry")
 
 
 def test_advisory_request_still_goes_through_fast_model(monkeypatch):
@@ -183,7 +349,7 @@ def test_advisory_request_still_goes_through_fast_model(monkeypatch):
     assert frame["primary"] == "general"
     assert frame["method"] == "llm"
     assert frame["operationType"] == "inquiry"
-    # is_advisory_request 仍作为兜底启发式保留（LLM 不可用时用于推断 operationType）。
+    # is_advisory_request 仅供旧注入帧兼容解析，不参与 Provider 失败降级。
     assert is_advisory_request("这段写得怎么样？") is True
     assert is_advisory_request("请修改这段文字并保存") is False
 
@@ -256,9 +422,26 @@ def test_positive_modify_and_create_request_still_prefers_modification():
     assert frame["operationType"] == "modify_existing"
 
 
+def test_passive_story_detail_does_not_override_an_explicit_continuation_request():
+    prompt = (
+        "请明确继续当前第一章，在不重复前文的前提下续写正文：林默追查信件来源，"
+        "并发现档案编号对应一场被删除的火灾记录。只续写当前章，不要新建下一章，"
+        "保持第三人称有限视角。"
+    )
+
+    frame = heuristic_intent_frame(
+        prompt=prompt,
+        active_file="chapters/第1章 未命名/001.md",
+    )
+
+    assert frame["primary"] == "story_generation"
+    assert frame["operationType"] == "create_new"
+
+
 def test_classify_intent_calls_llm_even_for_clear_keyword_signal(monkeypatch):
     # 关键回归：即使 prompt 命中明确关键词（如"整理知识图谱"），也必须调用快速模型，
-    # 不再用关键词短路。provider 不可用时才退回启发式兜底。
+    # 不再用关键词短路。provider 不可用时必须安全降级为只读，不能再靠关键词
+    # 猜测一个会写盘的意图。
     calls = 0
 
     class BrokenProvider:
@@ -271,8 +454,11 @@ def test_classify_intent_calls_llm_even_for_clear_keyword_signal(monkeypatch):
     service = StorydexIntentService()
     frame = asyncio.run(service.classify_intent(prompt="帮我整理知识图谱", active_file=""))
     assert calls == 1
-    assert frame["primary"] == "wiki_work"
-    assert frame["method"] == "heuristic_fallback"
+    assert frame["primary"] == "general"
+    assert frame["operationType"] == "inquiry"
+    assert frame["decision"] == "needs_clarification"
+    assert frame["canWrite"] is False
+    assert frame["method"] == "safe_fallback"
 
 
 def test_restructure_request_is_not_forced_to_story_generation(monkeypatch):
@@ -281,8 +467,15 @@ def test_restructure_request_is_not_forced_to_story_generation(monkeypatch):
     class FakeProvider:
         async def chat(self, messages, options):
             return _FakeResponse(
-                '{"primary":"story_generation","secondary":"","operationType":"modify_existing",'
-                '"complexity":"complex","confidence":"high","reason":"重构现有片段"}'
+                _v2_intent_json(
+                    primary="story_generation",
+                    operation_type="modify_existing",
+                    effect="modify",
+                    artifact="chapter_prose",
+                    target_scope="current_fragment",
+                    evidence="重构一下",
+                    complexity="complex",
+                )
             )
 
     _install_fake_provider(monkeypatch, FakeProvider())
@@ -302,8 +495,14 @@ def test_greeting_goes_through_fast_model(monkeypatch):
     class FakeProvider:
         async def chat(self, messages, options):
             return _FakeResponse(
-                '{"primary":"general","secondary":"","operationType":"greeting",'
-                '"complexity":"simple","confidence":"high","reason":"greeting"}'
+                _v2_intent_json(
+                    primary="general",
+                    operation_type="greeting",
+                    effect="respond_only",
+                    artifact="general",
+                    target_scope="none",
+                    evidence="你好",
+                )
             )
 
     _install_fake_provider(monkeypatch, FakeProvider())
@@ -322,8 +521,11 @@ def test_classify_intent_falls_back_on_timeout(monkeypatch):
     _install_fake_provider(monkeypatch, SlowProvider())
     service = StorydexIntentService(llm_timeout_seconds=0.01)
     frame = asyncio.run(service.classify_intent(prompt="帮我处理一下这个", active_file="chapters/001.md"))
-    assert frame["primary"] == "story_generation"
-    assert frame["method"] == "heuristic_fallback"
+    assert frame["primary"] == "general"
+    assert frame["operationType"] == "inquiry"
+    assert frame["decision"] == "needs_clarification"
+    assert frame["canWrite"] is False
+    assert frame["method"] == "safe_fallback"
 
 
 def test_classify_intent_falls_back_on_invalid_llm_output(monkeypatch):
@@ -335,7 +537,27 @@ def test_classify_intent_falls_back_on_invalid_llm_output(monkeypatch):
     service = StorydexIntentService()
     frame = asyncio.run(service.classify_intent(prompt="帮我处理一下这个", active_file=""))
     assert frame["primary"] == "general"
-    assert frame["method"] == "heuristic_fallback"
+    assert frame["operationType"] == "inquiry"
+    assert frame["decision"] == "needs_clarification"
+    assert frame["canWrite"] is False
+    assert frame["method"] == "safe_fallback"
+
+
+def test_partial_legacy_shaped_model_output_cannot_authorise_writes(monkeypatch):
+    class PartialProvider:
+        async def chat(self, messages, options):
+            return _FakeResponse(
+                '{"primary":"story_generation","operationType":"create_new",'
+                '"confidence":"high","reason":"partial"}'
+            )
+
+    _install_fake_provider(monkeypatch, PartialProvider())
+    frame = asyncio.run(StorydexIntentService().classify_intent(prompt="写下一章"))
+
+    assert frame["method"] == "safe_fallback"
+    assert frame["decision"] == "needs_clarification"
+    assert frame["operationType"] == "inquiry"
+    assert frame["canWrite"] is False
 
 
 # ─────────────────── 3. 确定性短路 ───────────────────
@@ -412,7 +634,15 @@ def test_classify_intent_enriches_frame_with_asset_targets_and_skills(monkeypatc
     class FakeProvider:
         async def chat(self, messages, options):
             assert ".storydex/characters/" in messages[0]["content"]
-            return _FakeResponse('{"primary": "character_work", "confidence": "high", "reason": "角色设定"}')
+            return _FakeResponse(
+                _v2_intent_json(
+                    primary="character_work",
+                    operation_type="create_new",
+                    effect="create",
+                    artifact="character",
+                    evidence="设计一个反派角色",
+                )
+            )
 
     _install_fake_provider(monkeypatch, FakeProvider())
     service = StorydexIntentService()
@@ -443,7 +673,15 @@ def test_classify_intent_accepts_custom_registry_intent(monkeypatch, tmp_path):
     class FakeProvider:
         async def chat(self, messages, options):
             assert "poetry_work" in messages[0]["content"]
-            return _FakeResponse('{"primary": "poetry_work", "confidence": "high", "reason": "写诗请求"}')
+            return _FakeResponse(
+                _v2_intent_json(
+                    primary="poetry_work",
+                    operation_type="create_new",
+                    effect="create",
+                    artifact="general",
+                    evidence="写一首出场诗",
+                )
+            )
 
     _install_fake_provider(monkeypatch, FakeProvider())
     service = StorydexIntentService()
@@ -464,9 +702,15 @@ def test_classify_intent_passes_previous_turn_context(monkeypatch):
         async def chat(self, messages, options):
             nonlocal calls
             calls += 1
+            current_prompt = json.loads(messages[1]["content"])["prompt"]
             return _FakeResponse(
-                '{"primary":"character_work","secondary":"","operationType":"create_new",'
-                '"complexity":"simple","confidence":"high","reason":"角色设计"}'
+                _v2_intent_json(
+                    primary="character_work",
+                    operation_type="create_new",
+                    effect="create",
+                    artifact="character",
+                    evidence=current_prompt,
+                )
             )
 
     _install_fake_provider(monkeypatch, FakeProvider())
@@ -474,11 +718,12 @@ def test_classify_intent_passes_previous_turn_context(monkeypatch):
     # 首轮走快速模型判为 character_work。
     asyncio.run(service.classify_intent(prompt="设计一个新角色", session_id="s1"))
     assert calls == 1
-    # "继续"是省略式追问，延续上一轮意图，不再调用模型。
+    # 没有显式 pendingAction 时，"继续"必须带上一轮结构化语义再交给模型判断，
+    # 不能由本地规则把它硬猜成一次写操作。
     frame = asyncio.run(service.classify_intent(prompt="继续", session_id="s1"))
     assert frame["primary"] == "character_work"
-    assert frame["method"] == "deterministic_context"
-    assert calls == 1
+    assert frame["method"] == "llm"
+    assert calls == 2
 
 
 def test_persisted_assistant_action_survives_service_restart(monkeypatch, tmp_path):
@@ -504,6 +749,30 @@ def test_persisted_assistant_action_survives_service_restart(monkeypatch, tmp_pa
     monkeypatch.setattr(trace_history_module, "get_trace_history_service", lambda: PersistedTraceHistory())
 
     restarted_service = StorydexIntentService()
+    captured_previous = {}
+
+    async def classify_with_context(**kwargs):
+        captured_previous.update(kwargs.get("previous_turn") or {})
+        return {
+            "primary": "general",
+            "confidence": "high",
+            "signals": ["llm_classifier"],
+            "method": "llm",
+            "reason": "确认变量整理",
+            "operationType": "inquiry",
+            "decision": "decided",
+            "effect": "respond_only",
+            "artifact": "general",
+            "targetScope": "none",
+            "targetValue": "",
+            "explicitConstraints": [],
+            "ambiguities": [],
+            "evidence": ["执行"],
+            "canWrite": False,
+            "complexity": "simple",
+        }
+
+    monkeypatch.setattr(restarted_service, "_llm_intent_frame", classify_with_context)
     frame = asyncio.run(
         restarted_service.classify_intent(
             prompt="执行",
@@ -514,16 +783,31 @@ def test_persisted_assistant_action_survives_service_restart(monkeypatch, tmp_pa
     )
 
     assert frame["primary"] == "general"
-    assert frame["method"] == "deterministic_context"
-    assert "persistent_previous_turn" in frame["signals"]
+    assert frame["method"] == "llm"
+    assert "变量整理" in captured_previous["pendingAction"]
 
 
-def test_in_memory_previous_turn_is_isolated_by_workspace(tmp_path):
+def test_in_memory_previous_turn_is_isolated_by_workspace(monkeypatch, tmp_path):
     service = StorydexIntentService()
     first_workspace = tmp_path / "one"
     second_workspace = tmp_path / "two"
     first_workspace.mkdir()
     second_workspace.mkdir()
+
+    async def classify_by_context(**kwargs):
+        previous = kwargs.get("previous_turn")
+        primary = "character_work" if previous is None and kwargs["prompt"] != "继续" else "general"
+        return {
+            "primary": primary,
+            "confidence": "high",
+            "signals": ["llm_classifier"],
+            "method": "llm",
+            "operationType": "create_new" if primary == "character_work" else "inquiry",
+            "complexity": "simple",
+        }
+
+    monkeypatch.setattr(service, "_llm_intent_frame", classify_by_context)
+    monkeypatch.setattr(service, "_load_persisted_turn", lambda **kwargs: None)
 
     asyncio.run(
         service.classify_intent(
@@ -681,7 +965,8 @@ def test_provider_without_content_falls_back_and_follow_up_keeps_pending_fields(
     _install_fake_provider(monkeypatch, ContentlessProvider())
     service = StorydexIntentService()
     frame = asyncio.run(service.classify_intent(prompt="请帮我处理一下"))
-    assert frame["method"] == "heuristic_fallback"
+    assert frame["method"] == "safe_fallback"
+    assert frame["canWrite"] is False
 
     service._remember(
         session_key="default::s",
