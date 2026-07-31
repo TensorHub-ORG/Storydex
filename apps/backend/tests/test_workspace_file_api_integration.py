@@ -123,6 +123,34 @@ def test_workspace_git_endpoints_use_local_only_repository(workspace_client):
     assert not (root / ".git" / "config").read_text(encoding="utf-8").lower().count("remote ")
 
 
+def test_git_api_rejects_a_project_absorbed_by_its_parent_repository(workspace_client):
+    client, root, _project = workspace_client
+    if not shutil.which("git"):
+        pytest.skip("git unavailable")
+    parent = root.parent
+    routes_file.git_service.initialize_repository(parent)
+    (root / "chapter.md").write_text("must stay outside the parent index\n", encoding="utf-8")
+
+    summary = client.get(
+        "/api/v1/workspace/git/summary",
+        headers={"x-trace-id": "trace-parent-repository"},
+    )
+    assert summary.status_code == 500
+    payload = summary.json()
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "git_service_error"
+    assert "does not match" in payload["error"]["message"]
+    assert Path(payload["error"]["details"]["projectRoot"]) == root.resolve()
+    assert Path(payload["error"]["details"]["gitTopLevel"]) == parent.resolve()
+    assert payload["trace"]["traceId"] == "trace-parent-repository"
+
+    commit = client.post("/api/v1/workspace/git/commit", json={"message": "must be rejected"})
+    assert commit.status_code == 500
+    assert commit.json()["error"]["code"] == "git_service_error"
+    assert routes_file.git_service._run_git(parent, ["diff", "--cached", "--name-only"]) == ""
+    assert routes_file.git_service._has_head_commit(parent) is False
+
+
 def test_story_settings_templates_chapters_and_state_contract(workspace_client):
     client, root, _ = workspace_client
     settings = ok(client.get("/api/v1/story/settings"))

@@ -28,6 +28,22 @@ const DESKTOP_PRODUCT_NAME = String(DESKTOP_PACKAGE.build?.productName || DESKTO
 const FRONTEND_DEV_URL = process.env.STORYDEX_DESKTOP_URL || "http://127.0.0.1:5173";
 const BACKEND_HOST = process.env.STORYDEX_BACKEND_HOST || "127.0.0.1";
 const DEFAULT_BACKEND_PORT = Number(process.env.STORYDEX_BACKEND_PORT || 18081);
+const DEFAULT_BACKEND_HEALTH_ATTEMPTS = 120;
+const DEFAULT_BACKEND_HEALTH_INTERVAL_MS = 500;
+const DEFAULT_BACKEND_STARTUP_ATTEMPTS = 2;
+const DEFAULT_BACKEND_STARTUP_RETRY_DELAY_MS = 1500;
+
+function readBoundedInteger(value, fallback, minimum, maximum) {
+  const parsed = Number.parseInt(String(value || ""), 10);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.min(maximum, Math.max(minimum, parsed));
+}
+
+function backendStartupSetting(name, fallback, minimum, maximum) {
+  return readBoundedInteger(process.env[name], fallback, minimum, maximum);
+}
 // 实际端口在启动时确定：优先复用显式配置，否则动态挑选一个空闲端口，
 // 避免物理机上 18081 被占用导致后端永远无法监听（健康检查超时）。
 let backendPort = DEFAULT_BACKEND_PORT;
@@ -87,6 +103,10 @@ function stripWrappingQuotes(value) {
 }
 
 function resolvePackagedContentRoot() {
+  const unpackedRoot = path.join(process.resourcesPath, "app.asar.unpacked", "app");
+  if (fs.existsSync(unpackedRoot)) {
+    return unpackedRoot;
+  }
   const packagedRoot = path.join(process.resourcesPath, "app");
   const nestedAppRoot = path.join(packagedRoot, "app");
   return fs.existsSync(nestedAppRoot) ? nestedAppRoot : packagedRoot;
@@ -337,9 +357,12 @@ function buildMinGitPathEntries() {
 
 function resolveRendererEntry() {
   if (app.isPackaged) {
+    const archivedFrontend = path.join(app.getAppPath(), "app", "frontend-dist", "index.html");
     return {
       kind: "file",
-      value: path.join(resolvePackagedContentRoot(), "frontend-dist", "index.html")
+      value: fs.existsSync(archivedFrontend)
+        ? archivedFrontend
+        : path.join(resolvePackagedContentRoot(), "frontend-dist", "index.html")
     };
   }
   return {
@@ -715,6 +738,32 @@ async function waitUntilBackendHealthy(maxAttempts = 80, intervalMs = 500, proce
   return false;
 }
 
+function waitForBackendProcessExit(processRef, timeoutMs = 5000) {
+  if (!processRef || processRef.exitCode !== null || processRef.signalCode) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer = null;
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timer) {
+        clearTimeout(timer);
+      }
+      processRef.removeListener("exit", finish);
+      processRef.removeListener("close", finish);
+      resolve();
+    };
+    timer = setTimeout(finish, timeoutMs);
+    processRef.once("exit", finish);
+    processRef.once("close", finish);
+  });
+}
+
 function stopBackendKernel(targetProcess = backendProcess) {
   if (!targetProcess || targetProcess.killed) {
     return;
@@ -1014,7 +1063,9 @@ async function performInstallDesktopUpdate() {
     const runtimeRoot = updaterRuntimeRoot();
     const lockPath = updaterInstallLockPath();
     const logPath = path.join(runtimeRoot, "install.log");
-    const helperScript = path.join(__dirname, "update-helper.ps1");
+    const helperScript = app.isPackaged
+      ? path.join(process.resourcesPath, "app.asar.unpacked", "electron", "update-helper.ps1")
+      : path.join(__dirname, "update-helper.ps1");
     const helper = await launchUpdateHelper({
       helperScript,
       installerPath: downloadedInstallerPath,
@@ -1260,14 +1311,17 @@ async function showBackendFailureMessage({ backendDirectory, candidates, failure
     ? failures
         .map(
           (item, index) =>
-            `[${index + 1}] ${item.label} (${item.phase})\n${String(item.detail || "").trim() || "No details."}`
+            `[${index + 1}] ${item.label} (${item.phase}${item.startupAttempt ? `, attempt ${item.startupAttempt}` : ""})\n${String(item.detail || "").trim() || "No details."}`
         )
         .join("\n\n")
         .slice(-7000)
     : "No detailed failure logs were captured.";
-  await dialog.showMessageBox({
+  const result = await dialog.showMessageBox({
     type: "error",
     title: "Storydex Desktop",
+    buttons: ["Retry", "Open log", "Exit"],
+    defaultId: 0,
+    cancelId: 2,
     message: [
       "Backend did not become ready.",
       app.isPackaged
@@ -1284,6 +1338,14 @@ async function showBackendFailureMessage({ backendDirectory, candidates, failure
       .join("\n"),
     detail
   });
+
+  if (result.response === 1) {
+    if (backendLogFilePath) {
+      await shell.openPath(backendLogFilePath);
+    }
+    return "open-log";
+  }
+  return result.response === 0 ? "retry" : "exit";
 }
 
 async function killExternalBackendOnPort() {
@@ -1332,10 +1394,12 @@ async function killExternalBackendOnPort() {
   });
 }
 
-async function startBackendKernel() {
+async function startBackendKernel(startupAttempt = 1) {
   const backendDirectory = resolveBackendDirectory();
   const runtimeEnvironment = resolveDesktopRuntimeEnvironment();
-  initBackendLogStream(runtimeEnvironment.logsDir);
+  if (!backendLogStream) {
+    initBackendLogStream(runtimeEnvironment.logsDir);
+  }
 
   // 先确定本次使用的端口（显式配置优先，否则动态挑选空闲端口）。
   await resolveBackendPort();
@@ -1376,13 +1440,14 @@ async function startBackendKernel() {
 
     const preflight = await runPythonPreflight(candidate, backendDirectory, runtimeEnvironment);
     if (!preflight.ok) {
-      failures.push({ label: candidate.label, phase: "preflight", detail: preflight.detail });
+      failures.push({ startupAttempt, label: candidate.label, phase: "preflight", detail: preflight.detail });
       continue;
     }
 
     const attempt = await trySpawnBackendCandidate(candidate, backendDirectory, uvicornArgs, runtimeEnvironment);
     if (!attempt.process) {
       failures.push({
+        startupAttempt,
         label: candidate.label,
         phase: "spawn",
         detail: attempt.error ? `${attempt.error.name || "Error"}: ${attempt.error.message || String(attempt.error)}` : "Unknown spawn failure."
@@ -1392,26 +1457,36 @@ async function startBackendKernel() {
 
     backendProcess = attempt.process;
     attachBackendProcessLogging(backendProcess, candidate.label);
+    const candidateProcess = backendProcess;
 
     // 冷启动预算放宽到 ~60 秒（120 × 500ms）。老机械盘 + 杀软逐文件扫描时，
     // 嵌入式 Python 首启可能远超原来的 20 秒；waitUntilBackendHealthy 已能在
     // 进程提前退出时立即返回，因此加长窗口不会拖慢“真失败”的报错。
-    const ready = await waitUntilBackendHealthy(120, 500, backendProcess);
+    const ready = await waitUntilBackendHealthy(
+      backendStartupSetting("STORYDEX_BACKEND_HEALTH_ATTEMPTS", DEFAULT_BACKEND_HEALTH_ATTEMPTS, 1, 600),
+      backendStartupSetting("STORYDEX_BACKEND_HEALTH_INTERVAL_MS", DEFAULT_BACKEND_HEALTH_INTERVAL_MS, 100, 5000),
+      candidateProcess
+    );
     if (ready) {
       writeBackendLog(`[desktop] backend healthy via ${candidate.label} on port ${backendPort}`);
       return true;
     }
 
     const healthDetail =
-      readProcessLogTail(backendProcess) || `Backend started with ${candidate.label} but never became healthy.`;
+      readProcessLogTail(candidateProcess) || `Backend started with ${candidate.label} but never became healthy.`;
     writeBackendLog(`[desktop] health check failed for ${candidate.label} on port ${backendPort}\n${healthDetail}`);
     failures.push({
+      startupAttempt,
       label: candidate.label,
       phase: "health",
       detail: healthDetail
     });
-    stopBackendKernel(backendProcess);
-    backendProcess = null;
+    const failedProcess = candidateProcess;
+    stopBackendKernel(failedProcess);
+    await waitForBackendProcessExit(failedProcess);
+    if (backendProcess === failedProcess) {
+      backendProcess = null;
+    }
     await sleep(250);
   }
 
@@ -1420,7 +1495,29 @@ async function startBackendKernel() {
       .map((item) => `- ${item.label} (${item.phase}): ${String(item.detail || "").slice(-500)}`)
       .join("\n")}`
   );
-  await showBackendFailureMessage({ backendDirectory, candidates, failures, runtimeEnvironment });
+  const maxStartupAttempts = backendStartupSetting(
+    "STORYDEX_BACKEND_STARTUP_ATTEMPTS",
+    DEFAULT_BACKEND_STARTUP_ATTEMPTS,
+    1,
+    5
+  );
+  if (startupAttempt < maxStartupAttempts && !quitting) {
+    const retryDelayMs = backendStartupSetting(
+      "STORYDEX_BACKEND_STARTUP_RETRY_DELAY_MS",
+      DEFAULT_BACKEND_STARTUP_RETRY_DELAY_MS,
+      250,
+      30_000
+    );
+    writeBackendLog(`[desktop] automatic backend startup retry ${startupAttempt + 1}/${maxStartupAttempts} in ${retryDelayMs}ms`);
+    await sleep(retryDelayMs);
+    return startBackendKernel(startupAttempt + 1);
+  }
+
+  const action = await showBackendFailureMessage({ backendDirectory, candidates, failures, runtimeEnvironment });
+  if ((action === "retry" || action === "open-log") && !quitting) {
+    writeBackendLog(`[desktop] user selected ${action}; retrying backend startup.`);
+    return startBackendKernel(1);
+  }
   return false;
 }
 

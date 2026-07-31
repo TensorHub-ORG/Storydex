@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "ciTolerance": 0.05,
+  "measurement": {
+    "backend": "coverage.py 7.10.7 on the canonical Windows Python 3.13 CI job",
+    "frontend": "Vitest 4.1.10 with @vitest/coverage-v8 4.1.10 AST-aware remapping"
+  },
+  "components": {
+    "backend": {
+      "metrics": {
+        "lines": 86.5,
+        "branches": 73.7
+      },
+      "critical": {
+        "api/routes_agent.py": { "lines": 87.5 },
+        "services/agent_git_autocommit_service.py": { "lines": 98.7 },
+        "services/coomi_agent_service.py": { "lines": 87.6 },
+        "services/git_service.py": { "lines": 91.9 },
+        "services/storydex_intent_service.py": { "lines": 89.9 }
+      }
+    },
+    "frontend": {
+      "metrics": {
+        "lines": 76.2,
+        "statements": 75.5,
+        "functions": 72.1,
+        "branches": 65.6
+      },
+      "critical": {
+        "src/api/sseParser.mjs": {
+          "lines": 90.0,
+          "statements": 90.0,
+          "functions": 90.0,
+          "branches": 90.0
+        },
+        "src/stores/agent.ts": {
+          "lines": 90.0,
+          "statements": 90.0,
+          "functions": 90.0,
+          "branches": 90.0
+        },
+        "src/components/AgentPanel.vue": {
+          "lines": 90.0,
+          "statements": 90.0,
+          "functions": 90.0,
+          "branches": 89.7
+        }
+      }
+    }
+  }
+}
