@@ -186,3 +186,75 @@ def test_active_retrieval_policy_removes_only_storydex_retrieval_tools(tmp_path)
     _replace_runtime_tool_registry(agent, registry)
     assert agent.tool_registry is registry
     assert executor.tool_registry is registry
+
+
+def test_read_only_turn_registry_exposes_no_state_changing_tools(tmp_path):
+    pytest.importorskip("coomi")
+    from services.coomi_agent_service import _create_storydex_tool_registry
+
+    registry = _create_storydex_tool_registry(
+        tmp_path,
+        turn_contract={
+            "intentFrame": {
+                "primary": "story_generation",
+                "operationType": "inquiry",
+                "decision": "decided",
+                "effect": "respond_only",
+                "canWrite": False,
+            },
+            "executionPolicy": {
+                "directFileWrites": False,
+                "allowedWriteRoots": [],
+            },
+        },
+    )
+    names = {tool.name for tool in registry.list_tools()}
+
+    assert {"Read", "Glob", "Grep", "WebFetch", "WebSearch"} <= names
+    assert {"Write", "Edit", "Bash", "PowerShell"}.isdisjoint(names)
+    assert "StorydexSyncWiki" not in names
+    assert "StorydexApplyStoryIncrement" not in names
+
+
+@pytest.mark.parametrize(
+    ("primary", "allowed_root", "expected_domain_tool", "forbidden_domain_tool"),
+    [
+        ("character_work", ".storydex/characters/", None, "StorydexApplyStoryIncrement"),
+        ("worldbook_work", ".storydex/worldbook/", None, "StorydexSyncWiki"),
+        ("story_generation", "chapters/", "StorydexApplyStoryIncrement", "StorydexSyncWiki"),
+        ("wiki_work", ".storydex/wiki/", "StorydexSyncWiki", "StorydexApplyStoryIncrement"),
+    ],
+)
+def test_scoped_write_turn_registry_exposes_only_relevant_mutators(
+    tmp_path,
+    primary,
+    allowed_root,
+    expected_domain_tool,
+    forbidden_domain_tool,
+):
+    pytest.importorskip("coomi")
+    from services.coomi_agent_service import _create_storydex_tool_registry
+
+    registry = _create_storydex_tool_registry(
+        tmp_path,
+        turn_contract={
+            "intentFrame": {
+                "primary": primary,
+                "operationType": "create_new" if primary != "wiki_work" else "modify_existing",
+                "decision": "decided",
+                "effect": "create" if primary != "wiki_work" else "execute",
+                "canWrite": True,
+            },
+            "executionPolicy": {
+                "directFileWrites": True,
+                "allowedWriteRoots": [allowed_root],
+            },
+        },
+    )
+    names = {tool.name for tool in registry.list_tools()}
+
+    assert {"Read", "Glob", "Grep", "Write", "Edit"} <= names
+    assert {"Bash", "PowerShell", "Config", "Agent"}.isdisjoint(names)
+    if expected_domain_tool:
+        assert expected_domain_tool in names
+    assert forbidden_domain_tool not in names

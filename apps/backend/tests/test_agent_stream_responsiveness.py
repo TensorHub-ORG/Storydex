@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -24,12 +25,17 @@ def _packet(chunk: str) -> dict:
 
 def test_stream_sends_acceptance_and_heartbeats_before_slow_intent_finishes(monkeypatch, tmp_path):
     class SlowIntentService:
-        completed = False
+        def __init__(self):
+            self.started = threading.Event()
+            self.release = threading.Event()
+            self.completed = False
 
         async def classify_intent(self, **kwargs):
             # Simulate cold Coomi/OpenAI imports that block synchronously before
             # the provider reaches its first await.
-            time.sleep(0.06)
+            self.started.set()
+            if not self.release.wait(timeout=2.0):
+                raise TimeoutError("test did not release the slow intent service")
             self.completed = True
             return {"primary": "general", "confidence": "medium", "signals": [], "method": "llm"}
 
@@ -67,6 +73,13 @@ def test_stream_sends_acceptance_and_heartbeats_before_slow_intent_finishes(monk
     monkeypatch.setattr(routes_agent, "_resolve_agent_workspace_root", lambda payload: tmp_path)
     monkeypatch.setattr(routes_agent, "_stream_coomi_sse", fake_runtime)
     monkeypatch.setattr(routes_agent, "_PHASE_HEARTBEAT_SECONDS", 0.01)
+    monkeypatch.setattr(routes_agent.followup_mailbox_service, "set_active_trace", lambda **kwargs: None)
+    monkeypatch.setattr(routes_agent.followup_mailbox_service, "clear_active_trace", lambda **kwargs: None)
+
+    trace_id = "trace-fast-first-packet"
+    session_id = "session-1"
+    coordinator = ExecutionCoordinator()
+    execution_handle = coordinator.begin(tmp_path, session_id, trace_id)
 
     payload = routes_agent.AgentChatRequest(
         prompt="帮我处理一下",
@@ -79,31 +92,74 @@ def test_stream_sends_acceptance_and_heartbeats_before_slow_intent_finishes(monk
         stream = routes_agent._stream_agent_chat_request_sse(
             payload=payload,
             request=_ConnectedRequest(),
-            trace_id="trace-fast-first-packet",
-            session_id="session-1",
+            trace_id=trace_id,
+            session_id=session_id,
             cancellation_token=routes_agent._CancellationToken(),
+            execution_handle=execution_handle,
+            resolved_workspace_root=tmp_path,
         )
         first = await stream.__anext__()
         first_elapsed = time.perf_counter() - started
+        first_started_state = intent_service.started.is_set()
         first_completed_state = intent_service.completed
-        remaining = [chunk async for chunk in stream]
-        return first, first_elapsed, first_completed_state, remaining
+        heartbeat_observation = None
+        remaining = []
+        try:
+            async for chunk in stream:
+                remaining.append(chunk)
+                packet = _packet(chunk)
+                if (
+                    heartbeat_observation is None
+                    and packet.get("phase") == "intent_classification"
+                    and packet.get("heartbeat") is True
+                ):
+                    heartbeat_observation = {
+                        "intentCompleted": intent_service.completed,
+                    }
+                    intent_service.release.set()
+        finally:
+            intent_service.release.set()
+        return (
+            first,
+            first_elapsed,
+            first_started_state,
+            first_completed_state,
+            heartbeat_observation,
+            remaining,
+        )
 
-    first, first_elapsed, first_completed_state, remaining = asyncio.run(collect())
+    try:
+        (
+            first,
+            first_elapsed,
+            first_started_state,
+            first_completed_state,
+            heartbeat_observation,
+            remaining,
+        ) = asyncio.run(collect())
+    finally:
+        intent_service.release.set()
+        if coordinator.active_handle(session_id=session_id, workspace_root=tmp_path) is execution_handle:
+            execution_handle.reject_preflight("test_cleanup")
 
     assert _packet(first)["_type"] == "RunAccepted"
-    assert first_elapsed < 0.05
+    # This is a deadlock watchdog, not a shared-runner microbenchmark. The
+    # ordering assertion below proves acceptance precedes the slow intent work.
+    assert first_elapsed < 1.0
+    assert first_started_state is False
     assert first_completed_state is False
     packets = [_packet(chunk) for chunk in remaining]
     intent_packets = [packet for packet in packets if packet.get("phase") == "intent_classification"]
     heartbeat_packets = [packet for packet in intent_packets if packet.get("heartbeat") is True]
     assert heartbeat_packets
-    assert heartbeat_packets[0]["elapsedMs"] < 50
+    assert heartbeat_observation == {"intentCompleted": False}
     assert intent_packets[-1]["status"] == "success"
     assert intent_service.completed is True
     assert orchestration_service.contract_kwargs["provider"] == "chy"
     assert orchestration_service.contract_kwargs["model"] == "deepseek-v4-flash"
-    assert orchestration_service.contract_kwargs["story_generation"]["chapterWordCountTarget"] == 3000
+    story_generation = orchestration_service.contract_kwargs["story_generation"]
+    assert story_generation["preciseWordCountEnabled"] is False
+    assert "chapterWordCountTarget" not in story_generation
 
 
 def test_stream_completes_when_active_model_status_is_unavailable(monkeypatch, tmp_path):

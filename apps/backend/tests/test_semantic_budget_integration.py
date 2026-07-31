@@ -16,6 +16,11 @@ from services.story_semantic_budget_controller import (
 from services.storydex_orchestration_service import get_storydex_orchestration_service
 
 
+@pytest.fixture(autouse=True)
+def _disable_tier_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STORY_LENGTH_TIER_ENABLED", "0")
+
+
 def _decode_sse(chunk: str) -> tuple[str, dict[str, Any]]:
     event_name = ""
     payload: dict[str, Any] = {}
@@ -144,8 +149,8 @@ def test_turn_contract_adds_generation_control_only_when_explicitly_requested(
     assert control["maximumSceneRevisions"] == 2
     assert control["applyMode"] == "single_commit"
     short_control = short_semantic["turnPlan"]["generationControl"]
-    assert short_control["sceneCount"] == 3
-    assert short_control["maximumSceneRevisions"] == 3
+    assert short_control["sceneCount"] == 2
+    assert short_control["maximumSceneRevisions"] == 2
     assert "generationControl" not in legacy["turnPlan"]
 
 
@@ -164,6 +169,14 @@ def test_semantic_gate_requires_both_explicit_strategy_and_project_flag(tmp_path
     assert disabled == {"requested": True, "enabled": False, "reason": "feature_flag_disabled"}
     assert enabled == {"requested": True, "enabled": True, "reason": "enabled"}
     assert routes._semantic_budget_gate(tmp_path, _contract(semantic=False))["requested"] is False
+
+    inquiry = _contract()
+    inquiry["turnPlan"]["operationType"] = "inquiry"
+    assert routes._semantic_budget_gate(tmp_path, inquiry) == {
+        "requested": True,
+        "enabled": False,
+        "reason": "operation_not_create_new",
+    }
 
 
 def test_execute_semantic_budget_applies_completed_text_exactly_once(

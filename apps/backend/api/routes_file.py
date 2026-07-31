@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import base64
 from time import perf_counter
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Literal, Optional, Union
 from uuid import uuid4
 
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict, Field
 
 from api.response import ApiEnvelope, ApiTrace, success_response
+from core.config import FEATURE_FLAG_DEFAULTS
+from core.feature_flags import FeatureFlags
 from services.editor_service import EditorService
 from services.diagnostics_service import get_diagnostics_service
 from services.git_service import get_git_service
@@ -18,6 +20,7 @@ from services.story_project_service import (
     DEFAULT_CHAPTER_WORD_COUNT_TARGET,
     get_story_project_service,
 )
+from services.story_word_count_service import DEFAULT_CHAPTER_LENGTH_TIER
 
 router = APIRouter(tags=["file"])
 editor_service = EditorService()
@@ -167,10 +170,19 @@ class StoryProjectSettingsResponse(BaseModel):
     context_concision_max_calls: int = Field(default=2, alias="contextConcisionMaxCalls")
     context_concision_max_input_tokens: int = Field(default=32000, alias="contextConcisionMaxInputTokens")
     story_fragment_count: int = Field(default=1, alias="storyFragmentCount")
+    story_length_tier_enabled: bool = Field(
+        default=False,
+        alias="storyLengthTierEnabled",
+    )
+    chapter_length_tier: Literal["short", "medium", "long"] = Field(
+        default=DEFAULT_CHAPTER_LENGTH_TIER,
+        alias="chapterLengthTier",
+    )
     chapter_word_count_target: int = Field(default=DEFAULT_CHAPTER_WORD_COUNT_TARGET, alias="chapterWordCountTarget")
     story_fragment_word_count: int = Field(default=DEFAULT_CHAPTER_WORD_COUNT_TARGET, alias="storyFragmentWordCount")
     story_fragment_word_count_min: int = Field(default=DEFAULT_CHAPTER_WORD_COUNT_TARGET, alias="storyFragmentWordCountMin")
     story_fragment_word_count_max: int = Field(default=DEFAULT_CHAPTER_WORD_COUNT_TARGET, alias="storyFragmentWordCountMax")
+    precise_word_count_enabled: bool = Field(default=False, alias="preciseWordCountEnabled")
     story_chapter_template_id: str = Field(default="default_chapter_directory", alias="storyChapterTemplateId")
     auto_update_variables: bool = Field(default=False, alias="autoUpdateVariables")
     auto_update_wiki: bool = Field(default=False, alias="autoUpdateWiki")
@@ -191,10 +203,15 @@ class StoryProjectSettingsUpdateRequest(BaseModel):
     context_concision_max_calls: Optional[int] = Field(default=None, alias="contextConcisionMaxCalls")
     context_concision_max_input_tokens: Optional[int] = Field(default=None, alias="contextConcisionMaxInputTokens")
     story_fragment_count: Optional[int] = Field(default=None, alias="storyFragmentCount")
+    chapter_length_tier: Optional[Literal["short", "medium", "long"]] = Field(
+        default=None,
+        alias="chapterLengthTier",
+    )
     chapter_word_count_target: Optional[int] = Field(default=None, alias="chapterWordCountTarget")
     story_fragment_word_count: Optional[int] = Field(default=None, alias="storyFragmentWordCount")
     story_fragment_word_count_min: Optional[int] = Field(default=None, alias="storyFragmentWordCountMin")
     story_fragment_word_count_max: Optional[int] = Field(default=None, alias="storyFragmentWordCountMax")
+    precise_word_count_enabled: Optional[bool] = Field(default=None, alias="preciseWordCountEnabled")
     story_chapter_template_id: Optional[str] = Field(default=None, alias="storyChapterTemplateId")
     auto_update_variables: Optional[bool] = Field(default=None, alias="autoUpdateVariables")
     auto_update_wiki: Optional[bool] = Field(default=None, alias="autoUpdateWiki")
@@ -263,6 +280,10 @@ def _build_trace(*, started: float, trace_id: str, tool_calls: int = 1) -> ApiTr
 def _build_story_settings_payload() -> Dict[str, Any]:
     workspace_root = project_service.workspace_root
     project_settings = story_project_service.read_project_settings(workspace_root)
+    story_length_tier_enabled = FeatureFlags(
+        workspace_root,
+        FEATURE_FLAG_DEFAULTS,
+    ).get_bool("STORY_LENGTH_TIER_ENABLED")
     progress = story_project_service.read_chapter_progress(workspace_root)
     chapter_entries = progress.get("chapters") if isinstance(progress.get("chapters"), dict) else {}
     chapter_completion = {
@@ -289,6 +310,11 @@ def _build_story_settings_payload() -> Dict[str, Any]:
             maximum=500000,
         ),
         "storyFragmentCount": _positive_int(project_settings.get("storyFragmentCount"), default=1),
+        "storyLengthTierEnabled": story_length_tier_enabled,
+        "chapterLengthTier": str(
+            project_settings.get("chapterLengthTier")
+            or DEFAULT_CHAPTER_LENGTH_TIER
+        ),
         "chapterWordCountTarget": _bounded_int(
             project_settings.get("chapterWordCountTarget"),
             default=DEFAULT_CHAPTER_WORD_COUNT_TARGET,
@@ -313,6 +339,7 @@ def _build_story_settings_payload() -> Dict[str, Any]:
             minimum=100,
             maximum=20000,
         ),
+        "preciseWordCountEnabled": bool(project_settings.get("preciseWordCountEnabled", False)),
         "storyChapterTemplateId": str(
             project_settings.get("storyChapterTemplateId") or "default_chapter_directory"
         ).strip()
@@ -612,10 +639,12 @@ def update_story_project_settings(payload: StoryProjectSettingsUpdateRequest) ->
         "contextConcisionMaxCalls": payload.context_concision_max_calls,
         "contextConcisionMaxInputTokens": payload.context_concision_max_input_tokens,
         "storyFragmentCount": payload.story_fragment_count,
+        "chapterLengthTier": payload.chapter_length_tier,
         "chapterWordCountTarget": payload.chapter_word_count_target,
         "storyFragmentWordCount": payload.story_fragment_word_count,
         "storyFragmentWordCountMin": payload.story_fragment_word_count_min,
         "storyFragmentWordCountMax": payload.story_fragment_word_count_max,
+        "preciseWordCountEnabled": payload.precise_word_count_enabled,
         "storyChapterTemplateId": payload.story_chapter_template_id,
         "autoUpdateVariables": payload.auto_update_variables,
         "autoUpdateWiki": payload.auto_update_wiki,

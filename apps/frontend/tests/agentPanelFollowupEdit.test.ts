@@ -217,7 +217,7 @@ describe("AgentPanel computed branch coverage", () => {
     store.storyChapterTemplateId = "tpl-multi";
     await nextTick();
     expect(utils.isSingleFileChapterTemplate.value).toBe(false);
-    expect(utils.selectedChapterTemplateDescription.value).toContain("片段数量不受每章 3 段限制");
+    expect(utils.selectedChapterTemplateDescription.value).toContain("片段数量不受每章 3 片段限制");
     wrapper.unmount();
   });
 

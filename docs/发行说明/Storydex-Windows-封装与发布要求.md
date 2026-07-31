@@ -25,7 +25,7 @@ node scripts/validate_version_consistency.cjs --expected=1.0.0
 - 后端 Python 3.9/3.13 测试、覆盖率门禁、模块编译与导入检查。
 - 前端类型检查、单元测试、覆盖率、回归测试与生产构建。
 - 桌面端更新契约、发行配置、封装策略与更新辅助程序测试。
-- Windows `win-unpacked` 构建、内置 Python、后端资源、MinGit、更新配置和 Electron E2E 验证。
+- Windows `win-unpacked` 构建、内置 Python 真实健康检查、后端资源、MinGit、更新配置和 Electron E2E 验证。
 - NSIS 安装包、blockmap、`latest.yml`、便携 ZIP、校验值、依赖清单和构建 manifest 验证。
 
 本地正式门禁入口：
@@ -51,6 +51,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare_release_bund
 - Windows x64 构建环境。
 - Node.js 20，前端和桌面端均使用锁文件执行 `npm ci`。
 - Python 3.9；通过 `scripts/bootstrap_python39.ps1 -InstallRequirements` 准备可迁移的内置运行时。
+- `npm --prefix apps/desktop run check:embedded-python` 必须通过；内置运行时不得超过 512 MB，不得夹带 Storydex 未声明的 Conda/CUDA/MKL 载荷，并且必须能加载二进制依赖、启动后端和返回健康响应。
 - Electron、electron-builder、Python 依赖和 Storydex Coomi 运行时均以仓库锁文件与固定校验为准。
 - 正式包不得包含 `.env`、密钥、证书、用户配置、日志、测试结果、coverage、pytest 缓存或其他开发期临时文件。
 - 发布流程不得从工作区外临时复制未经记录的二进制或依赖。

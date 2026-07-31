@@ -245,6 +245,8 @@ export interface WorkspaceGitCommitEntry {
   authoredAt: string;
   refs: string;
   subject: string;
+  /** False for commits only reachable from a restore backup branch. */
+  onCurrentBranch?: boolean;
 }
 
 export interface WorkspaceGitSummaryResponse {
@@ -259,6 +261,8 @@ export interface WorkspaceGitSummaryResponse {
   defaultBranch: string;
   message: string;
   head?: WorkspaceGitCommitEntry | null;
+  /** Server clock stamp used to discard out-of-order summary responses. */
+  generatedAt?: number;
 }
 
 export interface WorkspaceGitCommitResponse {
@@ -285,12 +289,16 @@ export interface WorkspaceGitRestoreResponse {
 }
 
 export type StorySettingsSource = "api" | "project_file" | "default";
+export type ChapterLengthTier = "short" | "medium" | "long";
 
 export interface StoryProjectSettings {
   segmentExtension: StorySegmentExtension;
   maxSegmentsPerChapter: number;
   storyFragmentCount: number;
+  storyLengthTierEnabled: boolean;
+  chapterLengthTier: ChapterLengthTier;
   chapterWordCountTarget: number;
+  preciseWordCountEnabled: boolean;
   storyFragmentWordCount: number;
   storyFragmentWordCountMin: number;
   storyFragmentWordCountMax: number;
@@ -319,8 +327,14 @@ export interface StoryProjectSettingsResponse {
   chapter_segment_limit?: number | string;
   storyFragmentCount?: number | string;
   story_fragment_count?: number | string;
+  storyLengthTierEnabled?: boolean | string;
+  story_length_tier_enabled?: boolean | string;
+  chapterLengthTier?: ChapterLengthTier | string;
+  chapter_length_tier?: ChapterLengthTier | string;
   chapterWordCountTarget?: number | string;
   chapter_word_count_target?: number | string;
+  preciseWordCountEnabled?: boolean | string;
+  precise_word_count_enabled?: boolean | string;
   storyFragmentWordCount?: number | string;
   story_fragment_word_count?: number | string;
   storyFragmentWordCountMin?: number | string;
@@ -366,8 +380,12 @@ export interface StoryProjectSettingsUpdateRequest {
   chapter_segment_limit?: number;
   storyFragmentCount?: number;
   story_fragment_count?: number;
+  chapterLengthTier?: ChapterLengthTier;
+  chapter_length_tier?: ChapterLengthTier;
   chapterWordCountTarget?: number;
   chapter_word_count_target?: number;
+  preciseWordCountEnabled?: boolean;
+  precise_word_count_enabled?: boolean;
   storyFragmentWordCount?: number;
   story_fragment_word_count?: number;
   storyFragmentWordCountMin?: number;

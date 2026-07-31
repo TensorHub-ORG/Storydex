@@ -71,8 +71,19 @@ class EntityRegistry:
     def __init__(self, workspace_root: Path) -> None:
         self.workspace_root = Path(workspace_root).resolve()
         self.entities_path = self.workspace_root / ".storydex" / "memory" / "current" / "entities.json"
+        # 实例内记忆。registry 是只读视图，且所有调用方都「创建即用完丢弃」，
+        # 单次操作内 entities.json 不会被改写，所以不需要失效逻辑。
+        # 没有它时，一次 WIKI 重建会把同一个文件反复读盘解析数百次。
+        self._records: Optional[List[EntityRecord]] = None
+        self._aliases: Optional[Dict[str, str]] = None
 
     def load_records(self) -> List[EntityRecord]:
+        if self._records is None:
+            self._records = self._read_records()
+        # 返回副本，保持「每次调用拿到独立列表」的原有语义。
+        return list(self._records)
+
+    def _read_records(self) -> List[EntityRecord]:
         if not self.entities_path.exists():
             return []
         try:
@@ -118,9 +129,11 @@ class EntityRegistry:
         return tuple(dict.fromkeys(canonical for _index, _length, canonical in hits))
 
     def _alias_map(self) -> Dict[str, str]:
-        mapping: Dict[str, str] = {}
-        for record in self.load_records():
-            mapping[record.canonical_name] = record.canonical_name
-            for alias in record.aliases:
-                mapping[alias] = record.canonical_name
-        return mapping
+        if self._aliases is None:
+            mapping: Dict[str, str] = {}
+            for record in self.load_records():
+                mapping[record.canonical_name] = record.canonical_name
+                for alias in record.aliases:
+                    mapping[alias] = record.canonical_name
+            self._aliases = mapping
+        return dict(self._aliases)

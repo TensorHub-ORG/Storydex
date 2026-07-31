@@ -97,6 +97,7 @@ test-results/
 blob-report/
 htmlcov/
 .coverage
+.coverage.*
 
 # ----- OS / Editor -----
 .DS_Store

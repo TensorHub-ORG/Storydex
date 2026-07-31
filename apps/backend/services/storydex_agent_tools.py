@@ -9,6 +9,7 @@ from coomi.tools.base import BaseTool, ToolAccess, ToolConcurrency, ToolResult
 from services.git_service import get_git_service
 from services.help_guide_service import get_help_guide_service
 from services.story_project_service import get_story_project_service
+from services.story_word_count_service import STORY_WORD_COUNT_RULE
 
 
 class _StorydexWorkspaceToolMixin:
@@ -490,7 +491,7 @@ class StorydexWordCountTool(_StorydexWorkspaceToolMixin, BaseTool):
         result = {
             "ok": True,
             "algorithm": "storydex_visible_characters_v1",
-            "countingRule": "count every non-whitespace Unicode character",
+            "countingRule": STORY_WORD_COUNT_RULE,
             "items": items,
         }
         return ToolResult(success=True, output=json.dumps(result, ensure_ascii=False, indent=2), error=None)
@@ -629,6 +630,25 @@ class StorydexApplyStoryIncrementTool(_StorydexWorkspaceToolMixin, BaseTool):
         }
 
     def run(self, arguments: Dict[str, Any]) -> ToolResult:
+        if self.turn_contract:
+            from services.storydex_intent_service import intent_frame_allows_project_writes
+
+            intent = (
+                self.turn_contract.get("intentFrame")
+                if isinstance(self.turn_contract.get("intentFrame"), dict)
+                else {}
+            )
+            operation_type = str(intent.get("operationType") or "").strip().lower()
+            is_story_create = bool(
+                str(intent.get("primary") or "").strip().lower() == "story_generation"
+                and operation_type in {"", "create_new"}
+            )
+            if not intent_frame_allows_project_writes(intent) or not is_story_create:
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error="This turn contract does not authorise a story-generation increment.",
+                )
         payload = dict(arguments or {})
         workspace_root = self._resolve_workspace_root(payload.get("workspaceRoot"))
         result = get_story_project_service().apply_story_generation_increment(

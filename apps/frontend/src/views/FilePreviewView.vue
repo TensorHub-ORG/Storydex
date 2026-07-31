@@ -535,8 +535,24 @@ function extensionFromPath(value: string): string {
   return dotIndex >= 0 ? fileName.slice(dotIndex).toLowerCase() : ".txt";
 }
 
+// 与后端 story_word_count_service.strip_non_story_wrappers 保持同一口径：
+// 摘要、思考过程和角色留言不是正文，不计入字数；<content> 只剥标签留内容。
+const STORY_WRAPPER_BLOCK_TAGS = ["details", "summary", "thinking", "think", "plan", "reasoning"];
+const STORY_WRAPPER_TAG_RE = new RegExp(
+  `</?(?:${[...STORY_WRAPPER_BLOCK_TAGS, "content"].join("|")})\\b[^>]*>`,
+  "gi"
+);
+
+function stripNonStoryWrappers(content: string): string {
+  let text = String(content || "");
+  for (const tag of STORY_WRAPPER_BLOCK_TAGS) {
+    text = text.replace(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?</${tag}\\s*>`, "gi"), "\n\n");
+  }
+  return text.replace(STORY_WRAPPER_TAG_RE, "");
+}
+
 function countStoryTextWords(content: string): number {
-  return Array.from(String(content || "")).filter((char) => !/\s/.test(char)).length;
+  return Array.from(stripNonStoryWrappers(content)).filter((char) => !/\s/.test(char)).length;
 }
 
 function countLines(content: string): number {

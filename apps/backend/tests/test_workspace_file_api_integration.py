@@ -126,6 +126,17 @@ def test_workspace_git_endpoints_use_local_only_repository(workspace_client):
 def test_story_settings_templates_chapters_and_state_contract(workspace_client):
     client, root, _ = workspace_client
     settings = ok(client.get("/api/v1/story/settings"))
+    workspace_settings = ok(client.get("/api/v1/workspace/story/settings"))
+    assert settings["storyLengthTierEnabled"] is False
+    assert workspace_settings["storyLengthTierEnabled"] is False
+
+    flag_path = root / ".storydex" / "config" / "feature-flags.json"
+    flag_path.write_text(
+        json.dumps({"STORY_LENGTH_TIER_ENABLED": True}),
+        encoding="utf-8",
+    )
+    assert ok(client.get("/api/v1/story/settings"))["storyLengthTierEnabled"] is True
+    assert ok(client.get("/api/v1/workspace/story/settings"))["storyLengthTierEnabled"] is True
     updated = ok(client.put("/api/v1/story/settings", json={
         "storySegmentFormat": "txt",
         "defaultDialogueQuote": "“”",

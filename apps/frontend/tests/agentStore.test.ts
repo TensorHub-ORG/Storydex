@@ -85,6 +85,15 @@ describe("agent store streaming", () => {
     await store.runPrompt();
 
     expect(api.streamAgentPrompt).toHaveBeenCalledTimes(1);
+    const request = api.streamAgentPrompt.mock.calls[0][0];
+    expect(request.storyGeneration).toEqual({
+      fragmentCount: 1,
+      chapterLengthTier: "medium",
+      chapterTemplateId: "default_chapter_directory"
+    });
+    expect(request.storyGeneration).not.toHaveProperty("chapterWordCountTarget");
+    expect(request.storyGeneration).not.toHaveProperty("preciseWordCountEnabled");
+    expect(request.storyGeneration).not.toHaveProperty("fragmentWordCount");
     expect(store.isRunning).toBe(false);
     expect(store.lastReply).toBe("第一段输出");
     expect(store.executionHistory[0].status).toBe("completed");
@@ -364,12 +373,18 @@ describe("agent store sessions and Git decision UX", () => {
     store.currentTraceId = "trace-latest";
     store.executionHistory = [latest];
     store.beginEditLatestRun(latest);
+    store.setStoryGenerationOptions({ chapterLengthTier: "long" });
     store.promptInput = "replacement";
     api.streamAgentPrompt.mockRejectedValueOnce(new AgentApiError("preflight failed", "replacement_preflight"));
 
     await expect(store.reexecuteEditedLatestRun()).resolves.toBe(false);
     const request = api.streamAgentPrompt.mock.calls[0][0];
     expect(request.replaceLatestTraceId).toBe("trace-latest");
+    expect(request.storyGeneration).toEqual({
+      fragmentCount: 1,
+      chapterLengthTier: "long",
+      chapterTemplateId: "default_chapter_directory"
+    });
     expect(store.executionHistory).toHaveLength(1);
     expect(store.executionHistory[0].traceId).toBe("trace-latest");
     expect(store.executionHistory[0].reply).toBe("answer");

@@ -18,7 +18,15 @@ const workspace = vi.hoisted(() => ({
   health: null,
   activeFile: "chapters/001.md",
   activeFileBindingOrPath: "chapters/001.md",
-  storySettings: { storyFragmentCount: 1, chapterWordCountTarget: 2500, storyFragmentWordCount: 2500 },
+  storySettings: {
+    storyFragmentCount: 1,
+    storyLengthTierEnabled: false,
+    chapterLengthTier: "medium",
+    chapterWordCountTarget: 2500,
+    storyFragmentWordCount: 2500,
+    storyChapterTemplateId: "default_chapter_directory",
+    preciseWordCountEnabled: false
+  },
   refreshStorySettings: vi.fn().mockResolvedValue(undefined),
   updateStorySettings: vi.fn().mockResolvedValue(undefined),
   openFile: vi.fn()
@@ -72,6 +80,18 @@ beforeEach(() => {
   setActivePinia(createPinia());
   vi.clearAllMocks();
   window.localStorage.clear();
+  workspace.launchScreenVisible = false;
+  workspace.currentProject = { workspaceRoot: "C:/isolated/story" };
+  workspace.storySettings = {
+    storyFragmentCount: 1,
+    storyLengthTierEnabled: false,
+    chapterLengthTier: "medium",
+    chapterWordCountTarget: 2500,
+    storyFragmentWordCount: 2500,
+    storyChapterTemplateId: "default_chapter_directory",
+    preciseWordCountEnabled: false
+  } as any;
+  workspace.updateStorySettings.mockResolvedValue(undefined);
   api.fetchAgentCoomiStatus.mockResolvedValue({ data: { runtime: "coomi", installed: true, model: "fake", permissionMode: "full_access" } });
   api.fetchAgentSessions.mockResolvedValue({ data: { items: [] } });
   api.fetchAgentHistory.mockResolvedValue({ data: { items: [] } });
@@ -514,15 +534,17 @@ describe("AgentPanel", () => {
     await utils.handleConfigSaved(); expect(api.fetchAgentCoomiStatus).toHaveBeenCalled();
 
     utils.updateStoryFragmentCount({ target: { value: "3" } } as any);
-    utils.updateChapterWordCountTarget({ target: { value: "1800" } } as any);
+    utils.updateChapterLengthTier("short");
     utils.updateStoryChapterTemplate({ target: { value: "custom" } } as any);
     expect(store.storyFragmentCount).toBe(3);
-    expect(store.chapterWordCountTarget).toBe(1800);
-    expect(store.storyFragmentWordCountMin).toBe(1800);
-    expect(store.storyFragmentWordCountMax).toBe(1800);
+    expect(store.chapterLengthTier).toBe("short");
     // While the user is actively editing, a (possibly stale) settings refresh must
     // not clobber the just-typed value.
-    workspace.storySettings = { storyFragmentCount: 4, chapterWordCountTarget: 1900 } as any;
+    workspace.storySettings = {
+      storyFragmentCount: 4,
+      chapterLengthTier: "long",
+      storyChapterTemplateId: "custom"
+    } as any;
     utils.syncStoryGenerationOptionsFromProjectSettings(); expect(store.storyFragmentCount).toBe(3);
     // Toggling the popover clears the editing guard, so external settings sync again.
     utils.toggleStoryOptions(); await nextTick();
@@ -547,18 +569,70 @@ describe("AgentPanel", () => {
     wrapper.unmount();
   });
 
-  it("shows the current chapter length policy and uses its default for an empty input", async () => {
+  it("renders three continuation length tiers and persists only the selected tier", async () => {
+    workspace.storySettings.storyLengthTierEnabled = true;
     const store = useAgentStore();
     const wrapper = shallowMount(AgentPanel);
     const utils = (wrapper.vm as any).__testUtils;
 
     utils.toggleStoryOptions();
     await nextTick();
-    expect(wrapper.text()).toContain("3000 是默认目标值");
-    expect(wrapper.text()).toContain("±30%");
+    const tierControl = wrapper.find('[role="radiogroup"][aria-label="本次续写篇幅"]');
+    const tierButtons = tierControl.findAll("button");
+    expect(tierButtons).toHaveLength(3);
+    expect(tierButtons.map((button) => button.text())).toEqual(["短", "中", "长"]);
+    expect(tierButtons[1].attributes("aria-pressed")).toBe("true");
+    expect(wrapper.findAll('input[type="number"]')).toHaveLength(1);
+    expect(wrapper.find(".coomi-story-tier-field input").exists()).toBe(false);
+    expect(wrapper.find(".coomi-story-precision-toggle").exists()).toBe(false);
+    expect(wrapper.text()).toContain("本次续写篇幅");
+    expect(wrapper.text()).not.toContain("目标字数");
 
-    utils.updateChapterWordCountTarget({ target: { value: "" } } as any);
-    expect(store.chapterWordCountTarget).toBe(3000);
+    await tierButtons[2].trigger("click");
+    await vi.waitFor(() => expect(workspace.updateStorySettings).toHaveBeenCalled());
+    expect(store.chapterLengthTier).toBe("long");
+    const persisted = workspace.updateStorySettings.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(persisted).toMatchObject({ chapterLengthTier: "long" });
+    expect(persisted).not.toHaveProperty("chapterWordCountTarget");
+    expect(persisted).not.toHaveProperty("preciseWordCountEnabled");
+    expect(persisted).not.toHaveProperty("storyFragmentWordCount");
+    wrapper.unmount();
+  });
+
+  it("hides unaccepted continuation length tiers by default", async () => {
+    const wrapper = shallowMount(AgentPanel);
+    const utils = (wrapper.vm as any).__testUtils;
+
+    utils.toggleStoryOptions();
+    await nextTick();
+
+    expect(wrapper.find('[role="radiogroup"][aria-label="本次续写篇幅"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("本次续写篇幅");
+    expect(wrapper.text()).not.toContain("1片段/中");
+    expect(wrapper.text()).toContain("1片段");
+    wrapper.unmount();
+  });
+
+  it("restores the previous tier when project persistence fails", async () => {
+    workspace.launchScreenVisible = false;
+    workspace.currentProject = { workspaceRoot: "C:/isolated/story" };
+    workspace.storySettings = {
+      storyFragmentCount: 1,
+      chapterLengthTier: "medium",
+      chapterWordCountTarget: 3000,
+      storyFragmentWordCount: 3000,
+      storyChapterTemplateId: "default_chapter_directory",
+      preciseWordCountEnabled: false
+    } as any;
+    const store = useAgentStore();
+    const wrapper = shallowMount(AgentPanel);
+    const utils = (wrapper.vm as any).__testUtils;
+
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    workspace.updateStorySettings.mockRejectedValueOnce(new Error("disk"));
+    await utils.persistStoryGenerationOptions({ chapterLengthTier: "long" });
+    expect(store.chapterLengthTier).toBe("medium");
+    expect(warning).toHaveBeenCalled();
     wrapper.unmount();
   });
 
@@ -617,7 +691,7 @@ describe("AgentPanel", () => {
     await nextTick();
     workspace.launchScreenVisible = false;
     workspace.currentProject = null as any;
-    await utils.persistStoryGenerationOptions({ fragmentWordCount: 500 });
+    await utils.persistStoryGenerationOptions({ chapterLengthTier: "short" });
     workspace.currentProject = { workspaceRoot: "C:/isolated/story" };
     workspace.updateStorySettings.mockRejectedValueOnce(new Error("disk"));
     await utils.persistStoryGenerationOptions({ fragmentCount: 3 });
@@ -647,7 +721,7 @@ describe("AgentPanel", () => {
     utils.handleDocumentPointerDown({ target: document.body } as any);
     utils.handleDocumentPointerDown({ target: "not-node" } as any);
     utils.updateStoryFragmentCount({ target: null } as any);
-    utils.updateChapterWordCountTarget({ target: null } as any);
+    utils.updateChapterLengthTier("medium");
     utils.updateStoryChapterTemplate({ target: null } as any);
 
     store.storyChapterTemplates = [

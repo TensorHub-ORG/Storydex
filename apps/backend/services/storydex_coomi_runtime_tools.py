@@ -41,7 +41,42 @@ class _WorkspaceBoundMixin:
 
     def _strict_story_generation_turn(self) -> bool:
         intent = self.turn_contract.get("intentFrame") if isinstance(self.turn_contract.get("intentFrame"), dict) else {}
-        return str(intent.get("primary") or "") == "story_generation"
+        operation_type = str(intent.get("operationType") or "").strip().lower()
+        return bool(
+            str(intent.get("primary") or "") == "story_generation"
+            and operation_type in {"", "create_new"}
+        )
+
+    def _project_write_allowed(self, arguments: Dict[str, Any]) -> bool:
+        if not self.turn_contract:
+            return True
+        execution = (
+            self.turn_contract.get("executionPolicy")
+            if isinstance(self.turn_contract.get("executionPolicy"), dict)
+            else {}
+        )
+        if "directFileWrites" in execution and not bool(execution.get("directFileWrites")):
+            return False
+        allowed_roots = [
+            str(item or "").strip().replace("\\", "/").strip("/")
+            for item in execution.get("allowedWriteRoots", [])
+            if str(item or "").strip()
+        ] if isinstance(execution.get("allowedWriteRoots"), list) else []
+        if not allowed_roots:
+            return True
+        for key in _PATH_ARGUMENT_KEYS:
+            raw = str((arguments or {}).get(key) or "").strip()
+            if not raw:
+                continue
+            candidate = Path(raw)
+            if not candidate.is_absolute():
+                candidate = self.workspace_root / candidate
+            try:
+                relative = candidate.resolve().relative_to(self.workspace_root).as_posix().strip("/")
+            except ValueError:
+                return False
+            return any(relative == root or relative.startswith(f"{root}/") for root in allowed_roots)
+        return False
 
     def _targets_chapter_file(self, arguments: Dict[str, Any]) -> bool:
         for key in _PATH_ARGUMENT_KEYS:
@@ -88,6 +123,12 @@ class StorydexReadTool(_WorkspacePathNormalizerMixin, ReadTool):
 
 class StorydexWriteTool(_WorkspacePathNormalizerMixin, WriteTool):
     def run(self, arguments: Dict[str, Any]) -> ToolResult:
+        if not self._project_write_allowed(arguments):
+            return ToolResult(
+                success=False,
+                output="",
+                error="This turn contract does not authorise writing that project path.",
+            )
         if self._strict_story_generation_turn() and self._targets_chapter_file(arguments):
             return ToolResult(
                 success=False,
@@ -102,6 +143,12 @@ class StorydexWriteTool(_WorkspacePathNormalizerMixin, WriteTool):
 
 class StorydexEditTool(_WorkspacePathNormalizerMixin, EditTool):
     def run(self, arguments: Dict[str, Any]) -> ToolResult:
+        if not self._project_write_allowed(arguments):
+            return ToolResult(
+                success=False,
+                output="",
+                error="This turn contract does not authorise editing that project path.",
+            )
         if self._strict_story_generation_turn() and self._targets_chapter_file(arguments):
             return ToolResult(
                 success=False,

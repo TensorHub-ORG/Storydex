@@ -511,8 +511,15 @@ function resolveDesktopRuntimeEnvironment() {
   const userDataRoot = app.getPath("userData");
   const logsDir = path.join(userDataRoot, "logs");
   const workspacesRoot = path.join(userDataRoot, "workspaces");
-  const workspaceRoot = path.join(workspacesRoot, "default");
-  const globalRoot = path.join(app.getPath("home"), ".storydex");
+  const testing = process.env.STORYDEX_TESTING === "1";
+  const configuredWorkspaceRoot = String(process.env.STORYDEX_WORKSPACE_ROOT || "").trim();
+  const configuredGlobalRoot = String(process.env.STORYDEX_GLOBAL_ROOT || "").trim();
+  const workspaceRoot = testing && configuredWorkspaceRoot
+    ? path.resolve(configuredWorkspaceRoot)
+    : path.join(workspacesRoot, "default");
+  const globalRoot = testing && configuredGlobalRoot
+    ? path.resolve(configuredGlobalRoot)
+    : path.join(app.getPath("home"), ".storydex");
 
   for (const target of [logsDir, workspacesRoot, workspaceRoot, globalRoot]) {
     fs.mkdirSync(target, { recursive: true });
@@ -1091,6 +1098,7 @@ function buildBackendEnvironment(candidate, runtimeEnvironment) {
     ...process.env,
     PATH: nextPath,
     PYTHONIOENCODING: "utf-8",
+    PYTHONUNBUFFERED: "1",
     PYTHONNOUSERSITE: "1",
     PYTHONDONTWRITEBYTECODE: "1",
     STORYDEX_WORKSPACE_ROOT: runtimeEnvironment.workspaceRoot,
@@ -1307,7 +1315,7 @@ async function killExternalBackendOnPort() {
         resolve();
         return;
       }
-      console.log(`[Storydex Desktop] Killing stale backend(s) on :${BACKEND_PORT}: ${Array.from(pids).join(", ")}`);
+      console.log(`[Storydex Desktop] Killing stale backend(s) on :${backendPort}: ${Array.from(pids).join(", ")}`);
       const killers = Array.from(pids).map(
         (pid) =>
           new Promise((resolveKill) => {

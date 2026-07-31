@@ -18,8 +18,9 @@ from uuid import uuid4
 from core.bounded_text_io import read_text_limited as read_bounded_text_limited
 from core.bounded_text_io import read_text_preview as read_bounded_text_preview
 from core.bounded_text_io import read_text_tail as read_bounded_text_tail
-from core.config import get_settings
+from core.config import FEATURE_FLAG_DEFAULTS, get_settings
 from core.exceptions import StorydexError
+from core.feature_flags import FeatureFlags
 from services.preset_schema import (
     PresetDocument,
     find_sidecar_path,
@@ -28,10 +29,30 @@ from services.preset_schema import (
     write_preset_sidecar as _write_preset_sidecar_impl,
 )
 from services.storydex_manifest import ensure_manifest as ensure_storydex_manifest
+from services.story_chapter_action_service import (
+    CHAPTER_ACTION_CREATE_NEXT_CHAPTER,
+    CHAPTER_ACTION_CREATE_SPECIFIC_CHAPTER,
+    CHAPTER_ACTION_REWRITE_EXISTING,
+    resolve_chapter_action,
+)
+from services.story_preset_length_policy_service import strip_quantitative_length_directives
 from services.story_word_count_service import (
+    DEFAULT_CHAPTER_LENGTH_TIER,
+    HARD_MINIMUM_RATIO,
+    SOFT_MAXIMUM_RATIO,
+    STORY_OVER_BUDGET_KEEP_MESSAGE,
+    STORY_UNDER_BUDGET_KEEP_MESSAGE,
     STORY_WORD_COUNT_ALGORITHM,
+    STORY_WORD_COUNT_RULE,
+    WORD_COUNT_POLICY_VERSION,
+    classify_chapter_length_tier,
+    chapter_runtime_safety_maximum,
     count_story_file_words,
+    count_story_text_paragraphs,
     count_story_text_words,
+    migrate_chapter_word_count_target,
+    normalize_chapter_length_tier,
+    strip_non_story_wrappers,
 )
 
 _TEXT_SEGMENT_SUFFIXES = {".md", ".txt"}
@@ -61,6 +82,7 @@ MULTI_FRAGMENT_CONTENT_MODE = "multi_fragment"
 SINGLE_FILE_CONTENT_MODE = "single_file"
 DEFAULT_CHAPTER_WORD_COUNT_TARGET = 3000
 CHAPTER_WORD_COUNT_SCOPE = "chapter"
+CANDIDATE_WORD_COUNT_SCOPE = "candidate"
 _STORY_WORD_COUNT_SETTING_KEYS = {
     "chapterWordCountTarget",
     "chapter_word_count_target",
@@ -751,6 +773,7 @@ class StoryProjectService:
             "segmentNamingMode": "auto",
             "maxSegmentsPerChapter": 3,
             "storyFragmentCount": 1,
+            "chapterLengthTier": DEFAULT_CHAPTER_LENGTH_TIER,
             "chapterWordCountTarget": DEFAULT_CHAPTER_WORD_COUNT_TARGET,
             # Legacy aliases stay materialized for older clients. New settings
             # collapse them to the single chapter target.
@@ -758,6 +781,10 @@ class StoryProjectService:
             "storyFragmentWordCountMin": DEFAULT_CHAPTER_WORD_COUNT_TARGET,
             "storyFragmentWordCountMax": DEFAULT_CHAPTER_WORD_COUNT_TARGET,
             "wordCountSettingMode": "target",
+            # Off by default: turning it on is what allows one extra provider call
+            # per turn, so it must be an explicit user choice rather than a
+            # value an older project inherits by upgrading.
+            "preciseWordCountEnabled": False,
             "storyChapterTemplateId": DEFAULT_CHAPTER_TEMPLATE_ID,
             "autoUpdateVariables": False,
             "autoUpdateWiki": False,
@@ -1213,6 +1240,28 @@ class StoryProjectService:
         )
         return f"chapters/{chapter_dir}/{first_segment}"
 
+    def resolve_turn_chapter_action(
+        self,
+        workspace_root: Path,
+        *,
+        prompt: str,
+        active_file: str,
+        content_mode: str,
+        is_new_story: bool = False,
+    ) -> Dict[str, Any]:
+        """Decide which chapter this turn writes into, before any prose call."""
+
+        root = Path(workspace_root).resolve()
+        return resolve_chapter_action(
+            prompt=prompt,
+            active_file=active_file,
+            chapter_numbers=tuple(
+                state.chapter_number for state in self.list_chapter_states(root)
+            ),
+            content_mode=content_mode,
+            is_new_story=is_new_story,
+        )
+
     def plan_story_generation_targets(
         self,
         workspace_root: Path,
@@ -1222,15 +1271,32 @@ class StoryProjectService:
         active_file: str = "",
         prompt: str = "",
         is_new_story: bool = False,
+        chapter_action: Dict[str, Any] | None = None,
     ) -> List[Dict[str, Any]]:
-        """Build authoritative chapter paths without relying on model guesses."""
+        """Build authoritative chapter paths without relying on model guesses.
+
+        The chapter action decides the target directory. Passing an already
+        resolved action keeps the planner and the pre-call structure gate looking
+        at exactly the same decision instead of each re-deriving it from prompt
+        text.
+        """
 
         root = Path(workspace_root).resolve()
         self.ensure_project_structure(root)
         settings = self.read_project_settings(root)
         extension = "." + self._normalize_story_segment_format(settings.get("storySegmentFormat"))
         content_mode = self._normalize_chapter_content_mode(template.get("contentMode"))
-        rewrite_chapter = _extract_rewrite_chapter_number(prompt)
+        action = (
+            dict(chapter_action)
+            if isinstance(chapter_action, dict) and chapter_action
+            else self.resolve_turn_chapter_action(
+                root,
+                prompt=prompt,
+                active_file=active_file,
+                content_mode=content_mode,
+                is_new_story=is_new_story,
+            )
+        )
 
         if content_mode == SINGLE_FILE_CONTENT_MODE:
             target_path = self._single_file_chapter_target(
@@ -1240,10 +1306,13 @@ class StoryProjectService:
                 prompt=prompt,
                 extension=extension,
                 is_new_story=is_new_story,
-                rewrite_chapter=rewrite_chapter,
+                chapter_action=action,
             )
             absolute = root / target_path
-            write_mode = "replace" if rewrite_chapter or not absolute.exists() else "append"
+            # A rewrite replaces the chapter in place; a continuation appends to
+            # it. Only an existing file can be appended to.
+            rewrites = str(action.get("action") or "") == CHAPTER_ACTION_REWRITE_EXISTING
+            write_mode = "replace" if rewrites or not absolute.exists() else "append"
             return [
                 {
                     "order": 1,
@@ -1262,7 +1331,7 @@ class StoryProjectService:
             prompt=prompt,
             extension=extension,
             is_new_story=is_new_story,
-            rewrite_chapter=rewrite_chapter,
+            chapter_action=action,
         )
         paths = self._expand_multi_fragment_paths(
             root,
@@ -1304,7 +1373,7 @@ class StoryProjectService:
         min_word_count, max_word_count = self._resolve_turn_plan_word_count_range(turn_plan)
         content_mode = self._normalize_chapter_content_mode(turn_plan.get("chapterContentMode"))
         root = Path(workspace_root).resolve()
-        if self._story_word_count_scope(turn_plan) == CHAPTER_WORD_COUNT_SCOPE:
+        if self._uses_chapter_story_aggregation(turn_plan):
             return self._validate_chapter_story_generation_turn(
                 root,
                 turn_plan=turn_plan,
@@ -1315,6 +1384,12 @@ class StoryProjectService:
             )
         results: List[Dict[str, Any]] = []
         passed = bool(targets)
+        accept_min, accept_max = self._story_word_count_acceptance_band(
+            min_word_count,
+            max_word_count,
+        )
+        below_budget = False
+        over_budget = False
 
         for index, raw_target in enumerate(targets, start=1):
             target = raw_target if isinstance(raw_target, dict) else {}
@@ -1325,8 +1400,14 @@ class StoryProjectService:
             baseline = max(0, self._safe_int(target.get("baselineWordCount"), fallback=0, minimum=0, maximum=10**9))
             write_mode = str(target.get("writeMode") or "replace")
             generated_count = max(0, actual_file_count - baseline) if write_mode == "append" else actual_file_count
-            item_passed = exists and min_word_count <= generated_count <= max_word_count
+            item_below = generated_count < accept_min
+            item_over = generated_count > accept_max
+            # 超上限只作为告警：丢掉一整章可用正文的代价远大于章节偏长本身，
+            # 且系统不会压缩或截断，拒绝写入等于让作者白丢一次生成。
+            item_passed = exists and not item_below
             passed = passed and item_passed
+            below_budget = below_budget or item_below
+            over_budget = over_budget or item_over
             results.append(
                 {
                     "order": index,
@@ -1338,8 +1419,12 @@ class StoryProjectService:
                     "generatedWordCount": generated_count,
                     "targetWordCountMin": min_word_count,
                     "targetWordCountMax": max_word_count,
+                    "acceptWordCountMin": accept_min,
+                    "acceptWordCountMax": accept_max,
+                    "belowBudget": item_below,
+                    "overBudget": item_over,
                     "difference": self._word_count_range_difference(
-                        generated_count, min_word_count, max_word_count
+                        generated_count, accept_min, accept_max
                     ),
                     "status": "passed" if item_passed else "failed",
                 }
@@ -1354,20 +1439,25 @@ class StoryProjectService:
             "passed": passed,
             "status": "success" if passed else "error",
             "algorithm": STORY_WORD_COUNT_ALGORITHM,
-            "countingRule": "count every non-whitespace Unicode character",
+            "countingRule": STORY_WORD_COUNT_RULE,
             "exact": False,
             "wordCountScope": "fragment",
             "fragmentCount": len(targets),
             "targetWordCountMin": min_word_count,
             "targetWordCountMax": max_word_count,
+            "acceptWordCountMin": accept_min,
+            "acceptWordCountMax": accept_max,
             "chapterContentMode": content_mode,
             "structurePassed": structure_passed,
-            "overBudget": False,
+            "belowBudget": below_budget,
+            "overBudget": over_budget,
             "fragments": results,
             "message": (
-                "正文数量、章节结构和客观字数均已通过 Storydex 校验。"
+                STORY_OVER_BUDGET_KEEP_MESSAGE
+                if passed and over_budget
+                else "正文数量、章节结构和客观字数均已通过 Storydex 校验。"
                 if passed
-                else f"正文尚未满足章节模板或字数区间约束（每片段需落在 {min_word_count}-{max_word_count} 字），不能结束本轮。"
+                else f"正文尚未满足章节模板或字数验收带（每片段需落在 {accept_min}-{accept_max} 字），不能结束本轮。"
             ),
         }
 
@@ -1382,6 +1472,35 @@ class StoryProjectService:
         except (OSError, UnicodeDecodeError):
             return 0
 
+    def count_chapter_story_words(
+        self,
+        workspace_root: Path,
+        chapter_relative_path: str,
+    ) -> int:
+        """Count every prose file retained by one authoritative chapter."""
+
+        root = Path(workspace_root).resolve()
+        normalized = self._normalize_relative_path(chapter_relative_path)
+        if not normalized:
+            return 0
+        chapter_path = (root / normalized).resolve()
+        try:
+            chapter_path.relative_to(root)
+        except ValueError:
+            return 0
+        if chapter_path.is_file():
+            return (
+                self.count_story_file_words(chapter_path)
+                if self._is_story_text_file(chapter_path)
+                else 0
+            )
+        if not chapter_path.is_dir():
+            return 0
+        return sum(
+            self.count_story_file_words(path)
+            for path in self._sorted_segment_files(chapter_path)
+        )
+
     def _single_file_chapter_target(
         self,
         root: Path,
@@ -1391,14 +1510,36 @@ class StoryProjectService:
         prompt: str,
         extension: str,
         is_new_story: bool,
-        rewrite_chapter: Optional[int],
+        chapter_action: Dict[str, Any],
     ) -> str:
-        if rewrite_chapter:
-            existing = self.resolve_existing_chapter_by_number(root, rewrite_chapter)
+        action = str(chapter_action.get("action") or "")
+        target_number = int(chapter_action.get("targetChapterNumber") or 0)
+
+        if action == CHAPTER_ACTION_REWRITE_EXISTING and target_number:
+            existing = self.resolve_existing_chapter_by_number(root, target_number)
             if existing:
                 return existing
+        # A request naming a chapter that does not exist yet must get its own new
+        # directory. Falling through to the active chapter here is precisely how
+        # "写第二章" used to land inside chapter 1.
+        if action in (CHAPTER_ACTION_CREATE_NEXT_CHAPTER, CHAPTER_ACTION_CREATE_SPECIFIC_CHAPTER):
+            if is_new_story and target_number <= 1:
+                return self.initial_segment_path_from_chapter_template(template)
+            return self._new_chapter_first_path(
+                root,
+                template=template,
+                extension=extension,
+                prompt=prompt,
+                chapter_number=target_number or None,
+            )
         if is_new_story:
             return self.initial_segment_path_from_chapter_template(template)
+        # Continuing a chapter the request named by number: that chapter wins over
+        # whatever file happens to be open.
+        if target_number:
+            existing = self.resolve_existing_chapter_by_number(root, target_number)
+            if existing:
+                return existing
 
         active = self._normalize_relative_path(active_file)
         active_path = root / active if active else None
@@ -1436,14 +1577,41 @@ class StoryProjectService:
         prompt: str,
         extension: str,
         is_new_story: bool,
-        rewrite_chapter: Optional[int],
+        chapter_action: Dict[str, Any],
     ) -> str:
-        if rewrite_chapter:
-            existing = self.resolve_existing_chapter_by_number(root, rewrite_chapter)
+        action = str(chapter_action.get("action") or "")
+        target_number = int(chapter_action.get("targetChapterNumber") or 0)
+
+        if action == CHAPTER_ACTION_REWRITE_EXISTING and target_number:
+            existing = self.resolve_existing_chapter_by_number(root, target_number)
             if existing:
                 return existing
+        # A named chapter that does not exist yet gets its own directory. The old
+        # code fell through to the active chapter here, which is how "写第二章"
+        # ended up as chapters/第1章 .../002.md.
+        if action in (CHAPTER_ACTION_CREATE_NEXT_CHAPTER, CHAPTER_ACTION_CREATE_SPECIFIC_CHAPTER):
+            if is_new_story and target_number <= 1:
+                return self.initial_segment_path_from_chapter_template(template)
+            return self._new_chapter_first_path(
+                root,
+                template=template,
+                extension=extension,
+                prompt=prompt,
+                chapter_number=target_number or None,
+            )
         if is_new_story:
             return self.initial_segment_path_from_chapter_template(template)
+        # An existing chapter named by number outranks whatever file is open.
+        if target_number:
+            existing = self.resolve_existing_chapter_by_number(root, target_number)
+            if existing:
+                chapter_dir = root / Path(existing).parent
+                if chapter_dir.is_dir() and chapter_dir != root / "chapters":
+                    return self._next_segment_path_in_chapter(
+                        chapter_dir=chapter_dir,
+                        workspace_root=root,
+                        extension=extension,
+                    )
 
         active = self._normalize_relative_path(active_file)
         if active.startswith("chapters/"):
@@ -1472,9 +1640,16 @@ class StoryProjectService:
         template: Dict[str, Any],
         extension: str,
         prompt: str,
+        chapter_number: Optional[int] = None,
     ) -> str:
         states = self.list_chapter_states(root)
-        number = (states[-1].chapter_number + 1) if states else 1
+        # An explicitly requested number is honoured as given. Requesting chapter
+        # 5 while 3 exists is the author's call; renumbering it to 4 would write
+        # prose under a heading they did not ask for.
+        if chapter_number and int(chapter_number) > 0:
+            number = int(chapter_number)
+        else:
+            number = (states[-1].chapter_number + 1) if states else 1
         title = self._extract_requested_chapter_title(prompt) or "未命名"
         chapter_name = self._chapter_name_from_template(template, number=number, title=title)
         chapter_name = self._safe_template_path_part(chapter_name, fallback=f"第{number}章 {title}")
@@ -1579,6 +1754,19 @@ class StoryProjectService:
                 "maxSegmentsPerChapter": self._normalize_max_segments_per_chapter(payload.get("maxSegmentsPerChapter")),
                 "storyFragmentCount": self._normalize_story_fragment_count(payload.get("storyFragmentCount")),
                 **self._merge_story_fragment_word_count_range(payload),
+                "chapterLengthTier": normalize_chapter_length_tier(
+                    payload.get("chapterLengthTier", payload.get("chapter_length_tier")),
+                    legacy_target=payload.get(
+                        "chapterWordCountTarget",
+                        payload.get(
+                            "chapter_word_count_target",
+                            payload.get(
+                                "storyFragmentWordCount",
+                                payload.get("story_fragment_word_count"),
+                            ),
+                        ),
+                    ),
+                ),
                 "storyChapterTemplateId": self._normalize_story_chapter_template_id(
                     payload.get("storyChapterTemplateId", payload.get("story_chapter_template_id"))
                 ),
@@ -1593,6 +1781,10 @@ class StoryProjectService:
                     default=True,
                 ),
                 "autoNameChapterTitle": self._normalize_bool(payload.get("autoNameChapterTitle"), default=False),
+                # Numeric precision is retired in tier mode. Keep the serialized
+                # key readable for migration, but it can no longer authorise a
+                # second prose call.
+                "preciseWordCountEnabled": False,
                 "contextConcisionMinCalls": self._normalize_llm_call_count(payload.get("contextConcisionMinCalls"), fallback=1),
                 "contextConcisionMaxCalls": self._normalize_llm_call_count(payload.get("contextConcisionMaxCalls"), fallback=2),
                 "contextConcisionMaxInputTokens": self._normalize_context_input_tokens(
@@ -1621,12 +1813,36 @@ class StoryProjectService:
         current.update(
             self._merge_story_fragment_word_count_range(payload, current=current)
         )
+        explicit_tier = payload.get(
+            "chapterLengthTier",
+            payload.get("chapter_length_tier"),
+        )
+        legacy_tier_source = payload.get(
+            "chapterWordCountTarget",
+            payload.get(
+                "chapter_word_count_target",
+                payload.get(
+                    "storyFragmentWordCount",
+                    payload.get("story_fragment_word_count"),
+                ),
+            ),
+        )
+        current["chapterLengthTier"] = (
+            normalize_chapter_length_tier(explicit_tier)
+            if explicit_tier is not None
+            else migrate_chapter_word_count_target(legacy_tier_source)
+            if legacy_tier_source is not None
+            else normalize_chapter_length_tier(current.get("chapterLengthTier"))
+        )
         current["storyChapterTemplateId"] = self._normalize_story_chapter_template_id(
             payload.get(
                 "storyChapterTemplateId",
                 payload.get("story_chapter_template_id", current.get("storyChapterTemplateId")),
             )
         )
+        # The retired key stays serialized for one compatibility release, but it
+        # can no longer turn the precision path back on.
+        current["preciseWordCountEnabled"] = False
         current["autoUpdateVariables"] = self._normalize_bool(
             payload.get("autoUpdateVariables", current.get("autoUpdateVariables")),
             default=False,
@@ -2473,7 +2689,7 @@ class StoryProjectService:
         expected_count = self._normalize_story_fragment_count(turn_plan.get("fragmentCount"))
         min_word_count, max_word_count = self._resolve_turn_plan_word_count_range(turn_plan)
         content_mode = self._normalize_chapter_content_mode(turn_plan.get("chapterContentMode"))
-        if self._story_word_count_scope(turn_plan) == CHAPTER_WORD_COUNT_SCOPE:
+        if self._uses_chapter_story_aggregation(turn_plan):
             return self._prepare_chapter_scoped_story_increment(
                 workspace_root,
                 payload=payload,
@@ -2485,7 +2701,7 @@ class StoryProjectService:
                 max_word_count=max_word_count,
                 content_mode=content_mode,
             )
-        accept_min, accept_max = self._legacy_story_word_count_acceptance_band(
+        accept_min, accept_max = self._story_word_count_acceptance_band(
             min_word_count,
             max_word_count,
         )
@@ -2493,6 +2709,8 @@ class StoryProjectService:
         results: List[Dict[str, Any]] = []
         passed = bool(targets) and len(targets) == expected_count and actual_count == expected_count
         prepared: List[Dict[str, Any]] = []
+        below_budget = False
+        over_budget = False
 
         for index in range(max(actual_count, expected_count)):
             fragment = dict(fragments[index]) if index < actual_count else {}
@@ -2508,9 +2726,14 @@ class StoryProjectService:
             baseline_matches = write_mode != "append" or current_count == baseline
             # 字数改为宽容带：只要落在放行区间即视为达标，避免模型为凑到目标区间
             # 反复重写同一章导致"抠字数"死循环。目标区间仍作为建议展示给作者。
-            word_count_ok = accept_min <= actual_word_count <= accept_max
+            # 超上限只标记告警，不阻断写入：偏长的代价远小于丢掉一整章正文。
+            item_below = actual_word_count < accept_min
+            item_over = actual_word_count > accept_max
+            word_count_ok = not item_below
             item_passed = bool(relative_path and text) and word_count_ok and baseline_matches
             passed = passed and item_passed
+            below_budget = below_budget or item_below
+            over_budget = over_budget or item_over
             results.append(
                 {
                     "order": index + 1,
@@ -2524,8 +2747,10 @@ class StoryProjectService:
                     "targetWordCountMax": max_word_count,
                     "acceptWordCountMin": accept_min,
                     "acceptWordCountMax": accept_max,
+                    "belowBudget": item_below,
+                    "overBudget": item_over,
                     "difference": self._word_count_range_difference(
-                        actual_word_count, min_word_count, max_word_count
+                        actual_word_count, accept_min, accept_max
                     ),
                     "status": "passed" if item_passed else "failed",
                 }
@@ -2537,7 +2762,7 @@ class StoryProjectService:
                 fragment["_storydexTargetWordCountMin"] = min_word_count
                 fragment["_storydexTargetWordCountMax"] = max_word_count
                 fragment["_storydexWordCountStatus"] = "passed" if item_passed else "failed"
-                fragment["_storydexOverBudget"] = False
+                fragment["_storydexOverBudget"] = item_over
                 prepared.append(fragment)
 
         structure_passed = self._validate_planned_target_structure(targets, content_mode=content_mode)
@@ -2549,7 +2774,7 @@ class StoryProjectService:
             "passed": passed,
             "status": "success" if passed else "warning",
             "algorithm": STORY_WORD_COUNT_ALGORITHM,
-            "countingRule": "count every non-whitespace Unicode character",
+            "countingRule": STORY_WORD_COUNT_RULE,
             "exact": False,
             "wordCountScope": "fragment",
             "expectedFragmentCount": expected_count,
@@ -2560,10 +2785,13 @@ class StoryProjectService:
             "acceptWordCountMax": accept_max,
             "chapterContentMode": content_mode,
             "structurePassed": structure_passed,
-            "overBudget": False,
+            "belowBudget": below_budget,
+            "overBudget": over_budget,
             "fragments": results,
             "message": (
-                "正文已通过 Storydex 落盘前客观字数和章节结构校验。"
+                STORY_OVER_BUDGET_KEEP_MESSAGE
+                if passed and over_budget
+                else "正文已通过 Storydex 落盘前客观字数和章节结构校验。"
                 if passed
                 else f"提示：请复核未通过的片段。每个片段的 Storydex 非空白字符数建议落在 {min_word_count}-{max_word_count} 字（放行区间 {accept_min}-{accept_max} 字），且片段数量与章节模板需一致。"
             ),
@@ -2587,9 +2815,27 @@ class StoryProjectService:
         max_word_count: int,
         content_mode: str,
     ) -> tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
-        accept_min, accept_max = self._story_word_count_acceptance_band(min_word_count, max_word_count)
+        policy = turn_plan.get("wordCountPolicy") if isinstance(turn_plan.get("wordCountPolicy"), dict) else {}
+        tier_mode = str(policy.get("mode") or "").strip().lower() == "tier"
+        candidate_scoped = bool(
+            tier_mode
+            and self._story_word_count_scope(turn_plan)
+            == CANDIDATE_WORD_COUNT_SCOPE
+        )
+        if tier_mode:
+            accept_min = max(1, int(policy.get("preferredMinimum") or min_word_count))
+            accept_max = max(accept_min, int(policy.get("preferredMaximum") or max_word_count))
+        else:
+            accept_min, accept_max = self._story_word_count_acceptance_band(
+                min_word_count,
+                max_word_count,
+            )
         chapter_target = self._story_chapter_word_count_target(turn_plan, min_word_count, max_word_count)
-        allow_below_minimum = self._story_word_count_allows_below_minimum_after_correction(turn_plan)
+        has_planned_retained = "retainedWordCount" in policy
+        planned_retained = max(0, int(policy.get("retainedWordCount") or 0))
+        authoritative_chapter_path = str(
+            turn_plan.get("authoritativeChapterPath") or ""
+        ).strip().replace("\\", "/").strip("/")
         actual_count = len(fragments)
         prepared: List[Dict[str, Any]] = []
         results: List[Dict[str, Any]] = []
@@ -2601,6 +2847,7 @@ class StoryProjectService:
             target = targets[index] if index < len(targets) and isinstance(targets[index], dict) else {}
             text = self._story_increment_fragment_text(fragment)
             generated_count = count_story_text_words(text)
+            generated_paragraphs = count_story_text_paragraphs(text)
             relative_path = self._normalize_relative_path(str(target.get("path") or ""))
             chapter_path = Path(relative_path).parent.as_posix() if relative_path else ""
             write_mode = str(target.get("writeMode") or "replace")
@@ -2616,6 +2863,18 @@ class StoryProjectService:
                 {
                     "chapterPath": chapter_path,
                     "generatedWordCount": 0,
+                    # Text already on disk that this turn will keep. Append mode
+                    # adds to a chapter that is partly written, so the target
+                    # describes the *resulting* chapter, not this turn's share.
+                    "retainedWordCount": (
+                        planned_retained
+                        if has_planned_retained
+                        and (
+                            not authoritative_chapter_path
+                            or chapter_path == authoritative_chapter_path
+                        )
+                        else 0
+                    ),
                     "targetWordCountMin": min_word_count,
                     "targetWordCountMax": max_word_count,
                     "chapterWordCountTarget": chapter_target,
@@ -2626,6 +2885,11 @@ class StoryProjectService:
                 },
             )
             chapter["generatedWordCount"] += generated_count
+            if write_mode == "append" and not has_planned_retained:
+                chapter["retainedWordCount"] += baseline
+            chapter["generatedParagraphCount"] = (
+                int(chapter.get("generatedParagraphCount") or 0) + generated_paragraphs
+            )
             chapter["allFragmentsReady"] = bool(chapter["allFragmentsReady"] and item_ready)
             chapter["fragmentOrders"].append(index + 1)
             results.append(
@@ -2663,23 +2927,61 @@ class StoryProjectService:
         status_by_order: Dict[int, str] = {}
         over_budget = False
         below_budget = False
+        runtime_safety_exceeded = False
+        runtime_safety_maximum = chapter_runtime_safety_maximum(chapter_target)
+        hard_minimum = accept_min
+        hard_minimum_passed = True
+        tier_hit = True
+        tier_deviations: set[str] = set()
+        asymmetric_enabled = bool(
+            isinstance(policy.get("asymmetric"), dict)
+            and policy["asymmetric"].get("enabled")
+        )
         for chapter in chapters.values():
             generated_count = int(chapter["generatedWordCount"])
-            chapter_below = generated_count < accept_min
-            chapter_over = generated_count > accept_max
+            resulting_count = int(chapter["retainedWordCount"]) + generated_count
+            length_count = generated_count if candidate_scoped else resulting_count
+            length_gate = self._chapter_length_gate(
+                turn_plan,
+                count=length_count,
+                target=chapter_target,
+                hard_minimum=accept_min,
+                soft_maximum=accept_max,
+            )
+            chapter_below = bool(
+                length_gate.get("belowPreferred")
+                if tier_mode
+                else not bool(length_gate["hardMinimumPassed"])
+            )
+            chapter_over = bool(length_gate["aboveSoftMaximum"])
+            chapter_safety_exceeded = bool(length_gate["runtimeSafetyExceeded"])
             chapter_passed = bool(
-                chapter["allFragmentsReady"] and (not chapter_below or allow_below_minimum)
+                chapter["allFragmentsReady"] and length_gate["writeGatePassed"]
             )
             passed = passed and chapter_passed
             over_budget = over_budget or chapter_over
             below_budget = below_budget or chapter_below
+            runtime_safety_exceeded = (
+                runtime_safety_exceeded or chapter_safety_exceeded
+            )
+            runtime_safety_maximum = int(length_gate["runtimeSafetyMaximum"])
+            hard_minimum = int(length_gate["hardMinimum"])
+            hard_minimum_passed = hard_minimum_passed and bool(
+                length_gate["hardMinimumPassed"]
+            )
+            if tier_mode:
+                tier_hit = tier_hit and bool(length_gate.get("tierHit"))
+                tier_deviations.add(str(length_gate.get("tierDeviation") or ""))
             chapter.update(
                 {
                     "passed": chapter_passed,
+                    "actualWordCount": length_count,
+                    "resultingWordCount": resulting_count,
                     "belowBudget": chapter_below,
                     "overBudget": chapter_over,
+                    **length_gate,
                     "acceptanceDifference": self._word_count_range_difference(
-                        generated_count,
+                        length_count,
                         accept_min,
                         accept_max,
                     ),
@@ -2705,19 +3007,39 @@ class StoryProjectService:
         structure_passed = self._validate_planned_target_structure(targets, content_mode=content_mode)
         passed = passed and structure_passed
         generated_total = sum(int(item["generatedWordCount"]) for item in chapter_results)
+        resulting_total = sum(int(item["resultingWordCount"]) for item in chapter_results)
+        retained_total = sum(int(item["retainedWordCount"]) for item in chapter_results)
+        actual_total = generated_total if candidate_scoped else resulting_total
+        generated_paragraph_total = sum(
+            int(item.get("generatedParagraphCount") or 0) for item in chapter_results
+        )
         validation = {
             "_type": "StoryGenerationValidation",
             "_version": 1,
             "applicable": True,
             "passed": passed,
-            "status": "success" if passed else "warning",
+            "status": (
+                "warning"
+                if passed and (below_budget or over_budget)
+                else "success"
+                if passed
+                else "warning"
+            ),
             "algorithm": STORY_WORD_COUNT_ALGORITHM,
-            "countingRule": "count every non-whitespace Unicode character",
+            "countingRule": STORY_WORD_COUNT_RULE,
             "exact": False,
-            "wordCountScope": CHAPTER_WORD_COUNT_SCOPE,
+            "wordCountScope": (
+                CANDIDATE_WORD_COUNT_SCOPE
+                if candidate_scoped
+                else CHAPTER_WORD_COUNT_SCOPE
+            ),
             "expectedFragmentCount": expected_count,
             "actualFragmentCount": actual_count,
+            "actualWordCount": actual_total,
             "generatedWordCount": generated_total,
+            "retainedWordCount": retained_total,
+            "resultingWordCount": resulting_total,
+            "generatedParagraphCount": generated_paragraph_total,
             "chapterWordCountTarget": chapter_target,
             "targetWordCountMin": min_word_count,
             "targetWordCountMax": max_word_count,
@@ -2727,16 +3049,42 @@ class StoryProjectService:
             "structurePassed": structure_passed,
             "belowBudget": below_budget,
             "overBudget": over_budget,
-            "correctionApplied": allow_below_minimum,
+            "chapterLengthTier": str(policy.get("tier") or "") if tier_mode else "",
+            "tierHit": tier_hit if tier_mode else None,
+            "tierDeviation": (
+                next(iter(tier_deviations))
+                if tier_mode and len(tier_deviations) == 1
+                else "mixed"
+                if tier_mode
+                else ""
+            ),
+            "preferredMinimum": accept_min if tier_mode else None,
+            "preferredMaximum": accept_max if tier_mode else None,
+            "hardMinimum": hard_minimum,
+            "softMaximum": accept_max,
+            "runtimeSafetyMaximum": runtime_safety_maximum,
+            "hardMinimumPassed": hard_minimum_passed,
+            "aboveSoftMaximum": over_budget,
+            "runtimeSafetyExceeded": runtime_safety_exceeded,
+            "asymmetricLengthEnabled": asymmetric_enabled,
+            "productGatePassed": hard_minimum_passed and not runtime_safety_exceeded,
             "chapters": chapter_results,
             "fragments": results,
             "message": (
-                f"定向补写正文已落盘；本章仍低于可接受下界 {accept_min} 字，已按单轮修订策略放行。"
-                if passed and below_budget and allow_below_minimum
+                STORY_OVER_BUDGET_KEEP_MESSAGE
+                if passed and over_budget
+                else STORY_UNDER_BUDGET_KEEP_MESSAGE
+                if passed and below_budget
+                else "正文已通过 Storydex 落盘前候选字数和章节结构校验。"
+                if candidate_scoped
+                else "正文已通过 Storydex 落盘前章级字数和章节结构校验。"
+                if passed
                 else (
-                    "正文已通过 Storydex 落盘前章级字数和章节结构校验。"
-                    if passed
-                    else f"本章正文低于可接受下界 {accept_min} 字，或片段数量、写入基线与章节模板不一致。"
+                    f"本章正文超过运行安全上限 {runtime_safety_maximum} 字，未写入。"
+                    if runtime_safety_exceeded
+                    else f"本章正文低于安全写入下界 {hard_minimum} 字，未写入。"
+                    if not hard_minimum_passed
+                    else "本章正文的片段数量、写入基线或章节模板不一致。"
                 )
             ),
         }
@@ -2759,6 +3107,189 @@ class StoryProjectService:
         if content_mode == SINGLE_FILE_CONTENT_MODE:
             return len(paths) == 1
         return len(paths) == len(set(paths))
+
+    @staticmethod
+    def _uses_atomic_bounded_story_commit(
+        generation_contract: Dict[str, Any] | None,
+    ) -> bool:
+        contract = generation_contract if isinstance(generation_contract, dict) else {}
+        intent = contract.get("intentFrame") if isinstance(contract.get("intentFrame"), dict) else {}
+        turn_plan = contract.get("turnPlan") if isinstance(contract.get("turnPlan"), dict) else {}
+        policy = turn_plan.get("wordCountPolicy") if isinstance(turn_plan.get("wordCountPolicy"), dict) else {}
+        control = turn_plan.get("generationControl") if isinstance(turn_plan.get("generationControl"), dict) else {}
+        scope = str(policy.get("scope") or "").strip().lower()
+        tier_candidate = bool(
+            str(policy.get("mode") or "").strip().lower() == "tier"
+            and scope == CANDIDATE_WORD_COUNT_SCOPE
+        )
+        return bool(
+            str(intent.get("primary") or "") == "story_generation"
+            and int(policy.get("version") or 0) >= WORD_COUNT_POLICY_VERSION
+            and (scope == CHAPTER_WORD_COUNT_SCOPE or tier_candidate)
+            and str(control.get("strategy") or "").strip().lower()
+            != "semantic_budget"
+        )
+
+    def _commit_bounded_story_fragments_atomically(
+        self,
+        workspace_root: Path,
+        fragments: List[Dict[str, Any]],
+    ) -> Set[str]:
+        """Commit all bounded prose files or restore the exact prior state."""
+
+        root = Path(workspace_root).resolve()
+        prepared: List[Dict[str, Any]] = []
+        seen: Set[Path] = set()
+        created_directories: Set[Path] = set()
+
+        for fragment in fragments:
+            relative_path = self._normalize_relative_path(str(fragment.get("path") or ""))
+            text = strip_non_story_wrappers(
+                self._story_increment_fragment_text(fragment)
+            ).strip()
+            if not relative_path or not text:
+                raise StoryProjectServiceError(
+                    "Bounded story commit requires a non-empty path and prose body."
+                )
+            target = (root / relative_path).resolve()
+            try:
+                target.relative_to(root)
+            except ValueError as exc:
+                raise StoryProjectServiceError(
+                    "Bounded story target escapes the workspace."
+                ) from exc
+            if (
+                target in seen
+                or target.suffix.lower() not in _TEXT_SEGMENT_SUFFIXES
+                or target.name.lower() == "readme.md"
+            ):
+                raise StoryProjectServiceError(
+                    "Bounded story targets must be unique chapter text files."
+                )
+            seen.add(target)
+
+            write_mode = str(fragment.get("_storydexWriteMode") or "replace")
+            baseline = max(
+                0,
+                self._safe_int(
+                    fragment.get("_storydexBaselineWordCount"),
+                    fallback=0,
+                    minimum=0,
+                    maximum=10**9,
+                ),
+            )
+            current_count = self.count_story_file_words(target) if target.is_file() else 0
+            if current_count != baseline:
+                raise StoryProjectServiceError(
+                    f"Bounded story baseline changed before commit: {relative_path}"
+                )
+
+            existing_text = ""
+            if write_mode == "append" and target.is_file():
+                existing_text = target.read_text(encoding="utf-8-sig").rstrip()
+            final_text = (
+                f"{existing_text}\n\n{text.rstrip()}"
+                if write_mode == "append" and existing_text
+                else text.rstrip()
+            ) + "\n"
+            prepared.append(
+                {
+                    "relativePath": relative_path,
+                    "target": target,
+                    "content": final_text,
+                    "existed": target.is_file(),
+                    "original": target.read_bytes() if target.is_file() else None,
+                    "temp": target.with_name(
+                        f".{target.name}.storydex-{uuid4().hex}.tmp"
+                    ),
+                }
+            )
+
+        try:
+            for item in prepared:
+                parent = item["target"].parent
+                if not parent.exists():
+                    parent.mkdir(parents=True, exist_ok=True)
+                    created_directories.add(parent)
+                item["temp"].write_text(item["content"], encoding="utf-8")
+        except Exception:
+            for item in prepared:
+                try:
+                    item["temp"].unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
+
+        replaced: List[Dict[str, Any]] = []
+        try:
+            for item in prepared:
+                os.replace(item["temp"], item["target"])
+                replaced.append(item)
+        except Exception as commit_error:
+            rollback_errors: List[str] = []
+            for item in reversed(replaced):
+                target = item["target"]
+                try:
+                    if item["existed"]:
+                        rollback_temp = target.with_name(
+                            f".{target.name}.storydex-rollback-{uuid4().hex}.tmp"
+                        )
+                        rollback_temp.write_bytes(item["original"])
+                        os.replace(rollback_temp, target)
+                    else:
+                        target.unlink(missing_ok=True)
+                except Exception as rollback_error:  # noqa: BLE001
+                    rollback_errors.append(
+                        f"{item['relativePath']}:{type(rollback_error).__name__}"
+                    )
+            for item in prepared:
+                try:
+                    item["temp"].unlink(missing_ok=True)
+                except OSError:
+                    pass
+            for directory in sorted(
+                created_directories,
+                key=lambda path: len(path.parts),
+                reverse=True,
+            ):
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
+            if rollback_errors:
+                raise StoryProjectServiceError(
+                    "Bounded story commit failed and rollback was incomplete: "
+                    + ", ".join(rollback_errors)
+                ) from commit_error
+            raise
+
+        return {str(item["relativePath"]) for item in prepared}
+
+    def validate_story_generation_candidate(
+        self,
+        workspace_root: Path,
+        payload: Dict[str, Any],
+        *,
+        generation_contract: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        """Run the authoritative pre-write gates without changing project files."""
+
+        root = Path(workspace_root).resolve()
+        candidate = dict(payload) if isinstance(payload, dict) else {}
+        fragments = self._normalize_story_increment_fragments(candidate)
+        _, _, validation = self._prepare_constrained_story_increment(
+            root,
+            payload=candidate,
+            fragments=fragments,
+            generation_contract=generation_contract,
+        )
+        return validation or {
+            "applicable": False,
+            "passed": True,
+            "structurePassed": True,
+            "algorithm": STORY_WORD_COUNT_ALGORITHM,
+            "countingRule": STORY_WORD_COUNT_RULE,
+        }
 
     def apply_story_generation_increment(
         self,
@@ -2795,6 +3326,12 @@ class StoryProjectService:
             }
         if not fragments:
             fragments = [{}]
+
+        atomic_story_paths = (
+            self._commit_bounded_story_fragments_atomically(root, fragments)
+            if self._uses_atomic_bounded_story_commit(generation_contract)
+            else set()
+        )
 
         top_level_increment = self._normalize_story_increment_payload(payload)
         has_explicit_apply_variables = any(
@@ -2853,8 +3390,10 @@ class StoryProjectService:
                 segment_relative_path,
                 chapter_path_mapping,
             )
-            segment_text = self._story_increment_fragment_text(fragment)
-            if segment_text:
+            segment_text = strip_non_story_wrappers(
+                self._story_increment_fragment_text(fragment)
+            ).strip()
+            if segment_text and segment_relative_path not in atomic_story_paths:
                 segment_path = root / segment_relative_path
                 segment_path.parent.mkdir(parents=True, exist_ok=True)
                 write_mode = str(fragment.get("_storydexWriteMode") or "replace")
@@ -3778,6 +4317,11 @@ class StoryProjectService:
         original target shape.
         """
         policy = turn_plan.get("wordCountPolicy") if isinstance(turn_plan.get("wordCountPolicy"), dict) else {}
+        if str(policy.get("mode") or "").strip().lower() == "tier":
+            return (
+                max(1, int(policy.get("preferredMinimum") or 1)),
+                max(1, int(policy.get("preferredMaximum") or 1)),
+            )
         raw_target = turn_plan.get("chapterWordCountTarget", turn_plan.get("chapter_word_count_target"))
         if raw_target is not None and str(policy.get("mode") or "target") != "range":
             target = self._normalize_story_fragment_word_count(raw_target)
@@ -3800,32 +4344,84 @@ class StoryProjectService:
 
     @staticmethod
     def _story_word_count_acceptance_band(minimum: int, maximum: int) -> tuple[int, int]:
-        """Expand the chapter target band by 30 percent for acceptance.
+        """Return the asymmetric hard-minimum/soft-maximum interval.
 
-        The default target 3000 therefore yields [2100, 3900]. The target is a
-        center value, not an upper limit; over-budget chapters are written and
-        reported separately instead of being regenerated.
+        The default target 3000 yields [2550, 3900]. The upper boundary is a
+        soft signal; callers use ``_chapter_length_gate`` to distinguish it
+        from the hard lower and runtime-safety decisions.
         """
         low = max(1, int(minimum))
         high = max(low, int(maximum))
         # 下限只做防空保护（50 字），不要用大的绝对下限，否则会把 100 字这种
         # 小目标算出反向区间，反而把合法片段挡在外面。
-        accept_min = max(50, int(round(low * 0.70)))
-        accept_max = int(round(high * 1.30))
+        # Serialized legacy ranges keep their historical lower tolerance. Only
+        # a single chapter target adopts the new 85% hard-minimum semantics.
+        lower_ratio = HARD_MINIMUM_RATIO if low == high else 0.70
+        accept_min = max(50, int(round(low * lower_ratio)))
+        accept_max = int(round(high * SOFT_MAXIMUM_RATIO))
         if accept_min > accept_max:
             accept_min, accept_max = accept_max, accept_min
         return accept_min, accept_max
 
     @staticmethod
-    def _legacy_story_word_count_acceptance_band(minimum: int, maximum: int) -> tuple[int, int]:
-        """Preserve the pre-W1 per-fragment gate for serialized old contracts."""
-        low = max(1, int(minimum))
-        high = max(low, int(maximum))
-        accept_min = max(50, int(round(low * 0.6)))
-        accept_max = int(round(high * 1.4))
-        if accept_min > accept_max:
-            accept_min, accept_max = accept_max, accept_min
-        return accept_min, accept_max
+    def _chapter_length_gate(
+        turn_plan: Dict[str, Any],
+        *,
+        count: int,
+        target: int,
+        hard_minimum: int,
+        soft_maximum: int,
+    ) -> Dict[str, Any]:
+        """Classify one resulting chapter for both pre- and post-write checks."""
+
+        policy = (
+            turn_plan.get("wordCountPolicy")
+            if isinstance(turn_plan.get("wordCountPolicy"), dict)
+            else {}
+        )
+        if str(policy.get("mode") or "").strip().lower() == "tier":
+            tier_status = classify_chapter_length_tier(
+                count,
+                tier=policy.get("tier"),
+                policy=policy,
+            )
+            return {
+                **tier_status,
+                "softMaximum": int(tier_status["preferredMaximum"]),
+                "aboveSoftMaximum": bool(tier_status["abovePreferred"]),
+                "normalBandPassed": bool(tier_status["tierHit"]),
+                "asymmetricLengthEnabled": False,
+            }
+        asymmetric = (
+            policy.get("asymmetric")
+            if isinstance(policy.get("asymmetric"), dict)
+            else {}
+        )
+        asymmetric_enabled = bool(asymmetric.get("enabled"))
+        runtime_safety_maximum = max(
+            int(soft_maximum),
+            int(
+                asymmetric.get("runtimeSafetyMaximum")
+                or chapter_runtime_safety_maximum(target)
+            ),
+        )
+        actual = max(0, int(count))
+        below = actual < int(hard_minimum)
+        above_soft = actual > int(soft_maximum)
+        safety_exceeded = actual > runtime_safety_maximum
+        return {
+            "hardMinimum": int(hard_minimum),
+            "softMaximum": int(soft_maximum),
+            "runtimeSafetyMaximum": runtime_safety_maximum,
+            "hardMinimumPassed": not below,
+            "aboveSoftMaximum": above_soft,
+            "runtimeSafetyExceeded": safety_exceeded,
+            "asymmetricLengthEnabled": asymmetric_enabled,
+            "productGatePassed": not below and not safety_exceeded,
+            "writeGatePassed": (
+                not safety_exceeded and (not asymmetric_enabled or not below)
+            ),
+        }
 
     @staticmethod
     def allocate_story_fragment_reference_word_count(
@@ -3852,9 +4448,21 @@ class StoryProjectService:
         policy = turn_plan.get("wordCountPolicy") if isinstance(turn_plan.get("wordCountPolicy"), dict) else {}
         return str(policy.get("scope") or "fragment").strip().lower()
 
-    def _story_word_count_allows_below_minimum_after_correction(self, turn_plan: Dict[str, Any]) -> bool:
-        policy = turn_plan.get("wordCountPolicy") if isinstance(turn_plan.get("wordCountPolicy"), dict) else {}
-        return self._normalize_bool(policy.get("allowBelowMinimumAfterCorrection"), default=False)
+    @classmethod
+    def _uses_chapter_story_aggregation(cls, turn_plan: Dict[str, Any]) -> bool:
+        policy = (
+            turn_plan.get("wordCountPolicy")
+            if isinstance(turn_plan.get("wordCountPolicy"), dict)
+            else {}
+        )
+        scope = cls._story_word_count_scope(turn_plan)
+        return bool(
+            scope == CHAPTER_WORD_COUNT_SCOPE
+            or (
+                scope == CANDIDATE_WORD_COUNT_SCOPE
+                and str(policy.get("mode") or "").strip().lower() == "tier"
+            )
+        )
 
     def _story_chapter_word_count_target(
         self,
@@ -3862,6 +4470,15 @@ class StoryProjectService:
         minimum: int,
         maximum: int,
     ) -> int:
+        policy = (
+            turn_plan.get("wordCountPolicy")
+            if isinstance(turn_plan.get("wordCountPolicy"), dict)
+            else {}
+        )
+        if str(policy.get("mode") or "").strip().lower() == "tier":
+            preferred_minimum = int(policy.get("preferredMinimum") or minimum)
+            preferred_maximum = int(policy.get("preferredMaximum") or maximum)
+            return int(round((preferred_minimum + preferred_maximum) / 2))
         raw_target = turn_plan.get("chapterWordCountTarget")
         if raw_target is not None:
             return self._normalize_story_fragment_word_count(raw_target)
@@ -3966,9 +4583,27 @@ class StoryProjectService:
         max_word_count: int,
         content_mode: str,
     ) -> Dict[str, Any]:
-        accept_min, accept_max = self._story_word_count_acceptance_band(min_word_count, max_word_count)
+        policy = turn_plan.get("wordCountPolicy") if isinstance(turn_plan.get("wordCountPolicy"), dict) else {}
+        tier_mode = str(policy.get("mode") or "").strip().lower() == "tier"
+        candidate_scoped = bool(
+            tier_mode
+            and self._story_word_count_scope(turn_plan)
+            == CANDIDATE_WORD_COUNT_SCOPE
+        )
+        if tier_mode:
+            accept_min = max(1, int(policy.get("preferredMinimum") or min_word_count))
+            accept_max = max(accept_min, int(policy.get("preferredMaximum") or max_word_count))
+        else:
+            accept_min, accept_max = self._story_word_count_acceptance_band(
+                min_word_count,
+                max_word_count,
+            )
         chapter_target = self._story_chapter_word_count_target(turn_plan, min_word_count, max_word_count)
-        allow_below_minimum = self._story_word_count_allows_below_minimum_after_correction(turn_plan)
+        has_planned_retained = "retainedWordCount" in policy
+        planned_retained = max(0, int(policy.get("retainedWordCount") or 0))
+        authoritative_chapter_path = str(
+            turn_plan.get("authoritativeChapterPath") or ""
+        ).strip().replace("\\", "/").strip("/")
         results: List[Dict[str, Any]] = []
         chapters: Dict[str, Dict[str, Any]] = {}
 
@@ -3990,6 +4625,17 @@ class StoryProjectService:
                 {
                     "chapterPath": chapter_path,
                     "generatedWordCount": 0,
+                    # append 续写保留的旧正文。章目标描述的是落盘后整章的长度，
+                    # 只看本轮新增会让每一轮都各自判定通过，最终堆成两章。
+                    "retainedWordCount": (
+                        planned_retained
+                        if has_planned_retained
+                        and (
+                            not authoritative_chapter_path
+                            or chapter_path == authoritative_chapter_path
+                        )
+                        else 0
+                    ),
                     "targetWordCountMin": min_word_count,
                     "targetWordCountMax": max_word_count,
                     "chapterWordCountTarget": chapter_target,
@@ -4000,6 +4646,8 @@ class StoryProjectService:
                 },
             )
             chapter["generatedWordCount"] += generated_count
+            if write_mode == "append" and not has_planned_retained:
+                chapter["retainedWordCount"] += baseline
             chapter["allFragmentsExist"] = bool(chapter["allFragmentsExist"] and exists)
             chapter["fragmentOrders"].append(index)
             results.append(
@@ -4029,24 +4677,62 @@ class StoryProjectService:
         word_count_passed = bool(chapters)
         over_budget = False
         below_budget = False
+        runtime_safety_exceeded = False
+        runtime_safety_maximum = chapter_runtime_safety_maximum(chapter_target)
+        hard_minimum = accept_min
+        hard_minimum_passed = True
+        tier_hit = True
+        tier_deviations: set[str] = set()
+        asymmetric_enabled = bool(
+            isinstance(policy.get("asymmetric"), dict)
+            and policy["asymmetric"].get("enabled")
+        )
         status_by_order: Dict[int, str] = {}
         for chapter in chapters.values():
             generated_count = int(chapter["generatedWordCount"])
-            chapter_below = generated_count < accept_min
-            chapter_over = generated_count > accept_max
+            resulting_count = int(chapter["retainedWordCount"]) + generated_count
+            length_count = generated_count if candidate_scoped else resulting_count
+            length_gate = self._chapter_length_gate(
+                turn_plan,
+                count=length_count,
+                target=chapter_target,
+                hard_minimum=accept_min,
+                soft_maximum=accept_max,
+            )
+            chapter_below = bool(
+                length_gate.get("belowPreferred")
+                if tier_mode
+                else not bool(length_gate["hardMinimumPassed"])
+            )
+            chapter_over = bool(length_gate["aboveSoftMaximum"])
+            chapter_safety_exceeded = bool(length_gate["runtimeSafetyExceeded"])
             chapter_passed = bool(
-                chapter["allFragmentsExist"] and (not chapter_below or allow_below_minimum)
+                chapter["allFragmentsExist"] and length_gate["writeGatePassed"]
             )
             word_count_passed = word_count_passed and chapter_passed
             over_budget = over_budget or chapter_over
             below_budget = below_budget or chapter_below
+            runtime_safety_exceeded = (
+                runtime_safety_exceeded or chapter_safety_exceeded
+            )
+            runtime_safety_maximum = int(length_gate["runtimeSafetyMaximum"])
+            hard_minimum = int(length_gate["hardMinimum"])
+            hard_minimum_passed = hard_minimum_passed and bool(
+                length_gate["hardMinimumPassed"]
+            )
+            if tier_mode:
+                tier_hit = tier_hit and bool(length_gate.get("tierHit"))
+                tier_deviations.add(str(length_gate.get("tierDeviation") or ""))
             chapter.update(
                 {
                     "passed": chapter_passed,
+                    "actualWordCount": length_count,
+                    "resultingWordCount": resulting_count,
                     "belowBudget": chapter_below,
                     "overBudget": chapter_over,
+                    **length_gate,
                     "acceptanceDifference": self._word_count_range_difference(
-                        generated_count,
+                        length_count,
                         accept_min,
                         accept_max,
                     ),
@@ -4069,23 +4755,30 @@ class StoryProjectService:
         structure_passed = self._validate_chapter_target_structure(root, targets, content_mode=content_mode)
         passed = bool(word_count_passed and structure_passed)
         generated_total = sum(int(item["generatedWordCount"]) for item in chapter_results)
-        if passed and below_budget and allow_below_minimum:
-            message = (
-                f"已完成一次定向补写；本章生成 {generated_total} 字，仍低于可接受下界 "
-                f"{accept_min} 字，已按单轮修订策略放行。"
-            )
-        elif passed and over_budget:
-            message = (
-                f"正文已落盘；本章生成 {generated_total} 字，超出建议放行带上界 {accept_max} 字，"
-                "已标记 overBudget，请作者按需裁剪。"
-            )
+        resulting_total = sum(int(item["resultingWordCount"]) for item in chapter_results)
+        retained_total = sum(int(item["retainedWordCount"]) for item in chapter_results)
+        actual_total = generated_total if candidate_scoped else resulting_total
+        if passed and over_budget:
+            message = STORY_OVER_BUDGET_KEEP_MESSAGE
+        elif passed and below_budget:
+            message = STORY_UNDER_BUDGET_KEEP_MESSAGE
         elif passed:
-            message = "正文数量、章节结构和章级客观字数均已通过 Storydex 校验。"
+            message = (
+                "正文数量、章节结构和本次候选客观字数均已通过 Storydex 校验。"
+                if candidate_scoped
+                else "正文数量、章节结构和章级客观字数均已通过 Storydex 校验。"
+            )
+        elif runtime_safety_exceeded:
+            message = f"本章正文超过运行安全上限 {runtime_safety_maximum} 字。"
+        elif not hard_minimum_passed:
+            message = f"本章正文低于安全写入下界 {hard_minimum} 字。"
         elif not structure_passed:
             message = "正文尚未满足章节模板结构，不能结束本轮。"
         else:
             message = (
-                f"本章当前生成 {generated_total} 字，低于可接受下界 {accept_min} 字，"
+                "正文未通过本轮写入校验，候选已保留且不会自动补写或重试。"
+                if tier_mode
+                else f"本章当前共 {resulting_total} 字，低于可接受下界 {accept_min} 字，"
                 "需要一次定向补写。"
             )
         return {
@@ -4093,13 +4786,26 @@ class StoryProjectService:
             "_version": 1,
             "applicable": True,
             "passed": passed,
-            "status": "success" if passed else "error",
+            "status": (
+                "warning"
+                if passed and (below_budget or over_budget)
+                else "success"
+                if passed
+                else "error"
+            ),
             "algorithm": STORY_WORD_COUNT_ALGORITHM,
-            "countingRule": "count every non-whitespace Unicode character",
+            "countingRule": STORY_WORD_COUNT_RULE,
             "exact": False,
-            "wordCountScope": CHAPTER_WORD_COUNT_SCOPE,
+            "wordCountScope": (
+                CANDIDATE_WORD_COUNT_SCOPE
+                if candidate_scoped
+                else CHAPTER_WORD_COUNT_SCOPE
+            ),
             "fragmentCount": len(targets),
+            "actualWordCount": actual_total,
             "generatedWordCount": generated_total,
+            "retainedWordCount": retained_total,
+            "resultingWordCount": resulting_total,
             "chapterWordCountTarget": chapter_target,
             "targetWordCountMin": min_word_count,
             "targetWordCountMax": max_word_count,
@@ -4109,7 +4815,25 @@ class StoryProjectService:
             "structurePassed": structure_passed,
             "belowBudget": below_budget,
             "overBudget": over_budget,
-            "correctionApplied": allow_below_minimum,
+            "chapterLengthTier": str(policy.get("tier") or "") if tier_mode else "",
+            "tierHit": tier_hit if tier_mode else None,
+            "tierDeviation": (
+                next(iter(tier_deviations))
+                if tier_mode and len(tier_deviations) == 1
+                else "mixed"
+                if tier_mode
+                else ""
+            ),
+            "preferredMinimum": accept_min if tier_mode else None,
+            "preferredMaximum": accept_max if tier_mode else None,
+            "hardMinimum": hard_minimum,
+            "softMaximum": accept_max,
+            "runtimeSafetyMaximum": runtime_safety_maximum,
+            "hardMinimumPassed": hard_minimum_passed,
+            "aboveSoftMaximum": over_budget,
+            "runtimeSafetyExceeded": runtime_safety_exceeded,
+            "asymmetricLengthEnabled": asymmetric_enabled,
+            "productGatePassed": hard_minimum_passed and not runtime_safety_exceeded,
             "chapters": chapter_results,
             "fragments": results,
             "message": message,
@@ -6541,14 +7265,51 @@ class StoryProjectService:
         if not entries:
             return ""
 
+        feature_flags = FeatureFlags(
+            Path(workspace_root).resolve(),
+            FEATURE_FLAG_DEFAULTS,
+        )
+        tier_mode_enabled = feature_flags.get_bool("STORY_LENGTH_TIER_ENABLED")
+        paragraph_quota_enabled = feature_flags.get_bool(
+            "PARAGRAPH_QUOTA_GENERATION_ENABLED"
+        )
+        strip_length_directives = tier_mode_enabled or paragraph_quota_enabled
         lines: List[str] = [
             "[Active Project Preset]",
             "The rules below are the authoritative creative directives for this generation.",
-            "Follow them strictly for style, POV, formatting, pacing, and content decisions; they take precedence over generic style defaults.",
+            "Follow them strictly for style, POV, formatting, prose density, and content decisions; "
+            "they take precedence over generic style defaults.",
             "Raw preset export JSON and regex/display scripts remain source metadata unless a compatibility layer applies them.",
         ]
+        if tier_mode_enabled:
+            lines[3:3] = [
+                "Chapter length is NOT a preset decision: the turn contract's semantic "
+                "short/medium/long tier is the only length instruction. Presets decide style, "
+                "paragraph shape, and prose density. Ignore preset wording that states a target "
+                "character/word count or paragraph count."
+            ]
+        elif paragraph_quota_enabled:
+            lines[3:3] = [
+                "Chapter length is NOT a preset decision: the turn contract's paragraph quota decides how "
+                "many paragraphs this chapter has. Presets decide how long each paragraph runs and how "
+                "dense the prose is. Ignore any preset wording that claims priority over the turn "
+                "contract's length, or that states a target character/word count or paragraph count."
+            ]
+        stripped_directives: List[str] = []
         for relative_path, content in entries:
-            lines.extend(["", f"### {relative_path}", content])
+            cleaned, removed = (
+                strip_quantitative_length_directives(content)
+                if strip_length_directives
+                else (content, [])
+            )
+            stripped_directives.extend(removed)
+            lines.extend(["", f"### {relative_path}", cleaned])
+        if stripped_directives and compile_errors is not None:
+            # 浮出到 TurnContract notes，避免"预设被静默改写"。
+            compile_errors.append(
+                "preset_length_directives_stripped: "
+                + "; ".join(dict.fromkeys(stripped_directives))[:400]
+            )
         # 外部导入预设编译文本远超 Storydex 自有预设的预算；出现超长条目时
         # 放开总预算，保持社区预设全量注入。
         effective_total = int(total_chars or 2400)

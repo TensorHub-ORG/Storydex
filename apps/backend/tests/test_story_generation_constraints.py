@@ -11,16 +11,32 @@ from api import routes_agent as routes
 from api.routes_file import StoryProjectSettingsResponse as FileStoryProjectSettingsResponse
 from api.routes_story import StoryProjectSettingsResponse as StoryStoryProjectSettingsResponse
 from services.agent_git_autocommit_service import AgentGitSnapshot
+from services import story_project_service as story_project_module
 from services.story_project_service import (
     DEFAULT_CHAPTER_TEMPLATE_ID,
     SINGLE_FILE_CHAPTER_TEMPLATE_ID,
     get_story_project_service,
 )
 from services.story_length_calibration_service import StoryLengthCalibrationService
-from services.story_word_count_service import STORY_WORD_COUNT_ALGORITHM, count_story_text_words
+from services.story_prose_quality import extract_story_prose
+from services.story_word_count_service import (
+    STORY_OVER_BUDGET_KEEP_MESSAGE,
+    STORY_UNDER_BUDGET_KEEP_MESSAGE,
+    STORY_WORD_COUNT_ALGORITHM,
+    STORY_WORD_COUNT_RULE,
+    count_story_text_paragraphs,
+    count_story_text_words,
+    strip_non_story_wrappers,
+)
+from services.storydex_agent_tools import StorydexApplyStoryIncrementTool
 from services.storydex_coomi_runtime_tools import StorydexEditTool, StorydexWriteTool
 from services.storydex_orchestration_service import get_storydex_orchestration_service
 from storage.workspace_io import WorkspaceIO
+
+
+@pytest.fixture(autouse=True)
+def legacy_story_length_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STORY_LENGTH_TIER_ENABLED", "0")
 
 
 def _story_contract(
@@ -105,6 +121,79 @@ def test_modify_existing_intent_plans_no_new_fragments(tmp_path: Path) -> None:
     assert plan["requiresChapterTemplateSelection"] is False
 
 
+def test_story_discussion_contract_is_read_only_end_to_end(tmp_path: Path) -> None:
+    contract = get_storydex_orchestration_service().build_turn_contract(
+        tmp_path,
+        prompt="讨论下一章怎么安排，只分析方案，不要写入或修改任何文件。",
+        active_file="chapters/第一章/001.md",
+        story_generation={"fragmentCount": 2, "chapterWordCountTarget": 3000},
+        intent_frame={
+            "primary": "story_generation",
+            "confidence": "high",
+            "signals": ["llm_classifier"],
+            "method": "llm",
+            "decision": "decided",
+            "effect": "respond_only",
+            "artifact": "plot_plan",
+            "targetScope": "next_chapter",
+            "explicitConstraints": ["no_project_write"],
+            "ambiguities": [],
+            "evidence": ["只分析方案", "不要写入或修改任何文件"],
+            "canWrite": False,
+            "operationType": "inquiry",
+            "complexity": "simple",
+        },
+    )
+
+    plan = contract["turnPlan"]
+    execution = contract["executionPolicy"]
+    assert plan["operationType"] == "inquiry"
+    assert plan["fragmentTargets"] == []
+    assert plan["isNewStory"] is False
+    assert plan["chapterAction"] == ""
+    assert plan["authoritativeFragmentPaths"] == []
+    assert "generationControl" not in plan
+    assert execution["directFileWrites"] is False
+    assert execution["localGitAutoCommit"] is False
+    assert execution["allowedWriteRoots"] == []
+
+    write = StorydexWriteTool(workspace_root=tmp_path, turn_contract=contract).run(
+        {"file_path": "chapters/第一章/002.md", "content": "不应写入"}
+    )
+    assert write.success is False
+    assert not (tmp_path / "chapters" / "第一章" / "002.md").exists()
+
+
+def test_character_write_contract_cannot_escape_its_asset_root(tmp_path: Path) -> None:
+    contract = {
+        "intentFrame": {
+            "primary": "character_work",
+            "operationType": "create_new",
+            "decision": "decided",
+            "effect": "create",
+            "canWrite": True,
+        },
+        "executionPolicy": {
+            "directFileWrites": True,
+            "allowedWriteRoots": [".storydex/characters/"],
+        },
+    }
+    tool = StorydexWriteTool(workspace_root=tmp_path, turn_contract=contract)
+
+    allowed = tool.run({"file_path": ".storydex/characters/反派.md", "content": "角色卡"})
+    denied = tool.run({"file_path": ".storydex/worldbook/魔法.md", "content": "越权"})
+    structured_bypass = StorydexApplyStoryIncrementTool(
+        workspace_root=tmp_path,
+        turn_contract=contract,
+    ).run({"fragments": [{"path": "chapters/越权.md", "text": "越权"}]})
+
+    assert allowed.success is True
+    assert denied.success is False
+    assert structured_bypass.success is False
+    assert (tmp_path / ".storydex" / "characters" / "反派.md").is_file()
+    assert not (tmp_path / ".storydex" / "worldbook" / "魔法.md").exists()
+
+
 def test_modify_existing_turn_skips_story_word_count_validation(tmp_path: Path) -> None:
     # 重构请求不该被"必须 N 段 × 字数区间"的硬校验反复打回。
     service = get_story_project_service()
@@ -130,6 +219,81 @@ def test_story_word_count_is_shared_with_workspace_file_statistics() -> None:
     expected = len("甲乙Coomi🙂")
     assert count_story_text_words(content) == expected
     assert WorkspaceIO._count_story_text_words(content) == expected
+
+
+def test_wrapper_blocks_are_excluded_from_the_word_count() -> None:
+    # 摘要和角色留言随正文一起交付，但它们不是正文：计入既会让偏短正文假性达标，
+    # 也能被用来凑字数绕过验收。
+    body = "正" * 2000
+    content = (
+        f"<content>\n{body}\n</content>\n\n"
+        "<summary>\n" + "摘" * 200 + "\n</summary>\n\n"
+        "<details><summary>作者留言</summary>\n" + "喵" * 100 + "\n</details>\n"
+    )
+    assert count_story_text_words(content) == 2000
+    # <content> 是正文容器：剥标签、留内容。
+    assert count_story_text_words(f"<content>\n{body}\n</content>") == 2000
+    # 段落计数必须用同一口径，否则段数配额会把摘要算成正文段落。
+    assert count_story_text_paragraphs(content) == 1
+
+
+def test_apply_story_increment_writes_only_the_counted_prose(tmp_path: Path) -> None:
+    body = "正" * 2100
+    wrapped = (
+        f"<content>\n{body}\n</content>\n"
+        "<summary>摘要内容</summary>\n"
+        "<details><summary>作者留言</summary>包装内容</details>\n"
+        "<thinking>思考内容</thinking>\n"
+        "<think>内部思考</think>\n"
+        "<plan>写作计划</plan>\n"
+        "<reasoning>推理过程</reasoning>"
+    )
+    contract = _story_contract(tmp_path, chapter_word_count_target=3000)
+    target_path = contract["turnPlan"]["fragmentTargets"][0]["path"]
+    tool = StorydexApplyStoryIncrementTool(workspace_root=tmp_path, turn_contract=contract)
+
+    result = json.loads(tool.run({"fragments": [{"text": wrapped}]}).output)
+    written = (tmp_path / target_path).read_text(encoding="utf-8")
+
+    assert result["ok"] is True
+    assert result["wordCountValidation"]["generatedWordCount"] == len(body)
+    assert result["fragments"][0]["generatedWordCount"] == len(body)
+    assert written == strip_non_story_wrappers(wrapped).strip() + "\n"
+    assert written == body + "\n"
+
+
+def test_unclosed_wrapper_is_rejected_before_counting_or_writing() -> None:
+    raw = "<summary>\n正文没有闭合"
+    extraction = extract_story_prose(raw)
+
+    assert extraction.status == "rejected"
+    assert extraction.reason_codes == ("unclosed_known_wrapper",)
+    assert count_story_text_words(raw) == 0
+    assert strip_non_story_wrappers(raw) == ""
+
+
+def test_wrapper_stripping_does_not_touch_angle_brackets_in_prose() -> None:
+    content = "他在纸上写下 a<b 与 c>d 两个式子。"
+    assert count_story_text_words(content) == len("他在纸上写下a<b与c>d两个式子。")
+
+
+def test_dialogue_paragraph_breaks_do_not_change_count_or_get_normalized(
+    tmp_path: Path,
+) -> None:
+    service = get_story_project_service()
+    content = "叙" * 1040 + "\n\n“你好。”\n\n" + "续" * 1055
+    assert count_story_text_words(content) == 2100
+
+    contract = _story_contract(tmp_path, chapter_word_count_target=3000)
+    target_path = contract["turnPlan"]["fragmentTargets"][0]["path"]
+    result = service.apply_story_generation_increment(
+        tmp_path,
+        {"fragments": [{"text": content}]},
+        generation_contract=contract,
+    )
+
+    assert result["ok"] is True
+    assert (tmp_path / target_path).read_text(encoding="utf-8") == content + "\n"
 
 
 def test_project_settings_use_single_target_and_preserve_legacy_ranges(tmp_path: Path) -> None:
@@ -212,6 +376,88 @@ def test_multi_fragment_contract_carries_soft_reference_lengths(tmp_path: Path) 
     assert all(item["referenceWordCountIsHardLimit"] is False for item in targets)
 
 
+def test_single_file_continuation_uses_only_the_remaining_chapter_budget(
+    tmp_path: Path,
+) -> None:
+    initial = _story_contract(
+        tmp_path,
+        chapter_word_count_target=3000,
+        template_id=SINGLE_FILE_CHAPTER_TEMPLATE_ID,
+    )
+    target_path = initial["turnPlan"]["fragmentTargets"][0]["path"]
+    chapter_file = tmp_path / target_path
+    chapter_file.parent.mkdir(parents=True, exist_ok=True)
+    chapter_file.write_text("甲" * 2600, encoding="utf-8")
+
+    continuation = _story_contract(
+        tmp_path,
+        chapter_word_count_target=3000,
+        template_id=SINGLE_FILE_CHAPTER_TEMPLATE_ID,
+        active_file=target_path,
+        prompt="请继续当前章",
+    )
+    plan = continuation["turnPlan"]
+    policy = plan["wordCountPolicy"]
+
+    assert policy["retainedWordCount"] == 2600
+    assert policy["remainingWordCount"] == 400
+    assert policy["modelReferenceWordCount"] == 400
+    assert [item["referenceWordCount"] for item in plan["fragmentTargets"]] == [400]
+
+    applied = get_story_project_service().apply_story_generation_increment(
+        tmp_path,
+        {"fragments": [{"text": "乙" * 400}]},
+        generation_contract=continuation,
+    )
+    assert applied["ok"] is True
+    assert applied["wordCountValidation"]["generatedWordCount"] == 400
+    assert applied["wordCountValidation"]["retainedWordCount"] == 2600
+    assert applied["wordCountValidation"]["resultingWordCount"] == 3000
+
+
+def test_multi_fragment_continuation_counts_all_prose_in_the_authoritative_chapter(
+    tmp_path: Path,
+) -> None:
+    initial = _story_contract(
+        tmp_path,
+        fragment_count=2,
+        chapter_word_count_target=3000,
+        template_id=DEFAULT_CHAPTER_TEMPLATE_ID,
+    )
+    initial_targets = initial["turnPlan"]["fragmentTargets"]
+    assert len(initial_targets) == 2
+    for target, count in zip(initial_targets, (1200, 1400)):
+        path = tmp_path / target["path"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("甲" * count, encoding="utf-8")
+
+    continuation = _story_contract(
+        tmp_path,
+        fragment_count=1,
+        chapter_word_count_target=3000,
+        template_id=DEFAULT_CHAPTER_TEMPLATE_ID,
+        active_file=initial_targets[0]["path"],
+        prompt="请继续当前章",
+    )
+    plan = continuation["turnPlan"]
+    policy = plan["wordCountPolicy"]
+
+    assert policy["retainedWordCount"] == 2600
+    assert policy["remainingWordCount"] == 400
+    assert policy["modelReferenceWordCount"] == 400
+    assert [item["referenceWordCount"] for item in plan["fragmentTargets"]] == [400]
+
+    applied = get_story_project_service().apply_story_generation_increment(
+        tmp_path,
+        {"fragments": [{"text": "乙" * 400}]},
+        generation_contract=continuation,
+    )
+    assert applied["ok"] is True
+    assert applied["wordCountValidation"]["generatedWordCount"] == 400
+    assert applied["wordCountValidation"]["retainedWordCount"] == 2600
+    assert applied["wordCountValidation"]["resultingWordCount"] == 3000
+
+
 def test_turn_contract_uses_calibrated_model_reference_without_changing_product_target(
     tmp_path: Path,
 ) -> None:
@@ -246,30 +492,62 @@ def test_turn_contract_uses_calibrated_model_reference_without_changing_product_
     plan = contract["turnPlan"]
     policy = plan["wordCountPolicy"]
     assert plan["chapterWordCountTarget"] == 3000
-    assert (policy["acceptanceMinimum"], policy["acceptanceMaximum"]) == (2100, 3900)
-    assert policy["modelReferenceWordCount"] == 2500
+    assert (policy["acceptanceMinimum"], policy["acceptanceMaximum"]) == (2550, 3900)
+    assert policy["overBudgetAction"] == "warn_and_keep"
+    # 3 个样本还不足 FULL_STRENGTH_CALIBRATION_SAMPLES，只按半强度纠偏：
+    # 实测偏置 1.20 -> 应用 1.10 -> 参考字数 3000 / 1.10 = 2727。
+    assert policy["calibration"]["correctionStrength"] == 0.50
+    assert policy["modelReferenceWordCount"] == 2727
     assert policy["calibration"]["status"] == "applied"
     assert policy["calibration"]["reason"] == "same_target_grade"
-    assert [item["referenceWordCount"] for item in plan["fragmentTargets"]] == [2500]
+    assert [item["referenceWordCount"] for item in plan["fragmentTargets"]] == [2727]
 
 
-def test_correction_prompt_uses_program_measurements_without_hard_counting_commands() -> None:
+def test_correction_prompt_avoids_exact_gap_and_foreshadowing_requirements() -> None:
     prompt = routes._story_generation_correction_prompt(
         {
             "generatedWordCount": 1600,
             "acceptWordCountMin": 1875,
             "acceptWordCountMax": 3125,
-            "fragments": [],
+            "fragments": [
+                {
+                    "order": 1,
+                    "path": "chapters/第一章/001.md",
+                    "exists": False,
+                    "writeMode": "replace",
+                    "baselineWordCount": 0,
+                    "generatedWordCount": 1600,
+                    "status": "failed",
+                }
+            ],
         },
         correction_attempt=1,
     )
-    assert "本章当前约 1600 字" in prompt
-    assert "还需补写约 275 字" in prompt
-    assert "场景细节" in prompt
-    assert "人物心理" in prompt
-    assert "推动情节的对话" in prompt
-    assert '"additionalWordCountNeeded":275' in prompt
-    assert "1875-3125" not in prompt
+    correction = json.loads(prompt.split("STORYDEX_OBJECTIVE_VALIDATION=", 1)[1])
+
+    assert "1600" not in prompt
+    assert "1875" not in prompt
+    assert "3125" not in prompt
+    assert "currentProgramWordCount" not in prompt
+    assert "还需补写" not in prompt
+    assert "275" not in prompt
+    assert "additionalWordCountNeeded" not in prompt
+    assert "acceptWordCountMin" not in prompt
+    assert "baselineWordCount" not in prompt
+    assert "generatedWordCount" not in prompt
+    assert "情节没有写完" not in prompt
+    assert "兑现" not in prompt
+    assert "伏笔" not in prompt
+    assert (
+        "在不改变既定剧情计划、不新增无关支线、不重复已有信息的前提下，"
+        "补充与本轮核心事件直接相关的动作后果、角色下一步决定和必要的场景收束。"
+    ) in prompt
+    assert correction["expansionDirections"] == [
+        "当前冲突的直接后果",
+        "角色的下一步决定",
+        "必要的场景收束",
+    ]
+    assert "不要写摘要、留言" in prompt
     assert "不要自行估算字数" not in prompt
     assert "未通过不得结束" not in prompt
     assert "must fall within" not in prompt.lower()
@@ -335,11 +613,11 @@ def test_near_target_story_fragment_is_accepted_within_tolerance(
 
 
 @pytest.mark.parametrize("actual_word_count", [10])
-def test_story_fragment_far_outside_band_is_rejected_before_any_file_write(
+def test_story_fragment_far_outside_band_is_written_with_a_warning(
     tmp_path: Path,
     actual_word_count: int,
 ) -> None:
-    # 偏短内容低于目标 100 的章级放行带下界 75 时拦截落盘。
+    # v3 章级正文低于放行带时保留结构合法候选，并明确标记偏短。
     service = get_story_project_service()
     contract = _story_contract(tmp_path, fragment_word_count=100)
     target_path = contract["turnPlan"]["fragmentTargets"][0]["path"]
@@ -348,9 +626,12 @@ def test_story_fragment_far_outside_band_is_rejected_before_any_file_write(
         {"fragments": [{"text": "字" * actual_word_count}]},
         generation_contract=contract,
     )
-    assert result["ok"] is False
-    assert result["code"] == "story_generation_constraints_not_met"
-    assert not (tmp_path / target_path).exists()
+    assert result["ok"] is True
+    assert result["wordCountValidation"]["passed"] is True
+    assert result["wordCountValidation"]["belowBudget"] is True
+    assert result["wordCountValidation"]["status"] == "warning"
+    assert result["wordCountValidation"]["message"] == STORY_UNDER_BUDGET_KEEP_MESSAGE
+    assert (tmp_path / target_path).exists()
 
 
 def test_exact_story_fragment_writes_and_validates_with_objective_count(tmp_path: Path) -> None:
@@ -417,56 +698,78 @@ def test_story_fragment_near_range_edges_is_accepted(
 
 
 @pytest.mark.parametrize(
-    ("actual_word_count", "expected_passed", "expected_over_budget"),
+    ("actual_word_count", "expected_below_budget", "expected_over_budget"),
     [
-        (2099, False, False),
-        (2100, True, False),
-        (3000, True, False),
-        (3900, True, False),
-        (3901, True, True),
+        (2549, True, False),
+        (2550, False, False),
+        (3000, False, False),
+        (3900, False, False),
+        # 超上限只告警：仍然放行并落盘，overBudget 标记保留给作者看。
+        (3901, False, True),
     ],
 )
 def test_chapter_target_uses_one_acceptance_band_before_and_after_write(
     tmp_path: Path,
     actual_word_count: int,
-    expected_passed: bool,
+    expected_below_budget: bool,
     expected_over_budget: bool,
 ) -> None:
     service = get_story_project_service()
-    contract = _story_contract(tmp_path, chapter_word_count_target=3000)
+    prewrite_root = tmp_path / "prewrite"
+    contract = _story_contract(prewrite_root, chapter_word_count_target=3000)
     target_path = contract["turnPlan"]["fragmentTargets"][0]["path"]
     result = service.apply_story_generation_increment(
-        tmp_path,
+        prewrite_root,
         {"fragments": [{"text": "字" * actual_word_count}]},
         generation_contract=contract,
     )
-    validation = service.validate_story_generation_turn(tmp_path, contract)
     preflight = result["wordCountValidation"]
 
-    assert result["ok"] is expected_passed
-    assert preflight["passed"] is expected_passed
+    assert result["ok"] is True
+    assert preflight["passed"] is True
     assert preflight["generatedWordCount"] == actual_word_count
     assert preflight["chapterWordCountTarget"] == 3000
-    assert (preflight["acceptWordCountMin"], preflight["acceptWordCountMax"]) == (2100, 3900)
+    assert (preflight["acceptWordCountMin"], preflight["acceptWordCountMax"]) == (2550, 3900)
+    assert preflight["belowBudget"] is expected_below_budget
     assert preflight["overBudget"] is expected_over_budget
-    assert validation["passed"] is expected_passed
+    assert preflight["status"] == ("warning" if expected_below_budget or expected_over_budget else "success")
+    assert (prewrite_root / target_path).read_text(encoding="utf-8") == "字" * actual_word_count + "\n"
+
+    postwrite_root = tmp_path / "postwrite"
+    postwrite_contract = _story_contract(postwrite_root, chapter_word_count_target=3000)
+    postwrite_target = postwrite_contract["turnPlan"]["fragmentTargets"][0]["path"]
+    postwrite_path = postwrite_root / postwrite_target
+    postwrite_path.parent.mkdir(parents=True, exist_ok=True)
+    postwrite_path.write_text("字" * actual_word_count, encoding="utf-8")
+    validation = service.validate_story_generation_turn(postwrite_root, postwrite_contract)
+
+    assert validation["passed"] is True
+    assert validation["belowBudget"] is expected_below_budget
     assert validation["overBudget"] is expected_over_budget
-    assert (tmp_path / target_path).exists() is expected_passed
+    assert validation["status"] == ("warning" if expected_below_budget or expected_over_budget else "success")
+    if expected_below_budget:
+        assert preflight["message"] == STORY_UNDER_BUDGET_KEEP_MESSAGE
+        assert validation["message"] == STORY_UNDER_BUDGET_KEEP_MESSAGE
+    if expected_over_budget:
+        assert preflight["message"] == STORY_OVER_BUDGET_KEEP_MESSAGE
+        assert validation["message"] == STORY_OVER_BUDGET_KEEP_MESSAGE
+        assert "不能结束本轮" not in preflight["message"]
+        assert "不能结束本轮" not in validation["message"]
 
 
 @pytest.mark.parametrize(
-    ("actual_word_count", "expected_passed", "expected_over_budget"),
+    ("actual_word_count", "expected_below_budget", "expected_over_budget"),
     [
-        (1399, False, False),
-        (1400, True, False),
-        (3250, True, False),
-        (3251, True, True),
+        (1399, True, False),
+        (1400, False, False),
+        (3250, False, False),
+        (3251, False, True),
     ],
 )
 def test_legacy_range_settings_use_chapter_scope_acceptance_band(
     tmp_path: Path,
     actual_word_count: int,
-    expected_passed: bool,
+    expected_below_budget: bool,
     expected_over_budget: bool,
 ) -> None:
     service = get_story_project_service()
@@ -478,6 +781,7 @@ def test_legacy_range_settings_use_chapter_scope_acceptance_band(
     plan = contract["turnPlan"]
     assert plan["wordCountPolicy"]["scope"] == "chapter"
     assert plan["wordCountPolicy"]["mode"] == "range"
+    target_path = plan["fragmentTargets"][0]["path"]
 
     result = service.apply_story_generation_increment(
         tmp_path,
@@ -486,10 +790,67 @@ def test_legacy_range_settings_use_chapter_scope_acceptance_band(
     )
     validation = service.validate_story_generation_turn(tmp_path, contract)
     preflight = result["wordCountValidation"]
-    assert result["ok"] is expected_passed
+    assert result["ok"] is True
     assert (preflight["targetWordCountMin"], preflight["targetWordCountMax"]) == (2000, 2500)
     assert (preflight["acceptWordCountMin"], preflight["acceptWordCountMax"]) == (1400, 3250)
+    assert preflight["belowBudget"] is expected_below_budget
     assert preflight["overBudget"] is expected_over_budget
+    assert validation["passed"] is True
+    assert validation["belowBudget"] is expected_below_budget
+    assert validation["overBudget"] is expected_over_budget
+    assert (tmp_path / target_path).exists()
+
+
+@pytest.mark.parametrize(
+    ("actual_word_count", "expected_passed", "expected_over_budget"),
+    [
+        (1399, False, False),
+        (1400, True, False),
+        (3250, True, False),
+        (3251, True, True),
+    ],
+)
+def test_serialized_legacy_contract_uses_same_band_before_and_after_write(
+    tmp_path: Path,
+    actual_word_count: int,
+    expected_passed: bool,
+    expected_over_budget: bool,
+) -> None:
+    service = get_story_project_service()
+    prewrite_root = tmp_path / "prewrite"
+    contract = _story_contract(
+        prewrite_root,
+        fragment_word_count_min=2000,
+        fragment_word_count_max=2500,
+    )
+    contract["turnPlan"]["wordCountPolicy"].pop("scope", None)
+    target_path = contract["turnPlan"]["fragmentTargets"][0]["path"]
+    result = service.apply_story_generation_increment(
+        prewrite_root,
+        {"fragments": [{"text": "字" * actual_word_count}]},
+        generation_contract=contract,
+    )
+
+    preflight = result["wordCountValidation"]
+    assert result["ok"] is expected_passed
+    assert preflight["passed"] is expected_passed
+    assert (preflight["acceptWordCountMin"], preflight["acceptWordCountMax"]) == (1400, 3250)
+    assert preflight["overBudget"] is expected_over_budget
+    assert (prewrite_root / target_path).exists() is expected_passed
+
+    postwrite_root = tmp_path / "postwrite"
+    postwrite_contract = _story_contract(
+        postwrite_root,
+        fragment_word_count_min=2000,
+        fragment_word_count_max=2500,
+    )
+    postwrite_contract["turnPlan"]["wordCountPolicy"].pop("scope", None)
+    postwrite_target = postwrite_contract["turnPlan"]["fragmentTargets"][0]["path"]
+    postwrite_path = postwrite_root / postwrite_target
+    postwrite_path.parent.mkdir(parents=True, exist_ok=True)
+    postwrite_path.write_text("字" * actual_word_count, encoding="utf-8")
+    validation = service.validate_story_generation_turn(postwrite_root, postwrite_contract)
+
     assert validation["passed"] is expected_passed
     assert validation["overBudget"] is expected_over_budget
 
@@ -515,40 +876,73 @@ def test_multi_fragment_chapter_is_validated_by_aggregate_word_count(tmp_path: P
     assert validation["generatedWordCount"] == 2800
 
 
-def test_one_correction_can_land_below_minimum_and_preserves_budget_status(tmp_path: Path) -> None:
+@pytest.mark.parametrize("preexisting", [True, False])
+def test_bounded_multi_fragment_commit_rolls_back_when_the_second_replace_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    preexisting: bool,
+) -> None:
+    service = get_story_project_service()
+    contract = _story_contract(
+        tmp_path,
+        fragment_count=2,
+        chapter_word_count_target=2500,
+    )
+    targets = [tmp_path / item["path"] for item in contract["turnPlan"]["fragmentTargets"]]
+    originals = ["旧" * 1200 + "一", "旧" * 1200 + "二"]
+    if preexisting:
+        assert len(contract["turnPlan"]["fragmentTargets"]) == len(targets) == len(originals)
+        for target, path, content in zip(
+            contract["turnPlan"]["fragmentTargets"],
+            targets,
+            originals,
+        ):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+            target["baselineWordCount"] = service.count_story_file_words(path)
+
+    real_replace = story_project_module.os.replace
+    failed = False
+
+    def fail_second_replace(source: Any, destination: Any) -> None:
+        nonlocal failed
+        if Path(destination).resolve() == targets[1].resolve() and not failed:
+            failed = True
+            raise OSError("injected second replacement failure")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(story_project_module.os, "replace", fail_second_replace)
+
+    with pytest.raises(OSError, match="second replacement failure"):
+        service.apply_story_generation_increment(
+            tmp_path,
+            {"fragments": [{"text": "新" * 1250}, {"text": "文" * 1250}]},
+            generation_contract=contract,
+        )
+
+    if preexisting:
+        assert [path.read_text(encoding="utf-8") for path in targets] == originals
+    else:
+        assert all(not path.exists() for path in targets)
+
+
+def test_v3_short_candidate_is_committed_without_legacy_append_correction(tmp_path: Path) -> None:
     service = get_story_project_service()
     contract = _story_contract(tmp_path, chapter_word_count_target=2500)
     target_path = contract["turnPlan"]["fragmentTargets"][0]["path"]
 
-    rejected = service.apply_story_generation_increment(
+    applied = service.apply_story_generation_increment(
         tmp_path,
         {"fragments": [{"text": "甲" * 1600}]},
         generation_contract=contract,
     )
-    assert rejected["ok"] is False
-    corrected_contract = routes._rebuild_story_generation_contract_for_correction(
-        tmp_path,
-        contract,
-        rejected["wordCountValidation"],
-    )
+    assert applied["ok"] is True
+    assert applied["wordCountValidation"]["passed"] is True
+    assert applied["wordCountValidation"]["belowBudget"] is True
+    assert applied["wordCountValidation"]["status"] == "warning"
+    assert routes._supports_correction_continuation(contract) is False
     assert "allowBelowMinimumAfterCorrection" not in contract["turnPlan"]["wordCountPolicy"]
-    assert corrected_contract["turnPlan"]["wordCountPolicy"]["allowBelowMinimumAfterCorrection"] is True
-
-    corrected = service.apply_story_generation_increment(
-        tmp_path,
-        {"fragments": [{"text": "乙" * 1700}]},
-        generation_contract=corrected_contract,
-    )
-    validation = service.validate_story_generation_turn(tmp_path, corrected_contract)
-    assert corrected["ok"] is True
-    assert corrected["wordCountValidation"]["passed"] is True
-    assert corrected["wordCountValidation"]["belowBudget"] is True
-    assert corrected["wordCountValidation"]["correctionApplied"] is True
-    assert validation["passed"] is True
-    assert validation["generatedWordCount"] == 1700
-    assert validation["belowBudget"] is True
-    assert validation["correctionApplied"] is True
-    assert service.count_story_file_words(tmp_path / target_path) == 1700
+    assert service.count_story_file_words(tmp_path / target_path) == 1600
 
 
 def test_contract_without_scope_keeps_legacy_per_fragment_gate(tmp_path: Path) -> None:
@@ -611,7 +1005,7 @@ def test_single_file_continuation_uses_baseline_and_cannot_append_twice(tmp_path
     assert service.count_story_file_words(tmp_path / target_path) == 200
 
 
-def test_append_correction_can_land_once_below_minimum_without_disabling_duplicate_guard(
+def test_v3_short_append_is_committed_without_legacy_append_correction(
     tmp_path: Path,
 ) -> None:
     service = get_story_project_service()
@@ -623,7 +1017,9 @@ def test_append_correction_can_land_once_below_minimum_without_disabling_duplica
     target_path = initial["turnPlan"]["fragmentTargets"][0]["path"]
     target = tmp_path / target_path
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("甲" * 2200, encoding="utf-8")
+    # 章级判定看的是"落盘后整章有多长"，所以偏短场景必须让磁盘正文加本轮新增
+    # 之后仍然低于下界 1750，否则续写的是一章正常长度的正文，不该被拒。
+    target.write_text("甲" * 800, encoding="utf-8")
 
     continuation = _story_contract(
         tmp_path,
@@ -631,41 +1027,17 @@ def test_append_correction_can_land_once_below_minimum_without_disabling_duplica
         template_id=SINGLE_FILE_CHAPTER_TEMPLATE_ID,
         active_file=target_path,
     )
-    rejected = service.apply_story_generation_increment(
+    applied = service.apply_story_generation_increment(
         tmp_path,
-        {"fragments": [{"text": "乙" * 1000}]},
+        {"fragments": [{"text": "乙" * 300}]},
         generation_contract=continuation,
     )
-    assert rejected["ok"] is False
-    assert service.count_story_file_words(target) == 2200
-
-    corrected_contract = routes._rebuild_story_generation_contract_for_correction(
-        tmp_path,
-        continuation,
-        rejected["wordCountValidation"],
-    )
-    corrected_target = corrected_contract["turnPlan"]["fragmentTargets"][0]
-    assert corrected_target["baselineWordCount"] == 2200
-    assert corrected_contract["turnPlan"]["wordCountPolicy"]["allowBelowMinimumAfterCorrection"] is True
-
-    corrected = service.apply_story_generation_increment(
-        tmp_path,
-        {"fragments": [{"text": "丙" * 1200}]},
-        generation_contract=corrected_contract,
-    )
-    validation = service.validate_story_generation_turn(tmp_path, corrected_contract)
-    duplicate = service.apply_story_generation_increment(
-        tmp_path,
-        {"fragments": [{"text": "丁" * 1200}]},
-        generation_contract=corrected_contract,
-    )
-    assert corrected["ok"] is True
-    assert validation["passed"] is True
-    assert validation["belowBudget"] is True
-    assert validation["correctionApplied"] is True
-    assert duplicate["ok"] is False
-    assert duplicate["wordCountValidation"]["fragments"][0]["baselineMatches"] is False
-    assert service.count_story_file_words(target) == 3400
+    assert applied["ok"] is True
+    assert applied["wordCountValidation"]["resultingWordCount"] == 1100
+    assert applied["wordCountValidation"]["belowBudget"] is True
+    assert applied["wordCountValidation"]["status"] == "warning"
+    assert routes._supports_correction_continuation(continuation) is False
+    assert service.count_story_file_words(target) == 1100
 
 
 def test_append_correction_rebuilds_baseline_without_disabling_duplicate_guard(tmp_path: Path) -> None:
@@ -687,21 +1059,20 @@ def test_append_correction_rebuilds_baseline_without_disabling_duplicate_guard(t
         template_id=SINGLE_FILE_CHAPTER_TEMPLATE_ID,
         active_file=target_path,
     )
-    # W1-1 specifically covers the serialized pre-W1 contract path. New
-    # contracts use a unified chapter-level acceptance band and would accept
-    # 1999 directly.
+    # Serialized pre-W1 contracts keep their fragment scope, but now use the
+    # same 70%-130% acceptance band before and after writing.
     continuation["turnPlan"]["wordCountPolicy"].pop("scope", None)
     assert continuation["turnPlan"]["fragmentTargets"][0]["baselineWordCount"] == 2200
 
     first_result = service.apply_story_generation_increment(
         tmp_path,
-        {"fragments": [{"text": "乙" * 1999}]},
+        {"fragments": [{"text": "乙" * 1399}]},
         generation_contract=continuation,
     )
     first_validation = service.validate_story_generation_turn(tmp_path, continuation)
-    assert first_result["ok"] is True
+    assert first_result["ok"] is False
     assert first_validation["passed"] is False
-    assert service.count_story_file_words(target) == 4199
+    assert service.count_story_file_words(target) == 2200
 
     corrected_contract = routes._rebuild_story_generation_contract_for_correction(
         tmp_path,
@@ -709,7 +1080,7 @@ def test_append_correction_rebuilds_baseline_without_disabling_duplicate_guard(t
         first_validation,
     )
     corrected_target = corrected_contract["turnPlan"]["fragmentTargets"][0]
-    assert corrected_target["baselineWordCount"] == 4199
+    assert corrected_target["baselineWordCount"] == 2200
     assert continuation["turnPlan"]["fragmentTargets"][0]["baselineWordCount"] == 2200
 
     corrected = service.apply_story_generation_increment(
@@ -728,8 +1099,8 @@ def test_append_correction_rebuilds_baseline_without_disabling_duplicate_guard(t
     assert corrected_validation["passed"] is True
     assert duplicate["ok"] is False
     assert duplicate["wordCountValidation"]["fragments"][0]["baselineMatches"] is False
-    assert service.count_story_file_words(target) == 6399
-    assert final_text.count("乙") == 1999
+    assert service.count_story_file_words(target) == 4400
+    assert final_text.count("乙") == 0
     assert final_text.count("丙") == 2200
 
 
@@ -761,7 +1132,7 @@ def _chapter_validation_payload(
         "passed": passed,
         "status": "success" if passed else "error",
         "algorithm": STORY_WORD_COUNT_ALGORITHM,
-        "countingRule": "count every non-whitespace Unicode character",
+        "countingRule": STORY_WORD_COUNT_RULE,
         "exact": True,
         "wordCountScope": "chapter",
         "fragmentCount": 1,
@@ -846,9 +1217,14 @@ def _run_story_generation_sequence(
     class CalibrationService:
         def __init__(self) -> None:
             self.calls: list[dict[str, Any]] = []
+            self.paragraph_calls: list[dict[str, Any]] = []
 
         def record_generation_result(self, _root: Path, **kwargs: Any) -> bool:
             self.calls.append(kwargs)
+            return True
+
+        def record_paragraph_generation_result(self, _root: Path, **kwargs: Any) -> bool:
+            self.paragraph_calls.append(kwargs)
             return True
 
     class Handle:
@@ -947,7 +1323,7 @@ def _run_story_generation_sequence(
     }
 
 
-def test_below_budget_gets_one_correction_and_still_short_write_can_finish(
+def test_below_budget_gets_one_correction_and_still_short_write_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -964,29 +1340,30 @@ def test_below_budget_gets_one_correction_and_still_short_write_can_finish(
     event_names = [name for name, _payload in packets]
     validations = [payload for name, payload in packets if name == "StoryGenerationValidation"]
     continuations = [payload for name, payload in packets if name == "ContinuationStarted"]
+    errors = [payload for name, payload in packets if name == "AgentError"]
     assert result["runtime"].calls == 2
     assert result["project"].validations == 2
-    assert [item["passed"] for item in validations] == [False, True]
+    assert [item["passed"] for item in validations] == [False, False]
     assert validations[1]["belowBudget"] is True
     assert validations[1]["correctionApplied"] is True
     assert validations[1]["maximumCorrectionAttempts"] == 1
     assert len(continuations) == 1
     assert continuations[0]["continuationMode"] == "story_generation_correction"
     assert continuations[0]["maximumCorrectionAttempts"] == 1
-    assert "本章当前约 1600 字" in result["runtime"].prompts[1]
-    assert "还需补写约 275 字" in result["runtime"].prompts[1]
+    assert "1600" not in result["runtime"].prompts[1]
+    assert "还需补写" not in result["runtime"].prompts[1]
+    assert "兑现" not in result["runtime"].prompts[1]
     correction_policy = result["runtime"].contracts[1]["turnPlan"]["wordCountPolicy"]
-    assert correction_policy["allowBelowMinimumAfterCorrection"] is True
-    assert event_names.count("AgentCompleted") == 1
-    assert "AgentError" not in event_names
+    assert "allowBelowMinimumAfterCorrection" not in correction_policy
+    assert event_names.count("AgentCompleted") == 0
+    assert len(errors) == 1
+    assert errors[0]["error_type"] == "StoryGenerationValidationFailed"
     assert result["handle"].finalize_calls == 1
     assert result["handle"].runtime_calls_at_finalize == 2
-    assert len(result["calibration"].calls) == 1
-    assert result["calibration"].calls[0]["provider"] == "test-provider"
-    assert result["calibration"].calls[0]["model"] == "test-model"
+    assert result["calibration"].calls == []
 
 
-def test_over_budget_finishes_without_correction(
+def test_over_budget_completes_with_a_warning_instead_of_failing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -999,14 +1376,24 @@ def test_over_budget_finishes_without_correction(
         ],
     )
     packets = result["packets"]
+    event_names = [name for name, _payload in packets]
     validations = [payload for name, payload in packets if name == "StoryGenerationValidation"]
+    completions = [payload for name, payload in packets if name == "AgentCompleted"]
+    errors = [payload for name, payload in packets if name == "AgentError"]
     assert result["runtime"].calls == 1
     assert len(validations) == 1
+    # 偏长的章节仍然是一次成功生成：overBudget 只作为告警随包一起交给作者。
     assert validations[0]["passed"] is True
     assert validations[0]["overBudget"] is True
     assert validations[0]["correctionApplied"] is False
+    assert validations[0]["message"] == STORY_OVER_BUDGET_KEEP_MESSAGE
+    # 超上限不触发补写：补写只为偏短而存在。
     assert not [payload for name, payload in packets if name == "ContinuationStarted"]
-    assert not [payload for name, payload in packets if name == "AgentError"]
+    assert event_names.count("AgentCompleted") == 1
+    assert completions[0]["overBudget"] is True
+    assert completions[0]["message"] == STORY_OVER_BUDGET_KEEP_MESSAGE
+    assert "不能结束本轮" not in completions[0]["message"]
+    assert not errors
 
 
 def test_correction_segment_cannot_reuse_previous_segment_successful_write(

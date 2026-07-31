@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const { execFileSync } = require("child_process");
 const { TextDecoder } = require("util");
 
 const projectRoot = path.resolve(__dirname, "..");
@@ -64,22 +65,13 @@ function shouldSkip(relativePath) {
   return normalized.split("/").some((segment) => excludedSegments.has(segment));
 }
 
-function walk(directory) {
-  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-    const fullPath = path.join(directory, entry.name);
-    const relativePath = path.relative(projectRoot, fullPath);
-    if (shouldSkip(relativePath)) {
-      continue;
-    }
-    if (entry.isDirectory()) {
-      walk(fullPath);
-      continue;
-    }
-    if (!entry.isFile() || !includedExtensions.has(path.extname(entry.name).toLowerCase())) {
-      continue;
-    }
-    validateFile(fullPath, toPosix(relativePath));
-  }
+function candidateFiles() {
+  const output = execFileSync(
+    "git",
+    ["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+    { cwd: projectRoot, encoding: "utf8" }
+  );
+  return output.split("\0").filter(Boolean);
 }
 
 function validateFile(fullPath, relativePath) {
@@ -110,7 +102,16 @@ function validateFile(fullPath, relativePath) {
   }
 }
 
-walk(projectRoot);
+for (const relativePath of candidateFiles()) {
+  const normalized = toPosix(relativePath);
+  if (shouldSkip(normalized) || !includedExtensions.has(path.extname(normalized).toLowerCase())) {
+    continue;
+  }
+  const fullPath = path.join(projectRoot, relativePath);
+  if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
+    validateFile(fullPath, normalized);
+  }
+}
 
 if (failures.length) {
   console.error("[Storydex] Text encoding validation failed:");

@@ -16,7 +16,28 @@ interface GitState {
   isRestoring: boolean;
   error: string;
   successMessage: string;
+  /** Wall-clock ms of the last summary that was actually applied to the store. */
+  lastSyncedAt: number;
 }
+
+/**
+ * Sequence numbers for summary reads. A read may only write to the store if no
+ * newer read or write has been applied since it started, so a slow response can
+ * never clobber fresher state. Kept outside Pinia state because this is
+ * transport bookkeeping, not UI data.
+ */
+let summaryRequestSeq = 0;
+let appliedSummarySeq = 0;
+/** Set while a read is in flight so concurrent callers can await it. */
+let inFlightSummary: Promise<void> | null = null;
+/**
+ * Sequence of the read that owns `inFlightSummary`. Ownership is tracked
+ * separately from `summaryRequestSeq` because a write (commit/init/restore) also
+ * bumps the request counter; without this, the owning read would never release
+ * the slot and every later refresh would await an already-settled promise and
+ * return without fetching — the exact "refresh button does nothing" symptom.
+ */
+let inFlightSeq = 0;
 
 export const useGitStore = defineStore("git", {
   state: (): GitState => ({
@@ -26,7 +47,8 @@ export const useGitStore = defineStore("git", {
     isCommitting: false,
     isRestoring: false,
     error: "",
-    successMessage: ""
+    successMessage: "",
+    lastSyncedAt: 0
   }),
 
   getters: {
@@ -36,6 +58,22 @@ export const useGitStore = defineStore("git", {
 
     recentCommits(state) {
       return Array.isArray(state.summary?.recentCommits) ? state.summary?.recentCommits : [];
+    },
+
+    /** Commits reachable from HEAD — the project's own timeline. */
+    branchCommits(state) {
+      const commits = Array.isArray(state.summary?.recentCommits) ? state.summary.recentCommits : [];
+      return commits.filter((item) => item.onCurrentBranch !== false);
+    },
+
+    /** Commits only reachable from restore backup branches. */
+    backupCommits(state) {
+      const commits = Array.isArray(state.summary?.recentCommits) ? state.summary.recentCommits : [];
+      return commits.filter((item) => item.onCurrentBranch === false);
+    },
+
+    isBusy(state): boolean {
+      return state.isLoading || state.isInitializing || state.isCommitting || state.isRestoring;
     }
   },
 
@@ -48,29 +86,71 @@ export const useGitStore = defineStore("git", {
       this.isInitializing = false;
       this.isCommitting = false;
       this.isRestoring = false;
+      this.lastSyncedAt = 0;
+      // Invalidate any in-flight read so it cannot repopulate the panel with the
+      // previous project's summary after the workspace was closed or switched.
+      appliedSummarySeq = ++summaryRequestSeq;
+      inFlightSummary = null;
+      inFlightSeq = 0;
     },
 
-    async refreshSummary(options?: { silent?: boolean }): Promise<void> {
-      if (this.isLoading) {
+    /**
+     * Re-read the repository summary.
+     *
+     * Concurrent callers share the in-flight request instead of being dropped.
+     * The previous implementation returned early while `isLoading` was true,
+     * which silently discarded a refresh the user triggered by hand whenever a
+     * background poll happened to be running, leaving stale data and no error —
+     * the "refresh button does nothing" and "committed but no history" reports.
+     * `force` skips sharing so an explicit click always causes a fresh read.
+     */
+    async refreshSummary(options?: { silent?: boolean; force?: boolean }): Promise<void> {
+      const silent = options?.silent ?? false;
+      if (!options?.force && inFlightSummary) {
+        await inFlightSummary;
         return;
       }
+
+      const seq = ++summaryRequestSeq;
+      // Claim the in-flight slot before issuing the request so the release check
+      // below is correct regardless of when the request settles.
+      inFlightSeq = seq;
       this.isLoading = true;
-      if (!options?.silent) {
+      if (!silent) {
         this.error = "";
       }
-      try {
-        const result = await fetchWorkspaceGitSummary();
-        this.summary = result.data;
-        if (!options?.silent) {
+
+      const run = (async () => {
+        try {
+          const result = await fetchWorkspaceGitSummary();
+          // Drop a response that lost the race to a newer read or a write.
+          if (seq < appliedSummarySeq) {
+            return;
+          }
+          appliedSummarySeq = seq;
+          this.summary = result.data;
+          this.lastSyncedAt = Date.now();
           this.error = "";
-        }
-      } catch (error: unknown) {
-        if (!options?.silent) {
+        } catch (error: unknown) {
+          if (seq < appliedSummarySeq) {
+            return;
+          }
+          // Surface the failure even for background polls: a silently swallowed
+          // error is exactly how "committed but no history" presented itself.
           this.error = normalizeGitError(error);
+        } finally {
+          // Always release the slot this read owns, even if a write bumped the
+          // request counter meanwhile, so the next refresh can start cleanly.
+          if (inFlightSeq === seq) {
+            inFlightSummary = null;
+            inFlightSeq = 0;
+            this.isLoading = false;
+          }
         }
-      } finally {
-        this.isLoading = false;
-      }
+      })();
+
+      inFlightSummary = run;
+      await run;
     },
 
     async initializeRepository(): Promise<void> {
@@ -82,7 +162,7 @@ export const useGitStore = defineStore("git", {
       this.successMessage = "";
       try {
         const result = await initializeWorkspaceGitRepository();
-        this.summary = result.data;
+        this.applySummary(result.data);
         this.successMessage = "本地仓库已初始化。";
       } catch (error: unknown) {
         this.error = normalizeGitError(error);
@@ -91,19 +171,26 @@ export const useGitStore = defineStore("git", {
       }
     },
 
-    async commitAll(message: string): Promise<void> {
+    async commitAll(message: string): Promise<boolean> {
       if (this.isCommitting) {
-        return;
+        return false;
       }
       this.isCommitting = true;
       this.error = "";
       this.successMessage = "";
       try {
         const result = await commitWorkspaceGitChanges({ message });
-        this.summary = result.data.summary;
-        this.successMessage = result.data.created ? "已创建本地提交。" : "当前没有可提交的更改。";
+        this.applySummary(result.data.summary);
+        if (result.data.created) {
+          const shortId = result.data.commit?.shortId || "";
+          this.successMessage = shortId ? `已创建本地提交 ${shortId}。` : "已创建本地提交。";
+        } else {
+          this.successMessage = "当前没有可提交的更改。";
+        }
+        return Boolean(result.data.created);
       } catch (error: unknown) {
         this.error = normalizeGitError(error);
+        return false;
       } finally {
         this.isCommitting = false;
       }
@@ -118,7 +205,7 @@ export const useGitStore = defineStore("git", {
       this.successMessage = "";
       try {
         const result = await restoreWorkspaceGitCommit({ commitId, createBackup });
-        this.summary = result.data.summary;
+        this.applySummary(result.data.summary);
         const restoredSubject = result.data.restoredCommit?.subject || "已恢复到目标版本";
         const backupInfo = result.data.backupRef ? `，已保留备份分支 ${result.data.backupRef}` : "";
         this.successMessage = `${restoredSubject}${backupInfo}`;
@@ -127,6 +214,19 @@ export const useGitStore = defineStore("git", {
       } finally {
         this.isRestoring = false;
       }
+    },
+
+    /**
+     * Adopt a summary returned by a write (commit/init/restore). Writes carry the
+     * post-operation state, so they win over any read still in flight.
+     */
+    applySummary(summary: WorkspaceGitSummaryResponse | null | undefined): void {
+      if (!summary) {
+        return;
+      }
+      appliedSummarySeq = ++summaryRequestSeq;
+      this.summary = summary;
+      this.lastSyncedAt = Date.now();
     }
   }
 });

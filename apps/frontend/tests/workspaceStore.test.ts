@@ -31,7 +31,7 @@ const result = (data: unknown) => ({ data, trace: null, audit: [] });
 const project = { projectName: "Demo", workspaceRoot: "C:/story", storydexRoot: "C:/story/.storydex", storydexDirName: ".storydex", hasStorydexConfig: true, requiresInitialization: false, missingDirectories: [], projectState: "ready", openedAt: "now" };
 const file = (relativePath = "chapters/a.md", content = "body") => ({ relativePath, content, size: content.length, updatedAt: "now", extension: ".md", kind: "file", title: relativePath.split("/").pop(), media: {} });
 const tree = { roots: [{ kind: "directory", relativePath: "chapters", children: [{ kind: "file", relativePath: "chapters/a.md", extension: ".md" }] }], workspaceRoot: "C:/story", storydexRoot: "C:/story/.storydex", projectName: "Demo", hasStorydexConfig: true, requiresInitialization: false, missingDirectories: [], openedAt: "now" };
-const settings = { segmentExtension: ".md", maxSegmentsPerChapter: 3, storyFragmentCount: 1, chapterWordCountTarget: 2500, storyFragmentWordCount: 2500, storyFragmentWordCountMin: 2500, storyFragmentWordCountMax: 2500, autoUpdateVariables: false, autoUpdateWiki: false, agentCommitPromptEnabled: true, autoNameChapterDirectories: false, contextConcisionMinCalls: 1, contextConcisionMaxCalls: 2, contextConcisionMaxInputTokens: 32000, chapterCompletion: {}, updatedAt: "now", settingsPath: ".storydex/config/project-settings.json" };
+const settings = { segmentExtension: ".md", maxSegmentsPerChapter: 3, storyFragmentCount: 1, chapterLengthTier: "medium", chapterWordCountTarget: 2500, preciseWordCountEnabled: false, storyFragmentWordCount: 2500, storyFragmentWordCountMin: 2500, storyFragmentWordCountMax: 2500, storyChapterTemplateId: "default_chapter_directory", autoUpdateVariables: false, autoUpdateWiki: false, agentCommitPromptEnabled: true, autoNameChapterDirectories: false, contextConcisionMinCalls: 1, contextConcisionMaxCalls: 2, contextConcisionMaxInputTokens: 32000, chapterCompletion: {}, updatedAt: "now", settingsPath: ".storydex/config/project-settings.json" };
 const diff = { available: true, gitInstalled: true, initialized: true, branch: "main", files: [{ relativePath: "chapters/a.md", status: "M", added: 1, removed: 0, hunks: [] }], totals: { files: 1, added: 1, removed: 0 }, message: "" };
 
 beforeEach(() => {
@@ -39,7 +39,8 @@ beforeEach(() => {
   api.fetchSystemBootstrap.mockResolvedValue(result({ workspaceState: { lastProjectPath: "C:/story", recentProjects: [] }, uiPreferences: {} }));
   api.fetchSystemHealth.mockResolvedValue(result({ workspaceRoot: "C:/story", hasStorydexConfig: true }));
   api.fetchCurrentProject.mockResolvedValue(result(project)); api.fetchWorkspaceTree.mockResolvedValue(result(tree));
-  api.fetchStoryProjectSettings.mockResolvedValue(result(settings)); api.updateStoryProjectSettings.mockResolvedValue(result(settings));
+  api.fetchStoryProjectSettings.mockResolvedValue(result(settings));
+  api.updateStoryProjectSettings.mockImplementation((payload: unknown) => Promise.resolve(result(payload)));
   api.updateStoryChapterCompletion.mockResolvedValue(result(settings)); api.fetchWorkspaceDiagnostics.mockResolvedValue(result({ items: [] }));
   api.openWorkspaceProject.mockResolvedValue(result(project)); api.createWorkspaceProject.mockResolvedValue(result(project)); api.initializeWorkspaceProject.mockResolvedValue(result(project));
   api.readWorkspaceFile.mockImplementation(({ relativePath }: any) => Promise.resolve(result(file(relativePath, relativePath.endsWith(".json") ? "{}" : "body"))));
@@ -98,7 +99,34 @@ describe("workspace store full action lifecycle", () => {
     await store.refreshStorySettings();
     store.launchScreenVisible = false; store.currentProject = project as any; store.tree = tree.roots as any;
     await store.refreshStorySettings(); expect(store.storySettings.storyFragmentWordCount).toBe(2500);
-    await store.updateStorySettings({ storyFragmentCount: 2 });
+    await store.updateStorySettings({ storyFragmentCount: 2, chapterLengthTier: "long" });
+    expect(api.updateStoryProjectSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        chapterLengthTier: "long",
+        chapter_length_tier: "long"
+      })
+    );
+    const apiPayload = api.updateStoryProjectSettings.mock.calls[0][0];
+    expect(apiPayload).not.toHaveProperty("chapterWordCountTarget");
+    expect(apiPayload).not.toHaveProperty("preciseWordCountEnabled");
+    expect(apiPayload).not.toHaveProperty("storyFragmentWordCount");
+    const configWrite = api.writeWorkspaceFile.mock.calls.find(
+      ([request]) => request.relativePath === ".storydex/config/project-settings.json"
+    );
+    const persistedConfig = JSON.parse(configWrite?.[0].content || "{}");
+    expect(persistedConfig).toMatchObject({
+      chapterLengthTier: "long",
+      chapter_length_tier: "long"
+    });
+    expect(persistedConfig).not.toHaveProperty("chapterWordCountTarget");
+    expect(persistedConfig).not.toHaveProperty("preciseWordCountEnabled");
+    expect(store.storySettings.chapterLengthTier).toBe("long");
+    api.readWorkspaceFile.mockResolvedValueOnce(result(file(
+      ".storydex/config/project-settings.json",
+      configWrite?.[0].content || "{}"
+    )));
+    const reopened = await store.readStorySettingsFromProjectFile();
+    expect(reopened.chapterLengthTier).toBe("long");
     await store.setChapterCompletion("", true);
     await store.setChapterCompletion("chapters/a", true);
     await store.refreshDiagnostics();

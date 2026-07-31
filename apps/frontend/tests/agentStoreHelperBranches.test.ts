@@ -13,9 +13,14 @@ describe("agent store helper fallback branches", () => {
     // 1704/1705: status !== needs_user_input -> "info"
     expect(u.statusForPacket("TurnContract", packet({ status: "ready" }))).toBe("info");
     expect(u.statusForPacket("TurnContract", packet({ status: "needs_user_input" }))).toBe("warning");
-    // 1709: passed truthy -> success, falsy -> warning
+    // A rejected candidate is an error; a committed tier miss is only a warning.
     expect(u.statusForPacket("StoryGenerationValidation", packet({ passed: true }))).toBe("success");
-    expect(u.statusForPacket("StoryGenerationValidation", packet({ passed: false }))).toBe("warning");
+    expect(u.statusForPacket("StoryGenerationValidation", packet({ passed: false }))).toBe("error");
+    expect(u.statusForPacket("StoryGenerationValidation", packet({
+      passed: true,
+      chapterLengthTier: "medium",
+      tierHit: false
+    }))).toBe("warning");
   });
 
   it("detailForPacket branches for tools, chunks, retries and errors", () => {
@@ -56,8 +61,15 @@ describe("agent store helper fallback branches", () => {
     // 1528/1529: correction attempt/max fallbacks
     const correction = u.streamPacketToWaterfallItem("t", packet({ _type: "ContinuationStarted", continuationMode: "story_generation_correction" }), []);
     expect(correction?.content).toContain("1/1");
-    // 1570: StoryGenerationValidation warning -> notice, success -> system
-    const validationWarning = u.streamPacketToWaterfallItem("t", packet({ _type: "StoryGenerationValidation", passed: false }), []);
+    // Rejected candidates stay system errors; committed tier misses are notices.
+    const validationError = u.streamPacketToWaterfallItem("t", packet({ _type: "StoryGenerationValidation", passed: false }), []);
+    expect(validationError?.type).toBe("system");
+    const validationWarning = u.streamPacketToWaterfallItem("t", packet({
+      _type: "StoryGenerationValidation",
+      passed: true,
+      chapterLengthTier: "medium",
+      tierHit: false
+    }), []);
     expect(validationWarning?.type).toBe("notice");
     const validationOk = u.streamPacketToWaterfallItem("t", packet({ _type: "StoryGenerationValidation", passed: true }), []);
     expect(validationOk?.type).toBe("system");

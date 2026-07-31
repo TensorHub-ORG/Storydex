@@ -192,13 +192,13 @@ npm ci --prefix apps/desktop
 .\scripts\run_full_test_suite.ps1 -Mode Release
 ```
 
-- `Fast`：编码、冲突标记、版本、Python 编译、后端 pytest/覆盖率、前端类型/Vitest/回归/构建、桌面单元与发布配置检查。
+- `Fast`：编码、冲突标记、版本、固定 Coomi 运行时、Python 编译、后端 pytest/覆盖率报告、前端类型/Vitest/回归/构建、桌面单元与发布配置检查。开发期覆盖率不足会告警但不掩盖测试失败。
 - `Full`：在 Fast 基础上构建 `win-unpacked`，验证前端字体、后端、嵌入式 Python、MinGit 与更新配置，并运行隔离用户目录的 Electron E2E。
 - `Release`：在 Full 基础上生成并验证 NSIS installer、blockmap、`latest.yml` 和校验文件；任何阶段失败都会返回非零退出码。
 
 测试代码分别位于 `apps/backend/tests`、`apps/frontend/tests` 和 `apps/desktop/tests`。后端覆盖 unit、API contract、integration、security、SSE 性能、会话恢复和并发失败恢复；前端覆盖 SSE parser、Pinia store、AgentPanel 与字体状态机；桌面覆盖 Node 契约、打包资源、Electron 冷启动和更新元数据。所有自动化测试使用临时 HOME、临时项目和 fake/mock provider，不访问真实付费 LLM 或用户配置。
 
-`.github/workflows/ci.yml` 在 PR、main push 和手动触发时调用可复用的 `quality-gate.yml`。质量门禁覆盖 Python 3.9（Windows/Ubuntu）、Python 3.13 Windows 兼容性、Node 20、Windows 打包与 Electron E2E，并上传 JUnit、覆盖率和失败诊断产物。发布工作流必须先通过同一质量门禁。
+`.github/workflows/ci.yml` 在 PR、main push 和手动触发时调用可复用的 `quality-gate.yml`。日常 CI 中，测试、类型检查、编译、构建、打包和 Electron E2E 仍是硬门禁，覆盖率阈值仅报告告警；`release-windows.yml` 会开启严格覆盖率阈值。质量门禁覆盖 Python 3.9（Windows/Ubuntu）、Python 3.13 Windows 兼容性、Node 20，并上传 JUnit、覆盖率和失败诊断产物。
 
 ## Windows 安装、便携包与应用内更新
 
