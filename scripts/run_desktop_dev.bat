@@ -52,6 +52,10 @@ cd /d "%DESKTOP_DIR%" || goto :error
 call npm run build:frontend || goto :error
 
 echo.
+echo [Storydex] Building Storydex Coomi Rust bridge...
+call npm run build:coomi-runtime || goto :error
+
+echo.
 echo [Storydex] Syncing latest desktop app assets...
 call npm run sync:assets || goto :error
 

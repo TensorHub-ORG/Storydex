@@ -424,7 +424,7 @@ def is_advisory_request(prompt: str) -> bool:
 
 
 class _BoundedIntentProvider:
-    """Apply metadata-call limits without modifying the pinned Coomi wheel."""
+    """Apply Storydex metadata-call limits at the concrete provider boundary."""
 
     def __init__(self, provider: Any) -> None:
         object.__setattr__(self, "_provider", provider)
@@ -448,7 +448,17 @@ class _BoundedIntentProvider:
         direct = await _bounded_metadata_chat(self._provider, messages)
         if direct is not None:
             return direct
-        return await _invoke_provider_chat(self._provider, messages)
+        chat = getattr(self._provider, "chat", None)
+        try:
+            parameter = inspect.signature(chat).parameters.get("max_output_tokens")
+        except (TypeError, ValueError):
+            parameter = None
+        bounded_kwargs = (
+            {"max_output_tokens": _INTENT_MAX_OUTPUT_TOKENS}
+            if parameter is not None and parameter.kind is not inspect.Parameter.VAR_KEYWORD
+            else {}
+        )
+        return await _invoke_provider_chat(self._provider, messages, **bounded_kwargs)
 
 
 async def _bounded_metadata_chat(provider: Any, messages: list[Dict[str, Any]]) -> Any | None:
@@ -671,28 +681,27 @@ def _is_deepseek_model(model: str) -> bool:
     return "deepseek" in str(model or "").strip().lower()
 
 
-async def _invoke_provider_chat(provider: Any, messages: list[Dict[str, Any]]) -> Any:
+async def _invoke_provider_chat(
+    provider: Any,
+    messages: list[Dict[str, Any]],
+    **kwargs: Any,
+) -> Any:
     chat = getattr(provider, "chat")
     if inspect.iscoroutinefunction(chat):
-        return await chat(messages, None)
-    response = await asyncio.to_thread(chat, messages, None)
+        return await chat(messages, None, **kwargs)
+    response = await asyncio.to_thread(chat, messages, None, **kwargs)
     return await response if inspect.isawaitable(response) else response
 
 
 def _metadata_llm_response(*, content: str, reasoning_content: str = "") -> Any:
-    try:
-        from coomi.types import LLMResponse
+    from services.coomi_bridge_client import BridgeLLMResponse
 
-        return LLMResponse(
-            content=content,
-            tool_calls=None,
-            usage=None,
-            reasoning_content=reasoning_content or None,
-        )
-    except (ImportError, TypeError):
-        from types import SimpleNamespace
-
-        return SimpleNamespace(content=content, tool_calls=None, usage=None, reasoning_content=reasoning_content or None)
+    return BridgeLLMResponse(
+        content=content,
+        tool_calls=None,
+        usage=None,
+        reasoning_content=reasoning_content or None,
+    )
 
 
 def is_valid_intent_frame(frame: Any) -> bool:
@@ -1150,16 +1159,9 @@ class StorydexIntentService:
                 from services.llm_replay import get_replayable_llm_provider, llm_purpose
 
                 def create_provider() -> Any:
-                    from coomi.services import get_llm_provider
+                    from services.coomi_bridge_client import get_bridge_provider
 
-                    main_provider = get_llm_provider()
-                    try:
-                        from coomi.services.llm.factory import create_fast_provider
-
-                        fast_provider = create_fast_provider(main_provider)
-                    except Exception:
-                        fast_provider = None
-                    bounded_provider = _BoundedIntentProvider(fast_provider or main_provider)
+                    bounded_provider = _BoundedIntentProvider(get_bridge_provider(fast=True))
                     return get_replayable_llm_provider(bounded_provider)
 
                 with llm_purpose("intent"):

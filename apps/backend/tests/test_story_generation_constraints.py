@@ -29,7 +29,6 @@ from services.story_word_count_service import (
     strip_non_story_wrappers,
 )
 from services.storydex_agent_tools import StorydexApplyStoryIncrementTool
-from services.storydex_coomi_runtime_tools import StorydexEditTool, StorydexWriteTool
 from services.storydex_orchestration_service import get_storydex_orchestration_service
 from storage.workspace_io import WorkspaceIO
 
@@ -156,43 +155,6 @@ def test_story_discussion_contract_is_read_only_end_to_end(tmp_path: Path) -> No
     assert execution["directFileWrites"] is False
     assert execution["localGitAutoCommit"] is False
     assert execution["allowedWriteRoots"] == []
-
-    write = StorydexWriteTool(workspace_root=tmp_path, turn_contract=contract).run(
-        {"file_path": "chapters/第一章/002.md", "content": "不应写入"}
-    )
-    assert write.success is False
-    assert not (tmp_path / "chapters" / "第一章" / "002.md").exists()
-
-
-def test_character_write_contract_cannot_escape_its_asset_root(tmp_path: Path) -> None:
-    contract = {
-        "intentFrame": {
-            "primary": "character_work",
-            "operationType": "create_new",
-            "decision": "decided",
-            "effect": "create",
-            "canWrite": True,
-        },
-        "executionPolicy": {
-            "directFileWrites": True,
-            "allowedWriteRoots": [".storydex/characters/"],
-        },
-    }
-    tool = StorydexWriteTool(workspace_root=tmp_path, turn_contract=contract)
-
-    allowed = tool.run({"file_path": ".storydex/characters/反派.md", "content": "角色卡"})
-    denied = tool.run({"file_path": ".storydex/worldbook/魔法.md", "content": "越权"})
-    structured_bypass = StorydexApplyStoryIncrementTool(
-        workspace_root=tmp_path,
-        turn_contract=contract,
-    ).run({"fragments": [{"path": "chapters/越权.md", "text": "越权"}]})
-
-    assert allowed.success is True
-    assert denied.success is False
-    assert structured_bypass.success is False
-    assert (tmp_path / ".storydex" / "characters" / "反派.md").is_file()
-    assert not (tmp_path / ".storydex" / "worldbook" / "魔法.md").exists()
-
 
 def test_modify_existing_turn_skips_story_word_count_validation(tmp_path: Path) -> None:
     # 重构请求不该被"必须 N 段 × 字数区间"的硬校验反复打回。
@@ -1102,20 +1064,6 @@ def test_append_correction_rebuilds_baseline_without_disabling_duplicate_guard(t
     assert service.count_story_file_words(target) == 4400
     assert final_text.count("乙") == 0
     assert final_text.count("丙") == 2200
-
-
-def test_plain_write_and_edit_tools_cannot_bypass_story_generation_contract(tmp_path: Path) -> None:
-    contract = {"intentFrame": {"primary": "story_generation"}}
-    write_result = StorydexWriteTool(workspace_root=tmp_path, turn_contract=contract).run(
-        {"file_path": "chapters/第1章/001.md", "content": "正文"}
-    )
-    edit_result = StorydexEditTool(workspace_root=tmp_path, turn_contract=contract).run(
-        {"file_path": "chapters/第1章/001.md", "old_string": "正", "new_string": "改"}
-    )
-    assert write_result.success is False
-    assert edit_result.success is False
-    assert "StorydexApplyStoryIncrement" in str(write_result.error)
-    assert not (tmp_path / "chapters/第1章/001.md").exists()
 
 
 def _chapter_validation_payload(

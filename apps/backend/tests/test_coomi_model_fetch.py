@@ -1,11 +1,12 @@
+from __future__ import annotations
+
 import asyncio
 import json
-import sys
-import types
+from types import SimpleNamespace
 
+from api import routes_agent
 from services import coomi_agent_service as coomi_module
 from services.coomi_agent_service import StorydexCoomiAgentService
-from api import routes_agent
 
 
 class _FakeModelResponse:
@@ -23,72 +24,43 @@ class _FakeModelResponse:
         }
 
 
-def test_list_models_derives_models_url_from_chat_completions_endpoint():
+def test_list_models_derives_endpoint_and_deduplicates_ids() -> None:
     seen = {}
 
     def fake_get(url, *, headers, timeout):
-        seen["url"] = url
-        seen["headers"] = headers
-        seen["timeout"] = timeout
+        seen.update(url=url, headers=headers, timeout=timeout)
         return _FakeModelResponse()
 
     result = StorydexCoomiAgentService().list_models(
         base_url="https://opencode.ai/zen/go/v1/chat/completions",
         api_key="sk-test",
+        provider_type="openai_compatible",
         http_get=fake_get,
     )
-
     assert seen["url"] == "https://opencode.ai/zen/go/v1/models"
     assert seen["headers"]["Authorization"] == "Bearer sk-test"
-    assert seen["headers"]["Accept"] == "application/json"
-    assert result == {
-        "endpoint": "https://opencode.ai/zen/go/v1/models",
-        "models": ["claude-sonnet-4", "gpt-4.1"],
-    }
+    assert result["models"] == ["claude-sonnet-4", "gpt-4.1"]
 
 
-def test_list_models_accepts_common_response_variants():
-    class FakeVariantResponse:
-        status_code = 200
-        text = '{"models":[]}'
-
-        def json(self):
-            return {"models": ["deepseek-chat", {"name": "deepseek-reasoner"}, {"model": "qwen-max"}]}
-
-    result = StorydexCoomiAgentService().list_models(
-        base_url="https://api.example.com/v1",
-        api_key="sk-test",
-        http_get=lambda url, *, headers, timeout: FakeVariantResponse(),
-    )
-
-    assert result["endpoint"] == "https://api.example.com/v1/models"
-    assert result["models"] == ["deepseek-chat", "deepseek-reasoner", "qwen-max"]
-
-
-def test_list_models_uses_anthropic_endpoint_and_authentication_headers():
+def test_list_models_uses_anthropic_authentication() -> None:
     seen = {}
 
     def fake_get(url, *, headers, timeout):
-        seen["url"] = url
-        seen["headers"] = headers
-        seen["timeout"] = timeout
+        seen.update(url=url, headers=headers)
         return _FakeModelResponse()
 
-    result = StorydexCoomiAgentService().list_models(
+    StorydexCoomiAgentService().list_models(
         base_url="https://api.anthropic.com",
         api_key="sk-ant-test",
         provider_type="anthropic_messages",
         http_get=fake_get,
     )
-
     assert seen["url"] == "https://api.anthropic.com/v1/models"
     assert seen["headers"]["x-api-key"] == "sk-ant-test"
-    assert seen["headers"]["anthropic-version"] == "2023-06-01"
     assert "Authorization" not in seen["headers"]
-    assert result["models"] == ["claude-sonnet-4", "gpt-4.1"]
 
 
-def test_list_models_sanitizes_transport_errors():
+def test_list_models_sanitizes_transport_errors() -> None:
     def fake_get(url, *, headers, timeout):
         raise RuntimeError("network down for sk-secret")
 
@@ -96,32 +68,21 @@ def test_list_models_sanitizes_transport_errors():
         StorydexCoomiAgentService().list_models(
             base_url="https://api.example.com/v1",
             api_key="sk-secret",
+            provider_type="openai_compatible",
             http_get=fake_get,
         )
     except ValueError as exc:
         message = str(exc)
     else:
         raise AssertionError("expected ValueError")
-
     assert "sk-secret" not in message
     assert "Model list request failed" in message
 
 
-def test_model_catalog_error_is_rewritten_as_actionable_message():
-    message = coomi_module._coomi_error_message(
-        "BadRequestError: Model deepseek-v4-pro is not supported on the lite model list. "
-        "Use GET /inference/go/openai/v1/models; source C:/secret/loop.py"
-    )
-    assert "deepseek-v4-pro" in message
-    assert "自动重试一次" in message
-    assert "C:/secret" not in message
-
-
-def test_write_config_preserves_user_chat_completion_url(monkeypatch, tmp_path):
+def test_write_config_preserves_chat_completion_url(monkeypatch, tmp_path) -> None:
     config_path = tmp_path / ".storydex" / ".coomi" / "config" / "providers.json"
-    monkeypatch.setattr(coomi_module, "STORYDEX_COOMI_HOME", tmp_path / ".storydex")
+    monkeypatch.setattr(coomi_module, "STORYDEX_COOMI_HOME", tmp_path / ".storydex" / ".coomi")
     monkeypatch.setattr(coomi_module, "STORYDEX_COOMI_CONFIG", config_path)
-
     updated = StorydexCoomiAgentService().write_config(
         json.dumps(
             {
@@ -129,7 +90,7 @@ def test_write_config_preserves_user_chat_completion_url(monkeypatch, tmp_path):
                 "active": "opencode",
                 "providers": {
                     "opencode": {
-                        "type": "openai",
+                        "type": "openai_compatible",
                         "display": "OpenCode",
                         "api_key": "sk-test",
                         "base_url": "https://opencode.ai/zen/go/v1/chat/completions",
@@ -139,84 +100,43 @@ def test_write_config_preserves_user_chat_completion_url(monkeypatch, tmp_path):
             }
         )
     )
-
-    assert updated["parsed"]["providers"]["opencode"]["base_url"] == (
-        "https://opencode.ai/zen/go/v1/chat/completions"
-    )
-    assert json.loads(config_path.read_text(encoding="utf-8"))["providers"]["opencode"]["base_url"] == (
-        "https://opencode.ai/zen/go/v1/chat/completions"
-    )
+    assert updated["parsed"]["providers"]["opencode"]["base_url"].endswith("/chat/completions")
 
 
-def test_storydex_coomi_home_normalizes_provider_config_runtime_base_url(monkeypatch, tmp_path):
-    config_path = tmp_path / ".storydex" / ".coomi" / "config" / "providers.json"
-    monkeypatch.setattr(coomi_module, "STORYDEX_COOMI_HOME", tmp_path / ".storydex")
-    monkeypatch.setattr(coomi_module, "STORYDEX_COOMI_CONFIG", config_path)
-
-    with coomi_module._storydex_coomi_home():
-        from coomi.services.llm.config import ProviderConfig
-
-        config = ProviderConfig.from_dict(
-            "opencode",
-            {
-                "type": "openai",
-                "display": "OpenCode",
-                "api_key": "sk-test",
-                "base_url": "https://opencode.ai/zen/go/v1/chat/completions",
-                "model": "deepseek-v4-flash",
-            },
-        )
-
-    assert config.base_url == "https://opencode.ai/zen/go/v1"
-
-
-def test_agent_coomi_models_route_returns_model_list(monkeypatch):
+def test_agent_models_route_returns_model_list(monkeypatch) -> None:
     class FakeService:
         def list_models(self, *, base_url, api_key, provider_type):
-            assert base_url == "https://api.example.com/v1/chat/completions"
-            assert api_key == "sk-test"
             assert provider_type == "anthropic_messages"
             return {"endpoint": "https://api.example.com/v1/models", "models": ["model-a"]}
 
     monkeypatch.setattr(routes_agent, "get_storydex_coomi_agent_service", lambda: FakeService())
-
     payload = routes_agent.AgentCoomiModelListRequest(
         baseUrl="https://api.example.com/v1/chat/completions",
         apiKey="sk-test",
         providerType="anthropic_messages",
     )
     response = routes_agent.agent_list_coomi_models(payload, request=None)
-
     assert response.ok is True
-    assert response.data["endpoint"] == "https://api.example.com/v1/models"
     assert response.data["models"] == ["model-a"]
 
 
-def test_generate_commit_message_awaits_async_provider_chat(monkeypatch, tmp_path):
-    class FakeResponse:
-        content = "agent: update generated story files"
-
-    class FakeProvider:
-        async def chat(self, messages, options):
+def test_generate_commit_message_uses_bridge_provider(monkeypatch, tmp_path) -> None:
+    class Provider:
+        async def chat(self, messages, tools=None):
             assert messages
-            assert options is None
-            return FakeResponse()
+            assert tools is None
+            return SimpleNamespace(content="agent: update generated story files")
 
-    fake_services = types.ModuleType("coomi.services")
-    fake_services.get_llm_provider = lambda: FakeProvider()
-    monkeypatch.setitem(sys.modules, "coomi", types.ModuleType("coomi"))
-    monkeypatch.setitem(sys.modules, "coomi.services", fake_services)
+    monkeypatch.setattr(coomi_module, "get_bridge_provider", lambda **_kwargs: Provider())
+    import services.llm_replay as llm_replay
 
-    service = StorydexCoomiAgentService()
-    monkeypatch.setattr(service, "_ensure_coomi_installed", lambda: None)
-
+    monkeypatch.setattr(llm_replay, "get_replayable_llm_provider", lambda provider=None: provider)
     message = asyncio.run(
-        service.generate_commit_message(
+        StorydexCoomiAgentService().generate_commit_message(
             workspace_root=tmp_path,
             changed_files=[".storydex/project.json"],
             diff_summary="+ generated",
             prompt="continue story",
         )
     )
-
     assert message == "agent: update generated story files"

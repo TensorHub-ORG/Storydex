@@ -51,6 +51,10 @@
             <span class="material-symbols-rounded">play_arrow</span>
             <span>{{ gitStore.isInitializing ? "初始化中…" : "启用版本记录" }}</span>
           </button>
+          <form class="scm-empty-branch-form" @submit.prevent="handleCreateBranch">
+            <input v-model.trim="newBranchName" placeholder="无提交也可以先创建分支" :disabled="gitStore.isBranchBusy" />
+            <button class="scm-primary-btn" type="submit" :disabled="gitStore.isBranchBusy || !newBranchName">创建分支</button>
+          </form>
         </div>
         <div v-if="gitStore.error" class="scm-feedback is-error">{{ gitStore.error }}</div>
       </template>
@@ -82,6 +86,28 @@
               <span>{{ changedCountLabel }}</span>
             </span>
           </div>
+        </section>
+
+        <section class="scm-branch-manager">
+          <div class="scm-branch-manager-row">
+            <label for="scm-branch-select">当前分支</label>
+            <select
+              id="scm-branch-select"
+              :value="branchName"
+              :disabled="gitStore.isBranchBusy || hasChanges"
+              title="有未提交修改时不能切换分支"
+              @change="handleBranchSelect"
+            >
+              <option v-for="branch in gitStore.branches" :key="branch.name" :value="branch.name">{{ branch.name }}</option>
+            </select>
+          </div>
+          <form class="scm-new-branch" @submit.prevent="handleCreateBranch">
+            <input v-model.trim="newBranchName" placeholder="新分支名称，例如 draft/chapter-3" :disabled="gitStore.isBranchBusy" />
+            <button class="scm-icon-btn" type="submit" title="新建并切换分支" :disabled="gitStore.isBranchBusy || !newBranchName">
+              <span class="material-symbols-rounded">add</span>
+            </button>
+          </form>
+          <p v-if="hasChanges" class="scm-compose-hint">提交当前修改后即可切换分支。</p>
         </section>
 
         <!-- 提交区 -->
@@ -272,6 +298,7 @@ const gitStore = useGitStore();
 const workspaceStore = useWorkspaceStore();
 
 const commitMessage = ref("");
+const newBranchName = ref("");
 const changesExpanded = ref(true);
 const historyExpanded = ref(true);
 const commitInputRef = ref<HTMLTextAreaElement | null>(null);
@@ -337,6 +364,7 @@ const refreshTitle = computed(() =>
 onMounted(() => {
   if (!workspaceStore.launchScreenVisible) {
     void gitStore.refreshSummary({ silent: true });
+    void gitStore.refreshBranches();
   }
   autoRefreshTimer = window.setInterval(handleAutoRefresh, AUTO_REFRESH_INTERVAL_MS);
   clockTimer = window.setInterval(() => {
@@ -386,6 +414,20 @@ function handleWindowFocus(): void {
 // running, otherwise the button looks broken.
 function refreshSummary(): void {
   void gitStore.refreshSummary({ force: true });
+  void gitStore.refreshBranches();
+}
+
+function handleBranchSelect(event: Event): void {
+  const name = (event.target as HTMLSelectElement).value;
+  if (name && name !== branchName.value) void gitStore.switchBranch(name);
+}
+
+function handleCreateBranch(): void {
+  const name = newBranchName.value.trim();
+  if (!name) return;
+  void gitStore.createBranch(name).then((created) => {
+    if (created) newBranchName.value = "";
+  });
 }
 
 function initializeRepository(): void {
@@ -739,6 +781,54 @@ defineExpose({
   background: var(--bg-card);
 }
 
+.scm-branch-manager {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-ghost);
+  display: grid;
+  gap: 8px;
+  margin: 10px 14px 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md, 6px);
+  background: var(--bg-card);
+}
+
+.scm-branch-manager-row,
+.scm-new-branch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.scm-branch-manager-row label {
+  color: var(--text-muted);
+  font-size: 12px;
+  flex: 0 0 auto;
+}
+
+.scm-branch-manager select,
+.scm-new-branch input,
+.scm-empty-branch-form input {
+  min-width: 0;
+  flex: 1 1 auto;
+  height: 30px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-editor);
+  color: var(--text-main);
+  padding: 0 8px;
+  font: inherit;
+}
+
+.scm-empty-branch-form { display: flex; gap: 8px; width: 100%; margin-top: 10px; }
+.scm-empty-branch-form input { min-width: 0; flex: 1; height: 32px; border: 1px solid var(--border-subtle); border-radius: 5px; padding: 0 8px; background: var(--bg-editor); color: var(--text-main); font: inherit; font-size: 11px; }
+.scm-empty-branch-form input:focus { outline: none; border-color: var(--accent); }
+.scm-new-branch input::placeholder, .scm-empty-branch-form input::placeholder { font-size: 10px; }
+
+.scm-branch-manager select:focus,
+.scm-new-branch input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
 .scm-state-row {
   display: flex;
   align-items: center;
@@ -877,6 +967,8 @@ defineExpose({
   font-size: 11px;
   line-height: 1.5;
 }
+
+.scm-branch-manager .scm-compose-hint { font-size: 10px; }
 
 .scm-primary-btn {
   height: 28px;

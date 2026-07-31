@@ -14,6 +14,7 @@ from core.feature_flags import FeatureFlags
 from services.editor_service import EditorService
 from services.diagnostics_service import get_diagnostics_service
 from services.git_service import get_git_service
+from services.index_service import IndexService
 from services.large_file_service import get_large_file_service
 from services.project_service import get_project_service
 from services.story_project_service import (
@@ -93,6 +94,7 @@ class WorkspaceTransferRequest(BaseModel):
 
 class ProjectPathRequest(BaseModel):
     project_path: str = Field(alias="projectPath")
+    architecture: Literal["standard", "free"] = "standard"
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -144,6 +146,7 @@ class ProjectInfoResponse(BaseModel):
     missing_directories: list[str] = Field(alias="missingDirectories", default_factory=list)
     project_state: str = Field(alias="projectState")
     opened_at: str = Field(alias="openedAt")
+    architecture: str = "unconfigured"
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -156,6 +159,7 @@ class WorkspaceTreeResponse(BaseModel):
     requires_initialization: bool = Field(alias="requiresInitialization")
     missing_directories: list[str] = Field(alias="missingDirectories", default_factory=list)
     opened_at: str = Field(alias="openedAt")
+    architecture: str = "unconfigured"
     default_file: Optional[str] = Field(default=None, alias="defaultFile")
     roots: list[dict] = Field(default_factory=list)
 
@@ -265,6 +269,20 @@ class WorkspaceGitCommitRequest(BaseModel):
 class WorkspaceGitRestoreRequest(BaseModel):
     commit_id: str = Field(alias="commitId")
     create_backup: bool = Field(default=True, alias="createBackup")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class WorkspaceGitBranchRequest(BaseModel):
+    name: str
+    checkout: bool = True
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class WorkspaceSearchRequest(BaseModel):
+    query: str
+    limit: int = Field(default=20, ge=1, le=50)
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -386,6 +404,11 @@ def read_workspace_tree() -> ApiEnvelope:
     started = perf_counter()
     trace_id = str(uuid4())
     tree = editor_service.list_workspace_tree()
+    inspection = project_service.inspect_project(project_service.workspace_root)
+    tree["architecture"] = inspection.get("architecture", "unconfigured")
+    tree["requiresInitialization"] = bool(inspection.get("requiresInitialization"))
+    tree["hasStorydexConfig"] = bool(inspection.get("hasStorydexConfig"))
+    tree["missingDirectories"] = inspection.get("missingDirectories") or []
     data = WorkspaceTreeResponse(**tree)
     audit = [
         {
@@ -437,7 +460,7 @@ def open_project(payload: ProjectPathRequest) -> ApiEnvelope:
 def create_project(payload: ProjectPathRequest) -> ApiEnvelope:
     started = perf_counter()
     trace_id = str(uuid4())
-    project = ProjectInfoResponse(**project_service.create_project(payload.project_path))
+    project = ProjectInfoResponse(**project_service.create_project(payload.project_path, payload.architecture))
     audit = [{"action": "create_project", "workspaceRoot": project.workspace_root}]
     return success_response(
         data=project.model_dump(by_alias=True),
@@ -451,7 +474,8 @@ def initialize_project(payload: Optional[ProjectPathRequest] = None) -> ApiEnvel
     started = perf_counter()
     trace_id = str(uuid4())
     target_path = payload.project_path if payload is not None else ""
-    project = ProjectInfoResponse(**project_service.initialize_project(target_path))
+    architecture = payload.architecture if payload is not None else "standard"
+    project = ProjectInfoResponse(**project_service.initialize_project(target_path, architecture))
     audit = [{"action": "initialize_project", "workspaceRoot": project.workspace_root}]
     return success_response(
         data=project.model_dump(by_alias=True),
@@ -565,6 +589,43 @@ def initialize_workspace_git_repository() -> ApiEnvelope:
         trace=_build_trace(started=started, trace_id=trace_id),
         audit=audit,
     )
+
+
+@router.post("/workspace/search", response_model=ApiEnvelope)
+def search_workspace(payload: WorkspaceSearchRequest) -> ApiEnvelope:
+    started = perf_counter()
+    trace_id = str(uuid4())
+    query = payload.query.strip()
+    items = IndexService().search(query, limit=payload.limit) if query else []
+    return success_response(
+        data={"query": query, "items": items},
+        trace=_build_trace(started=started, trace_id=trace_id),
+        audit=[{"action": "search_workspace", "resultCount": len(items)}],
+    )
+
+
+@router.get("/workspace/git/branches", response_model=ApiEnvelope)
+def read_workspace_git_branches() -> ApiEnvelope:
+    started = perf_counter()
+    trace_id = str(uuid4())
+    data = git_service.list_branches(project_service.workspace_root)
+    return success_response(data=data, trace=_build_trace(started=started, trace_id=trace_id), audit=[{"action": "read_workspace_git_branches"}])
+
+
+@router.post("/workspace/git/branches", response_model=ApiEnvelope)
+def create_workspace_git_branch(payload: WorkspaceGitBranchRequest) -> ApiEnvelope:
+    started = perf_counter()
+    trace_id = str(uuid4())
+    data = git_service.create_branch(project_service.workspace_root, name=payload.name, checkout=payload.checkout)
+    return success_response(data=data, trace=_build_trace(started=started, trace_id=trace_id), audit=[{"action": "create_workspace_git_branch", "branch": payload.name}])
+
+
+@router.post("/workspace/git/checkout", response_model=ApiEnvelope)
+def switch_workspace_git_branch(payload: WorkspaceGitBranchRequest) -> ApiEnvelope:
+    started = perf_counter()
+    trace_id = str(uuid4())
+    data = git_service.switch_branch(project_service.workspace_root, name=payload.name)
+    return success_response(data=data, trace=_build_trace(started=started, trace_id=trace_id), audit=[{"action": "switch_workspace_git_branch", "branch": payload.name}])
 
 
 @router.post("/workspace/git/commit", response_model=ApiEnvelope)

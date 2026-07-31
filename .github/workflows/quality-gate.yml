@@ -65,6 +65,7 @@ jobs:
             critical_lines: "90.0"
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
@@ -76,6 +77,10 @@ jobs:
         run: |
           python -m pip install --require-hashes -r requirements.lock
           python -m pip install -r apps/backend/requirements-test.txt
+      - name: Test and build Storydex Coomi Rust runtime
+        run: |
+          cargo test --manifest-path vendor/coomi-rs/Cargo.toml --locked --workspace
+          cargo build --manifest-path vendor/coomi-rs/Cargo.toml --release --locked -p storydex-coomi-bridge
       - name: Verify pinned Coomi runtime
         run: python scripts/verify_coomi_runtime.py
       - name: Run backend tests with coverage
@@ -117,10 +122,13 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
       - uses: actions/setup-python@v5
         with: { python-version: "3.13" }
       - run: python -m pip install --require-hashes -r requirements.lock
       - run: python -m pip install -r apps/backend/requirements-test.txt
+      - name: Build Storydex Coomi Rust runtime
+        run: cargo build --manifest-path vendor/coomi-rs/Cargo.toml --release --locked -p storydex-coomi-bridge
       - run: python scripts/verify_coomi_runtime.py
       - name: Compile and import all backend modules
         working-directory: apps/backend
@@ -183,6 +191,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.9"
@@ -192,6 +201,8 @@ jobs:
             apps/backend/requirements-test.txt
       - run: python -m pip install --require-hashes -r requirements.lock
       - run: python -m pip install -r apps/backend/requirements-test.txt
+      - name: Build Storydex Coomi Rust runtime
+        run: cargo build --manifest-path vendor/coomi-rs/Cargo.toml --release --locked -p storydex-coomi-bridge
       - run: python scripts/verify_coomi_runtime.py
       - name: Session, SSE, Git, and runtime integration regressions
         working-directory: apps/backend
@@ -216,6 +227,7 @@ jobs:
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
       - uses: actions/setup-node@v4
         with:
           node-version: "20"

@@ -29,6 +29,7 @@ class UIPreferencesResponse(BaseModel):
     left_pane_font_scale: int = Field(alias="leftPaneFontScale", default=100)
     center_pane_font_scale: int = Field(alias="centerPaneFontScale", default=100)
     right_pane_font_scale: int = Field(alias="rightPaneFontScale", default=100)
+    font_family: str = Field(alias="fontFamily", default="system")
     file_font_size: int = Field(alias="fileFontSize", default=16)
     player_font_size: int = Field(alias="playerFontSize", default=14)
     updated_at: str = Field(alias="updatedAt", default="")
@@ -47,6 +48,7 @@ class UIPreferencesUpdateRequest(BaseModel):
     left_pane_font_scale: int = Field(alias="leftPaneFontScale", default=100)
     center_pane_font_scale: int = Field(alias="centerPaneFontScale", default=100)
     right_pane_font_scale: int = Field(alias="rightPaneFontScale", default=100)
+    font_family: str = Field(alias="fontFamily", default="system")
     file_font_size: int = Field(alias="fileFontSize", default=16)
     player_font_size: int = Field(alias="playerFontSize", default=14)
 

@@ -17,7 +17,6 @@ $pythonRoot = Join-Path $projectRoot ".python39"
 $pythonExe = Join-Path $pythonRoot "Scripts\python.exe"
 $requirementsFile = Join-Path $projectRoot "requirements.txt"
 $requirementsLockFile = Join-Path $projectRoot "requirements.lock"
-$coomiVerifier = Join-Path $projectRoot "scripts\verify_coomi_runtime.py"
 
 function Write-Storydex([string]$Message) {
     Write-Host "[Storydex] $Message"
@@ -210,8 +209,7 @@ function Test-RequirementsInstalled {
         return $false
     }
 
-    & $pythonExe $coomiVerifier | Out-Null
-    return $LASTEXITCODE -eq 0
+    return $true
 }
 
 function Install-RequirementsWithRetry {

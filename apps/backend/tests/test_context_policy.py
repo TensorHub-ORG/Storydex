@@ -7,7 +7,6 @@ from dataclasses import FrozenInstanceError
 import pytest
 
 from services.context_policy import ContextPolicy, context_policy_from_turn_contract
-from services.context_trace_service import build_context_trace
 from services.global_config_service import GlobalConfigService
 from services.story_project_service import get_story_project_service
 from services.storydex_context_assembler_service import StorydexContextAssemblerService
@@ -123,30 +122,14 @@ def test_product_agent_settings_generate_next_turn_policy(tmp_path):
 
 
 def test_memory_disabled_passes_none_and_records_zero_memory_source(tmp_path, monkeypatch):
-    from coomi.engine import session as coomi_session
-    from services import llm_replay
     from services.coomi_agent_service import _build_coomi_memory, _build_coomi_system_prompt
 
     policy = ContextPolicy(coomi_memory=False)
     assert _build_coomi_memory(tmp_path, policy) == (None, None)
 
-    captured = {}
-
-    async def fake_build_system_prompt(**kwargs):
-        captured.update(kwargs)
-        return "base system prompt"
-
-    monkeypatch.setattr(coomi_session, "build_system_prompt", fake_build_system_prompt)
-    monkeypatch.setattr(
-        llm_replay,
-        "get_replayable_llm_provider",
-        lambda: types.SimpleNamespace(model="fake-model"),
-    )
-    trace = build_context_trace([], [], assemble_ms=0, context_policy=policy.to_dict())
-    assembly = {"contextTrace": trace, "promptBlocks": [], "sources": [], "budget": {}}
     contract = {
         "contextPolicy": {"sources": policy.to_dict()},
-        "contextAssembly": assembly,
+        "contextAssembly": {"promptBlocks": [], "sources": [], "budget": {}},
     }
     prompt = asyncio.run(
         _build_coomi_system_prompt(
@@ -156,20 +139,11 @@ def test_memory_disabled_passes_none_and_records_zero_memory_source(tmp_path, mo
         )
     )
     assert "Persistent Memories" not in prompt
-    assert captured["memory_manager"] is None
-    assert captured["memory_recall"] is None
-    memory = next(source for source in trace["sources"] if source["kind"] == "coomi_memory")
-    assert memory["included"] is False
-    assert memory["dropReason"] == "disabled_by_policy"
-    assert memory["estTokens"] == 0
+    assert "Rust runtime tools" in prompt
 
 
 def test_active_retrieval_policy_removes_only_storydex_retrieval_tools(tmp_path):
-    pytest.importorskip("coomi")
-    from services.coomi_agent_service import (
-        _create_storydex_tool_registry,
-        _replace_runtime_tool_registry,
-    )
+    from services.coomi_agent_service import _create_storydex_tool_registry
 
     registry = _create_storydex_tool_registry(
         tmp_path,
@@ -181,16 +155,10 @@ def test_active_retrieval_policy_removes_only_storydex_retrieval_tools(tmp_path)
     assert "StorydexSyncWiki" in names
     assert "StorydexApplyStoryIncrement" in names
 
-    executor = types.SimpleNamespace(tool_registry=None)
-    agent = types.SimpleNamespace(tool_registry=None, tool_executor=executor)
-    _replace_runtime_tool_registry(agent, registry)
-    assert agent.tool_registry is registry
-    assert executor.tool_registry is registry
-
 
 def test_read_only_turn_registry_exposes_no_state_changing_tools(tmp_path):
-    pytest.importorskip("coomi")
     from services.coomi_agent_service import _create_storydex_tool_registry
+    from services.storydex_tool_types import ToolAccess
 
     registry = _create_storydex_tool_registry(
         tmp_path,
@@ -210,8 +178,8 @@ def test_read_only_turn_registry_exposes_no_state_changing_tools(tmp_path):
     )
     names = {tool.name for tool in registry.list_tools()}
 
-    assert {"Read", "Glob", "Grep", "WebFetch", "WebSearch"} <= names
-    assert {"Write", "Edit", "Bash", "PowerShell"}.isdisjoint(names)
+    assert names
+    assert all(tool.access == ToolAccess.READ_ONLY for tool in registry.list_tools())
     assert "StorydexSyncWiki" not in names
     assert "StorydexApplyStoryIncrement" not in names
 
@@ -232,7 +200,6 @@ def test_scoped_write_turn_registry_exposes_only_relevant_mutators(
     expected_domain_tool,
     forbidden_domain_tool,
 ):
-    pytest.importorskip("coomi")
     from services.coomi_agent_service import _create_storydex_tool_registry
 
     registry = _create_storydex_tool_registry(
@@ -253,8 +220,7 @@ def test_scoped_write_turn_registry_exposes_only_relevant_mutators(
     )
     names = {tool.name for tool in registry.list_tools()}
 
-    assert {"Read", "Glob", "Grep", "Write", "Edit"} <= names
-    assert {"Bash", "PowerShell", "Config", "Agent"}.isdisjoint(names)
+    assert "StorydexProjectSearch" in names
     if expected_domain_tool:
         assert expected_domain_tool in names
     assert forbidden_domain_tool not in names

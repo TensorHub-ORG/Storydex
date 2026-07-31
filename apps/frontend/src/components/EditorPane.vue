@@ -43,7 +43,7 @@
         <div v-else-if="!workspaceStore.activeFile" class="editor-empty">
           从左侧资源管理器选择文件，或点击待审批文件查看临时预览。
         </div>
-        <section v-else class="editor-pane">
+        <section v-else ref="editorPaneRef" class="editor-pane">
           <div class="editor-pane-head">
             <div>
               <div class="editor-pane-title">{{ workspaceStore.activeFileName }}</div>
@@ -55,6 +55,9 @@
             </div>
 
             <div class="editor-pane-actions">
+              <button class="editor-mode-btn" type="button" title="在文件中查找" aria-label="在文件中查找" @click="toggleFind">
+                <span class="material-symbols-rounded">find_in_page</span>
+              </button>
               <div v-if="workspaceStore.isGitReviewActive" class="editor-readonly-badge">
                 <span class="material-symbols-rounded">difference</span>
                 <span>只读 Diff</span>
@@ -112,6 +115,15 @@
                 </button>
               </div>
             </div>
+          </div>
+
+          <div v-if="editorSearchOpen" class="editor-find-box" @keydown.esc.prevent="closeFind">
+            <span class="material-symbols-rounded">search</span>
+            <input ref="editorFindInputRef" v-model="editorFindQuery" placeholder="在文件中查找" @keydown.enter.prevent="findNext($event.shiftKey ? -1 : 1)" />
+            <span class="editor-find-count">{{ editorFindCount ? `${editorFindIndex + 1}/${editorFindCount}` : "无结果" }}</span>
+            <button type="button" title="上一个" @click="findNext(-1)"><span class="material-symbols-rounded">keyboard_arrow_up</span></button>
+            <button type="button" title="下一个" @click="findNext(1)"><span class="material-symbols-rounded">keyboard_arrow_down</span></button>
+            <button type="button" title="关闭" @click="closeFind"><span class="material-symbols-rounded">close</span></button>
           </div>
 
           <GitReviewPane
@@ -180,10 +192,12 @@
 
           <textarea
             v-else-if="!workspaceStore.isPreviewUnsupported"
+            ref="editorTextAreaRef"
             :value="workspaceStore.editorContent"
             class="doc-editor"
             spellcheck="false"
             @input="handleInput"
+            @keydown="handleEditorKeydown"
           />
           <div v-else class="doc-unavailable">
             {{ workspaceStore.previewUnsupportedMessage }}
@@ -272,6 +286,29 @@ const tabContextMenu = ref({
 });
 const tabContextMenuRef = ref<HTMLDivElement | null>(null);
 const agentPreviewMode = ref<"preview" | "diff">("preview");
+const editorSearchOpen = ref(false);
+const editorFindQuery = ref("");
+const editorFindIndex = ref(-1);
+const editorFindInputRef = ref<HTMLInputElement | null>(null);
+const editorTextAreaRef = ref<HTMLTextAreaElement | null>(null);
+const editorPaneRef = ref<HTMLElement | null>(null);
+const previewFindMatches = ref<HTMLElement[]>([]);
+const previewFindCount = ref(0);
+const editorFindMatches = computed(() => {
+  const query = editorFindQuery.value;
+  if (!query) return [] as number[];
+  const text = workspaceStore.editorContent || "";
+  const positions: number[] = [];
+  let offset = 0;
+  while ((offset = text.indexOf(query, offset)) >= 0) { positions.push(offset); offset += Math.max(1, query.length); }
+  return positions;
+});
+const editorFindCount = computed(() => editorTextAreaRef.value ? editorFindMatches.value.length : previewFindCount.value);
+watch(editorFindQuery, async () => {
+  editorFindIndex.value = editorFindQuery.value ? 0 : -1;
+  await nextTick();
+  refreshPreviewHighlights();
+});
 const contextTab = computed(
   () => workspaceStore.openTabs.find((tab) => tab.relativePath === tabContextMenu.value.relativePath) ?? null
 );
@@ -304,6 +341,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  clearPreviewHighlights();
   document.removeEventListener("pointerdown", handleDocumentPointerDown, true);
   document.removeEventListener("keydown", handleDocumentKeydown, true);
   window.removeEventListener("blur", closeTabContextMenu);
@@ -311,8 +349,20 @@ onBeforeUnmount(() => {
 
 watch(
   () => workspaceStore.activeFile,
-  () => {
+  async () => {
     agentPreviewMode.value = "preview";
+    clearPreviewHighlights();
+    await nextTick();
+    refreshPreviewHighlights();
+  }
+);
+
+watch(
+  [() => workspaceStore.editorMode, () => workspaceStore.isAgentPreviewActive, agentPreviewMode],
+  async () => {
+    clearPreviewHighlights();
+    await nextTick();
+    refreshPreviewHighlights();
   }
 );
 
@@ -328,6 +378,127 @@ watch(
 function handleInput(event: Event): void {
   const target = event.target as HTMLTextAreaElement;
   workspaceStore.setEditorContent(target.value);
+}
+
+function toggleFind(): void {
+  editorSearchOpen.value = true;
+  void nextTick(() => editorFindInputRef.value?.focus());
+}
+function closeFind(): void {
+  editorSearchOpen.value = false;
+  editorFindQuery.value = "";
+  clearPreviewHighlights();
+  window.getSelection()?.removeAllRanges();
+}
+function findNext(direction: number): void {
+  const area = editorTextAreaRef.value;
+  if (area) {
+    const matches = editorFindMatches.value;
+    if (!matches.length) return;
+    editorFindIndex.value = (editorFindIndex.value + direction + matches.length) % matches.length;
+    const start = matches[editorFindIndex.value];
+    area.focus();
+    area.setSelectionRange(start, start + editorFindQuery.value.length);
+    const lineHeight = Number.parseFloat(window.getComputedStyle(area).lineHeight) || 22;
+    const lineIndex = workspaceStore.editorContent.slice(0, start).split("\n").length - 1;
+    area.scrollTop = Math.max(0, lineIndex * lineHeight - area.clientHeight / 2);
+  } else {
+    const count = previewFindMatches.value.length;
+    if (!count) return;
+    editorFindIndex.value = (editorFindIndex.value + direction + count) % count;
+    activatePreviewMatch(editorFindIndex.value, true);
+  }
+}
+
+function clearPreviewHighlights(): void {
+  const marks = editorPaneRef.value?.querySelectorAll<HTMLElement>("mark.editor-find-highlight") || [];
+  for (const mark of marks) mark.replaceWith(document.createTextNode(mark.textContent || ""));
+  editorPaneRef.value?.normalize();
+  previewFindMatches.value = [];
+  previewFindCount.value = 0;
+}
+
+function refreshPreviewHighlights(): void {
+  clearPreviewHighlights();
+  const query = editorFindQuery.value;
+  const root = editorPaneRef.value?.querySelector<HTMLElement>(".doc-preview-shell, .doc-markdown");
+  if (!root || !query) return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const parent = node.parentElement;
+      if (!parent || parent.closest("mark.editor-find-highlight, script, style")) return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    }
+  });
+  const matchesByNode: Array<{ node: Text; offsets: number[] }> = [];
+  let node: Node | null;
+  while ((node = walker.nextNode())) {
+    const text = node.textContent || "";
+    const offsets: number[] = [];
+    let offset = 0;
+    let found = text.indexOf(query, offset);
+    while (found >= 0) {
+      offsets.push(found);
+      offset = found + Math.max(1, query.length);
+      found = text.indexOf(query, offset);
+    }
+    if (offsets.length) matchesByNode.push({ node: node as Text, offsets });
+  }
+
+  const marks: HTMLElement[] = [];
+  for (const match of matchesByNode) {
+    const text = match.node.data;
+    const fragment = document.createDocumentFragment();
+    let offset = 0;
+    for (const start of match.offsets) {
+      fragment.append(text.slice(offset, start));
+      const mark = document.createElement("mark");
+      mark.className = "editor-find-highlight";
+      mark.textContent = text.slice(start, start + query.length);
+      fragment.append(mark);
+      marks.push(mark);
+      offset = start + query.length;
+    }
+    fragment.append(text.slice(offset));
+    match.node.replaceWith(fragment);
+  }
+  previewFindMatches.value = marks;
+  previewFindCount.value = marks.length;
+  if (marks.length) {
+    editorFindIndex.value = Math.min(Math.max(editorFindIndex.value, 0), marks.length - 1);
+    activatePreviewMatch(editorFindIndex.value, false);
+  } else {
+    editorFindIndex.value = -1;
+  }
+}
+
+function activatePreviewMatch(matchIndex: number, shouldScroll: boolean): void {
+  previewFindMatches.value.forEach((mark, index) => mark.classList.toggle("is-active", index === matchIndex));
+  const active = previewFindMatches.value[matchIndex];
+  if (shouldScroll && active) active.scrollIntoView({ block: "center", behavior: "smooth" });
+}
+
+function handleEditorKeydown(event: KeyboardEvent): void {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
+    event.preventDefault();
+    toggleFind();
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+    event.preventDefault();
+    void workspaceStore.saveActiveFile();
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const area = event.currentTarget as HTMLTextAreaElement;
+  event.preventDefault();
+  const start = area.selectionStart;
+  const end = area.selectionEnd;
+  const value = workspaceStore.editorContent;
+  const indent = "  ";
+  workspaceStore.editorContent = `${value.slice(0, start)}${indent}${value.slice(end)}`;
+  workspaceStore.syncActiveDocument();
+  void nextTick(() => area.setSelectionRange(start + indent.length, start + indent.length));
 }
 
 function handleModeChange(mode: "preview" | "edit"): void {
@@ -700,12 +871,53 @@ defineExpose({
   flex-wrap: wrap;
 }
 
+.editor-pane { position: relative; min-height: 0; height: 100%; }
+.doc-editor,
+.doc-preview,
+.doc-markdown {
+  font-family: var(--font-editor-user, var(--font-prose));
+  font-size: var(--ui-pane-scaled-px-16, 16px);
+  line-height: 1.75;
+}
 .editor-pane-actions {
   display: flex;
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.editor-find-box {
+  position: absolute;
+  z-index: 5;
+  top: 64px;
+  right: 14px;
+  width: min(420px, calc(100% - 28px));
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 5px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-card);
+  box-shadow: 0 10px 26px rgba(15, 23, 42, .18);
+}
+.editor-find-box > .material-symbols-rounded { color: var(--text-muted); font-size: 17px; }
+.editor-find-box input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: var(--text-main); padding: 4px; }
+.editor-find-box button { width: 26px; height: 26px; border: 0; background: transparent; color: var(--text-muted); cursor: pointer; display: grid; place-items: center; }
+.editor-find-box button:hover { background: var(--bg-hover); color: var(--text-main); }
+.editor-find-count { color: var(--text-muted); font-size: 11px; white-space: nowrap; }
+.editor-pane :deep(mark.editor-find-highlight) {
+  padding: 0;
+  border-radius: 2px;
+  background: #ffe082;
+  color: #202124;
+  box-shadow: 0 0 0 1px rgba(120, 84, 0, .2);
+}
+.editor-pane :deep(mark.editor-find-highlight.is-active) {
+  background: #ff9f43;
+  box-shadow: 0 0 0 2px rgba(196, 90, 0, .42);
 }
 
 .editor-readonly-badge {

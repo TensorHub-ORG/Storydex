@@ -904,6 +904,11 @@ def _encode_sse(event_name: str, payload: Dict[str, Any]) -> str:
     return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+def _exception_message(error: BaseException, fallback: str = "Coomi execution failed.") -> str:
+    detail = str(error).strip()
+    return detail or f"{fallback.rstrip('.')} ({type(error).__name__})."
+
+
 def _reconcile_story_knowledge_projection(workspace_root: Path) -> Dict[str, Any]:
     """Run the deterministic projection finalizer for every terminal Agent outcome."""
     try:
@@ -4317,13 +4322,22 @@ async def _stream_coomi_sse_worker(
                         events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
                         yield _encode_sse(task_event_name, task_payload)
         except Exception as exc:
-            error_message = str(exc)
+            error_message = _exception_message(exc)
+            _LOGGER.exception(
+                "Coomi execution failed trace=%s session=%s",
+                trace_id,
+                session_id,
+            )
             packet = {
                 "_type": "AgentError",
                 "_version": 1,
                 "error_type": type(exc).__name__,
-                "message": str(exc),
-                "details": {"runtime": "coomi"},
+                "message": error_message,
+                "details": {
+                    "runtime": "coomi",
+                    "traceId": trace_id,
+                    "sessionId": session_id,
+                },
             }
             events.append(_event_to_trace_event("AgentError", packet, len(events) + 1))
             yield _encode_sse("AgentError", packet)
@@ -4567,6 +4581,12 @@ async def _stream_coomi_sse_worker(
             yield packet
         yield _encode_sse("done", {"type": "done"})
     except Exception as exc:
+        error_message = _exception_message(exc)
+        _LOGGER.exception(
+            "Coomi finalization failed trace=%s session=%s",
+            trace_id,
+            session_id,
+        )
         if replacement is not None and not replacement.accepted:
             try:
                 await asyncio.to_thread(replacement.restore, reason="replacement_execution_failed")
@@ -4577,8 +4597,12 @@ async def _stream_coomi_sse_worker(
             "_type": "AgentError",
             "_version": 1,
             "error_type": type(exc).__name__,
-            "message": str(exc),
-            "details": {"runtime": "execution_coordinator"},
+            "message": error_message,
+            "details": {
+                "runtime": "execution_coordinator",
+                "traceId": trace_id,
+                "sessionId": session_id,
+            },
         }
         yield _encode_sse("AgentError", packet)
         yield _encode_sse("done", {"type": "done"})
@@ -4657,6 +4681,12 @@ async def _stream_coomi_sse(
             handle.abandon("worker_cancelled")
             raise
         except Exception as exc:
+            error_message = _exception_message(exc)
+            _LOGGER.exception(
+                "Coomi worker crashed trace=%s session=%s",
+                trace_id,
+                session_id,
+            )
             await queue.put(
                 _encode_sse(
                     "AgentError",
@@ -4664,7 +4694,12 @@ async def _stream_coomi_sse(
                         "_type": "AgentError",
                         "_version": 1,
                         "error_type": type(exc).__name__,
-                        "message": str(exc),
+                        "message": error_message,
+                        "details": {
+                            "runtime": "execution_worker",
+                            "traceId": trace_id,
+                            "sessionId": session_id,
+                        },
                     },
                 )
             )

@@ -104,6 +104,25 @@
 
 
                 <section class="system-settings-block">
+                  <div class="system-settings-block-title">编辑器字体样式</div>
+                  <div class="system-settings-font-grid">
+                    <button
+                      v-for="font in editorFontOptions"
+                      :key="font.id"
+                      type="button"
+                      class="system-settings-font-option"
+                      :class="{ active: uiStore.fontFamily === font.id }"
+                      :style="{ fontFamily: font.css }"
+                      @click="uiStore.setFontFamily(font.id)"
+                    >
+                      <span>{{ font.label }}</span>
+                      <small>Storydex 小说编辑预览</small>
+                    </button>
+                  </div>
+                </section>
+
+
+                <section class="system-settings-block">
                   <div class="system-settings-block-title">字体大小</div>
 
                   <label class="system-settings-field">
@@ -384,7 +403,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { themeOptions } from "@/constants/themes";
 import { fetchAgentSettings, updateAgentSettings } from "@/api/system";
 import type { ThemeCode } from "@/constants/themes";
-import { useUiStore } from "@/stores/ui";
+import { editorFontOptions, useUiStore } from "@/stores/ui";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type { StorySegmentExtension } from "@/types/workspace";
 import { MAX_PANE_FONT_SCALE, MIN_PANE_FONT_SCALE, PANE_FONT_SCALE_STEP } from "@/utils/paneFontScale";
@@ -856,6 +875,30 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 </script>
 
 <style scoped>
+.system-settings-font-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.system-settings-font-option {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-editor);
+  color: var(--text-main);
+  text-align: left;
+  cursor: pointer;
+  display: grid;
+  gap: 4px;
+}
+
+.system-settings-font-option.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 45%, var(--bg-editor));
+}
+
+.system-settings-font-option small { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .system-settings-overlay {
   position: fixed;
   inset: 0;

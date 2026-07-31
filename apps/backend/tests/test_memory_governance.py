@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 
 import pytest
-from coomi.ui.events import ToolDone
 
 from services.coomi_agent_service import _CoomiEventTranslator
 from services.storydex_agent_tools import StorydexApplyStoryIncrementTool
@@ -266,11 +265,13 @@ def test_review_required_result_is_preserved_in_tool_done_trace_without_permissi
     knowledge_review = json.loads(tool_result.output)["knowledgeReview"]
 
     translated = _CoomiEventTranslator(session_id="session-1").translate(
-        ToolDone(
-            tool_name=tool.name,
-            elapsed=0.01,
-            result_preview=tool_result.output[:500],
-        )
+        {
+            "type": "tool_finished",
+            "data": {
+                "call": {"id": "call-1", "name": tool.name, "arguments": {}},
+                "result": {"success": True, "output": tool_result.output},
+            },
+        }
     )
 
     assert tool.requires_confirmation is False

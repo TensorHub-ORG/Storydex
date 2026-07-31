@@ -507,7 +507,7 @@
       <div v-if="executionFloatVisible && !executionFloatCollapsed" class="coomi-execution-float-slot">
         <AgentExecutionFloatBar @collapse="collapseExecutionFloat" />
       </div>
-      <div class="coomi-input-shell">
+      <div class="coomi-input-shell" @pointerdown.stop>
         <textarea
           ref="inputRef"
           v-model="agentStore.promptInput"
@@ -518,6 +518,7 @@
           rows="1"
           @keydown="handleComposerKeydown"
           @input="handleComposerInput"
+          @focus="handleComposerFocus"
         ></textarea>
         <button
           class="coomi-send"
@@ -580,7 +581,6 @@ import CoomiConfigPanel from "@/components/CoomiConfigPanel.vue";
 import { useAgentStore } from "@/stores/agent";
 import { useGitStore } from "@/stores/git";
 import { useWorkspaceStore } from "@/stores/workspace";
-import { openFilePreviewWindow } from "@/utils/filePreview";
 import { createMarkdownRenderer } from "@/utils/markdown";
 import {
   findMarkdownLinkAnchor,
@@ -1107,6 +1107,15 @@ async function handleSubmitOrStop(): Promise<void> {
   await agentStore.runPrompt();
   await nextTick();
   resizeComposer();
+}
+
+function handleComposerFocus(): void {
+  void nextTick(() => {
+    if (document.activeElement !== inputRef.value && !agentStore.isReexecuting) {
+      inputRef.value?.focus({ preventScroll: true });
+    }
+    resizeComposer();
+  });
 }
 
 async function handleStopRun(): Promise<void> {
@@ -1978,7 +1987,7 @@ function handleMarkdownLinkClick(event: MouseEvent): void {
   if (relativePath) {
     event.preventDefault();
     event.stopPropagation();
-    void openFilePreviewWindow(relativePath);
+    void workspaceStore.openFile(relativePath);
     return;
   }
 
@@ -3863,6 +3872,8 @@ defineExpose({
 
 .coomi-input-shell {
   position: relative;
+  z-index: 10;
+  pointer-events: auto;
   display: flex;
   align-items: flex-end;
   gap: 10px;

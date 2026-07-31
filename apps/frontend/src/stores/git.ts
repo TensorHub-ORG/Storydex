@@ -2,11 +2,14 @@ import { defineStore } from "pinia";
 import { ApiResponseError, describeTransportError } from "@/api/client";
 import {
   commitWorkspaceGitChanges,
+  createWorkspaceGitBranch,
+  fetchWorkspaceGitBranches,
   fetchWorkspaceGitSummary,
   initializeWorkspaceGitRepository,
-  restoreWorkspaceGitCommit
+  restoreWorkspaceGitCommit,
+  switchWorkspaceGitBranch
 } from "@/api/workspace";
-import type { WorkspaceGitSummaryResponse } from "@/types/workspace";
+import type { WorkspaceGitBranchEntry, WorkspaceGitSummaryResponse } from "@/types/workspace";
 
 interface GitState {
   summary: WorkspaceGitSummaryResponse | null;
@@ -18,6 +21,8 @@ interface GitState {
   successMessage: string;
   /** Wall-clock ms of the last summary that was actually applied to the store. */
   lastSyncedAt: number;
+  branches: WorkspaceGitBranchEntry[];
+  isBranchBusy: boolean;
 }
 
 /**
@@ -48,7 +53,9 @@ export const useGitStore = defineStore("git", {
     isRestoring: false,
     error: "",
     successMessage: "",
-    lastSyncedAt: 0
+    lastSyncedAt: 0,
+    branches: [],
+    isBranchBusy: false
   }),
 
   getters: {
@@ -87,6 +94,8 @@ export const useGitStore = defineStore("git", {
       this.isCommitting = false;
       this.isRestoring = false;
       this.lastSyncedAt = 0;
+      this.branches = [];
+      this.isBranchBusy = false;
       // Invalidate any in-flight read so it cannot repopulate the panel with the
       // previous project's summary after the workspace was closed or switched.
       appliedSummarySeq = ++summaryRequestSeq;
@@ -169,6 +178,44 @@ export const useGitStore = defineStore("git", {
       } finally {
         this.isInitializing = false;
       }
+    },
+
+    async refreshBranches(): Promise<void> {
+      try {
+        const result = await fetchWorkspaceGitBranches();
+        this.branches = result.data.branches || [];
+        if (result.data.summary) this.applySummary(result.data.summary);
+      } catch (error: unknown) {
+        this.error = normalizeGitError(error);
+      }
+    },
+
+    async createBranch(name: string): Promise<boolean> {
+      if (this.isBranchBusy) return false;
+      this.isBranchBusy = true;
+      this.error = "";
+      try {
+        const result = await createWorkspaceGitBranch(name, true);
+        this.branches = result.data.branches || [];
+        if (result.data.summary) this.applySummary(result.data.summary);
+        this.successMessage = `已创建并切换到分支 ${name}`;
+        return true;
+      } catch (error: unknown) { this.error = normalizeGitError(error); return false; }
+      finally { this.isBranchBusy = false; }
+    },
+
+    async switchBranch(name: string): Promise<boolean> {
+      if (this.isBranchBusy) return false;
+      this.isBranchBusy = true;
+      this.error = "";
+      try {
+        const result = await switchWorkspaceGitBranch(name);
+        this.branches = result.data.branches || [];
+        if (result.data.summary) this.applySummary(result.data.summary);
+        this.successMessage = `已切换到分支 ${name}`;
+        return true;
+      } catch (error: unknown) { this.error = normalizeGitError(error); return false; }
+      finally { this.isBranchBusy = false; }
     },
 
     async commitAll(message: string): Promise<boolean> {

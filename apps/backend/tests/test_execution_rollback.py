@@ -25,62 +25,42 @@ def _trace_record(trace_id: str, prompt: str, timestamp: str) -> dict:
     }
 
 
-def test_rollback_last_turn_atomically_truncates_real_coomi_jsonl(monkeypatch, tmp_path: Path):
-    from coomi.engine.session import SessionManager, add_assistant_message, add_tool_result, add_user_message
-    from coomi.services.session_history import append_session_state, load_session_from_jsonl
-
+def test_rollback_last_turn_atomically_truncates_rust_session_json(monkeypatch, tmp_path: Path):
     sessions_root = tmp_path / "coomi-sessions"
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir(exist_ok=True)
+    sessions_root.mkdir(exist_ok=True)
     monkeypatch.setattr(coomi, "STORYDEX_COOMI_SESSIONS", sessions_root)
-
-    session = SessionManager(history_dir=sessions_root).create_session(cwd=str(workspace_root), model="fake")
-    add_user_message(session, "first prompt")
-    add_assistant_message(session, "first reply")
-    add_tool_result(session, "tool-1", "first tool result")
-    session.active_skills = ["story"]
-    append_session_state(session)
-    add_user_message(session, "second prompt")
-    add_assistant_message(session, "second reply")
-    add_tool_result(session, "tool-2", "second tool result")
+    history_path = sessions_root / "runtime-session.json"
+    history_path.write_text(
+        json.dumps(
+            {
+                "messages": [
+                    {"role": "user", "content": "first prompt"},
+                    {"role": "assistant", "content": "first reply"},
+                    {"role": "tool", "content": "first tool result"},
+                    {"role": "user", "content": "second prompt"},
+                    {"role": "assistant", "content": "second reply"},
+                    {"role": "tool", "content": "second tool result"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
     coomi._write_coomi_session_binding(
         workspace_root=workspace_root,
         storydex_session_id="session-a",
-        session=session,
+        runtime_session_id="runtime-session",
     )
-
     service = coomi.StorydexCoomiAgentService()
-    runtime_key = service._runtime_key(session_id="session-a", workspace_root=workspace_root)
-    service._sessions[runtime_key] = session
-    service._agents[runtime_key] = object()
-    service._permissions[runtime_key] = object()
-
     result = service.rollback_last_turn("session-a", workspace_root=workspace_root)
-
     assert result["rolledBack"] is True
-    entries = [
-        json.loads(line)
-        for line in Path(session.history_path).read_text(encoding="utf-8").splitlines()
-        if line.strip()
+    restored = json.loads(history_path.read_text(encoding="utf-8"))
+    assert [message["content"] for message in restored["messages"]] == [
+        "first prompt",
+        "first reply",
+        "first tool result",
     ]
-    assert entries[0]["type"] == "session"
-    assert [
-        entry["message"]["content"]
-        for entry in entries
-        if entry.get("type") == "message"
-    ] == ["first prompt", "first reply", "first tool result"]
-    assert entries[-1]["type"] == "state"
-
-    restored = load_session_from_jsonl(session.history_path)
-    assert [(message.role, message.content) for message in restored.messages] == [
-        ("user", "first prompt"),
-        ("assistant", "first reply"),
-        ("tool", "first tool result"),
-    ]
-    assert restored.active_skills == ["story"]
-    assert runtime_key not in service._sessions
-    assert runtime_key not in service._agents
-    assert runtime_key not in service._permissions
     assert coomi._read_coomi_session_binding(
         workspace_root=workspace_root,
         storydex_session_id="session-a",
@@ -88,24 +68,23 @@ def test_rollback_last_turn_atomically_truncates_real_coomi_jsonl(monkeypatch, t
 
 
 def test_rollback_last_turn_is_idempotent_without_user_message_or_binding(monkeypatch, tmp_path: Path):
-    from coomi.engine.session import SessionManager
-
     sessions_root = tmp_path / "coomi-sessions"
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir(exist_ok=True)
+    sessions_root.mkdir(exist_ok=True)
     monkeypatch.setattr(coomi, "STORYDEX_COOMI_SESSIONS", sessions_root)
-
-    session = SessionManager(history_dir=sessions_root).create_session(cwd=str(workspace_root), model="fake")
+    history_path = sessions_root / "runtime-session.json"
+    history_path.write_text('{"messages": []}', encoding="utf-8")
     coomi._write_coomi_session_binding(
         workspace_root=workspace_root,
         storydex_session_id="session-a",
-        session=session,
+        runtime_session_id="runtime-session",
     )
-    original = Path(session.history_path).read_bytes()
+    original = history_path.read_bytes()
     service = coomi.StorydexCoomiAgentService()
 
     assert service.rollback_last_turn("session-a", workspace_root=workspace_root)["rolledBack"] is False
-    assert Path(session.history_path).read_bytes() == original
+    assert history_path.read_bytes() == original
     assert service.rollback_last_turn("missing", workspace_root=workspace_root)["rolledBack"] is False
 
 

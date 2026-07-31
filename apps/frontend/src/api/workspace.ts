@@ -17,6 +17,8 @@ import type {
   WorkspaceGitRestoreRequest,
   WorkspaceGitRestoreResponse,
   WorkspaceGitSummaryResponse,
+  WorkspaceGitBranchesResponse,
+  WorkspaceSearchResponse,
   WorkspaceImportFilesRequest,
   WorkspaceImportFilesResponse,
   StoryLatestSnapshotResponse,
@@ -296,6 +298,26 @@ export async function initializeWorkspaceGitRepository(): Promise<ApiResult<Work
     }
     throw error;
   }
+}
+
+export async function searchWorkspace(query: string, limit = 20): Promise<ApiResult<WorkspaceSearchResponse>> {
+  const response = await apiClient.post<ApiEnvelope<WorkspaceSearchResponse>>("/workspace/search", { query, limit });
+  return unwrapEnvelope(response.data, "Workspace search failed.");
+}
+
+export async function fetchWorkspaceGitBranches(): Promise<ApiResult<WorkspaceGitBranchesResponse>> {
+  const response = await apiClient.get<ApiEnvelope<WorkspaceGitBranchesResponse>>("/workspace/git/branches");
+  return unwrapEnvelope(response.data, "Workspace Git branches request failed.");
+}
+
+export async function createWorkspaceGitBranch(name: string, checkout = true): Promise<ApiResult<WorkspaceGitBranchesResponse>> {
+  const response = await apiClient.post<ApiEnvelope<WorkspaceGitBranchesResponse>>("/workspace/git/branches", { name, checkout });
+  return unwrapEnvelope(response.data, "Workspace Git branch creation failed.");
+}
+
+export async function switchWorkspaceGitBranch(name: string): Promise<ApiResult<WorkspaceGitBranchesResponse>> {
+  const response = await apiClient.post<ApiEnvelope<WorkspaceGitBranchesResponse>>("/workspace/git/checkout", { name });
+  return unwrapEnvelope(response.data, "Workspace Git branch switch failed.");
 }
 
 export async function commitWorkspaceGitChanges(

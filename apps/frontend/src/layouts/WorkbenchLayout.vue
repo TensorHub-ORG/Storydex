@@ -57,6 +57,7 @@ import EditorPane from "@/components/EditorPane.vue";
 import ExplorerSidebar from "@/components/ExplorerSidebar.vue";
 import PresetManagementSidebar from "@/components/PresetManagementSidebar.vue";
 import PromptRepositorySidebar from "@/components/PromptRepositorySidebar.vue";
+import SearchSidebar from "@/components/SearchSidebar.vue";
 import SourceControlSidebar from "@/components/SourceControlSidebar.vue";
 import StatusBar from "@/components/StatusBar.vue";
 import StoryStatePanel from "@/components/StoryStatePanel.vue";
@@ -70,8 +71,9 @@ import { paneFontScaleStyle } from "@/utils/paneFontScale";
 
 const uiStore = useUiStore();
 const workspaceStore = useWorkspaceStore();
-const { applyTheme, applyPaneFontScale } = useTheme();
+const { applyTheme, applyPaneFontScale, applyEditorFont } = useTheme();
 applyPaneFontScale();
+applyEditorFont(uiStore.fontFamily);
 
 const workspaceRef = ref<HTMLElement | null>(null);
 
@@ -101,6 +103,9 @@ const showAgentPanel = computed(() => !uiStore.agentCollapsed && !workspaceStore
 const sidebarComponent = computed(() => {
   if (uiStore.activeActivity === "source-control") {
     return SourceControlSidebar;
+  }
+  if (uiStore.activeActivity === "search") {
+    return SearchSidebar;
   }
   if (uiStore.activeActivity === "presets") {
     return PresetManagementSidebar;
@@ -161,6 +166,8 @@ watch(
   (nextTheme) => applyTheme(nextTheme),
   { immediate: true }
 );
+
+watch(() => uiStore.fontFamily, (fontFamily) => applyEditorFont(fontFamily), { immediate: true });
 
 function startResize(target: "sidebar" | "agent", event: PointerEvent): void {
   const workspace = workspaceRef.value;

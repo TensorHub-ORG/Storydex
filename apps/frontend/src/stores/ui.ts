@@ -23,7 +23,21 @@ interface UiState {
   centerPaneFontScale: number;
   rightPaneFontScale: number;
   systemSettingsOpen: boolean;
+  fontFamily: string;
 }
+
+export const editorFontOptions = [
+  { id: "system", label: "系统无衬线", css: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" },
+  { id: "yahei", label: "微软雅黑", css: "'Microsoft YaHei', 'PingFang SC', sans-serif" },
+  { id: "noto-sans", label: "Noto Sans", css: "'Noto Sans SC', sans-serif" },
+  { id: "source-han-sans", label: "思源黑体", css: "'Source Han Sans SC', sans-serif" },
+  { id: "source-han-serif", label: "思源宋体", css: "'Source Han Serif SC', serif" },
+  { id: "songti", label: "宋体", css: "SimSun, 'Songti SC', serif" },
+  { id: "kai", label: "楷体", css: "KaiTi, 'Kaiti SC', cursive" },
+  { id: "cascadia", label: "Cascadia Mono", css: "'Cascadia Mono', Consolas, monospace" },
+  { id: "jetbrains", label: "JetBrains Mono", css: "'JetBrains Mono', Consolas, monospace" },
+  { id: "fira", label: "Fira Code", css: "'Fira Code', Consolas, monospace" }
+] as const;
 
 const DEFAULT_WORKBENCH_MODE: WorkbenchMode = "storydex";
 const DEFAULT_SIDEBAR_WIDTH = 320;
@@ -44,7 +58,8 @@ export const useUiStore = defineStore("ui", {
     leftPaneFontScale: DEFAULT_PANE_FONT_SCALE,
     centerPaneFontScale: DEFAULT_PANE_FONT_SCALE,
     rightPaneFontScale: DEFAULT_PANE_FONT_SCALE,
-    systemSettingsOpen: false
+    systemSettingsOpen: false,
+    fontFamily: "system"
   }),
   actions: {
     applyPersistedState(payload?: Partial<UIPreferencesResponse> | null): void {
@@ -61,6 +76,8 @@ export const useUiStore = defineStore("ui", {
       this.leftPaneFontScale = normalizePaneFontScale(payload?.leftPaneFontScale);
       this.centerPaneFontScale = normalizePaneFontScale(payload?.centerPaneFontScale, legacyCenterScale);
       this.rightPaneFontScale = normalizePaneFontScale(payload?.rightPaneFontScale);
+      const persistedFont = String(payload?.fontFamily || "system");
+      this.fontFamily = editorFontOptions.some((item) => item.id === persistedFont) ? persistedFont : "system";
       this.bootstrapped = true;
     },
 
@@ -129,6 +146,13 @@ export const useUiStore = defineStore("ui", {
       this.systemSettingsOpen = open;
     },
 
+    setFontFamily(fontFamily: string): void {
+      const option = editorFontOptions.find((item) => item.id === fontFamily) || editorFontOptions[0];
+      this.fontFamily = option.id;
+      document.documentElement.style.setProperty("--font-editor-user", option.css);
+      this.schedulePersist();
+    },
+
     schedulePersist(): void {
       if (typeof window === "undefined") {
         return;
@@ -153,7 +177,8 @@ export const useUiStore = defineStore("ui", {
         agentWidth: this.agentWidth,
         leftPaneFontScale: this.leftPaneFontScale,
         centerPaneFontScale: this.centerPaneFontScale,
-        rightPaneFontScale: this.rightPaneFontScale
+        rightPaneFontScale: this.rightPaneFontScale,
+        fontFamily: this.fontFamily
       });
     }
   }

@@ -12,10 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 import time
 import types
-from contextlib import contextmanager
 
 from services.llm_replay import get_llm_metrics, llm_trace, reset_llm_metrics
 from services.storydex_intent_service import (
@@ -73,18 +71,13 @@ def _v2_intent_json(
 
 
 def _install_fake_provider(monkeypatch, provider) -> None:
-    fake_services = types.ModuleType("coomi.services")
-    fake_services.get_llm_provider = lambda: provider
-    monkeypatch.setitem(sys.modules, "coomi", types.ModuleType("coomi"))
-    monkeypatch.setitem(sys.modules, "coomi.services", fake_services)
+    import services.coomi_bridge_client as coomi_bridge_client
 
-    @contextmanager
-    def fake_home():
-        yield
-
-    import services.coomi_agent_service as coomi_agent_service
-
-    monkeypatch.setattr(coomi_agent_service, "_storydex_coomi_home", fake_home)
+    monkeypatch.setattr(
+        coomi_bridge_client,
+        "get_bridge_provider",
+        lambda *_args, **_kwargs: provider,
+    )
 
 
 # ─────────────────── 1. LLM 正常路径 ───────────────────

@@ -102,6 +102,27 @@ def test_first_commit_paths_empty_paths_and_validation(git_service: GitService, 
         git_service.read_commit_diff(workspace, commit_id="")
 
 
+def test_create_branch_before_first_commit(git_service: GitService, tmp_path: Path):
+    workspace = tmp_path / "unborn-branch"
+    workspace.mkdir()
+
+    initial = git_service.list_branches(workspace)
+    assert initial["current"] == GitService.DEFAULT_BRANCH
+
+    created = git_service.create_branch(workspace, name="draft/opening", checkout=True)
+    assert created["current"] == "draft/opening"
+    assert created["summary"]["branch"] == "draft/opening"
+    assert created["branches"] == [{"name": "draft/opening", "current": True}]
+
+    with pytest.raises(GitServiceError):
+        git_service.create_branch(workspace, name="draft/opening", checkout=True)
+
+    (workspace / "opening.md").write_text("first draft\n", encoding="utf-8")
+    committed = git_service.commit_all(workspace, message="draft: opening")
+    assert committed["created"] is True
+    assert committed["summary"]["branch"] == "draft/opening"
+
+
 def test_snapshot_and_diff_parsers_cover_text_binary_truncation_and_renames(git_service: GitService, tmp_path: Path):
     workspace = tmp_path / "files"
     workspace.mkdir()

@@ -1,142 +1,78 @@
 from __future__ import annotations
 
-import inspect
-import asyncio
-from importlib.metadata import version
+import subprocess
 
-from services.coomi_agent_service import _CoomiEventTranslator
+import pytest
+
+from services.coomi_agent_service import _CoomiEventTranslator, _create_storydex_tool_registry
+from services.coomi_bridge_client import (
+    BRIDGE_PROTOCOL_VERSION,
+    STORYDEX_COOMI_RUNTIME_VERSION,
+    _decode_lines,
+    _wire_messages,
+    _wire_tools,
+    bridge_command,
+)
 from services.coomi_version_service import read_expected_coomi_version
-from services.llm_replay import normalize_llm_usage
 
 
-def test_usage_provenance_is_owned_by_storydex_adapter():
-    assert version("coomi-agent") == read_expected_coomi_version()
-
-    payload = normalize_llm_usage(
-        {
-            "requested_model": "contract-model",
-            "estimated_input_tokens": 12,
-            "estimator": "contract-estimator",
-        },
-        source="missing",
-        protocol="openai_responses",
+def test_vendored_rust_bridge_version_contract() -> None:
+    completed = subprocess.run(
+        [*bridge_command(), "--version"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        check=False,
     )
-    assert payload is not None
-    assert payload["_type"] == "LLMUsage"
-    assert payload["_version"] == 1
-    assert payload["source"] == "missing"
-    assert payload["inputTokens"] is None
-    assert payload["estimatedInputTokens"] == 12
-    assert payload["protocol"] == "openai_responses"
+    assert completed.returncode == 0
+    assert f"storydex-coomi-bridge {STORYDEX_COOMI_RUNTIME_VERSION}" in completed.stdout
+    assert read_expected_coomi_version() == STORYDEX_COOMI_RUNTIME_VERSION
+    assert BRIDGE_PROTOCOL_VERSION == 1
 
 
-def test_agent_and_loop_public_signatures():
-    from coomi.engine.loop import AgentLoop
-    from coomi.engine.loop_runner import LoopRunner
-
-    agent_params = inspect.signature(AgentLoop).parameters
-    assert {"llm", "tool_registry", "permission_system", "project_path"} <= set(agent_params)
-    assert inspect.isasyncgenfunction(AgentLoop.run_stream)
-
-    start_params = inspect.signature(LoopRunner.start_loop).parameters
-    assert {"cwd", "memory_manager", "memory_recall"} <= set(start_params)
-    assert inspect.isasyncgenfunction(LoopRunner.start_loop)
-
-
-def test_session_lifecycle_and_run_stream_is_iterable(tmp_path):
-    from coomi.engine.loop import AgentLoop
-    from coomi.engine.session import SessionManager
-    from coomi.tools.registry import ToolRegistry
-
-    class Provider:
-        model = "contract-model"
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        manager = SessionManager(history_dir=tmp_path, persist_history=False)
-        session = manager.create_session(system_prompt="contract", cwd=str(tmp_path), model="contract-model")
-        agent = AgentLoop(Provider(), ToolRegistry(), project_path=str(tmp_path))
-        stream = agent.run_stream(session, "hello")
-        assert stream.__aiter__() is stream
-        assert session.system_prompt == "contract"
-        assert session.id
-    finally:
-        loop.close()
-        asyncio.set_event_loop(None)
-
-
-def test_translated_public_event_shapes():
-    from coomi.ui.events import (
-        AgentCancelled,
-        AgentError,
-        CompressionEvent,
-        ConnectionRetry,
-        ReasoningChunk,
-        TextChunk,
-        ToolDone,
-        ToolRunning,
-        ToolStart,
-        UsageUpdate,
+def test_jsonl_and_wire_contract_preserve_tool_history() -> None:
+    packets = _decode_lines(b'{"type":"text","data":{"text":"ok"}}\n')
+    assert packets == [{"type": "text", "data": {"text": "ok"}}]
+    messages = _wire_messages(
+        [
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "name": "Read"}]},
+            {"role": "tool", "content": "done", "tool_call_id": "c1"},
+        ]
     )
+    assert messages[0]["tool_calls"][0]["id"] == "c1"
+    assert messages[1]["tool_call_id"] == "c1"
+    assert _wire_tools(
+        [{"type": "function", "function": {"name": "StorydexWikiQuery", "parameters": {"type": "object"}}}]
+    )[0]["name"] == "StorydexWikiQuery"
 
+
+def test_invalid_jsonl_is_rejected() -> None:
+    with pytest.raises(Exception, match="Invalid JSONL"):
+        _decode_lines(b"not-json\n")
+
+
+def test_bridge_events_translate_to_storydex_public_shapes() -> None:
     translator = _CoomiEventTranslator(session_id="contract-session")
-    # Hidden model reasoning is intentionally not part of Storydex's public
-    # event contract and must never reach SSE, trace history, or audit logs.
-    assert translator.translate(ReasoningChunk(content="reason")) is None
-    cases = [
-        (TextChunk(content="text"), "TextChunk", "content"),
-        (ConnectionRetry(attempt=1, max_attempts=3, delay=0.5, message="retry"), "ConnectionRetry", "maxAttempts"),
-        (ToolStart(tool_name="Read", arguments={}), "ToolStart", "tool_name"),
-        (ToolRunning(tool_name="Read"), "ToolRunning", "progress"),
-        (ToolDone(tool_name="Read", result_preview="ok"), "ToolDone", "result_preview"),
-        (UsageUpdate(usage={"total_tokens": 1}), "UsageUpdate", "usage"),
-        (CompressionEvent(before=2, after=1), "CompressionEvent", "summary"),
-        (AgentError(message="bad"), "AgentError", "message"),
-        (AgentCancelled(), "AgentCancelled", "reason"),
-    ]
-    for event, expected_type, expected_field in cases:
-        translated = translator.translate(event)
-        assert translated is not None
-        name, payload = translated
-        assert name == expected_type
-        assert payload["_type"] == expected_type
-        assert expected_field in payload
+    assert translator.translate({"type": "reasoning_delta", "data": {"text": "hidden"}}) is None
+    start = translator.translate(
+        {"type": "tool_started", "data": {"call": {"id": "c1", "name": "Read", "arguments": {}}}}
+    )
+    done = translator.translate(
+        {
+            "type": "tool_finished",
+            "data": {"call": {"id": "c1", "name": "Read"}, "result": {"success": True, "output": "ok"}},
+        }
+    )
+    assert start is not None and start[0] == "ToolStart"
+    assert done is not None and done[0] == "ToolDone"
+    assert done[1]["tool_call_id"] == "c1"
+    assert done[1]["is_error"] is False
 
 
-def test_permissions_memory_cancel_and_config_public_contract(monkeypatch, tmp_path):
-    from coomi.engine.loop import AgentLoop
-    from coomi.engine.loop_runner import LoopRunner
-    from coomi.security import PermissionLevel, PermissionMode, PermissionSystem
-    from coomi.services.llm.config import ConfigManager
-    from coomi.services.memory import MemoryManager, MemoryRecall
-    from coomi.tools.registry import ToolRegistry
-
-    permissions = PermissionSystem()
-    permissions.set_mode(PermissionMode.FULL_ACCESS)
-    assert PermissionLevel.AUTO.value == "auto"
-    assert permissions is not None
-
-    manager = MemoryManager(project_path=str(tmp_path))
-    provider = object()
-    recall = MemoryRecall(provider, manager)
-    assert manager is not None and recall is not None
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        runner = LoopRunner(provider, ToolRegistry(), permission_system=permissions)
-        stream = runner.start_loop(cwd=str(tmp_path), memory_manager=None, memory_recall=None)
-        assert stream.__aiter__() is stream
-
-        agent = AgentLoop(provider, ToolRegistry(), permission_system=permissions, project_path=str(tmp_path))
-        agent.cancel_token.cancel()
-        assert agent.cancel_token.is_cancelled is True
-    finally:
-        loop.close()
-        asyncio.set_event_loop(None)
-
-    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-    config = ConfigManager()
-    assert isinstance(config.data, dict)
-    assert config.list_providers() == []
+def test_storydex_domain_registry_is_independent_of_python_coomi(tmp_path) -> None:
+    registry = _create_storydex_tool_registry(tmp_path)
+    names = {tool.name for tool in registry.list_tools()}
+    assert {"StorydexProjectSearch", "StorydexWikiQuery", "StorydexApplyStoryIncrement"} <= names
+    assert all(spec["name"].startswith("Storydex") for spec in registry.specs())

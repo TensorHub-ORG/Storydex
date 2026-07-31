@@ -180,6 +180,18 @@
         />
       </label>
 
+      <div class="modal-label">
+        目录骨架
+        <div class="project-architecture-options">
+          <button type="button" :class="{ active: createArchitecture === 'standard' }" @click="createArchitecture = 'standard'">
+            <strong>规范架构</strong><span>章节、角色、世界观、模板等完整目录</span>
+          </button>
+          <button type="button" :class="{ active: createArchitecture === 'free' }" @click="createArchitecture = 'free'">
+            <strong>自由架构</strong><span>仅创建运行缓存与 Git 忽略规则</span>
+          </button>
+        </div>
+      </div>
+
       <label class="modal-label">
         最终项目路径
         <div class="modal-inline-readonly">{{ newProjectTargetPath || "请选择目录并填写项目名称" }}</div>
@@ -274,9 +286,10 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import storydexIcon from "@/assets/storydex_icon_01.png";
 import { useProjectLauncher } from "@/composables/useProjectLauncher";
+import { searchWorkspace } from "@/api/workspace";
 import { useUiStore } from "@/stores/ui";
 import { useWorkspaceStore } from "@/stores/workspace";
-import type { WorkspaceProjectInfo, WorkspaceTreeNode } from "@/types/workspace";
+import type { WorkspaceProjectInfo, WorkspaceSearchItem, WorkspaceTreeNode } from "@/types/workspace";
 
 const uiStore = useUiStore();
 const workspaceStore = useWorkspaceStore();
@@ -294,6 +307,7 @@ const dialogMode = launcher.dialogMode;
 const createBaseDirectory = launcher.createBaseDirectory;
 const createProjectName = launcher.createProjectName;
 const openProjectPathInput = launcher.openProjectPathInput;
+const createArchitecture = launcher.createArchitecture;
 const newProjectTargetPath = launcher.newProjectTargetPath;
 const createValidationMessage = launcher.createValidationMessage;
 const canCreateProject = launcher.canCreateProject;
@@ -336,6 +350,8 @@ const commandOpen = ref(false);
 const commandQuery = ref("");
 const commandActiveIndex = ref(0);
 const COMMAND_FILE_RESULT_LIMIT = 12;
+const contentSearchResults = ref<WorkspaceSearchItem[]>([]);
+let contentSearchTimer: number | null = null;
 
 interface StaticCommandDefinition {
   key: string;
@@ -484,6 +500,18 @@ const commandResults = computed<CommandPaletteGroup[]>(() => {
     if (fileItems.length) {
       groups.push({ label: "项目文件", items: fileItems });
     }
+    const contentItems: CommandPaletteItem[] = contentSearchResults.value
+      .filter((item) => item.relativePath)
+      .slice(0, COMMAND_FILE_RESULT_LIMIT)
+      .map((item) => ({
+        key: `content:${item.relativePath}`,
+        label: item.relativePath,
+        detail: item.snippet || (item.lineNumber ? `第 ${item.lineNumber} 行` : "内容匹配"),
+        icon: "manage_search",
+        flatIndex: flatIndex++,
+        run: async () => { await workspaceStore.openFile(item.relativePath); switchActivity("resources"); }
+      }));
+    if (contentItems.length) groups.push({ label: "内容匹配", items: contentItems });
   }
 
   return groups;
@@ -554,6 +582,13 @@ function handleGlobalCommandShortcut(event: KeyboardEvent): void {
 
 watch(commandQuery, () => {
   commandActiveIndex.value = 0;
+  if (contentSearchTimer !== null) window.clearTimeout(contentSearchTimer);
+  const query = commandQuery.value.trim();
+  if (!query || workspaceStore.launchScreenVisible) { contentSearchResults.value = []; return; }
+  contentSearchTimer = window.setTimeout(async () => {
+    try { contentSearchResults.value = (await searchWorkspace(query, 12)).data.items || []; }
+    catch { contentSearchResults.value = []; }
+  }, 260);
 });
 
 watch(
@@ -584,6 +619,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   document.removeEventListener("pointerdown", handleDocumentPointerDown, true);
   window.removeEventListener("keydown", handleGlobalCommandShortcut);
+  if (contentSearchTimer !== null) window.clearTimeout(contentSearchTimer);
 });
 
 function handleDocumentPointerDown(event: PointerEvent): void {
@@ -693,6 +729,18 @@ function handleOpenAbout(): void {
 </script>
 
 <style scoped>
+.project-architecture-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 6px; }
+.project-architecture-options button { display: grid; gap: 4px; padding: 10px; border: 1px solid var(--border-subtle); background: var(--bg-editor); color: var(--text-main); text-align: left; cursor: pointer; }
+.project-architecture-options button.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent-soft) 45%, var(--bg-editor)); }
+.project-architecture-options span { color: var(--text-muted); font-size: 11px; line-height: 1.4; }
+.modal-card { width: min(620px, calc(100vw - 32px)); padding: 24px 26px 20px; border-radius: 10px; }
+.modal-title { font-size: 21px; letter-spacing: 0; }
+.modal-desc { margin-top: 6px; color: var(--text-muted); }
+.modal-label { gap: 6px; margin-top: 14px; }
+.modal-input, .modal-inline-readonly { min-height: 40px; border-radius: 7px; }
+.project-architecture-options button { min-height: 66px; border-radius: 7px; transition: border-color .16s ease, background-color .16s ease; }
+.project-architecture-options button:hover { border-color: var(--accent); }
+.modal-actions { margin-top: 18px; }
 .top-header {
   position: relative;
   display: flex;

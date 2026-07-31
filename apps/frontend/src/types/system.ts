@@ -27,6 +27,7 @@ export interface UIPreferencesResponse {
   leftPaneFontScale: number;
   centerPaneFontScale: number;
   rightPaneFontScale: number;
+  fontFamily?: string;
   /** @deprecated Kept for compatibility with older Storydex preferences. */
   fileFontSize?: number;
   /** @deprecated Kept for compatibility with older Storydex preferences. */
@@ -45,6 +46,7 @@ export interface UIPreferencesUpdateRequest {
   leftPaneFontScale: number;
   centerPaneFontScale: number;
   rightPaneFontScale: number;
+  fontFamily?: string;
 }
 
 export interface WorkspaceStateResponse {

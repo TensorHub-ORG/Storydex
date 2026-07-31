@@ -1467,7 +1467,7 @@ export const useAgentStore = defineStore("agent", {
       } else if (eventName === "AgentError") {
         nextRun.status = "failed";
         nextRun.tasks = finalizeTaskStatuses(nextRun.tasks, "failed");
-        nextRun.errorMessage = String(visiblePacket.message || "Coomi execution failed.");
+        nextRun.errorMessage = formatAgentErrorPacket(visiblePacket);
         nextRun.errorCode = String(visiblePacket.error_type || "coomi_error");
         this.pendingApprovals = [];
       }
@@ -1710,7 +1710,7 @@ function streamPacketToWaterfallItem(
       type: "error",
       status: "error",
       title: packet.error_type || "Coomi error",
-      content: String(packet.message || "Coomi execution failed."),
+      content: formatAgentErrorPacket(packet),
       raw
     });
   }
@@ -1854,6 +1854,49 @@ function detailForPacket(eventName: string, packet: AgentStreamPacket): string {
   if (eventName === "RunAccepted" || eventName === "TurnPhase") return String(packet.detail || packet.label || eventName);
   if (eventName === "AgentCompleted") return `tokens ${Number(packet.total_tokens || 0)}`;
   return eventName;
+}
+
+function formatAgentErrorPacket(packet: AgentStreamPacket): string {
+  const details = toRecord(packet.details) || {};
+  const lines: string[] = [];
+  const message = String(packet.message || "Coomi execution failed.").trim();
+  const errorType = String(packet.error_type || details.exceptionType || "CoomiError").trim();
+  lines.push(message || errorType);
+
+  const stage = asString(details.stage);
+  if (stage) lines.push(`Stage: ${stage}`);
+
+  const origin = toRecord(details.origin);
+  if (origin) {
+    const file = asString(origin.file);
+    const line = asNumber(origin.line);
+    const fn = asString(origin.function);
+    if (file) lines.push(`Origin: ${file}${line ? `:${line}` : ""}${fn ? ` in ${fn}` : ""}`);
+  }
+
+  const chain = Array.isArray(details.exceptionChain) ? details.exceptionChain : [];
+  const chainText = chain
+    .map((item) => {
+      const record = toRecord(item);
+      if (!record) return "";
+      return [asString(record.type), asString(record.message)].filter(Boolean).join(": ");
+    })
+    .filter(Boolean);
+  if (chainText.length > 1 || (chainText[0] && !message.includes(chainText[0]))) {
+    lines.push(`Cause: ${chainText.join(" <- ")}`);
+  }
+
+  const runtime = asString(details.runtime);
+  const runtimeVersion = asString(details.runtimeVersion);
+  if (runtime || runtimeVersion) lines.push(`Runtime: ${[runtime, runtimeVersion].filter(Boolean).join(" ")}`);
+  const provider = asString(details.providerId);
+  const model = asString(details.model);
+  if (provider || model) lines.push(`Provider: ${[provider, model].filter(Boolean).join(" / ")}`);
+  const traceId = asString(details.traceId);
+  const sessionId = asString(details.sessionId);
+  if (traceId) lines.push(`Trace: ${traceId}`);
+  if (sessionId) lines.push(`Session: ${sessionId}`);
+  return lines.join("\n");
 }
 
 function summarizeGitAutoCommitPacket(packet: AgentStreamPacket): string {
@@ -2302,6 +2345,10 @@ function normalizeHistoryRun(value: unknown, fallbackSessionId: string): AgentEx
   const changeLedger = normalizeHistoryChangeLedger(record.changeLedger, events, traceId, sessionId);
   const createdAt = asString(record.createdAt) || new Date().toISOString();
   const updatedAt = asString(record.updatedAt) || createdAt;
+  const agentErrorEvent = [...events].reverse().find((event) => event.event === "AgentError");
+  const detailedErrorMessage = agentErrorEvent?.data
+    ? formatAgentErrorPacket({ type: "AgentError", ...agentErrorEvent.data } as AgentStreamPacket)
+    : "";
   return {
     traceId,
     sessionId,
@@ -2325,7 +2372,7 @@ function normalizeHistoryRun(value: unknown, fallbackSessionId: string): AgentEx
     tasks,
     changeLedger,
     items: buildHistoryWaterfallItems(traceId, prompt, reply, events),
-    errorMessage: asString(record.errorMessage) || "",
+    errorMessage: detailedErrorMessage || asString(record.errorMessage) || "",
     errorCode: asString(record.errorCode),
     turnTokens: historyTurnMetric(record, events, ["total_tokens", "totalTokens"]),
     turnDurationMs: historyTurnMetric(record, events, ["duration_ms", "durationMs", "duration_ms_total"])
@@ -3364,6 +3411,7 @@ export const __agentStoreTestUtils = import.meta.env.MODE === "test" ? {
   phaseForEvent,
   statusForPacket,
   detailForPacket,
+  formatAgentErrorPacket,
   summarizeGitAutoCommitPacket,
   summarizeTurnContractPacket,
   summarizeStoryGenerationValidationPacket,
