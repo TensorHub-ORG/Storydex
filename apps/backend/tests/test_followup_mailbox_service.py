@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import services.followup_mailbox_service as followup_mailbox_module
 from services.followup_mailbox_service import FollowupMailboxError, FollowupMailboxService
 
 
@@ -247,3 +248,25 @@ def test_paused_mailbox_preserves_pending_message_and_resumes_exactly_once(tmp_p
     )
     assert claimed == replay
     assert replay["status"] == "dispatching"
+
+
+def test_atomic_mailbox_write_retries_transient_windows_file_sharing_error(monkeypatch, tmp_path: Path) -> None:
+    original_replace = followup_mailbox_module.os.replace
+    calls = []
+
+    def replace_once_locked(source, target):
+        calls.append((source, target))
+        if len(calls) == 1:
+            raise PermissionError("temporary file sharing violation")
+        return original_replace(source, target)
+
+    monkeypatch.setattr(followup_mailbox_module.os, "replace", replace_once_locked)
+    monkeypatch.setattr(followup_mailbox_module.time, "sleep", lambda _seconds: None)
+
+    service = FollowupMailboxService()
+    paused = service.pause(workspace_root=tmp_path, session_id="session-retry", reason="disconnect")
+
+    assert paused["paused"] is True
+    assert len(calls) == 2
+    persisted = FollowupMailboxService().list_mailbox(workspace_root=tmp_path, session_id="session-retry")
+    assert persisted["pauseReason"] == "disconnect"

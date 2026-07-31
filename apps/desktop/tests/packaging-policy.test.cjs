@@ -39,6 +39,24 @@ test("embedded Python packaging excludes caches and non-relocatable venv metadat
   assert.equal(shouldCopyPythonRuntime("C:/runtime/python.exe"), true);
 });
 
+test("embedded Python packaging excludes test-only distributions from reused environments", () => {
+  const rejected = [
+    "C:/runtime/Lib/site-packages/pytest/__init__.py",
+    "C:/runtime/Lib/site-packages/_pytest/config/__init__.py",
+    "C:/runtime/Lib/site-packages/pytest_cov/plugin.py",
+    "C:/runtime/Lib/site-packages/pytest-cov.pth",
+    "C:/runtime/Lib/site-packages/pytest_timeout.py",
+    "C:/runtime/Lib/site-packages/coverage/__init__.py",
+    "C:/runtime/Lib/site-packages/hypothesis/__init__.py",
+    "C:/runtime/Lib/site-packages/iniconfig/__init__.py",
+    "C:/runtime/Lib/site-packages/pluggy/__init__.py"
+  ];
+  for (const candidate of rejected) {
+    assert.equal(shouldCopyPythonEnv(candidate), false, candidate);
+  }
+  assert.equal(shouldCopyPythonEnv("C:/runtime/Lib/site-packages/fastapi/__init__.py"), true);
+});
+
 test("portable Python packaging excludes unrelated Conda CUDA and development payloads", () => {
   const root = "C:/conda/envs/pytorch";
   const accepted = [

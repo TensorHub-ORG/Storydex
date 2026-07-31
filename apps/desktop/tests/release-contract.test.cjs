@@ -17,8 +17,16 @@ test("package, lockfile, extra metadata, and artifact naming agree", () => {
 });
 
 test("release configuration is offline-capable and updater-aware", () => {
-  assert.equal(pkg.build.asar, false);
+  assert.equal(pkg.build.asar, true);
   assert.ok(pkg.build.files.includes("app/**/*"));
+  assert.deepEqual(pkg.build.asarUnpack, [
+    "app/backend/**/*",
+    "app/docs/**/*",
+    "app/python-env/**/*",
+    "app/mingit/**/*",
+    "app/assets/**/*",
+    "electron/update-helper.ps1"
+  ]);
   assert.equal(pkg.build.publish[0].provider, "generic");
   assert.equal(resolveUpdateFeedUrl(pkg), pkg.build.extraMetadata.storydexUpdateFeedUrl);
   assert.match(pkg.build.extraMetadata.storydexUpdateFeedUrl, /^https:\/\//);
@@ -30,6 +38,7 @@ test("desktop packages the guide and prompt repository and exposes their roots t
   assert.match(mainSource, /STORYDEX_HELP_GUIDE_ROOT:\s*helpGuideRoot/);
   assert.match(mainSource, /STORYDEX_PROMPT_REPOSITORY_ROOT:\s*promptRepositoryRoot/);
   assert.match(mainSource, /STORYDEX_BUILTIN_SKILLS_ROOT:\s*builtinSkillsRoot/);
+  assert.match(mainSource, /app\.asar\.unpacked/);
   assert.match(syncSource, /docs",\s*"guide"/);
   assert.match(syncSource, /docs",\s*"prompts"/);
   assert.match(syncSource, /docs",\s*"skills"/);
@@ -45,6 +54,17 @@ test("desktop source declares process cleanup and a strict IPC whitelist", () =>
   assert.ok(channels.length >= 8);
   assert.equal(new Set(channels).size, channels.length);
   assert.ok(channels.every((channel) => channel.startsWith("storydex:")));
+});
+
+test("backend startup failure is recoverable instead of silently quitting", () => {
+  const source = fs.readFileSync(path.join(root, "electron", "main.cjs"), "utf8");
+  assert.match(source, /DEFAULT_BACKEND_STARTUP_ATTEMPTS\s*=\s*2/);
+  assert.match(source, /STORYDEX_BACKEND_STARTUP_ATTEMPTS/);
+  assert.match(source, /automatic backend startup retry/);
+  assert.match(source, /buttons:\s*\["Retry", "Open log", "Exit"\]/);
+  assert.match(source, /shell\.openPath\(backendLogFilePath\)/);
+  assert.match(source, /action === "retry" \|\| action === "open-log"/);
+  assert.match(source, /waitForBackendProcessExit\(failedProcess\)/);
 });
 
 test("local release scripts derive version from package.json, not hardcoded strings", () => {

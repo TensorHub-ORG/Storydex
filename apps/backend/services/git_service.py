@@ -28,7 +28,7 @@ def _worktree_lock(workspace_root: Path) -> threading.RLock:
     operation atomic. The lock is re-entrant because the mutating helpers
     call each other (`commit_all` -> `initialize_repository` -> `read_summary`).
     """
-    key = str(workspace_root).lower()
+    key = os.path.normcase(os.path.realpath(os.fspath(workspace_root)))
     with _WORKTREE_LOCKS_GUARD:
         lock = _WORKTREE_LOCKS.get(key)
         if lock is None:
@@ -42,7 +42,7 @@ def _serialized(method: Callable[..., _T]) -> Callable[..., _T]:
 
     @wraps(method)
     def wrapper(self: "GitService", workspace_root: Path, *args: Any, **kwargs: Any) -> _T:
-        with _worktree_lock(Path(workspace_root).resolve()):
+        with _worktree_lock(Path(workspace_root)):
             return method(self, workspace_root, *args, **kwargs)
 
     return wrapper
@@ -66,7 +66,7 @@ class GitService:
         commit_id: str,
         create_backup: bool = True,
     ) -> Dict[str, Any]:
-        root = Path(workspace_root).resolve()
+        root = self._resolve_workspace_root(workspace_root)
         self.initialize_repository(root)
         normalized_commit = str(commit_id or "").strip()
         if not normalized_commit:
@@ -117,7 +117,7 @@ class GitService:
         }
 
     def read_summary(self, workspace_root: Path, *, history_limit: int = HISTORY_LIMIT) -> Dict[str, Any]:
-        root = Path(workspace_root).resolve()
+        root = self._resolve_workspace_root(workspace_root)
         if not self.is_git_available():
             return {
                 "available": False,
@@ -185,7 +185,7 @@ class GitService:
         paths: Optional[Iterable[str]] = None,
         context_lines: int = 3,
     ) -> Dict[str, Any]:
-        root = Path(workspace_root).resolve()
+        root = self._resolve_workspace_root(workspace_root)
         if not self.is_git_available():
             return {
                 "available": False,
@@ -265,7 +265,7 @@ class GitService:
         paths: Optional[Iterable[str]] = None,
         context_lines: int = 3,
     ) -> Dict[str, Any]:
-        root = Path(workspace_root).resolve()
+        root = self._resolve_workspace_root(workspace_root)
         if not self.is_git_available():
             return {
                 "available": False,
@@ -344,7 +344,8 @@ class GitService:
         paths: Iterable[str],
         status: str = "A",
     ) -> Dict[str, Any]:
-        root = Path(workspace_root).resolve()
+        root = self._resolve_workspace_root(workspace_root)
+        initialized = self.is_repository_initialized(root)
         diff_files = [
             self._build_untracked_diff(root, relative_path, status=status)
             for relative_path in self._normalize_paths(paths)
@@ -358,8 +359,8 @@ class GitService:
         return {
             "available": True,
             "gitInstalled": self.is_git_available(),
-            "initialized": self.is_repository_initialized(root),
-            "branch": self._read_current_branch(root) if self.is_repository_initialized(root) else "",
+            "initialized": initialized,
+            "branch": self._read_current_branch(root) if initialized else "",
             "files": diff_files,
             "totals": totals,
             "message": "",
@@ -367,7 +368,7 @@ class GitService:
 
     @_serialized
     def initialize_repository(self, workspace_root: Path) -> Dict[str, Any]:
-        root = Path(workspace_root).resolve()
+        root = self._resolve_workspace_root(workspace_root)
         self._ensure_git_installed()
         if not self.is_repository_initialized(root):
             self._run_git(root, ["init"])
@@ -435,7 +436,7 @@ class GitService:
 
     @_serialized
     def commit_all(self, workspace_root: Path, *, message: str = "") -> Dict[str, Any]:
-        root = Path(workspace_root).resolve()
+        root = self._resolve_workspace_root(workspace_root)
         self.initialize_repository(root)
         self._run_git(root, ["add", "-A"])
         if self._is_worktree_clean(root):
@@ -458,7 +459,7 @@ class GitService:
 
     @_serialized
     def commit_paths(self, workspace_root: Path, *, paths: Iterable[str], message: str = "") -> Dict[str, Any]:
-        root = Path(workspace_root).resolve()
+        root = self._resolve_workspace_root(workspace_root)
         normalized_paths = self._normalize_paths(paths)
         self.initialize_repository(root)
         if not normalized_paths:
@@ -495,14 +496,15 @@ class GitService:
         }
 
     def is_repository_initialized(self, workspace_root: Path) -> bool:
-        root = Path(workspace_root).resolve()
+        root = self._resolve_workspace_root(workspace_root)
         if not self.is_git_available():
             return False
-        try:
-            result = self._run_git(root, ["rev-parse", "--is-inside-work-tree"], check=False)
-        except GitServiceError:
+        repository_root = self._repository_top_level(root)
+        if repository_root is None:
             return False
-        return result.strip() == "true"
+        if not self._paths_refer_to_same_location(root, repository_root):
+            self._raise_repository_boundary_error(root, repository_root)
+        return True
 
     def _ensure_git_installed(self) -> None:
         if self.is_git_available():
@@ -535,7 +537,7 @@ class GitService:
             self._run_git(workspace_root, ["config", "user.email", self.DEFAULT_AUTHOR_EMAIL])
 
     def _ensure_gitignore(self, workspace_root: Path) -> None:
-        ignore_path = Path(workspace_root).resolve() / ".gitignore"
+        ignore_path = self._resolve_workspace_root(workspace_root) / ".gitignore"
         existing_lines = []
         if ignore_path.exists():
             existing_lines = [line.rstrip("\n") for line in ignore_path.read_text(encoding="utf-8").splitlines()]
@@ -552,18 +554,18 @@ class GitService:
 
     def _ensure_agent_runtime_untracked(self, workspace_root: Path) -> None:
         self._run_git(
-            Path(workspace_root).resolve(),
+            self._resolve_workspace_root(workspace_root),
             ["rm", "-r", "--cached", "--ignore-unmatch", self.AGENT_RUNTIME_PREFIX.rstrip("/")],
             check=False,
         )
 
     def _read_current_branch(self, workspace_root: Path) -> str:
-        return self._run_git(Path(workspace_root).resolve(), ["branch", "--show-current"], check=False).strip()
+        return self._run_git(self._resolve_workspace_root(workspace_root), ["branch", "--show-current"], check=False).strip()
 
     def _read_recent_commits(self, workspace_root: Path, *, limit: int) -> List[Dict[str, Any]]:
         if not self._has_head_commit(workspace_root):
             return []
-        root = Path(workspace_root).resolve()
+        root = self._resolve_workspace_root(workspace_root)
         window = max(1, int(limit or self.HISTORY_LIMIT))
         # History is read with `--all` so commits parked on a restore backup
         # branch stay recoverable. Because `git log` sorts by date, those
@@ -607,7 +609,7 @@ class GitService:
 
     def _read_head_reachable_ids(self, workspace_root: Path, *, limit: int) -> set[str]:
         output = self._run_git(
-            Path(workspace_root).resolve(),
+            self._resolve_workspace_root(workspace_root),
             ["rev-list", f"-n{max(1, int(limit or 200))}", "HEAD"],
             check=False,
         )
@@ -617,7 +619,7 @@ class GitService:
         if not self._has_head_commit(workspace_root):
             return []
         output = self._run_git(
-            Path(workspace_root).resolve(),
+            self._resolve_workspace_root(workspace_root),
             ["log", "--graph", "--decorate", "--oneline", "--all", f"-n{max(1, int(limit or 12))}"],
             check=False,
         )
@@ -625,7 +627,7 @@ class GitService:
 
     def _read_commit_changed_files(self, workspace_root: Path, commit_id: str) -> List[Dict[str, Any]]:
         output = self._run_git(
-            Path(workspace_root).resolve(),
+            self._resolve_workspace_root(workspace_root),
             [
                 "-c",
                 "core.quotePath=false",
@@ -663,12 +665,13 @@ class GitService:
 
     def _read_commit(self, workspace_root: Path, commit_id: str) -> Dict[str, Any]:
         output = self._run_git(
-            Path(workspace_root).resolve(),
+            self._resolve_workspace_root(workspace_root),
             [
                 "show",
                 "-s",
                 "--date=iso-strict",
                 "--pretty=format:%H%x1f%h%x1f%an%x1f%ad%x1f%D%x1f%s",
+                "--end-of-options",
                 f"{commit_id}^{{commit}}",
             ],
         )
@@ -688,12 +691,12 @@ class GitService:
         }
 
     def _has_head_commit(self, workspace_root: Path) -> bool:
-        result = self._run_git(Path(workspace_root).resolve(), ["rev-parse", "--verify", "HEAD"], check=False).strip()
+        result = self._run_git(self._resolve_workspace_root(workspace_root), ["rev-parse", "--verify", "HEAD"], check=False).strip()
         return bool(result)
 
     def _is_worktree_clean(self, workspace_root: Path) -> bool:
         status = self._run_git(
-            Path(workspace_root).resolve(),
+            self._resolve_workspace_root(workspace_root),
             ["-c", "core.quotePath=false", "status", "--porcelain=v1"],
             check=False,
         )
@@ -701,7 +704,7 @@ class GitService:
 
     def _paths_have_changes(self, workspace_root: Path, paths: List[str]) -> bool:
         status = self._run_git(
-            Path(workspace_root).resolve(),
+            self._resolve_workspace_root(workspace_root),
             ["-c", "core.quotePath=false", "status", "--porcelain=v1", "--", *paths],
             check=False,
         )
@@ -712,7 +715,21 @@ class GitService:
         normalized: List[str] = []
         seen = set()
         for item in paths:
-            value = str(item or "").replace("\\", "/").strip().strip("/")
+            raw_value = str(item or "").strip()
+            value = raw_value.replace("\\", "/")
+            if (
+                "\x00" in value
+                or value.startswith("/")
+                or re.match(r"^[A-Za-z]:", value)
+                or ".." in value.split("/")
+            ):
+                raise GitServiceError(
+                    "Git path must stay inside the Storydex project root.",
+                    details={"path": raw_value},
+                )
+            value = posixpath.normpath(value).strip("/")
+            if value == ".":
+                value = ""
             if not value or value in seen or GitService._is_agent_runtime_path(value):
                 continue
             seen.add(value)
@@ -776,7 +793,7 @@ class GitService:
 
     def _build_untracked_diff(self, workspace_root: Path, relative_path: str, *, status: str) -> Dict[str, Any]:
         normalized_path = str(relative_path or "").replace("\\", "/").strip().strip("/")
-        target = Path(workspace_root).resolve() / normalized_path
+        target = self._resolve_workspace_file(workspace_root, normalized_path)
         if not target.exists() or not target.is_file():
             return {
                 "relativePath": normalized_path,
@@ -972,12 +989,12 @@ class GitService:
         while self._branch_exists(workspace_root, candidate):
             candidate = f"{base_name}-{index}"
             index += 1
-        self._run_git(Path(workspace_root).resolve(), ["branch", candidate, current_head])
+        self._run_git(self._resolve_workspace_root(workspace_root), ["branch", candidate, current_head])
         return candidate
 
     def _branch_exists(self, workspace_root: Path, branch_name: str) -> bool:
         result = self._run_git(
-            Path(workspace_root).resolve(),
+            self._resolve_workspace_root(workspace_root),
             ["show-ref", "--verify", f"refs/heads/{branch_name}"],
             check=False,
         )
@@ -985,6 +1002,106 @@ class GitService:
 
     @classmethod
     def _run_git(cls, workspace_root: Path, args: List[str], *, check: bool = True) -> str:
+        root = cls._resolve_workspace_root(workspace_root)
+        cls._assert_repository_root(root)
+        return cls._run_git_process(root, args, check=check)
+
+    @classmethod
+    def _run_git_process(cls, workspace_root: Path, args: List[str], *, check: bool = True) -> str:
+        result = cls._run_git_process_result(workspace_root, args)
+        if check and result.returncode != 0:
+            raise GitServiceError(
+                "Local Git command failed.",
+                details={
+                    "args": args,
+                    "gitExecutable": cls._resolve_git_executable(),
+                    "returncode": result.returncode,
+                    "stderr": result.stderr.strip(),
+                    "stdout": result.stdout.strip(),
+                },
+            )
+        return result.stdout.strip()
+
+    @classmethod
+    def _repository_top_level(cls, workspace_root: Path) -> Path | None:
+        result = cls._run_git_process_result(
+            cls._resolve_workspace_root(workspace_root),
+            ["rev-parse", "--path-format=absolute", "--show-toplevel"],
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+        return cls._canonical_path(Path(result.stdout.strip()))
+
+    @classmethod
+    def _assert_repository_root(cls, workspace_root: Path) -> Path:
+        root = cls._resolve_workspace_root(workspace_root)
+        repository_root = cls._repository_top_level(root)
+        if repository_root is None:
+            raise GitServiceError(
+                "The Storydex project is not an initialized Git repository.",
+                details={"projectRoot": str(root)},
+            )
+        if not cls._paths_refer_to_same_location(root, repository_root):
+            cls._raise_repository_boundary_error(root, repository_root)
+        return root
+
+    @classmethod
+    def _raise_repository_boundary_error(cls, project_root: Path, repository_root: Path) -> None:
+        raise GitServiceError(
+            "Refusing Git operation because the Storydex project root does not match the Git repository root.",
+            details={
+                "projectRoot": str(cls._canonical_path(project_root)),
+                "gitTopLevel": str(cls._canonical_path(repository_root)),
+                "hint": "Initialize Git inside the Storydex project directory instead of using a parent repository.",
+            },
+        )
+
+    @classmethod
+    def _resolve_workspace_file(cls, workspace_root: Path, relative_path: str) -> Path:
+        normalized = cls._normalize_paths([relative_path])
+        if len(normalized) != 1:
+            raise GitServiceError(
+                "Git file path is required.",
+                details={"path": str(relative_path or "")},
+            )
+        root = cls._resolve_workspace_root(workspace_root)
+        target = cls._canonical_path(root / normalized[0])
+        root_key = cls._path_key(root)
+        try:
+            inside = os.path.commonpath([root_key, cls._path_key(target)]) == root_key
+        except ValueError:
+            inside = False
+        if not inside:
+            raise GitServiceError(
+                "Git file path resolves outside the Storydex project root.",
+                details={"path": normalized[0], "projectRoot": str(root)},
+            )
+        return target
+
+    @classmethod
+    def _resolve_workspace_root(cls, workspace_root: Path) -> Path:
+        root = cls._canonical_path(Path(workspace_root).expanduser())
+        if not root.exists() or not root.is_dir():
+            raise GitServiceError(
+                "Storydex project root does not exist or is not a directory.",
+                details={"projectRoot": str(root)},
+            )
+        return root
+
+    @staticmethod
+    def _canonical_path(path_value: Path) -> Path:
+        return Path(os.path.realpath(os.fspath(path_value)))
+
+    @classmethod
+    def _path_key(cls, path_value: Path) -> str:
+        return os.path.normcase(os.path.normpath(os.fspath(cls._canonical_path(path_value))))
+
+    @classmethod
+    def _paths_refer_to_same_location(cls, left: Path, right: Path) -> bool:
+        return cls._path_key(left) == cls._path_key(right)
+
+    @classmethod
+    def _run_git_process_result(cls, workspace_root: Path, args: List[str]) -> subprocess.CompletedProcess[str]:
         git_executable = cls._resolve_git_executable()
         if not git_executable:
             raise GitServiceError(
@@ -994,7 +1111,7 @@ class GitService:
         try:
             result = subprocess.run(
                 [git_executable, *args],
-                cwd=str(Path(workspace_root).resolve()),
+                cwd=str(cls._resolve_workspace_root(workspace_root)),
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -1007,19 +1124,7 @@ class GitService:
                 details={"args": args, "gitExecutable": git_executable, "reason": str(exc)},
             ) from exc
 
-        if check and result.returncode != 0:
-            raise GitServiceError(
-                "Local Git command failed.",
-                details={
-                    "args": args,
-                    "gitExecutable": git_executable,
-                    "returncode": result.returncode,
-                    "stderr": result.stderr.strip(),
-                    "stdout": result.stdout.strip(),
-                },
-            )
-
-        return result.stdout.strip()
+        return result
 
     @staticmethod
     @lru_cache(maxsize=1)
