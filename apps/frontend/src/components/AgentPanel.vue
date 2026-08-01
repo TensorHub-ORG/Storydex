@@ -636,7 +636,8 @@ type PendingWriteLike = {
     items?: LiveOperationItem[];
   };
 };
-type PermissionChoice = "plan_mode" | "ask_approval" | "approve_for_me" | "full_access";
+type PermissionChoice = "ask_approval" | "approve_for_me" | "full_access";
+type PermissionTone = PermissionChoice | "plan_mode";
 type ReasoningChoice = "auto" | "low" | "medium" | "high";
 type ApprovalDraft = { value: string; text: string };
 
@@ -755,7 +756,6 @@ const slashCommands = [
   { value: "/loop ", description: "运行循环任务" }
 ];
 const permissionOptions: Array<{ value: PermissionChoice; label: string; description: string }> = [
-  { value: "plan_mode", label: "计划模式", description: "只规划思路，不主动执行修改。" },
   { value: "ask_approval", label: "询问确认", description: "关键操作前等待你确认。" },
   { value: "approve_for_me", label: "自动批准", description: "常规操作自动通过。" },
   { value: "full_access", label: "完全访问", description: "允许 Coomi 直接执行任务。" }
@@ -829,7 +829,7 @@ const permissionControlLabel = computed(() => {
   }
   return permissionOptions.find((option) => option.value === agentStore.coomiStatus?.permissionMode)?.label || agentStore.permissionModeLabel;
 });
-const activePermissionTone = computed<PermissionChoice>(() => {
+const activePermissionTone = computed<PermissionTone>(() => {
   if (agentStore.coomiStatus?.planMode) {
     return "plan_mode";
   }
@@ -1335,25 +1335,16 @@ async function persistStoryGenerationOptions(options: {
 }
 
 function isPermissionOptionActive(value: PermissionChoice): boolean {
-  if (value === "plan_mode") {
-    return Boolean(agentStore.coomiStatus?.planMode);
-  }
   return !agentStore.coomiStatus?.planMode && agentStore.coomiStatus?.permissionMode === value;
 }
 
-function permissionToneClass(value: PermissionChoice): string {
+function permissionToneClass(value: PermissionTone): string {
   return `permission-${value.replace(/_/g, "-")}`;
 }
 
 async function selectPermissionOption(value: PermissionChoice): Promise<void> {
   permissionMenuOpen.value = false;
   if (agentStore.isRunning) {
-    return;
-  }
-  if (value === "plan_mode") {
-    if (!agentStore.coomiStatus?.planMode) {
-      await runCoomiCommand("/plan");
-    }
     return;
   }
   if (agentStore.coomiStatus?.planMode) {

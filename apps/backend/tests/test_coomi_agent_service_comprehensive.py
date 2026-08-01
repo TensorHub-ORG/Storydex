@@ -169,6 +169,8 @@ async def test_storydex_tool_callback_resolves_bridge_request(monkeypatch, tmp_p
 
 @pytest.mark.asyncio
 async def test_stream_events_preserves_storydex_event_contract(monkeypatch, tmp_path) -> None:
+    started_payload = {}
+
     class Bridge:
         async def events(self):
             yield {"type": "session_bound", "data": {"runtimeSessionId": "runtime-1"}}
@@ -181,7 +183,8 @@ async def test_stream_events_preserves_storydex_event_contract(monkeypatch, tmp_
         async def cancel(self, *, steer=False):
             return None
 
-    async def start(_payload):
+    async def start(payload):
+        started_payload.update(payload)
         return Bridge()
 
     monkeypatch.setattr(coomi.LiveBridgeProcess, "start", start)
@@ -198,6 +201,7 @@ async def test_stream_events_preserves_storydex_event_contract(monkeypatch, tmp_
             trace_id="trace",
             session_id="story-session",
             workspace_root=tmp_path,
+            turn_contract={"executionPolicy": {"directFileWrites": False}},
         )
     ]
     assert [name for name, _payload in events] == ["AgentStarted", "TextChunk", "AgentCompleted"]
@@ -206,6 +210,62 @@ async def test_stream_events_preserves_storydex_event_contract(monkeypatch, tmp_
         storydex_session_id="story-session",
     )
     assert binding["runtimeSessionId"] == "runtime-1"
+    assert started_payload["permissionMode"] == "full_access"
+    assert started_payload["writesAllowed"] is True
+    assert any(tool["name"] == "StorydexSyncWiki" for tool in started_payload["toolSpecs"])
+    assert "This turn is read-only" not in started_payload["systemPrompt"]
+
+
+@pytest.mark.asyncio
+async def test_stream_rejects_agent_attempt_to_enter_plan_mode(monkeypatch, tmp_path) -> None:
+    class Bridge:
+        async def events(self):
+            yield {
+                "type": "plan_mode_changed",
+                "data": {"active": True, "source": "agent"},
+            }
+            yield {
+                "type": "completed",
+                "data": {"usage": {"input_tokens": 1, "output_tokens": 1}},
+            }
+
+        async def close(self):
+            return None
+
+        async def cancel(self, *, steer=False):
+            return None
+
+    async def start(_payload):
+        return Bridge()
+
+    monkeypatch.setattr(coomi.LiveBridgeProcess, "start", start)
+    monkeypatch.setattr(
+        coomi.StorydexCoomiAgentService,
+        "get_status",
+        lambda self, **_kwargs: {"model": "model", "providerId": "provider"},
+    )
+    service = coomi.StorydexCoomiAgentService()
+    events = [
+        event
+        async for event in service.stream_events(
+            prompt="continue",
+            trace_id="trace",
+            session_id="story-session",
+            workspace_root=tmp_path,
+        )
+    ]
+
+    assert [name for name, _payload in events] == [
+        "AgentStarted",
+        "AgentWarning",
+        "AgentCompleted",
+    ]
+    assert events[1][1]["warning_type"] == "AgentPlanModeEntryRejected"
+    runtime_key = service._runtime_key(
+        session_id="story-session",
+        workspace_root=tmp_path,
+    )
+    assert service._plan_modes.get(runtime_key, False) is False
 
 
 def test_config_validation_models_and_status(monkeypatch, tmp_path) -> None:
@@ -436,4 +496,7 @@ def test_system_prompt_assigns_core_and_domain_tool_ownership(tmp_path) -> None:
     )
     assert "Rust runtime tools" in prompt
     assert "Storydex domain tools" in prompt
-    assert "read-only" in prompt
+    assert "Plan mode is inactive" in prompt
+    assert "This turn is read-only" not in prompt
+    assert "directFileWrites" not in prompt
+    assert "only the user's /plan command activates read-only Plan mode" in prompt
