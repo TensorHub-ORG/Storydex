@@ -32,6 +32,10 @@ test("release configuration is offline-capable and updater-aware", () => {
   assert.match(pkg.build.extraMetadata.storydexUpdateFeedUrl, /^https:\/\//);
 });
 
+test("packaged Electron E2E runs serially to avoid competing desktop instances", () => {
+  assert.match(pkg.scripts["test:e2e"], /--test-concurrency=1/);
+});
+
 test("desktop packages the guide and prompt repository and exposes their roots to the backend", () => {
   const mainSource = fs.readFileSync(path.join(root, "electron", "main.cjs"), "utf8");
   const syncSource = fs.readFileSync(path.join(root, "scripts", "sync-app-assets.cjs"), "utf8");
