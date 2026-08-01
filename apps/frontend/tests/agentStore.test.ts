@@ -6,6 +6,7 @@ const api = vi.hoisted(() => ({
   fetchAgentSessions: vi.fn(),
   fetchAgentHistory: vi.fn(),
   fetchAgentCoomiStatus: vi.fn(),
+  setAgentCoomiPlanMode: vi.fn(),
   submitAgentRunCommitDecision: vi.fn(),
   rollbackLatestExecution: vi.fn(),
   clearConversation: vi.fn(),
@@ -56,6 +57,9 @@ beforeEach(() => {
   api.fetchAgentCoomiStatus.mockResolvedValue({
     data: { runtime: "coomi", installed: true, model: "fake", permissionMode: "full_access" }
   });
+  api.setAgentCoomiPlanMode.mockImplementation((sessionId: string, active: boolean) => Promise.resolve({
+    data: { sessionId, planMode: active, permissionMode: active ? "plan_mode" : "full_access", permissionLabel: active ? "Plan mode" : "Full access" }
+  }));
   git.refreshSummary.mockResolvedValue(undefined);
   api.rollbackLatestExecution.mockResolvedValue({
     data: { rolledBack: false, sessionId: "default", removedTraceId: "", prompt: "" }
@@ -70,6 +74,27 @@ function envelopeMailbox(messages: unknown[] = []) {
 }
 
 describe("agent store streaming", () => {
+  it("handles /plan and /exit_plan locally without entering the story generation stream", async () => {
+    const store = useAgentStore();
+    store.currentSessionId = "session-plan";
+    store.promptInput = "/plan";
+
+    await store.runPrompt();
+
+    expect(api.setAgentCoomiPlanMode).toHaveBeenCalledWith("session-plan", true);
+    expect(api.streamAgentPrompt).not.toHaveBeenCalled();
+    expect(store.coomiStatus?.planMode).toBe(true);
+    expect(store.executionHistory[0].items.some((item) => item.type === "info")).toBe(true);
+    expect(store.promptInput).toBe("");
+
+    store.promptInput = "/exit_plan";
+    await store.runPrompt();
+
+    expect(api.setAgentCoomiPlanMode).toHaveBeenLastCalledWith("session-plan", false);
+    expect(store.coomiStatus?.planMode).toBe(false);
+    expect(store.executionHistory[0].reply).toContain("退出计划模式");
+  });
+
   it("publishes immediate phases, updates heartbeats in place, and appends text chunks", async () => {
     api.streamAgentPrompt.mockImplementation(async (_request: unknown, onPacket: (packet: unknown) => void) => {
       onPacket({ _type: "RunAccepted", phase: "request", status: "running", elapsedMs: 1, label: "请求已接收" });

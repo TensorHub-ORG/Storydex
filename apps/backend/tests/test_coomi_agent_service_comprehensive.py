@@ -242,6 +242,151 @@ def test_config_validation_models_and_status(monkeypatch, tmp_path) -> None:
     assert status["model"] == "model-a"
 
 
+def test_status_tracks_plan_mode_and_persistent_context_per_storydex_session(
+    monkeypatch, tmp_path
+) -> None:
+    sessions = tmp_path / "coomi-home" / "sessions"
+    sessions.mkdir(parents=True)
+    monkeypatch.setattr(coomi, "STORYDEX_COOMI_SESSIONS", sessions)
+    monkeypatch.setattr(
+        coomi.StorydexCoomiAgentService,
+        "_ensure_coomi_installed",
+        staticmethod(lambda: None),
+    )
+    monkeypatch.setattr(coomi, "_read_providers_config_payload", lambda: {})
+    runtime_id = "11111111-1111-4111-8111-111111111111"
+    (sessions / f"{runtime_id}.json").write_text(
+        json.dumps(
+            {
+                "usage": {"input_tokens": 1_234_000, "output_tokens": 567_000},
+                "context": {"estimated_active_tokens": 42_000},
+            }
+        ),
+        encoding="utf-8",
+    )
+    coomi._write_coomi_session_binding(
+        workspace_root=tmp_path,
+        storydex_session_id="session-a",
+        runtime_session_id=runtime_id,
+    )
+    service = coomi.StorydexCoomiAgentService()
+    service.set_plan_mode(session_id="session-a", workspace_root=tmp_path, active=True)
+
+    session_a = service.get_status(workspace_root=tmp_path, session_id="session-a")
+    session_b = service.get_status(workspace_root=tmp_path, session_id="session-b")
+
+    assert session_a["planMode"] is True
+    assert session_a["permissionMode"] == "plan_mode"
+    assert session_a["usedTokens"] == 42_000
+    assert session_a["cumulativeTokens"] == 1_801_000
+    assert session_b["planMode"] is False
+    assert session_b["cumulativeTokens"] == 0
+
+
+def test_persistent_context_deduplicates_events_and_accumulates_new_runtime(
+    monkeypatch, tmp_path
+) -> None:
+    sessions = tmp_path / "coomi-home" / "sessions"
+    sessions.mkdir(parents=True)
+    monkeypatch.setattr(coomi, "STORYDEX_COOMI_SESSIONS", sessions)
+    service = coomi.StorydexCoomiAgentService()
+    snapshot = coomi._context_snapshot_from_bridge({})
+
+    coomi._write_coomi_session_binding(
+        workspace_root=tmp_path,
+        storydex_session_id="session-a",
+        runtime_session_id="runtime-1",
+    )
+    first = service._merge_persistent_context(
+        workspace_root=tmp_path,
+        session_id="session-a",
+        snapshot=snapshot,
+        runtime_total=100,
+    )
+    duplicate = service._merge_persistent_context(
+        workspace_root=tmp_path,
+        session_id="session-a",
+        snapshot=snapshot,
+        runtime_total=100,
+    )
+    increased = service._merge_persistent_context(
+        workspace_root=tmp_path,
+        session_id="session-a",
+        snapshot=snapshot,
+        runtime_total=150,
+    )
+
+    coomi._write_coomi_session_binding(
+        workspace_root=tmp_path,
+        storydex_session_id="session-a",
+        runtime_session_id="runtime-2",
+    )
+    next_runtime = service._merge_persistent_context(
+        workspace_root=tmp_path,
+        session_id="session-a",
+        snapshot=snapshot,
+        runtime_total=25,
+    )
+
+    assert first["cumulativeTokens"] == 100
+    assert duplicate["cumulativeTokens"] == 100
+    assert increased["cumulativeTokens"] == 150
+    assert next_runtime["cumulativeTokens"] == 175
+
+
+def test_clear_session_preserves_usage_until_session_is_deleted(
+    monkeypatch, tmp_path
+) -> None:
+    sessions = tmp_path / "coomi-home" / "sessions"
+    sessions.mkdir(parents=True)
+    monkeypatch.setattr(coomi, "STORYDEX_COOMI_SESSIONS", sessions)
+    service = coomi.StorydexCoomiAgentService()
+    coomi._write_coomi_usage_ledger(
+        workspace_root=tmp_path,
+        storydex_session_id="session-a",
+        value={
+            "cumulativeTokens": 123,
+            "runtimeSessionId": "runtime-1",
+            "runtimeTotalTokens": 123,
+        },
+    )
+    ledger_path = coomi._coomi_usage_ledger_path(tmp_path, "session-a")
+
+    service.clear_session("session-a", workspace_root=tmp_path, delete_history=True)
+    assert ledger_path.is_file()
+
+    service.clear_session(
+        "session-a",
+        workspace_root=tmp_path,
+        delete_history=True,
+        delete_usage=True,
+    )
+    assert not ledger_path.exists()
+
+
+def test_persistent_context_tolerates_malformed_usage_ledger(tmp_path) -> None:
+    ledger_path = coomi._coomi_usage_ledger_path(tmp_path, "session-a")
+    ledger_path.parent.mkdir(parents=True)
+    ledger_path.write_text(
+        json.dumps(
+            {
+                "cumulativeTokens": "not-a-number",
+                "runtimeSessionId": "runtime-1",
+                "runtimeTotalTokens": {"invalid": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    context = coomi.StorydexCoomiAgentService()._merge_persistent_context(
+        workspace_root=tmp_path,
+        session_id="session-a",
+        snapshot=coomi._context_snapshot_from_bridge({}),
+    )
+
+    assert context["cumulativeTokens"] == 0
+
+
 def test_planner_commit_and_model_helpers() -> None:
     tasks = coomi._parse_task_plan_content(
         '{"tasks":[{"title":"Inspect","status":"in_progress"}]}',
@@ -270,6 +415,15 @@ def test_translator_hides_reasoning_and_surfaces_errors() -> None:
     assert event is not None
     assert event[0] == "AgentError"
     assert event[1]["details"]["runtime"] == "storydex-coomi-rs"
+    plan = translator.translate(
+        {
+            "type": "plan_mode_changed",
+            "data": {"active": False, "permissionMode": "full_access", "source": "agent"},
+        }
+    )
+    assert plan is not None
+    assert plan[0] == "PlanModeChanged"
+    assert plan[1]["planMode"] is False
 
 
 def test_system_prompt_assigns_core_and_domain_tool_ownership(tmp_path) -> None:

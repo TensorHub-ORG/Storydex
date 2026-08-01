@@ -13,9 +13,9 @@ describe("agent store helper fallback branches", () => {
     // 1704/1705: status !== needs_user_input -> "info"
     expect(u.statusForPacket("TurnContract", packet({ status: "ready" }))).toBe("info");
     expect(u.statusForPacket("TurnContract", packet({ status: "needs_user_input" }))).toBe("warning");
-    // A rejected candidate is an error; a committed tier miss is only a warning.
+    // Objective validation misses are actionable warnings, not system/LLM errors.
     expect(u.statusForPacket("StoryGenerationValidation", packet({ passed: true }))).toBe("success");
-    expect(u.statusForPacket("StoryGenerationValidation", packet({ passed: false }))).toBe("error");
+    expect(u.statusForPacket("StoryGenerationValidation", packet({ passed: false }))).toBe("warning");
     expect(u.statusForPacket("StoryGenerationValidation", packet({
       passed: true,
       chapterLengthTier: "medium",
@@ -61,9 +61,9 @@ describe("agent store helper fallback branches", () => {
     // 1528/1529: correction attempt/max fallbacks
     const correction = u.streamPacketToWaterfallItem("t", packet({ _type: "ContinuationStarted", continuationMode: "story_generation_correction" }), []);
     expect(correction?.content).toContain("1/1");
-    // Rejected candidates stay system errors; committed tier misses are notices.
+    // Rejected candidates and committed tier misses are both warning notices.
     const validationError = u.streamPacketToWaterfallItem("t", packet({ _type: "StoryGenerationValidation", passed: false }), []);
-    expect(validationError?.type).toBe("system");
+    expect(validationError?.type).toBe("notice");
     const validationWarning = u.streamPacketToWaterfallItem("t", packet({
       _type: "StoryGenerationValidation",
       passed: true,

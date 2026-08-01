@@ -214,6 +214,8 @@ describe("story and UI stores", () => {
       rightPaneFontScale: 999,
       fileFontSize: 24
     } as any);
+    expect(store.activeActivity).toBe("resources");
+    expect(store.sidebarCollapsed).toBe(false);
     expect(store.sidebarWidth).toBe(220); expect(store.agentWidth).toBe(760);
     expect(store.leftPaneFontScale).toBe(75); expect(store.centerPaneFontScale).toBe(150); expect(store.rightPaneFontScale).toBe(150);
     store.setTheme("white"); store.setActivity("search"); store.setActivity("bad"); store.setWorkbenchMode("storydex");

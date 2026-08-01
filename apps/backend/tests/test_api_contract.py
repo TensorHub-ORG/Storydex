@@ -122,13 +122,23 @@ class _Coomi:
     def set_permission_mode(self, mode):
         return {"permissionMode": mode, "permissionLabel": mode}
 
+    def set_plan_mode(self, *, session_id, workspace_root, active):
+        del workspace_root
+        return {
+            "sessionId": session_id,
+            "planMode": active,
+            "permissionMode": "plan_mode" if active else "full_access",
+            "permissionLabel": "Plan mode" if active else "Full access",
+        }
+
     def cycle_permission_mode(self):
         return {"permissionMode": "approve_for_me", "permissionLabel": "approve_for_me"}
 
     def resolve_approval(self, approval_id, decision, *, response):
         return {"approvalId": approval_id, "decision": decision, "response": response}
 
-    def clear_session(self, session_id, *, workspace_root, delete_history):
+    def clear_session(self, session_id, *, workspace_root, delete_history, delete_usage=False):
+        del session_id, workspace_root, delete_history, delete_usage
         return None
 
 
@@ -217,6 +227,12 @@ def test_coomi_status_config_permission_and_approval_contracts(client):
     assert_success(client.put("/api/v1/agent/coomi/config", json={"content": "{}"}))
     assert assert_success(client.post("/api/v1/agent/coomi/permission", json={"permissionMode": "plan"}))["data"]["permissionMode"] == "plan"
     assert_success(client.post("/api/v1/agent/coomi/permission/cycle"))
+    plan = assert_success(client.post(
+        "/api/v1/agent/coomi/plan-mode",
+        json={"sessionId": "session-a", "active": True},
+    ))
+    assert plan["data"]["planMode"] is True
+    assert plan["data"]["permissionMode"] == "plan_mode"
     approval = assert_success(client.post("/api/v1/agent/coomi/approval", json={"approvalId": "a1", "decision": "allow"}))
     assert approval["data"]["approvalId"] == "a1"
 

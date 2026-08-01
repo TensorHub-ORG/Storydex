@@ -64,6 +64,8 @@ describe("workspace store full action lifecycle", () => {
     const store = useWorkspaceStore();
     await store.bootstrapGlobalState(); expect(ui.applyPersistedState).toHaveBeenCalled();
     await store.bootstrap(); expect(store.initialized).toBe(true);
+    expect(store.launchScreenVisible).toBe(true);
+    expect(api.fetchCurrentProject).not.toHaveBeenCalled();
     store.launchScreenVisible = false; store.initialized = false;
     await store.bootstrap(true); expect(store.currentProject?.projectName).toBe("Demo");
     await store.bootstrap(); store.isBootstrapping = true; await store.bootstrap(true); store.isBootstrapping = false;

@@ -107,11 +107,20 @@
           v-html="renderMarkdown(entry.text)"
         ></div>
 
-        <!-- 错误 -->
-        <!-- 提示：客观验收未通过等警告级信息，不是错误也不该折叠 -->
-        <div v-else-if="entry.kind === 'notice'" class="cct-notice-text">{{ entry.text }}</div>
+        <div v-else-if="entry.kind === 'notice'" class="cct-notice-text">
+          <strong>警告</strong>
+          <span>{{ entry.text }}</span>
+        </div>
 
-        <div v-else-if="entry.kind === 'error'" class="cct-error-text">{{ entry.text }}</div>
+        <div v-else-if="entry.kind === 'info'" class="cct-info-text">
+          <strong>提示</strong>
+          <span>{{ entry.text }}</span>
+        </div>
+
+        <div v-else-if="entry.kind === 'error'" class="cct-error-text">
+          <strong>错误</strong>
+          <span>{{ entry.text }}</span>
+        </div>
       </template>
 
       <!-- 底部元信息：耗时 · token · 状态 · 无恢复点，纯文字不重复头部；右侧为完成时刻 -->
@@ -144,6 +153,7 @@ type FlowEntry =
   | { kind: "user"; id: string; text: string; time: string }
   | { kind: "phase"; id: string; text: string }
   | { kind: "notice"; id: string; text: string }
+  | { kind: "info"; id: string; text: string }
   | { kind: "error"; id: string; text: string };
 
 type ToolChunk = {
@@ -222,6 +232,8 @@ const entries = computed<FlowEntry[]>(() => {
       list.push({ kind: "phase", id: item.id, text: item.content });
     } else if (item.type === "notice") {
       list.push({ kind: "notice", id: item.id, text: item.content });
+    } else if (item.type === "info") {
+      list.push({ kind: "info", id: item.id, text: item.content });
     } else if (item.type === "error") {
       list.push({ kind: "error", id: item.id, text: item.content });
     }
@@ -653,6 +665,8 @@ function compactText(value: unknown, limit = 1200): string {
 }
 
 .cct-error-text {
+  display: grid;
+  gap: 2px;
   color: var(--danger);
   font-size: 14px;
   line-height: 1.7;
@@ -662,11 +676,30 @@ function compactText(value: unknown, limit = 1200): string {
 
 /* 客观验收未通过等警告类提示，与上游 coomi-notice-text 同色调 */
 .cct-notice-text {
+  display: grid;
+  gap: 2px;
   color: var(--warning);
   font-size: 13px;
   line-height: 1.72;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.cct-info-text {
+  display: grid;
+  gap: 2px;
+  color: var(--accent-strong);
+  font-size: 13px;
+  line-height: 1.72;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.cct-error-text strong,
+.cct-notice-text strong,
+.cct-info-text strong {
+  font-size: 12px;
+  font-weight: 650;
 }
 
 /* 底部元信息：纯文字，承载状态与时间，不与顶部重复 */

@@ -9,7 +9,7 @@ const api = vi.hoisted(() => ({
   streamAgentPrompt: vi.fn(),
   fetchAgentSessions: vi.fn(),
   fetchAgentHistory: vi.fn(),
-  fetchAgentCoomiStatus: vi.fn(),
+  fetchAgentCoomiStatus: vi.fn(), setAgentCoomiPlanMode: vi.fn(),
   submitAgentRunCommitDecision: vi.fn(),
   rollbackLatestExecution: vi.fn(),
   clearConversation: vi.fn(),

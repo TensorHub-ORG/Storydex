@@ -300,6 +300,13 @@ class AgentPermissionModeRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class AgentPlanModeRequest(BaseModel):
+    session_id: str = Field(default="default", alias="sessionId")
+    active: bool
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class AgentSessionDeleteRequest(BaseModel):
     session_id: str = Field(alias="sessionId")
 
@@ -3397,7 +3404,7 @@ async def _stream_coomi_sse_worker(
                     else {}
                 )
                 error_type = str(gate_error.get("type") or "ChapterPlanValidationFailed")
-                error_message = (
+                warning_message = (
                     "本章已达到目标字数。请明确要求超写，或续写下一章。"
                     if error_type == "ChapterWordCountTargetReached"
                     else "章节写入计划已失效，Storydex 已在生成正文前停止执行。"
@@ -3407,11 +3414,13 @@ async def _stream_coomi_sse_worker(
                     session_id=session_id,
                     reason="chapter_plan_validation_failed",
                 )
-                error_packet = {
-                    "_type": "AgentError",
+                warning_packet = {
+                    "_type": "AgentWarning",
                     "_version": 1,
+                    "warning_type": error_type,
                     "error_type": error_type,
-                    "message": error_message,
+                    "status": "warning",
+                    "message": warning_message,
                     "details": {
                         "runtime": BOUNDED_STORY_GENERATION_STRATEGY,
                         "reason": str(bounded_gate.get("reason") or ""),
@@ -3421,10 +3430,21 @@ async def _stream_coomi_sse_worker(
                     },
                 }
                 events.append(
-                    _event_to_trace_event("AgentError", error_packet, len(events) + 1)
+                    _event_to_trace_event("AgentWarning", warning_packet, len(events) + 1)
                 )
-                yield _encode_sse("AgentError", error_packet)
-                completed = False
+                yield _encode_sse("AgentWarning", warning_packet)
+                reply_chunks.append(warning_message)
+                completed = True
+                terminal_event = (
+                    "AgentCompleted",
+                    {
+                        "_type": "AgentCompleted",
+                        "_version": 1,
+                        "session_id": session_id,
+                        "route": BOUNDED_STORY_GENERATION_STRATEGY,
+                        "status": "warning",
+                    },
+                )
                 should_run_coomi = False
             if bounded_gate.get("enabled") and not execution_handle.is_cancelled:
                 if replacement is not None and not replacement.accepted:
@@ -4780,6 +4800,7 @@ def _delete_agent_session(session_id: str) -> ApiEnvelope:
         session_id,
         workspace_root=workspace_root,
         delete_history=True,
+        delete_usage=True,
     )
     storydex_intent_service.clear_session(session_id=session_id, workspace_root=workspace_root)
     result = trace_history_service.delete_session(session_id)
@@ -4798,16 +4819,55 @@ def _delete_agent_session(session_id: str) -> ApiEnvelope:
 
 
 @router.get("/agent/coomi/status", response_model=ApiEnvelope)
-def agent_coomi_status(request: Request) -> ApiEnvelope:
+def agent_coomi_status(
+    request: Request,
+    session_id_query: Optional[str] = Query(default=None, alias="sessionId"),
+) -> ApiEnvelope:
     del request
     started = time.perf_counter()
     trace_id = str(uuid4())
-    status = get_storydex_coomi_agent_service().get_status(workspace_root=project_service.workspace_root)
+    coomi_service = get_storydex_coomi_agent_service()
+    if str(session_id_query or "").strip():
+        status = coomi_service.get_status(
+            workspace_root=project_service.workspace_root,
+            session_id=str(session_id_query).strip(),
+        )
+    else:
+        status = coomi_service.get_status(workspace_root=project_service.workspace_root)
     data = AgentCoomiStatusData(**status)
     return success_response(
         data=data.model_dump(by_alias=True),
         trace=ApiTrace(traceId=trace_id, durationMs=int((time.perf_counter() - started) * 1000), toolCalls=0),
         audit=[{"action": "read_coomi_status", "toolCount": data.tool_count}],
+    )
+
+
+@router.post("/agent/coomi/plan-mode", response_model=ApiEnvelope)
+def agent_set_coomi_plan_mode(
+    payload: AgentPlanModeRequest, request: Request
+) -> ApiEnvelope:
+    del request
+    started = time.perf_counter()
+    trace_id = str(uuid4())
+    result = get_storydex_coomi_agent_service().set_plan_mode(
+        session_id=payload.session_id,
+        workspace_root=project_service.workspace_root,
+        active=payload.active,
+    )
+    return success_response(
+        data=result,
+        trace=ApiTrace(
+            traceId=trace_id,
+            durationMs=int((time.perf_counter() - started) * 1000),
+            toolCalls=0,
+        ),
+        audit=[
+            {
+                "action": "set_coomi_plan_mode",
+                "sessionId": result.get("sessionId"),
+                "planMode": result.get("planMode"),
+            }
+        ],
     )
 
 

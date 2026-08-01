@@ -14,6 +14,7 @@ import {
   resumeAgentFollowups,
   resolveAgentCoomiApproval,
   setAgentCoomiPermission,
+  setAgentCoomiPlanMode,
   steerAgentFollowup,
   stopAgentExecution,
   streamAgentPrompt,
@@ -257,6 +258,11 @@ export const useAgentStore = defineStore("agent", {
       this.lastError = "";
       this.lastErrorCode = null;
       this.lastSuccess = "";
+      this.usedTokens = null;
+      this.usageRatio = null;
+      this.cumulativeTokens = null;
+      this.compressionStatus = "idle";
+      this.compressionSummary = "";
       this.pendingApprovals = [];
       this.pendingSnapshotConfirmation = null;
       this.pendingCommitPrompt = null;
@@ -294,7 +300,7 @@ export const useAgentStore = defineStore("agent", {
 
     async refreshCoomiStatus(): Promise<void> {
       try {
-        const result = await fetchAgentCoomiStatus();
+        const result = await fetchAgentCoomiStatus(this.currentSessionId || undefined);
         this.coomiStatus = normalizeCoomiStatus(result.data);
         this.applyCoomiStatusContext(this.coomiStatus);
       } catch {
@@ -328,6 +334,86 @@ export const useAgentStore = defineStore("agent", {
         return;
       }
       await this.refreshCoomiStatus();
+    },
+
+    async setPlanMode(active: boolean, command = active ? "/plan" : "/exit_plan"): Promise<boolean> {
+      if (this.isRunning) {
+        return false;
+      }
+      const sessionId = this.currentSessionId || createSessionId();
+      const traceId = createTraceId();
+      const now = new Date().toISOString();
+      this.promptInput = "";
+      try {
+        const result = await setAgentCoomiPlanMode(sessionId, active);
+        this.currentSessionId = sessionId;
+        await this.refreshCoomiStatus();
+        if (this.coomiStatus) {
+          this.coomiStatus = {
+            ...this.coomiStatus,
+            planMode: Boolean(result.data.planMode),
+            permissionMode: result.data.permissionMode,
+            permissionLabel: result.data.permissionLabel
+          };
+        }
+        const message = active
+          ? "已进入计划模式，本会话当前为只读。"
+          : "已退出计划模式，Coomi 可以按当前权限继续执行。";
+        const run: AgentExecutionRun = {
+          traceId,
+          sessionId,
+          prompt: command,
+          route: "coomi",
+          agentMode: "coomi",
+          llmModel: this.coomiStatus?.model || "",
+          llmProvider: this.coomiStatus?.providerId || "",
+          status: "completed",
+          noRestorePoint: false,
+          createdAt: now,
+          updatedAt: now,
+          lastAction: "chat",
+          reply: message,
+          trace: null,
+          audit: [],
+          events: [],
+          tasks: [],
+          changeLedger: createEmptyChangeLedger(traceId, sessionId),
+          items: [
+            createWaterfallItem({
+              id: `${traceId}-user`,
+              type: "user",
+              status: "success",
+              title: "User",
+              content: command,
+              raw: { prompt: command }
+            }),
+            createWaterfallItem({
+              id: `${traceId}-plan-mode`,
+              type: "info",
+              status: "info",
+              title: "计划模式",
+              content: message,
+              raw: { planMode: active, source: "command" }
+            })
+          ],
+          errorMessage: "",
+          errorCode: null,
+          turnTokens: 0,
+          turnDurationMs: 0
+        };
+        this.lastPrompt = command;
+        this.lastReply = message;
+        this.lastError = "";
+        this.lastErrorCode = null;
+        this.lastSuccess = message;
+        this.currentTraceId = traceId;
+        this.upsertExecutionRun(run);
+        return true;
+      } catch (error: unknown) {
+        this.lastError = describeTransportError(error, "无法切换 Coomi 计划模式。");
+        this.lastErrorCode = error instanceof AgentApiError ? error.code ?? null : null;
+        return false;
+      }
     },
 
     async resolvePendingApproval(
@@ -819,6 +905,7 @@ export const useAgentStore = defineStore("agent", {
       this.currentSessionId = normalized;
       await this.loadHistory();
       await this.loadFollowups();
+      await this.refreshCoomiStatus();
     },
 
     async clearConversation(): Promise<void> {
@@ -827,7 +914,7 @@ export const useAgentStore = defineStore("agent", {
         await clearConversation(sessionId);
         this.resetSession();
         this.currentSessionId = sessionId;
-        await this.loadSessions();
+        await Promise.all([this.loadSessions(), this.refreshCoomiStatus()]);
       } catch (error: unknown) {
         this.lastError = describeTransportError(error, "Failed to clear Coomi conversation.");
       }
@@ -1005,6 +1092,10 @@ export const useAgentStore = defineStore("agent", {
       }
       if (this.isRunning) {
         await this.enqueueFollowup("queued");
+        return;
+      }
+      if (prompt === "/plan" || prompt === "/exit_plan") {
+        await this.setPlanMode(prompt === "/plan", prompt);
         return;
       }
       const workspaceStore = useWorkspaceStore();
@@ -1245,6 +1336,20 @@ export const useAgentStore = defineStore("agent", {
       if (visiblePacket.coomiStatus) {
         this.coomiStatus = normalizeCoomiStatus(visiblePacket.coomiStatus);
         this.applyCoomiStatusContext(this.coomiStatus);
+      }
+      if (eventName === "PlanModeChanged") {
+        const planMode = Boolean(visiblePacket.planMode);
+        if (this.coomiStatus) {
+          this.coomiStatus = {
+            ...this.coomiStatus,
+            planMode,
+            permissionMode: planMode
+              ? "plan_mode"
+              : String(visiblePacket.permissionMode || this.coomiStatus.permissionMode || "full_access")
+          };
+        } else {
+          void this.refreshCoomiStatus();
+        }
       }
 
       const item = streamPacketToWaterfallItem(traceId, visiblePacket, nextRun.items);
@@ -1676,6 +1781,26 @@ function streamPacketToWaterfallItem(
       raw
     });
   }
+  if (eventName === "PlanModeChanged" || eventName === "AgentNotice") {
+    return createWaterfallItem({
+      id: `${traceId}-${eventName.toLowerCase()}`,
+      type: "info",
+      status: "info",
+      title: eventName === "PlanModeChanged" ? "计划模式" : "提示",
+      content: String(packet.message || packet.detail || "状态已更新。"),
+      raw
+    });
+  }
+  if (eventName === "AgentWarning") {
+    return createWaterfallItem({
+      id: `${traceId}-warning-${String(packet.warning_type || packet.error_type || "agent")}`,
+      type: "notice",
+      status: "warning",
+      title: String(packet.warning_type || packet.error_type || "警告"),
+      content: formatAgentErrorPacket(packet),
+      raw
+    });
+  }
   if (
       eventName === "UsageUpdate" ||
       eventName === "CompressionEvent" ||
@@ -1796,6 +1921,8 @@ function phaseForEvent(eventName: string): string {
 }
 
 function statusForPacket(eventName: string, packet: AgentStreamPacket): CoomiWaterfallItemStatus {
+  if (eventName === "AgentWarning") return "warning";
+  if (eventName === "AgentNotice" || eventName === "PlanModeChanged") return "info";
   if (eventName === "AgentError" || packet.is_error) return "error";
   if (eventName === "TaskFailed") return "error";
   if (eventName === "TaskSkipped") return "warning";
@@ -1813,7 +1940,7 @@ function statusForPacket(eventName: string, packet: AgentStreamPacket): CoomiWat
     return String(packet.status || "") === "needs_user_input" ? "warning" : "info";
   }
   if (eventName === "StoryGenerationValidation") {
-    if (!packet.passed) return "error";
+    if (!packet.passed) return "warning";
     if (packet.chapterLengthTier && packet.tierHit === false) return "warning";
     const precisionMiss = packet.preciseWordCountEnabled === true && packet.precisionAchieved === false;
     return packet.passed && !packet.belowBudget && !packet.overBudget && !precisionMiss ? "success" : "warning";
@@ -3287,11 +3414,16 @@ function formatTokenCount(value: number): string {
     return "unknown";
   }
   const absolute = Math.abs(value);
-  if (absolute >= 1_000_000) {
-    return `${(value / 1_000_000).toFixed(1)}M`;
-  }
-  if (absolute >= 1_000) {
-    return `${(value / 1_000).toFixed(1)}K`;
+  const units = [
+    { threshold: 1_000_000_000_000, divisor: 1_000_000_000_000, suffix: "t" },
+    { threshold: 1_000_000_000, divisor: 1_000_000_000, suffix: "b" },
+    { threshold: 1_000_000, divisor: 1_000_000, suffix: "m" },
+    { threshold: 1_000, divisor: 1_000, suffix: "k" }
+  ];
+  for (const unit of units) {
+    if (absolute >= unit.threshold) {
+      return `${(value / unit.divisor).toFixed(2)}${unit.suffix}`;
+    }
   }
   return String(Math.round(value));
 }

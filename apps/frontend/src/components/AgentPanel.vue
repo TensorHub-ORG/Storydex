@@ -101,7 +101,14 @@
     </div>
 
     <footer ref="composerRef" class="coomi-composer">
-      <div v-if="composerError" class="coomi-error">{{ composerError }}</div>
+      <div
+        v-if="composerFeedback.message"
+        class="coomi-feedback"
+        :class="`is-${composerFeedback.level}`"
+      >
+        <strong>{{ composerFeedback.label }}</strong>
+        <span>{{ composerFeedback.message }}</span>
+      </div>
       <div v-if="collapsedHandlesVisible" class="coomi-collapsed-handles">
         <button
           v-if="executionFloatVisible && executionFloatCollapsed"
@@ -239,6 +246,15 @@
             </small>
           </div>
         </div>
+        <span
+          v-if="agentStore.coomiStatus?.planMode"
+          class="coomi-plan-indicator"
+          title="当前会话处于计划模式，只读工具仍可使用"
+          aria-label="计划模式，只读"
+        >
+          <span class="material-symbols-rounded">lock</span>
+          <span>只读</span>
+        </span>
         <span
           class="coomi-context-ring"
           :class="contextLevel"
@@ -704,6 +720,23 @@ const composerError = computed(() => {
   }
   return message;
 });
+const composerFeedback = computed(() => {
+  const message = composerError.value;
+  if (!message) {
+    return { level: "info", label: "提示", message: "" } as const;
+  }
+  const warningCodes = new Set([
+    "stale_trace",
+    "SNAPSHOT_FAILED",
+    "ChapterWordCountTargetReached",
+    "ChapterPlanValidationFailed"
+  ]);
+  const warning = warningCodes.has(String(agentStore.lastErrorCode || ""))
+    || /^(请输入|请先|当前.*无法|最新一轮)/.test(message);
+  return warning
+    ? { level: "warning", label: "警告", message } as const
+    : { level: "error", label: "错误", message } as const;
+});
 const visibleFollowups = computed(() =>
   agentStore.followups.filter((message) => message.status !== "sent" && message.status !== "cancelled")
 );
@@ -887,9 +920,9 @@ const contextTooltip = computed(() => {
   const ratio = contextRatio.value;
   const ctx =
     ratio !== null && agentStore.contextWindow && agentStore.usedTokens !== null
-      ? `上下文：${(ratio * 100).toFixed(1)}% (${formatTokenCount(agentStore.usedTokens)} / ${formatTokenCount(agentStore.contextWindow)})`
+      ? `当前上下文：${(ratio * 100).toFixed(1)}% (${formatTokenCount(agentStore.usedTokens)} / ${formatTokenCount(agentStore.contextWindow)})`
       : "上下文：未知";
-  const cum = `累计：${agentStore.cumulativeTokens !== null ? formatTokenCount(agentStore.cumulativeTokens) : "未知"} tokens`;
+  const cum = `会话累计：${agentStore.cumulativeTokens !== null ? formatTokenCount(agentStore.cumulativeTokens) : "未知"}`;
   const compression = `压缩：${agentStore.compressionStatus || "空闲"}`;
   return `${ctx}\n${cum}\n${compression}`;
 });
@@ -1015,6 +1048,7 @@ watch(
 watch(
   () => agentStore.promptInput,
   (value) => {
+    void nextTick(resizeComposer);
     const normalized = value.trimStart();
     if (!normalized.startsWith("/")) {
       commandMenuOpen.value = false;
@@ -1164,7 +1198,18 @@ function handleComposerKeydown(event: KeyboardEvent): void {
         (selectedCommandIndex.value - 1 + filteredCommands.value.length) % filteredCommands.value.length;
       return;
     }
-    if (event.key === "Enter" || event.key === "Tab") {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      const selected = filteredCommands.value[selectedCommandIndex.value];
+      if (selected && agentStore.promptInput.trim() === selected.value.trim()) {
+        commandMenuOpen.value = false;
+        void handleSubmitOrStop();
+        return;
+      }
+      selectCommand(selectedCommandIndex.value);
+      return;
+    }
+    if (event.key === "Tab") {
       event.preventDefault();
       selectCommand(selectedCommandIndex.value);
       return;
@@ -1914,6 +1959,7 @@ function formatItemType(type: CoomiWaterfallItemType): string {
     phase: "阶段",
     system: "系统",
     notice: "提示",
+    info: "提示",
     error: "错误"
   };
   return labels[type] || type;
@@ -2021,11 +2067,16 @@ function formatTokenCount(value: number): string {
     return "unknown";
   }
   const absolute = Math.abs(value);
-  if (absolute >= 1_000_000) {
-    return `${(value / 1_000_000).toFixed(1)}M`;
-  }
-  if (absolute >= 1_000) {
-    return `${(value / 1_000).toFixed(1)}K`;
+  const units = [
+    { threshold: 1_000_000_000_000, divisor: 1_000_000_000_000, suffix: "t" },
+    { threshold: 1_000_000_000, divisor: 1_000_000_000, suffix: "b" },
+    { threshold: 1_000_000, divisor: 1_000_000, suffix: "m" },
+    { threshold: 1_000, divisor: 1_000, suffix: "k" }
+  ];
+  for (const unit of units) {
+    if (absolute >= unit.threshold) {
+      return `${(value / unit.divisor).toFixed(2)}${unit.suffix}`;
+    }
   }
   return String(Math.round(value));
 }
@@ -2976,10 +3027,27 @@ defineExpose({
   border-top: 1px solid var(--border-subtle);
 }
 
-.coomi-error {
-  color: var(--danger);
+.coomi-feedback {
+  display: grid;
+  gap: 2px;
   font-size: 12px;
   line-height: 1.5;
+}
+
+.coomi-feedback strong {
+  font-weight: 650;
+}
+
+.coomi-feedback.is-error {
+  color: var(--danger);
+}
+
+.coomi-feedback.is-warning {
+  color: var(--warning);
+}
+
+.coomi-feedback.is-info {
+  color: var(--accent-strong);
 }
 
 .coomi-context-ring {
@@ -3020,6 +3088,22 @@ defineExpose({
 
 .coomi-context-ring.unknown {
   --coomi-context-color: rgba(148, 163, 184, 0.72);
+}
+
+.coomi-plan-indicator {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-height: 22px;
+  color: color-mix(in srgb, var(--warning) 86%, var(--text-main));
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.coomi-plan-indicator .material-symbols-rounded {
+  font-size: 14px;
 }
 
 .coomi-composer-status {
@@ -3951,6 +4035,7 @@ defineExpose({
   font-size: 13px;
   line-height: 22px;
   box-sizing: border-box;
+  overflow-y: auto;
 }
 
 .coomi-input:disabled {

@@ -3,7 +3,7 @@ import { createPinia, setActivePinia } from "pinia";
 
 const api = vi.hoisted(() => ({
   streamAgentPrompt: vi.fn(), fetchAgentSessions: vi.fn(), fetchAgentHistory: vi.fn(),
-  fetchAgentCoomiStatus: vi.fn(), submitAgentRunCommitDecision: vi.fn(), rollbackLatestExecution: vi.fn(), clearConversation: vi.fn(),
+  fetchAgentCoomiStatus: vi.fn(), setAgentCoomiPlanMode: vi.fn(), submitAgentRunCommitDecision: vi.fn(), rollbackLatestExecution: vi.fn(), clearConversation: vi.fn(),
   deleteAgentSession: vi.fn(), cycleAgentCoomiPermission: vi.fn(), setAgentCoomiPermission: vi.fn(),
   resolveAgentCoomiApproval: vi.fn(), fetchAgentFollowups: vi.fn(), enqueueAgentFollowup: vi.fn(),
   updateAgentFollowup: vi.fn(), deleteAgentFollowup: vi.fn(), steerAgentFollowup: vi.fn(),
@@ -49,6 +49,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.useFakeTimers();
   api.fetchAgentCoomiStatus.mockResolvedValue(envelope({ runtime: "coomi", installed: true, model: "fake", permissionMode: "full_access", contextWindow: 100, usedTokens: 20 }));
+  api.setAgentCoomiPlanMode.mockImplementation((sessionId: string, active: boolean) => Promise.resolve(envelope({
+    sessionId, planMode: active, permissionMode: active ? "plan_mode" : "full_access", permissionLabel: active ? "Plan mode" : "Full access"
+  })));
   api.fetchAgentSessions.mockResolvedValue(envelope({ items: [] }));
   api.fetchAgentHistory.mockResolvedValue(envelope({ items: [] }));
   api.cycleAgentCoomiPermission.mockResolvedValue(envelope({ permissionMode: "read_only", permissionLabel: "Read" }));

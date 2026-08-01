@@ -74,6 +74,50 @@ def _coomi_binding_path(workspace_root: Path, storydex_session_id: str) -> Path:
     return workspace / ".storydex" / ".agent" / "runtime" / "coomi-sessions" / f"{digest}.json"
 
 
+def _coomi_usage_ledger_path(workspace_root: Path, storydex_session_id: str) -> Path:
+    workspace = Path(workspace_root).resolve()
+    normalized = str(storydex_session_id or "default").strip() or "default"
+    digest = sha256(normalized.encode("utf-8")).hexdigest()[:24]
+    return workspace / ".storydex" / ".agent" / "runtime" / "coomi-usage" / f"{digest}.json"
+
+
+def _read_coomi_usage_ledger(
+    *, workspace_root: Path, storydex_session_id: str
+) -> Dict[str, Any]:
+    path = _coomi_usage_ledger_path(workspace_root, storydex_session_id)
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _write_coomi_usage_ledger(
+    *, workspace_root: Path, storydex_session_id: str, value: Dict[str, Any]
+) -> None:
+    path = _coomi_usage_ledger_path(workspace_root, storydex_session_id)
+    payload = {
+        "version": 1,
+        "workspaceRoot": str(Path(workspace_root).resolve()),
+        "storydexSessionId": str(storydex_session_id or "default").strip() or "default",
+        **dict(value),
+        "updatedAt": datetime.now(timezone.utc).isoformat(),
+    }
+    _atomic_write(
+        path,
+        json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8") + b"\n",
+    )
+
+
+def _nonnegative_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _read_coomi_session_binding(*, workspace_root: Path, storydex_session_id: str) -> Dict[str, Any]:
     path = _coomi_binding_path(workspace_root, storydex_session_id)
     if not path.is_file():
@@ -145,6 +189,73 @@ def _validated_session_path(binding: Dict[str, Any]) -> Path | None:
     return path
 
 
+def _runtime_session_total_tokens(binding: Dict[str, Any]) -> int | None:
+    """Read the runtime session's cumulative usage from its persisted JSON."""
+    path = _validated_session_path(binding)
+    if path is None or not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else payload
+    if not isinstance(usage, dict):
+        return None
+    total = usage.get("total_tokens")
+    if total is None:
+        total = usage.get("totalTokens")
+    if total is not None:
+        try:
+            return max(0, int(total))
+        except (TypeError, ValueError):
+            pass
+    input_tokens = usage.get("input_tokens")
+    if input_tokens is None:
+        input_tokens = usage.get("prompt_tokens")
+    if input_tokens is None:
+        input_tokens = usage.get("inputTokens")
+    output_tokens = usage.get("output_tokens")
+    if output_tokens is None:
+        output_tokens = usage.get("completion_tokens")
+    if output_tokens is None:
+        output_tokens = usage.get("outputTokens")
+    try:
+        return max(0, int(input_tokens or 0) + int(output_tokens or 0))
+    except (TypeError, ValueError):
+        return None
+
+
+def _usage_total_tokens(value: Dict[str, Any]) -> int | None:
+    """Extract a cumulative usage total from a bridge event payload."""
+    usage = value.get("usage") if isinstance(value.get("usage"), dict) else value
+    if not isinstance(usage, dict):
+        return None
+    for key in ("total_tokens", "totalTokens"):
+        if usage.get(key) is not None:
+            try:
+                return max(0, int(usage[key]))
+            except (TypeError, ValueError):
+                return None
+    input_tokens = usage.get("input_tokens")
+    if input_tokens is None:
+        input_tokens = usage.get("prompt_tokens")
+    if input_tokens is None:
+        input_tokens = usage.get("inputTokens")
+    output_tokens = usage.get("output_tokens")
+    if output_tokens is None:
+        output_tokens = usage.get("completion_tokens")
+    if output_tokens is None:
+        output_tokens = usage.get("outputTokens")
+    if input_tokens is None and output_tokens is None:
+        return None
+    try:
+        return max(0, int(input_tokens or 0) + int(output_tokens or 0))
+    except (TypeError, ValueError):
+        return None
+
+
 def _atomic_write(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
@@ -168,11 +279,69 @@ class StorydexCoomiAgentService:
         self._approval_waiters: dict[str, asyncio.Future[Dict[str, Any]]] = {}
         self._active_lock = threading.Lock()
         self._active: dict[str, tuple[asyncio.AbstractEventLoop, LiveBridgeProcess]] = {}
-        self._context_by_workspace: dict[str, Dict[str, Any]] = {}
+        self._context_by_session: dict[str, Dict[str, Any]] = {}
 
     @staticmethod
     def _runtime_key(*, session_id: str, workspace_root: Path) -> str:
         return f"{Path(workspace_root).resolve()}::{str(session_id or 'default').strip() or 'default'}"
+
+    def set_plan_mode(
+        self, *, session_id: str, workspace_root: Path, active: bool
+    ) -> Dict[str, Any]:
+        key = self._runtime_key(session_id=session_id, workspace_root=workspace_root)
+        self._plan_modes[key] = bool(active)
+        return {
+            "sessionId": str(session_id or "default").strip() or "default",
+            "planMode": bool(active),
+            "permissionMode": "plan_mode" if active else self._permission_mode,
+            "permissionLabel": "Plan mode" if active else _permission_label(self._permission_mode),
+        }
+
+    def _merge_persistent_context(
+        self,
+        *,
+        workspace_root: Path,
+        session_id: str,
+        snapshot: Dict[str, Any],
+        runtime_total: int | None = None,
+    ) -> Dict[str, Any]:
+        binding = _read_coomi_session_binding(
+            workspace_root=workspace_root,
+            storydex_session_id=session_id,
+        )
+        runtime_id = str(
+            binding.get("runtimeSessionId") or binding.get("coomiSessionId") or ""
+        )
+        ledger = _read_coomi_usage_ledger(
+            workspace_root=workspace_root,
+            storydex_session_id=session_id,
+        )
+        ledger_cumulative = _nonnegative_int(ledger.get("cumulativeTokens"))
+        cumulative = ledger_cumulative
+        previous_runtime_id = str(ledger.get("runtimeSessionId") or "")
+        previous_runtime_total = _nonnegative_int(ledger.get("runtimeTotalTokens"))
+        if runtime_total is None:
+            runtime_total = _runtime_session_total_tokens(binding)
+        if runtime_total is not None and runtime_total >= 0 and runtime_id:
+            if previous_runtime_id == runtime_id:
+                cumulative += max(0, runtime_total - previous_runtime_total)
+            else:
+                cumulative += runtime_total
+            if (
+                cumulative != ledger_cumulative
+                or previous_runtime_id != runtime_id
+                or previous_runtime_total != runtime_total
+            ):
+                _write_coomi_usage_ledger(
+                    workspace_root=workspace_root,
+                    storydex_session_id=session_id,
+                    value={
+                        "cumulativeTokens": cumulative,
+                        "runtimeSessionId": runtime_id,
+                        "runtimeTotalTokens": runtime_total,
+                    },
+                )
+        return {**snapshot, "cumulativeTokens": cumulative}
 
     def _register_bridge(
         self, *, session_id: str, workspace_root: Path, bridge: LiveBridgeProcess
@@ -289,20 +458,40 @@ class StorydexCoomiAgentService:
         runtime_key = self._runtime_key(session_id=normalized_session, workspace_root=workspace)
         command = _parse_slash_command(prompt)
         if command["name"] == "exit_plan":
-            self._plan_modes[runtime_key] = False
-            yield "TextChunk", {"_type": "TextChunk", "_version": 1, "content": "Plan mode disabled."}
+            self.set_plan_mode(
+                session_id=normalized_session, workspace_root=workspace, active=False
+            )
+            yield "PlanModeChanged", {
+                "_type": "PlanModeChanged",
+                "_version": 1,
+                "planMode": False,
+                "permissionMode": self._permission_mode,
+                "message": "已退出计划模式，Coomi 可以按当前权限继续执行。",
+                "source": "command",
+            }
             yield _completed_event(normalized_session, started, 0)
             return
         if command["name"] == "plan" and not command["body"]:
-            self._plan_modes[runtime_key] = True
-            yield "TextChunk", {"_type": "TextChunk", "_version": 1, "content": "Plan mode enabled."}
+            self.set_plan_mode(
+                session_id=normalized_session, workspace_root=workspace, active=True
+            )
+            yield "PlanModeChanged", {
+                "_type": "PlanModeChanged",
+                "_version": 1,
+                "planMode": True,
+                "permissionMode": "plan_mode",
+                "message": "已进入计划模式，本会话当前为只读。",
+                "source": "command",
+            }
             yield _completed_event(normalized_session, started, 0)
             return
         if command["name"] == "plan":
-            self._plan_modes[runtime_key] = True
+            self.set_plan_mode(
+                session_id=normalized_session, workspace_root=workspace, active=True
+            )
 
         plan_mode = self._plan_modes.get(runtime_key, False)
-        writes_allowed = _turn_contract_allows_project_writes(turn_contract) and not plan_mode
+        writes_allowed = _turn_contract_allows_project_writes(turn_contract)
         registry = _create_storydex_tool_registry(
             workspace,
             policy=context_policy_from_turn_contract(turn_contract),
@@ -331,7 +520,12 @@ class StorydexCoomiAgentService:
             for value in execution.get("allowedWriteRoots", [])
             if str(value).strip()
         ] if isinstance(execution.get("allowedWriteRoots"), list) else []
-        permission_mode = "plan_mode" if not writes_allowed else self._permission_mode
+        permission_mode = "plan_mode" if plan_mode else self._permission_mode
+        mutating_tool_names = [
+            tool.name
+            for tool in registry.list_tools()
+            if tool.access != ToolAccess.READ_ONLY
+        ]
         try:
             bridge = await LiveBridgeProcess.start(
                 {
@@ -342,9 +536,11 @@ class StorydexCoomiAgentService:
                     "runtimeSessionId": binding.get("runtimeSessionId") or binding.get("coomiSessionId"),
                     "storydexSessionId": normalized_session,
                     "permissionMode": permission_mode,
+                    "basePermissionMode": self._permission_mode,
                     "writesAllowed": writes_allowed,
                     "allowedWriteRoots": allowed_roots,
                     "toolSpecs": registry.specs(),
+                    "mutatingToolNames": mutating_tool_names,
                 }
             )
         except Exception as exc:
@@ -365,7 +561,7 @@ class StorydexCoomiAgentService:
         key = self._register_bridge(
             session_id=normalized_session, workspace_root=workspace, bridge=bridge
         )
-        status = self.get_status(workspace_root=workspace)
+        status = self.get_status(workspace_root=workspace, session_id=normalized_session)
         yield _agent_started(
             session_id=normalized_session, prompt=prompt, status=status, mode="coomi"
         )
@@ -403,8 +599,24 @@ class StorydexCoomiAgentService:
                     for event in events:
                         yield event
                     continue
-                if packet_type == "context_updated":
-                    self._context_by_workspace[str(workspace)] = _context_snapshot_from_bridge(data)
+                if packet_type in {"context_updated", "turn_completed", "completed"}:
+                    previous = self._context_by_session.get(runtime_key, {})
+                    snapshot = _context_snapshot_from_bridge(
+                        data, fallback=previous
+                    )
+                    self._context_by_session[runtime_key] = self._merge_persistent_context(
+                        workspace_root=workspace,
+                        session_id=normalized_session,
+                        snapshot=snapshot,
+                        runtime_total=_usage_total_tokens(data),
+                    )
+                if packet_type == "plan_mode_changed":
+                    active = bool(data.get("active"))
+                    self.set_plan_mode(
+                        session_id=normalized_session,
+                        workspace_root=workspace,
+                        active=active,
+                    )
                 translated = translator.translate(packet)
                 if translated is not None:
                     if translated[0] in {"AgentCompleted", "AgentCancelled", "AgentError"}:
@@ -526,7 +738,9 @@ class StorydexCoomiAgentService:
     def _ensure_coomi_installed() -> None:
         bridge_command()
 
-    def get_status(self, *, workspace_root: Path) -> Dict[str, Any]:
+    def get_status(
+        self, *, workspace_root: Path, session_id: str = "default"
+    ) -> Dict[str, Any]:
         installed = True
         try:
             self._ensure_coomi_installed()
@@ -536,9 +750,23 @@ class StorydexCoomiAgentService:
         providers = payload.get("providers") if isinstance(payload.get("providers"), dict) else {}
         provider_id = str(payload.get("active") or "")
         provider = providers.get(provider_id) if isinstance(providers.get(provider_id), dict) else {}
-        context = self._context_by_workspace.get(
-            str(Path(workspace_root).resolve()), _context_snapshot_from_bridge({})
+        normalized_session = str(session_id or "default").strip() or "default"
+        runtime_key = self._runtime_key(
+            session_id=normalized_session, workspace_root=workspace_root
         )
+        context = self._context_by_session.get(runtime_key)
+        if context is None:
+            context = _context_snapshot_from_session_file(
+                workspace_root=workspace_root,
+                session_id=normalized_session,
+            )
+            context = self._merge_persistent_context(
+                workspace_root=workspace_root,
+                session_id=normalized_session,
+                snapshot=context,
+            )
+            self._context_by_session[runtime_key] = context
+        plan_mode = self._plan_modes.get(runtime_key, False)
         return {
             "runtime": "storydex-coomi-rs",
             "installed": installed,
@@ -549,9 +777,9 @@ class StorydexCoomiAgentService:
             "providerType": str(provider.get("type") or ""),
             "model": str(provider.get("model") or ""),
             "display": str(provider.get("display") or provider_id),
-            "permissionMode": self._permission_mode,
-            "permissionLabel": _permission_label(self._permission_mode),
-            "planMode": False,
+            "permissionMode": "plan_mode" if plan_mode else self._permission_mode,
+            "permissionLabel": "Plan mode" if plan_mode else _permission_label(self._permission_mode),
+            "planMode": plan_mode,
             "toolCount": len(_create_storydex_tool_registry(workspace_root).specs()) + 20,
             **context,
         }
@@ -618,9 +846,20 @@ class StorydexCoomiAgentService:
         *,
         workspace_root: Path | None = None,
         delete_history: bool = False,
+        delete_usage: bool = False,
     ) -> None:
         if workspace_root is None:
             return
+        runtime_key = self._runtime_key(
+            session_id=session_id, workspace_root=workspace_root
+        )
+        self._plan_modes.pop(runtime_key, None)
+        self._context_by_session.pop(runtime_key, None)
+        if delete_usage:
+            try:
+                _coomi_usage_ledger_path(workspace_root, session_id).unlink()
+            except FileNotFoundError:
+                pass
         _delete_coomi_session_binding(
             workspace_root=workspace_root,
             storydex_session_id=str(session_id or "default"),
@@ -1112,6 +1351,19 @@ class _CoomiEventTranslator:
                 for step in steps if isinstance(step, dict)
             ]
             return "TaskPlanUpdated", {"_type": "TaskPlanUpdated", "_version": 1, "tasks": tasks}
+        if name == "plan_mode_changed":
+            active = bool(data.get("active"))
+            return "PlanModeChanged", {
+                "_type": "PlanModeChanged",
+                "_version": 1,
+                "planMode": active,
+                "permissionMode": "plan_mode" if active else str(data.get("permissionMode") or ""),
+                "message": str(
+                    data.get("message")
+                    or ("已进入计划模式，本会话当前为只读。" if active else "Coomi 已退出计划模式。")
+                ),
+                "source": str(data.get("source") or "agent"),
+            }
         if name == "loop_updated":
             return "TurnPhase", {
                 "_type": "TurnPhase",
@@ -1242,7 +1494,12 @@ async def _build_coomi_system_prompt(
         _render_turn_contract(turn_contract),
     ]
     if plan_mode:
-        prompt_parts.append("Plan mode is active. Read and reason, but do not modify project files.")
+        prompt_parts.append(
+            "Plan mode is active. Read and reason without modifying project files. "
+            "You have permission to call `exit_plan_mode` yourself when the user asks you to execute "
+            "the plan or when planning is complete and continuing the same task requires writes. "
+            "After that tool succeeds, continue under the configured Storydex permission mode."
+        )
     return "\n\n".join(part for part in prompt_parts if part)
 
 
@@ -1989,16 +2246,52 @@ def _resolve_context_window() -> int:
     return DEFAULT_CONTEXT_WINDOW
 
 
-def _context_snapshot_from_bridge(value: Dict[str, Any]) -> Dict[str, Any]:
+def _context_snapshot_from_session_file(
+    *, workspace_root: Path, session_id: str
+) -> Dict[str, Any]:
+    binding = _read_coomi_session_binding(
+        workspace_root=workspace_root,
+        storydex_session_id=session_id,
+    )
+    path = _validated_session_path(binding)
+    if path is None or not path.is_file():
+        return _context_snapshot_from_bridge({})
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return _context_snapshot_from_bridge({})
+    return _context_snapshot_from_bridge(payload if isinstance(payload, dict) else {})
+
+
+def _context_snapshot_from_bridge(
+    value: Dict[str, Any], *, fallback: Dict[str, Any] | None = None
+) -> Dict[str, Any]:
+    previous = fallback if isinstance(fallback, dict) else {}
     context = value.get("context") if isinstance(value.get("context"), dict) else value
     window = int(context.get("context_window") or context.get("effective_context_window") or _resolve_context_window())
-    used = int(context.get("used_tokens") or 0)
+    used = int(
+        context.get("used_tokens")
+        or context.get("estimated_active_tokens")
+        or previous.get("usedTokens")
+        or 0
+    )
+    usage = value.get("usage") if isinstance(value.get("usage"), dict) else {}
+    cumulative = int(
+        context.get("cumulative_tokens")
+        or usage.get("total_tokens")
+        or (
+            int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+            + int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
+        )
+        or previous.get("cumulativeTokens")
+        or 0
+    )
     ratio = used / max(1, window)
     return {
         "contextWindow": window,
         "usedTokens": used,
         "usageRatio": ratio,
-        "cumulativeTokens": int(context.get("cumulative_tokens") or 0),
+        "cumulativeTokens": cumulative,
         "compactThreshold": int(context.get("auto_compact_token_limit") or window * COMPACT_THRESHOLD_RATIO),
         "warningThreshold": int(window * WARNING_THRESHOLD_RATIO),
         "compressionStatus": "idle",

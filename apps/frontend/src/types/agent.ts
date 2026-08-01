@@ -170,6 +170,7 @@ export type AgentStreamPacketType =
   | "ToolCacheHit"
   | "UsageUpdate"
   | "CompressionEvent"
+  | "PlanModeChanged"
   | "PermissionRequest"
   | "GitAutoCommit"
   | "GitCommitPrompt"
@@ -189,6 +190,8 @@ export type AgentStreamPacketType =
   | "StageOutput"
   | "AgentStarted"
   | "AgentCompleted"
+  | "AgentWarning"
+  | "AgentNotice"
   | "AgentError"
   | "AgentCancelled"
   | "FollowupQueued"
@@ -218,6 +221,7 @@ export interface AgentStreamPacket {
   phase?: string;
   label?: string;
   status?: string;
+  permissionMode?: string;
   current?: number;
   total?: number;
   detail?: string;
@@ -392,6 +396,8 @@ export interface AgentStreamPacket {
   total_tokens?: number;
   duration_ms_total?: number;
   planMode?: boolean;
+  source?: string;
+  warning_type?: string;
 }
 
 export interface AgentApprovalOption {
@@ -478,6 +484,7 @@ export type CoomiWaterfallItemType =
   | "phase"
   | "system"
   | "notice"
+  | "info"
   | "error";
 
 export type CoomiWaterfallItemStatus = "running" | "success" | "error" | "info" | "warning";

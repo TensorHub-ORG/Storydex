@@ -4,7 +4,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { nextTick, unref } from "vue";
 
 const api = vi.hoisted(() => ({
-  fetchAgentCoomiStatus: vi.fn(), fetchAgentSessions: vi.fn(), fetchAgentHistory: vi.fn(),
+  fetchAgentCoomiStatus: vi.fn(), setAgentCoomiPlanMode: vi.fn(), fetchAgentSessions: vi.fn(), fetchAgentHistory: vi.fn(),
   submitAgentRunCommitDecision: vi.fn(), rollbackLatestExecution: vi.fn(), streamAgentPrompt: vi.fn(), clearConversation: vi.fn(),
   deleteAgentSession: vi.fn(), cycleAgentCoomiPermission: vi.fn(), setAgentCoomiPermission: vi.fn(),
   resolveAgentCoomiApproval: vi.fn(), fetchAgentFollowups: vi.fn(), enqueueAgentFollowup: vi.fn(),
@@ -97,6 +97,9 @@ beforeEach(() => {
   api.fetchAgentHistory.mockResolvedValue({ data: { items: [] } });
   api.cycleAgentCoomiPermission.mockResolvedValue({ data: { permissionMode: "ask_approval", permissionLabel: "Ask" } });
   api.setAgentCoomiPermission.mockResolvedValue({ data: { permissionMode: "ask_approval", permissionLabel: "Ask" } });
+  api.setAgentCoomiPlanMode.mockImplementation((sessionId: string, active: boolean) => Promise.resolve({
+    data: { sessionId, planMode: active, permissionMode: active ? "plan_mode" : "full_access", permissionLabel: active ? "Plan mode" : "Full access" }
+  }));
   api.resolveAgentCoomiApproval.mockResolvedValue({ data: { resolved: true } });
   api.clearConversation.mockResolvedValue({ data: { cleared: true } });
   api.deleteAgentSession.mockResolvedValue({ data: { deleted: true } });
@@ -226,6 +229,38 @@ describe("AgentPanel", () => {
     utils.resizeComposer();
     expect(input.style.height).toBe("180px");
     expect(window.localStorage.getItem("storydex.composerMaxHeight")).toBeNull();
+
+    let programmaticHeight = 120;
+    Object.defineProperty(input, "scrollHeight", { configurable: true, get: () => programmaticHeight });
+    const store = useAgentStore();
+    store.promptInput = "知识图谱自动填入的多行提示词\n第二行\n第三行";
+    await nextTick();
+    expect(input.style.height).toBe("120px");
+    programmaticHeight = 22;
+    store.promptInput = "";
+    await nextTick();
+    expect(input.style.height).toBe("34px");
+    wrapper.unmount();
+  });
+
+  it("shows a read-only marker and formats persistent session usage with two-decimal units", async () => {
+    const store = useAgentStore();
+    store.coomiStatus = {
+      runtime: "coomi", installed: true, permissionMode: "plan_mode", planMode: true
+    } as any;
+    store.usedTokens = 12_345;
+    store.contextWindow = 1_000_000;
+    store.cumulativeTokens = 1_234_567_890;
+    const wrapper = shallowMount(AgentPanel);
+    await nextTick();
+
+    expect(wrapper.find(".coomi-plan-indicator").text()).toContain("只读");
+    const utils = (wrapper.vm as any).__testUtils;
+    expect(utils.formatTokenCount(1_234)).toBe("1.23k");
+    expect(utils.formatTokenCount(1_234_567)).toBe("1.23m");
+    expect(utils.formatTokenCount(1_234_567_890)).toBe("1.23b");
+    expect(utils.formatTokenCount(1_234_567_890_123)).toBe("1.23t");
+    expect(unref(utils.contextTooltip)).toContain("1.23b");
     wrapper.unmount();
   });
 

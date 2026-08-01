@@ -357,6 +357,7 @@ class _Handle:
         self.is_cancelled = False
         self.cancel_reason = ""
         self.finalize_calls = 0
+        self.final_status = ""
 
     def cancel(self, reason: str) -> bool:
         self.is_cancelled = True
@@ -372,6 +373,7 @@ class _Handle:
             if observation.cancelled
             else "completed"
         )
+        self.final_status = status
         context.on_git_payload(context.finish_git())
         context.on_terminal(status, observation.error_message)
         payload = context.build_payload(status, observation.error_message, False, {})
@@ -663,9 +665,12 @@ def test_invalid_version_three_plan_stops_before_every_provider_call(
     assert collected["executeCalls"] == 0
     assert collected["runtime"].stream_calls == 0
     assert "AgentStarted" not in collected["names"]
-    error = _payload(collected, "AgentError")
-    assert error["error_type"] == "ChapterPlanValidationFailed"
-    assert error["details"]["providerCalls"] == 0
+    warning = _payload(collected, "AgentWarning")
+    assert warning["warning_type"] == "ChapterPlanValidationFailed"
+    assert warning["status"] == "warning"
+    assert warning["details"]["providerCalls"] == 0
+    assert "AgentError" not in collected["names"]
+    assert collected["handle"].final_status == "completed"
 
 
 def test_reached_chapter_target_stops_before_every_provider_call(
@@ -702,11 +707,14 @@ def test_reached_chapter_target_stops_before_every_provider_call(
     assert collected["executeCalls"] == 0
     assert collected["runtime"].stream_calls == 0
     assert "AgentStarted" not in collected["names"]
-    error = _payload(collected, "AgentError")
-    assert error["error_type"] == "ChapterWordCountTargetReached"
-    assert "超写" in error["message"]
-    assert "下一章" in error["message"]
-    assert error["details"]["providerCalls"] == 0
+    warning = _payload(collected, "AgentWarning")
+    assert warning["warning_type"] == "ChapterWordCountTargetReached"
+    assert warning["status"] == "warning"
+    assert "超写" in warning["message"]
+    assert "下一章" in warning["message"]
+    assert warning["details"]["providerCalls"] == 0
+    assert "AgentError" not in collected["names"]
+    assert collected["handle"].final_status == "completed"
 
 
 def test_tier_state_change_does_not_publish_a_remaining_numeric_budget(
