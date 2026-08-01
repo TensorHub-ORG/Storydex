@@ -328,8 +328,10 @@ export async function deleteAgentSession(
   }
 }
 
-export async function fetchAgentCoomiStatus(): Promise<ApiResult<AgentCoomiStatusResponse>> {
-  const response = await apiClient.get<ApiEnvelope<AgentCoomiStatusResponse>>("/agent/coomi/status");
+export async function fetchAgentCoomiStatus(sessionId?: string): Promise<ApiResult<AgentCoomiStatusResponse>> {
+  const response = await apiClient.get<ApiEnvelope<AgentCoomiStatusResponse>>("/agent/coomi/status", {
+    params: buildSessionParams(sessionId)
+  });
 
   try {
     return unwrapEnvelope(response.data, "Coomi status request failed.");
@@ -339,6 +341,24 @@ export async function fetchAgentCoomiStatus(): Promise<ApiResult<AgentCoomiStatu
     }
     throw error;
   }
+}
+
+export async function setAgentCoomiPlanMode(
+  sessionId: string,
+  active: boolean
+): Promise<ApiResult<{
+  sessionId: string;
+  planMode: boolean;
+  permissionMode: string;
+  permissionLabel: string;
+}>> {
+  const response = await apiClient.post<ApiEnvelope<{
+    sessionId: string;
+    planMode: boolean;
+    permissionMode: string;
+    permissionLabel: string;
+  }>>("/agent/coomi/plan-mode", { sessionId, active });
+  return unwrapAgentEnvelope(response.data, "Unable to update Coomi plan mode.");
 }
 
 export async function fetchAgentCoomiConfig(): Promise<ApiResult<AgentCoomiConfigResponse>> {

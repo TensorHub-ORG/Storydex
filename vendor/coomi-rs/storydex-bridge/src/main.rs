@@ -106,7 +106,11 @@ struct BridgeRequest {
     #[serde(default)]
     permission_mode: String,
     #[serde(default)]
+    base_permission_mode: String,
+    #[serde(default)]
     tool_specs: Vec<ToolSpec>,
+    #[serde(default)]
+    mutating_tool_names: Vec<String>,
     #[serde(default = "default_true")]
     writes_allowed: bool,
     #[serde(default)]
@@ -186,7 +190,8 @@ impl AgentObserver for StorydexObserver {
 }
 
 struct StorydexApproval {
-    mode: String,
+    base_mode: String,
+    plan_mode_active: Arc<AtomicBool>,
     emitter: Emitter,
     controls: Arc<ControlHub>,
 }
@@ -194,9 +199,11 @@ struct StorydexApproval {
 #[async_trait]
 impl ApprovalHandler for StorydexApproval {
     async fn approve(&self, call: &ToolCall, reason: &str) -> bool {
-        match self.mode.as_str() {
+        if self.plan_mode_active.load(Ordering::Acquire) {
+            return false;
+        }
+        match self.base_mode.as_str() {
             "approve_for_me" | "full_access" => true,
-            "plan_mode" => false,
             _ => {
                 let request_id = Uuid::new_v4().to_string();
                 let receiver = self.controls.register(request_id.clone());
@@ -236,6 +243,9 @@ struct StorydexTools {
     allowed_write_roots: Vec<PathBuf>,
     custom_specs: Vec<ToolSpec>,
     custom_names: HashSet<String>,
+    mutating_custom_names: HashSet<String>,
+    plan_mode_active: Arc<AtomicBool>,
+    base_permission_mode: String,
     emitter: Emitter,
     controls: Arc<ControlHub>,
 }
@@ -245,15 +255,58 @@ impl ToolRuntime for StorydexTools {
     fn specs(&self) -> Vec<ToolSpec> {
         let mut specs = self.core.specs();
         specs.extend(self.custom_specs.clone());
+        if self.plan_mode_active.load(Ordering::Acquire) {
+            specs.push(ToolSpec {
+                name: "exit_plan_mode".into(),
+                description: "Exit Storydex plan/read-only mode and continue this turn using the configured permission mode. Call this when planning is complete and the user's task now requires execution or file changes.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "reason": {
+                            "type": "string",
+                            "description": "Brief reason why execution should leave read-only mode."
+                        }
+                    },
+                    "additionalProperties": false
+                }),
+            });
+        }
         specs
     }
 
     async fn call(&self, call: &ToolCall, approval: &dyn ApprovalHandler) -> ToolResult {
+        if call.name == "exit_plan_mode" {
+            if !self.plan_mode_active.swap(false, Ordering::AcqRel) {
+                return ToolResult::success("Storydex plan mode is already disabled.");
+            }
+            self.emitter.event(
+                "plan_mode_changed",
+                json!({
+                    "active": false,
+                    "permissionMode": self.base_permission_mode,
+                    "source": "agent",
+                    "message": "Coomi 已自主退出计划模式，并将按当前权限继续执行。",
+                    "reason": call.arguments.get("reason").and_then(Value::as_str).unwrap_or_default(),
+                }),
+            );
+            return ToolResult::success(
+                "Plan mode disabled. Continue the current task using the configured Storydex permission mode.",
+            );
+        }
         if !self.custom_names.contains(&call.name) {
             if let Some(error) = self.rejected_core_write(call) {
                 return ToolResult::error(error);
             }
             return self.core.call(call, approval).await;
+        }
+        if self.mutating_custom_names.contains(&call.name)
+            && (self.plan_mode_active.load(Ordering::Acquire) || !self.writes_allowed)
+        {
+            return ToolResult::error(if self.plan_mode_active.load(Ordering::Acquire) {
+                "Storydex plan mode blocks state-changing tools until exit_plan_mode is called"
+            } else {
+                "Storydex turn contract blocks state-changing tools"
+            });
         }
         let request_id = Uuid::new_v4().to_string();
         let receiver = self.controls.register(request_id.clone());
@@ -291,6 +344,13 @@ impl ToolRuntime for StorydexTools {
 
 impl StorydexTools {
     fn rejected_core_write(&self, call: &ToolCall) -> Option<String> {
+        let plan_mode_active = self.plan_mode_active.load(Ordering::Acquire);
+        if plan_mode_active && !is_plan_safe_core_tool(&call.name) {
+            return Some(
+                "Storydex plan mode blocks state-changing tools until exit_plan_mode is called"
+                    .into(),
+            );
+        }
         let mutating = matches!(
             call.name.as_str(),
             "write_file"
@@ -302,9 +362,12 @@ impl StorydexTools {
                 | "memory_delete"
                 | "configure_mcp"
                 | "install_skill"
+                | "spawn_agent"
         );
         if mutating && !self.writes_allowed {
-            return Some("Storydex turn contract blocks state-changing tools".into());
+            return Some(
+                "Storydex turn contract blocks state-changing tools".into(),
+            );
         }
         if self.allowed_write_roots.is_empty() || !mutating {
             return None;
@@ -340,6 +403,26 @@ impl StorydexTools {
             ))
         }
     }
+}
+
+fn is_plan_safe_core_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "read_file"
+            | "search"
+            | "list_dir"
+            | "grep_files"
+            | "web_search"
+            | "view_image"
+            | "request_user_input"
+            | "update_plan"
+            | "get_loop"
+            | "list_skills"
+            | "read_skill"
+            | "memory_list"
+            | "memory_read"
+            | "memory_search"
+    )
 }
 
 fn lexical_path(cwd: &Path, value: &Path) -> PathBuf {
@@ -470,8 +553,13 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
         }),
     );
 
-    let access_mode = match request.permission_mode.as_str() {
-        "plan_mode" => AccessMode::ReadOnly,
+    let base_permission_mode = if request.base_permission_mode.trim().is_empty() {
+        request.permission_mode.clone()
+    } else {
+        request.base_permission_mode.clone()
+    };
+    let plan_mode_active = Arc::new(AtomicBool::new(request.permission_mode == "plan_mode"));
+    let access_mode = match base_permission_mode.as_str() {
         "full_access" => AccessMode::FullAccess,
         _ => AccessMode::WorkspaceWrite,
     };
@@ -515,6 +603,7 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
         .iter()
         .map(|tool| tool.name.clone())
         .collect();
+    let mutating_custom_names = request.mutating_tool_names.into_iter().collect();
     let controls = Arc::new(ControlHub::default());
     start_control_reader(Arc::clone(&controls), emitter.clone());
     let tools = StorydexTools {
@@ -524,11 +613,15 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
         allowed_write_roots: request.allowed_write_roots,
         custom_specs: request.tool_specs,
         custom_names,
+        mutating_custom_names,
+        plan_mode_active: Arc::clone(&plan_mode_active),
+        base_permission_mode: base_permission_mode.clone(),
         emitter: emitter.clone(),
         controls: Arc::clone(&controls),
     };
     let approval = StorydexApproval {
-        mode: request.permission_mode,
+        base_mode: base_permission_mode,
+        plan_mode_active,
         emitter: emitter.clone(),
         controls: Arc::clone(&controls),
     };
@@ -762,5 +855,14 @@ mod tests {
             };
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn plan_mode_core_allowlist_blocks_delegation_and_unknown_mcp_tools() {
+        assert!(is_plan_safe_core_tool("read_file"));
+        assert!(is_plan_safe_core_tool("update_plan"));
+        assert!(!is_plan_safe_core_tool("write_file"));
+        assert!(!is_plan_safe_core_tool("spawn_agent"));
+        assert!(!is_plan_safe_core_tool("third_party_mcp_tool"));
     }
 }

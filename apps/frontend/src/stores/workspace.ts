@@ -374,7 +374,10 @@ export const useWorkspaceStore = defineStore("workspace", {
         this.recentProjects = Array.isArray(result.data.workspaceState.recentProjects)
           ? result.data.workspaceState.recentProjects.slice(0, MAX_RECENT_PROJECTS)
           : [];
-        useUiStore().applyPersistedState(result.data.uiPreferences);
+        const uiStore = useUiStore();
+        if (!uiStore.bootstrapped) {
+          uiStore.applyPersistedState(result.data.uiPreferences);
+        }
       } catch {
         this.recentProjects = [];
       }
@@ -400,10 +403,6 @@ export const useWorkspaceStore = defineStore("workspace", {
         this.health = healthResult.data;
         this.healthTrace = healthResult.trace;
         this.workspaceError = "";
-
-        if (shouldRestoreProjectFromHealth(healthResult.data, this.lastProjectPath)) {
-          this.launchScreenVisible = false;
-        }
 
         if (this.launchScreenVisible) {
           agentStore.resetSession({ clearSessionId: true, clearAvailableSessions: true });

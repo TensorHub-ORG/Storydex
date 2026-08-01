@@ -9,7 +9,7 @@ import { nextTick } from "vue";
 // computed branches (context ring, chapter-template description, execution float
 // signature) that the existing suites never drive.
 const api = vi.hoisted(() => ({
-  fetchAgentCoomiStatus: vi.fn(), fetchAgentSessions: vi.fn(), fetchAgentHistory: vi.fn(),
+  fetchAgentCoomiStatus: vi.fn(), setAgentCoomiPlanMode: vi.fn(), fetchAgentSessions: vi.fn(), fetchAgentHistory: vi.fn(),
   submitAgentRunCommitDecision: vi.fn(), rollbackLatestExecution: vi.fn(), streamAgentPrompt: vi.fn(), clearConversation: vi.fn(),
   deleteAgentSession: vi.fn(), cycleAgentCoomiPermission: vi.fn(), setAgentCoomiPermission: vi.fn(),
   resolveAgentCoomiApproval: vi.fn(), fetchAgentFollowups: vi.fn(), enqueueAgentFollowup: vi.fn(),

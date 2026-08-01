@@ -66,10 +66,12 @@ export const useUiStore = defineStore("ui", {
       const theme = payload?.theme;
       this.theme = isThemeCode(theme) ? theme : "white";
       writeCachedThemeCode(this.theme);
-      this.activeActivity = normalizeActivityId(payload?.activeActivity);
+      // Navigation is intentionally session-local: every app launch starts in
+      // file management even though visual/layout preferences remain durable.
+      this.activeActivity = "resources";
       this.workbenchMode = DEFAULT_WORKBENCH_MODE;
       this.sidebarWidth = clamp(Number(payload?.sidebarWidth ?? DEFAULT_SIDEBAR_WIDTH), 220, 520);
-      this.sidebarCollapsed = Boolean(payload?.sidebarCollapsed ?? false);
+      this.sidebarCollapsed = false;
       this.agentCollapsed = Boolean(payload?.agentCollapsed ?? false);
       this.agentWidth = clamp(Number(payload?.agentWidth ?? DEFAULT_AGENT_WIDTH), 320, 760);
       const legacyCenterScale = legacyFileFontSizeToPaneScale(payload?.fileFontSize);
