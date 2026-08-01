@@ -255,6 +255,8 @@ describe("AgentPanel", () => {
     await nextTick();
 
     expect(wrapper.find(".coomi-plan-indicator").text()).toContain("只读");
+    await wrapper.find(".coomi-status-button").trigger("click");
+    expect(wrapper.find(".coomi-permission-popover").text()).not.toContain("计划模式");
     const utils = (wrapper.vm as any).__testUtils;
     expect(utils.formatTokenCount(1_234)).toBe("1.23k");
     expect(utils.formatTokenCount(1_234_567)).toBe("1.23m");
@@ -733,15 +735,11 @@ describe("AgentPanel", () => {
     await utils.persistStoryGenerationOptions({ fragmentCount: 3 });
 
     store.coomiStatus = { runtime: "coomi", installed: true, planMode: true, permissionMode: "full_access", permissionLabel: "Full" } as any;
-    expect(utils.isPermissionOptionActive("plan_mode")).toBe(true);
     expect(utils.isPermissionOptionActive("full_access")).toBe(false);
-    store.isRunning = true; await utils.selectPermissionOption("plan_mode");
-    store.isRunning = false; await utils.selectPermissionOption("plan_mode");
-    api.streamAgentPrompt.mockImplementationOnce(async (_request: unknown, onPacket: (packet: any) => void) => onPacket({ _type: "AgentCompleted" }));
-    await utils.selectPermissionOption("read_only");
+    store.isRunning = true; await utils.selectPermissionOption("full_access");
+    store.isRunning = false; await utils.selectPermissionOption("full_access");
     store.coomiStatus = { runtime: "coomi", installed: true, planMode: false, permissionMode: "full_access" } as any;
-    api.streamAgentPrompt.mockImplementationOnce(async (_request: unknown, onPacket: (packet: any) => void) => onPacket({ _type: "AgentCompleted" }));
-    await utils.selectPermissionOption("plan_mode");
+    await utils.selectPermissionOption("ask_approval");
 
     store.promptInput = "/"; utils.handleComposerInput(); await nextTick();
     utils.handleComposerKeydown(key("ArrowDown"));

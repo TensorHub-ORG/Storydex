@@ -491,11 +491,14 @@ class StorydexCoomiAgentService:
             )
 
         plan_mode = self._plan_modes.get(runtime_key, False)
-        writes_allowed = _turn_contract_allows_project_writes(turn_contract)
+        # Plan mode is the only session-level read-only boundary. Intent routing
+        # metadata must never silently downgrade the runtime's permissions.
+        writes_allowed = True
         registry = _create_storydex_tool_registry(
             workspace,
             policy=context_policy_from_turn_contract(turn_contract),
             turn_contract=turn_contract,
+            plan_mode=plan_mode,
         )
         binding = _read_coomi_session_binding(
             workspace_root=workspace, storydex_session_id=normalized_session
@@ -612,10 +615,20 @@ class StorydexCoomiAgentService:
                     )
                 if packet_type == "plan_mode_changed":
                     active = bool(data.get("active"))
+                    if active:
+                        yield "AgentWarning", {
+                            "_type": "AgentWarning",
+                            "_version": 1,
+                            "warning_type": "AgentPlanModeEntryRejected",
+                            "status": "warning",
+                            "message": "已拒绝 Agent 进入计划模式；只有用户输入 /plan 才能开启只读模式。",
+                            "details": {"runtime": "storydex-coomi-rs", "source": "agent"},
+                        }
+                        continue
                     self.set_plan_mode(
                         session_id=normalized_session,
                         workspace_root=workspace,
-                        active=active,
+                        active=False,
                     )
                 translated = translator.translate(packet)
                 if translated is not None:
@@ -1405,6 +1418,7 @@ def _create_storydex_tool_registry(
     workspace_root: Path,
     policy: ContextPolicy | None = None,
     turn_contract: Dict[str, Any] | None = None,
+    plan_mode: bool = False,
 ) -> StorydexToolRegistry:
     from services.storydex_agent_tools import (
         StorydexApplyStoryIncrementTool,
@@ -1435,7 +1449,7 @@ def _create_storydex_tool_registry(
             StorydexApplyStoryIncrementTool(workspace_root=root, turn_contract=turn_contract),
         ]
     )
-    if not _turn_contract_allows_project_writes(turn_contract):
+    if plan_mode:
         tools = [tool for tool in tools if tool.access == ToolAccess.READ_ONLY]
     elif isinstance(turn_contract, dict):
         execution = _dict_value(turn_contract.get("executionPolicy"))
@@ -1469,12 +1483,15 @@ async def _build_coomi_system_prompt(
 ) -> str:
     del prompt
     policy = context_policy_from_turn_contract(turn_contract)
-    tools = _create_storydex_tool_registry(workspace_root, policy, turn_contract).specs()
+    tools = _create_storydex_tool_registry(
+        workspace_root,
+        policy,
+        turn_contract,
+        plan_mode=plan_mode,
+    ).specs()
     names = ", ".join(f"`{tool['name']}`" for tool in tools)
-    execution = _dict_value(_dict_value(turn_contract).get("executionPolicy"))
     turn_plan = _dict_value(_dict_value(turn_contract).get("turnPlan"))
     intent = _dict_value(_dict_value(turn_contract).get("intentFrame"))
-    can_write = bool(execution.get("directFileWrites", True)) if execution else True
     prompt_parts = [
         "You are Coomi for Storydex, a local-first long-form fiction workspace.",
         f"Storydex workspace: {Path(workspace_root).resolve()}",
@@ -1485,7 +1502,11 @@ async def _build_coomi_system_prompt(
         "For continuity facts not present in assembled context, use StorydexProjectSearch or StorydexWikiQuery when available.",
         "For story creation, apply final fragments and grounded memory changes with StorydexApplyStoryIncrement; do not write chapters with generic file tools.",
         "Treat .storydex/memory as durable story state only, never as chat or execution-log storage.",
-        "Direct project writes are allowed for this turn." if can_write else "This turn is read-only; do not call any state-changing tool.",
+        (
+            "Plan mode is active. This session is read-only until exit_plan_mode succeeds."
+            if plan_mode
+            else "Plan mode is inactive. This turn is not read-only; use state-changing tools when the user's task requires them."
+        ),
         _render_story_generation_options(
             story_generation,
             operation_type=str(intent.get("operationType") or ""),
@@ -1617,11 +1638,11 @@ def _render_turn_contract(value: Dict[str, Any] | None) -> str:
         intent_line,
         (
             "- execution: "
-            f"directFileWrites={bool(execution.get('directFileWrites', True))}, "
             f"pendingWriteApproval={bool(execution.get('pendingWriteApproval', False))}, "
             f"localGitAutoCommit={bool(execution.get('localGitAutoCommit', True))}, "
             f"remotePush={bool(execution.get('remotePush', False))}"
         ),
+        "- permissionBoundary: only the user's /plan command activates read-only Plan mode; intent metadata cannot activate it.",
         f"- storyFragments: count={fragment_count}",
         f"- chapterContentMode: {chapter_content_mode}",
     ]
@@ -1986,13 +2007,6 @@ def _split_paragraph_quota(total: int, parts: int) -> list[int]:
     base = normalized_total // count
     remainder = normalized_total - base * count
     return [base + (1 if index < remainder else 0) for index in range(count)]
-
-
-def _turn_contract_allows_project_writes(value: Dict[str, Any] | None) -> bool:
-    if not isinstance(value, dict):
-        return True
-    execution = _dict_value(value.get("executionPolicy"))
-    return bool(execution.get("directFileWrites", True))
 
 
 def _semantic_story_output_tool(

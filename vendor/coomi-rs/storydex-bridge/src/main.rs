@@ -863,6 +863,7 @@ mod tests {
         assert!(is_plan_safe_core_tool("update_plan"));
         assert!(!is_plan_safe_core_tool("write_file"));
         assert!(!is_plan_safe_core_tool("spawn_agent"));
+        assert!(!is_plan_safe_core_tool("enter_plan_mode"));
         assert!(!is_plan_safe_core_tool("third_party_mcp_tool"));
     }
 }

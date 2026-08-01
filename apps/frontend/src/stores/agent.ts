@@ -2110,7 +2110,6 @@ function summarizeTurnContractPacket(packet: AgentStreamPacket): string {
           `章目标：${chapterWordCountTarget} 字`,
           `可接受：${acceptWordCountMin}-${acceptWordCountMax} 字`
         ]),
-    `直接写入：${Boolean(executionPolicy.directFileWrites) ? "开启" : "关闭"}`,
     `小说项目 Git：${Boolean(executionPolicy.localGitAutoCommit) ? "自动提交" : "未开启"}`
   );
   if (tierMode) {
