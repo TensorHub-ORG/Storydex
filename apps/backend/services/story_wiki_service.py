@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 from hashlib import sha256
 from collections import Counter
 from datetime import datetime, timezone
@@ -32,7 +33,7 @@ EXCLUDED_RELATIVE_PREFIXES = (
 ENTITY_SOURCE_PATH = ".storydex/memory/current/entities.json"
 FACT_SOURCE_PATH = ".storydex/memory/current/facts.json"
 
-WIKI_CATEGORY_SCHEMA_VERSION = "story-wiki-v5-evidence-grounded-graph"
+WIKI_CATEGORY_SCHEMA_VERSION = "story-wiki-v6-three-lens"
 PROJECTION_SCHEMA_VERSION = 2
 EVIDENCE_GROUNDED_GRAPH_POLICY = {
     "mode": "evidence_grounded_local_v1",
@@ -55,6 +56,19 @@ ALLOWED_RELATION_TYPES = {
     "alliance",
     "rivalry",
 }
+AGENT_RELATIONSHIP_EDGE_DIMENSIONS = {
+    "ally": "alliance",
+    "alliance": "alliance",
+    "hostile": "hostility",
+    "hostility": "hostility",
+    "rivalry": "rivalry",
+    "trust": "trust",
+    "intimacy": "intimacy",
+    "loyalty": "loyalty",
+    "family": "family",
+    "professional": "professional",
+    "professional_collaboration": "professional",
+}
 GRAPH_CHECKSUM_VOLATILE_KEYS = {
     "generatedAt",
     "lastUpdatedAt",
@@ -71,7 +85,10 @@ GRAPH_CHECKSUM_VOLATILE_KEYS = {
 }
 # 图谱边总量上限：超过后按权重淘汰（原 300 条硬截断会静默丢弃长篇项目的新增边）。
 MAX_WIKI_GRAPH_EDGES = 1200
-ALLOWED_WIKI_CATEGORIES = {"overview", "characters", "setting", "plot", "relationships"}
+# 可见分类收敛为三类：角色 / 剧情 / 设定。关系不再是独立分类，而是角色图里的连线。
+WIKI_VISIBLE_CATEGORIES = ("characters", "plot", "setting")
+# overview 只用于项目总览条目与 project:root 节点，不作为可见 tab。
+ALLOWED_WIKI_CATEGORIES = {"overview", *WIKI_VISIBLE_CATEGORIES}
 CATEGORY_ALIASES: Dict[str, str] = {
     "chapters": "plot",
     "events": "plot",
@@ -82,18 +99,41 @@ CATEGORY_ALIASES: Dict[str, str] = {
     "factions": "setting",
     "foreshadow": "setting",
     "characters": "characters",
-    "relationships": "relationships",
+    # 旧数据与旧 URL：关系视图并入角色视图。
+    "relationships": "characters",
     "overview": "overview",
     "index": "overview",
 }
 
 CATEGORY_LABELS: Dict[str, str] = {
-    "overview": "\u9879\u76ee\u6982\u89c8",
-    "characters": "\u89d2\u8272\u6863\u6848",
-    "setting": "\u8bbe\u5b9a",
-    "plot": "\u5267\u60c5",
-    "relationships": "\u89d2\u8272\u5173\u7cfb",
+    "overview": "项目总览",
+    "characters": "角色",
+    "plot": "剧情",
+    "setting": "设定",
 }
+
+# 各视图允许带出的一跳跨类邻居节点类型（前端弱化渲染）。
+# 角色图不带任何跨类邻居——章节/情节混进角色图正是用户报告的问题之一。
+CATEGORY_NEIGHBOR_NODE_TYPES: Dict[str, frozenset[str]] = {
+    "characters": frozenset(),
+    "plot": frozenset({"character"}),
+    "setting": frozenset({"character", "chapter"}),
+}
+
+# 发布闸门：只有真正的结构性错误才阻断发布；其余诊断只摘掉对应对象并降级为 warning，
+# 一条坏边不该让整个知识库消失。
+BLOCKING_GRAPH_DIAGNOSTIC_CODES = frozenset({"graph.revision.mismatch"})
+# 无法通过摘除对象修复、只用于提示的诊断：既不隔离，也不触发全量重建。
+REPORT_ONLY_GRAPH_DIAGNOSTIC_CODES = frozenset({"graph.character.canonical_count"})
+# 条目/节点里只有「根本没法寻址」的才摘除；证据缺失、显示名不规范这类问题保留内容
+# 并标 needsReview——否则一条缺证据的记录又会让角色从图上消失。边一律摘除。
+UNADDRESSABLE_GRAPH_DIAGNOSTIC_CODES = frozenset({
+    "graph.entry.missing_id",
+    "graph.entry.duplicate_id",
+    "graph.node.missing_id",
+    "graph.node.duplicate_id",
+    "graph.node.missing_entry",
+})
 
 NODE_TYPE_LABELS: Dict[str, str] = {
     "project": "\u9879\u76ee",
@@ -201,8 +241,16 @@ class StoryWikiService:
                     sources = self._collect_sources(root)
                     if str(data.get("sourceSetChecksum") or "") != self._source_set_checksum(sources):
                         return self.sync_local_incremental(root)
-                    if self.validate_graph_invariants(data, root=root, source_documents=sources):
+                    diagnostics = self.validate_graph_invariants(
+                        data,
+                        root=root,
+                        source_documents=sources,
+                    )
+                    if self._has_blocking_diagnostics(diagnostics):
                         return self.rebuild(root, sources=sources)
+                    if diagnostics:
+                        # 只读路径：坏对象在内存里摘掉后照常返回，不改盘上的 last-good。
+                        data, _ = self._quarantine_graph_objects(data, diagnostics)
                     return self._with_projection_status(root, data)
             except Exception:
                 pass
@@ -217,6 +265,7 @@ class StoryWikiService:
         sources: Sequence[Dict[str, Any]] | None = None,
     ) -> Dict[str, Any]:
         root = workspace_root.resolve()
+        self._backup_legacy_projection(root)
         if sources is None:
             # reconcile 可能改写 entities.json，而它本身也是被索引的来源，
             # 所以必须先归并再扫描。调用方复用扫描结果时同样要保证这个顺序。
@@ -317,6 +366,8 @@ class StoryWikiService:
 
         if chapter_sources:
             plot_details = self._chapter_plot_details(chapter_sources)
+            # 只保留主线剧情的文本条目：人造 hub 节点会把剧情图拉成星形，
+            # 章节之间真正的叙事顺序反而看不出来。
             entries.append(self._entry(
                 "plot:mainline",
                 "\u4e3b\u7ebf\u5267\u60c5",
@@ -326,19 +377,10 @@ class StoryWikiService:
                 [item["relativePath"] for item in chapter_sources[:12]],
                 knowledge_status="observed",
             ))
-            graph_nodes.append({
-                "id": "plot:mainline",
-                "label": "\u4e3b\u7ebf",
-                "type": "event",
-                "category": "plot",
-                "entryId": "plot:mainline",
-                "summary": "\u9879\u76ee\u5df2\u6709\u7ae0\u8282\u4e32\u8054\u7684\u4e3b\u7ebf\u5267\u60c5\u3002",
-                "knowledgeStatus": "observed",
-            })
-            graph_edges.append(self._edge(project_id, "plot:mainline", "\u63a8\u8fdb", "plot"))
 
         chapter_mentions = self._chapter_mentions_by_path(registry, chapter_sources, character_names)
 
+        previous_chapter_node_id = ""
         for index, source in enumerate(chapter_sources):
             entry_id = self._chapter_entry_id(source["relativePath"])
             chapter_title = self._display_title(source["relativePath"], source["title"])
@@ -361,8 +403,18 @@ class StoryWikiService:
                 "entryId": entry_id,
                 "summary": summary,
                 "knowledgeStatus": "observed",
+                "narrativeOrder": index + 1,
             })
-            graph_edges.append(self._edge("plot:mainline", node_id, "\u7ae0\u8282", "timeline", weight=max(1, index + 1)))
+            if previous_chapter_node_id:
+                # 章节按叙事顺序链式相连，读者视线沿着故事走。
+                graph_edges.append(self._edge(
+                    previous_chapter_node_id,
+                    node_id,
+                    "承接",
+                    "timeline",
+                    weight=max(1, index + 1),
+                ))
+            previous_chapter_node_id = node_id
 
         for index, source in enumerate(planned_sources, start=1):
             entry_id = self._planned_entry_id(str(source["relativePath"]))
@@ -525,8 +577,12 @@ class StoryWikiService:
         if not self._has_current_category_schema(before):
             # 旧 schema（如按排序位置命名的章节 ID）需要全量重建迁移。
             return self.rebuild(root, sources=sources)
-        if self.validate_graph_invariants(before, root=root, source_documents=sources):
+        diagnostics = self.validate_graph_invariants(before, root=root, source_documents=sources)
+        if self._has_blocking_diagnostics(diagnostics):
             return self.rebuild(root, sources=sources)
+        if diagnostics:
+            # 非阻断问题不该让每次保存都全量重扫重建：坏对象在内存里摘掉即可。
+            before, _ = self._quarantine_graph_objects(before, diagnostics)
 
         previous_index = self.read_index(root)
         changed_paths = self.changed_source_paths(root, sources=sources, previous_index=previous_index)
@@ -575,18 +631,6 @@ class StoryWikiService:
         nodes: List[Dict[str, Any]] = []
         edges: List[Dict[str, Any]] = []
 
-        # 确保 plot:mainline 节点存在（如果有章节的话）
-        if chapter_sources:
-            nodes.append({
-                "id": "plot:mainline",
-                "label": "主线",
-                "type": "event",
-                "category": "plot",
-                "entryId": "plot:mainline",
-                "summary": "项目已有章节串联的主线剧情。",
-                "knowledgeStatus": "observed",
-            })
-
         for index, source in enumerate(chapter_sources):
             if source["relativePath"] not in changed_set:
                 continue
@@ -610,8 +654,25 @@ class StoryWikiService:
                 "entryId": entry_id,
                 "summary": summary,
                 "knowledgeStatus": "observed",
+                "narrativeOrder": index + 1,
             })
-            edges.append(self._edge("plot:mainline", entry_id, "章节", "timeline", weight=max(1, index + 1)))
+            # 章节链：与上一章相接，变更章节两侧的接续边都要重建。
+            if index > 0:
+                edges.append(self._edge(
+                    self._chapter_entry_id(chapter_sources[index - 1]["relativePath"]),
+                    entry_id,
+                    "承接",
+                    "timeline",
+                    weight=max(1, index + 1),
+                ))
+            if index + 1 < len(chapter_sources):
+                edges.append(self._edge(
+                    entry_id,
+                    self._chapter_entry_id(chapter_sources[index + 1]["relativePath"]),
+                    "承接",
+                    "timeline",
+                    weight=max(1, index + 2),
+                ))
 
         for index, source in enumerate(planned_sources, start=1):
             if source["relativePath"] not in changed_set:
@@ -1064,7 +1125,9 @@ class StoryWikiService:
         max_depth = max(1, min(2, self._safe_int(depth, fallback=1)))
         max_items = max(1, min(120, self._safe_int(limit, fallback=60)))
         normalized_q = str(q or "").strip()
-        normalized_category = str(category or "").strip()
+        raw_category = str(category or "").strip()
+        # 旧 URL 与旧缓存里的 relationships/chapters 等分类在这里归一到三视图。
+        normalized_category = self._normalize_wiki_category(raw_category) if raw_category else ""
         normalized_entry_id = str(entry_id or "").strip()
         normalized_node_id = str(node_id or "").strip()
 
@@ -1123,22 +1186,27 @@ class StoryWikiService:
                     nodes=nodes,
                     valid_edges=content_edges,
                     category_labels=category_labels,
+                    allow_agent_relationship_aliases=self._allows_agent_relationship_aliases(payload),
                 ),
             )
         else:
+            # 没有检索词也没有指定可见分类：默认落到角色视图，不再返回人造 hub 总览图。
             return self._attach_projection_metadata(
                 payload,
-                self._query_wiki_overview_graph(
-                    payload,
+                self._query_wiki_category_graph(
+                    "characters",
+                    root=root,
                     normalized_q=normalized_q,
-                    normalized_category=normalized_category,
                     normalized_entry_id=normalized_entry_id,
                     normalized_node_id=normalized_node_id,
                     max_depth=max_depth,
                     max_items=max_items,
                     entries=entries,
                     entry_by_id=entry_by_id,
+                    nodes=nodes,
+                    valid_edges=content_edges,
                     category_labels=category_labels,
+                    allow_agent_relationship_aliases=self._allows_agent_relationship_aliases(payload),
                 ),
             )
 
@@ -1494,13 +1562,159 @@ class StoryWikiService:
         return entry_id not in surviving_entry_ids
 
     @staticmethod
-    def _graph_diagnostic(code: str, message: str, path: str) -> Dict[str, Any]:
+    def _graph_diagnostic(
+        code: str,
+        message: str,
+        path: str,
+        *,
+        scope: str = "payload",
+        index: int = -1,
+        blocking: bool = False,
+    ) -> Dict[str, Any]:
+        """结构化诊断：scope/index 指出坏对象在哪，blocking 决定它是否阻断发布。
+
+        scope ∈ {"payload", "entry", "node", "edge"}；index 是对应数组下标，
+        -1 表示这条诊断适用于整类对象（例如「所有空 ID 的条目」）。
+        """
         return {
             "code": code,
-            "severity": "error",
+            "severity": "error" if blocking else "warning",
             "message": message,
             "path": path,
+            "scope": scope,
+            "index": index,
+            "blocking": blocking,
         }
+
+    @staticmethod
+    def _has_blocking_diagnostics(diagnostics: Sequence[Dict[str, Any]]) -> bool:
+        """只有阻断性诊断才代表整份投影不可信，需要回退或全量重建。"""
+        return any(
+            bool(item.get("blocking"))
+            or str(item.get("code") or "") in BLOCKING_GRAPH_DIAGNOSTIC_CODES
+            for item in diagnostics
+            if isinstance(item, dict)
+        )
+
+    @staticmethod
+    def _unaddressable_indices(items: Sequence[Dict[str, Any]]) -> set[int]:
+        """缺 ID 与重复 ID 的下标：空 ID 全丢，重复 ID 只留第一条。"""
+        dropped: set[int] = set()
+        seen: set[str] = set()
+        for index, item in enumerate(items):
+            identifier = str(item.get("id") or "").strip()
+            if not identifier or identifier in seen:
+                dropped.add(index)
+                continue
+            seen.add(identifier)
+        return dropped
+
+    def _quarantine_graph_objects(
+        self,
+        payload: Dict[str, Any],
+        diagnostics: Sequence[Dict[str, Any]],
+    ) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
+        """按诊断摘掉坏对象并级联清理，而不是让一条坏边把整个知识库拖下水。
+
+        边级诊断丢边，节点级诊断丢节点及其关联边，条目缺 ID / 重复 ID 丢条目，
+        条目的证据与显示名问题只标 needsReview 保留内容。返回 (清理后 payload, 摘除说明)。
+        """
+        graph = payload.get("graph") if isinstance(payload.get("graph"), dict) else {}
+        entries = [item for item in payload.get("entries", []) if isinstance(item, dict)]
+        nodes = [item for item in graph.get("nodes", []) if isinstance(item, dict)]
+        edges = [item for item in graph.get("edges", []) if isinstance(item, dict)]
+
+        drop: Dict[str, set[int]] = {"entry": set(), "node": set(), "edge": set()}
+        flagged: Dict[str, set[int]] = {"entry": set(), "node": set()}
+        reasons: List[Dict[str, Any]] = []
+        buckets = {"entry": entries, "node": nodes, "edge": edges}
+        for diagnostic in diagnostics:
+            if not isinstance(diagnostic, dict):
+                continue
+            code = str(diagnostic.get("code") or "")
+            if code in BLOCKING_GRAPH_DIAGNOSTIC_CODES or code in REPORT_ONLY_GRAPH_DIAGNOSTIC_CODES:
+                continue
+            scope = str(diagnostic.get("scope") or "payload")
+            items = buckets.get(scope)
+            if items is None:
+                continue
+            index = self._safe_int(diagnostic.get("index"), fallback=-1)
+            if scope != "edge" and code not in UNADDRESSABLE_GRAPH_DIAGNOSTIC_CODES:
+                # 条目/节点是正文内容：证据缺失或显示名不规范时保留内容，交给人工确认。
+                if 0 <= index < len(items):
+                    flagged[scope].add(index)
+                continue
+            targets = (
+                {index}
+                if 0 <= index < len(items)
+                # 缺 ID / 重复 ID 是整类诊断，没有下标，只能按 ID 规则挑出该丢的那些。
+                else self._unaddressable_indices(items)
+            )
+            if not targets:
+                continue
+            drop[scope].update(targets)
+            reasons.append({"scope": scope, "code": code, "count": len(targets)})
+
+        review_count = 0
+        for scope, indices in flagged.items():
+            for index in indices:
+                if index in drop[scope]:
+                    continue
+                buckets[scope][index]["needsReview"] = True
+                review_count += 1
+
+        kept_entries = [entry for index, entry in enumerate(entries) if index not in drop["entry"]]
+        surviving_entry_ids = {
+            str(entry.get("id") or "").strip()
+            for entry in kept_entries
+            if str(entry.get("id") or "").strip()
+        }
+        kept_nodes = [
+            node
+            for index, node in enumerate(nodes)
+            if index not in drop["node"] and not self._node_orphaned_by_removal(node, surviving_entry_ids)
+        ]
+        surviving_node_ids = {
+            str(node.get("id") or "").strip()
+            for node in kept_nodes
+            if str(node.get("id") or "").strip()
+        }
+        kept_edges = [
+            edge
+            for index, edge in enumerate(edges)
+            if index not in drop["edge"]
+            and str(edge.get("source") or "").strip() in surviving_node_ids
+            and str(edge.get("target") or "").strip() in surviving_node_ids
+        ]
+
+        dropped_counts = {
+            "entries": len(entries) - len(kept_entries),
+            "nodes": len(nodes) - len(kept_nodes),
+            "edges": len(edges) - len(kept_edges),
+        }
+        if not any(dropped_counts.values()) and not review_count:
+            return payload, []
+
+        cleaned = dict(payload)
+        cleaned["entries"] = kept_entries
+        cleaned["graph"] = {**graph, "nodes": kept_nodes, "edges": kept_edges}
+        summary = [
+            {
+                "code": "graph.quarantine",
+                "severity": "warning",
+                "message": (
+                    f"已隔离 {dropped_counts['entries']} 条条目 / {dropped_counts['nodes']} 个节点 / "
+                    f"{dropped_counts['edges']} 条边，其余内容正常发布。"
+                ),
+                "path": "graph",
+                "scope": "payload",
+                "index": -1,
+                "blocking": False,
+                "dropped": dropped_counts,
+                "reasons": reasons,
+            }
+        ] if any(dropped_counts.values()) else []
+        return cleaned, summary
 
     def validate_graph_invariants(
         self,
@@ -1528,12 +1742,14 @@ class StoryWikiService:
                     "graph.entry.missing_id",
                     "WIKI 条目缺少稳定 ID。",
                     "entries",
+                    scope="entry",
                 ))
             elif count > 1:
                 diagnostics.append(self._graph_diagnostic(
                     "graph.entry.duplicate_id",
                     f"WIKI 条目 ID {entry_id} 重复 {count} 次。",
                     f"entries.{entry_id}",
+                    scope="entry",
                 ))
 
         for index, entry in enumerate(entries):
@@ -1543,6 +1759,8 @@ class StoryWikiService:
                     "graph.entry.internal_label",
                     f"条目显示名泄漏内部 ID：{title}",
                     f"entries[{index}].title",
+                    scope="entry",
+                    index=index,
                 ))
             category = self._normalize_wiki_category(entry.get("category"))
             source_refs = entry.get("sourcePaths")
@@ -1553,6 +1771,8 @@ class StoryWikiService:
                     "graph.entry.missing_source",
                     f"条目 {entry.get('id') or index} 没有 sourcePath/sourceRef。",
                     f"entries[{index}].sourcePaths",
+                    scope="entry",
+                    index=index,
                 ))
 
         node_counts = Counter(str(node.get("id") or "").strip() for node in nodes)
@@ -1567,12 +1787,14 @@ class StoryWikiService:
                     "graph.node.missing_id",
                     "图节点缺少稳定 ID。",
                     "graph.nodes",
+                    scope="node",
                 ))
             elif count > 1:
                 diagnostics.append(self._graph_diagnostic(
                     "graph.node.duplicate_id",
                     f"图节点 ID {node_id} 重复 {count} 次。",
                     f"graph.nodes.{node_id}",
+                    scope="node",
                 ))
 
         for index, node in enumerate(nodes):
@@ -1583,6 +1805,8 @@ class StoryWikiService:
                     "graph.node.internal_label",
                     f"节点显示名泄漏内部 ID：{label}",
                     f"graph.nodes[{index}].label",
+                    scope="node",
+                    index=index,
                 ))
             selectable = bool(node.get("selectable", True)) and not bool(node.get("synthetic", False))
             if not selectable:
@@ -1592,6 +1816,8 @@ class StoryWikiService:
                     "graph.node.missing_label",
                     f"可点击节点 {node_id or index} 缺少显示名。",
                     f"graph.nodes[{index}].label",
+                    scope="node",
+                    index=index,
                 ))
             node_type = str(node.get("type") or "").strip()
             if node_type == "project":
@@ -1602,6 +1828,8 @@ class StoryWikiService:
                     "graph.node.missing_entry",
                     f"可点击节点 {node_id or index} 没有 entryId。",
                     f"graph.nodes[{index}].entryId",
+                    scope="node",
+                    index=index,
                 ))
                 continue
             entry = entry_by_id.get(entry_id)
@@ -1610,6 +1838,8 @@ class StoryWikiService:
                     "graph.node.missing_entry",
                     f"节点 {node_id or index} 引用了不存在的条目 {entry_id}。",
                     f"graph.nodes[{index}].entryId",
+                    scope="node",
+                    index=index,
                 ))
                 continue
             source_refs = entry.get("sourcePaths")
@@ -1620,6 +1850,8 @@ class StoryWikiService:
                     "graph.node.missing_source",
                     f"可点击节点 {node_id or index} 的条目没有 sourcePath/sourceRef。",
                     f"graph.nodes[{index}].entryId",
+                    scope="node",
+                    index=index,
                 ))
 
         evidence_sources = (
@@ -1638,12 +1870,16 @@ class StoryWikiService:
                     "graph.edge.missing_endpoint",
                     f"边 {source or '<empty>'} -> {target or '<empty>'} 含不存在端点：{', '.join(missing)}。",
                     f"graph.edges[{index}]",
+                    scope="edge",
+                    index=index,
                 ))
             if source and source == target and not bool(edge.get("allowSelfLoop", False)):
                 diagnostics.append(self._graph_diagnostic(
                     "graph.edge.self_loop",
                     f"边 {source} 未声明允许自环。",
                     f"graph.edges[{index}]",
+                    scope="edge",
+                    index=index,
                 ))
             relation_type = str(edge.get("relationType") or "").strip()
             if relation_type and relation_type not in ALLOWED_RELATION_TYPES:
@@ -1651,6 +1887,8 @@ class StoryWikiService:
                     "graph.edge.invalid_relation_type",
                     f"关系类型 {relation_type} 不在受控词表中。",
                     f"graph.edges[{index}].relationType",
+                    scope="edge",
+                    index=index,
                 ))
             edge_type = str(edge.get("type") or "").strip()
             if edge.get("coOccurrence"):
@@ -1658,6 +1896,8 @@ class StoryWikiService:
                     "graph.edge.cooccurrence_removed",
                     f"已停用的同章共现边不能发布：{source} -> {target}。",
                     f"graph.edges[{index}]",
+                    scope="edge",
+                    index=index,
                 ))
             if edge_type == "relationship":
                 endpoint_types = {
@@ -1670,12 +1910,16 @@ class StoryWikiService:
                         "graph.edge.relationship_non_character",
                         f"角色关系边 {source} -> {target} 含非角色端点。",
                         f"graph.edges[{index}]",
+                        scope="edge",
+                        index=index,
                     ))
                 if not relation_type or relation_type == "unknown" or str(edge.get("status") or "") != "asserted":
                     diagnostics.append(self._graph_diagnostic(
                         "graph.edge.unresolved_relationship",
                         f"未解析关系不能发布：{source} -> {target}。",
                         f"graph.edges[{index}]",
+                        scope="edge",
+                        index=index,
                     ))
                 unsupported_metrics = [
                     key
@@ -1687,6 +1931,8 @@ class StoryWikiService:
                         "graph.edge.synthetic_relationship_metric",
                         f"角色关系边 {source} -> {target} 含无证据量化值：{', '.join(unsupported_metrics)}。",
                         f"graph.edges[{index}]",
+                        scope="edge",
+                        index=index,
                     ))
                 grounded = bool(
                     self._grounded_evidence_source_path(
@@ -1701,6 +1947,8 @@ class StoryWikiService:
                         "graph.edge.ungrounded_relationship",
                         f"角色关系边 {source} -> {target} 没有可在项目源文件中逐字核对的证据。",
                         f"graph.edges[{index}].evidence",
+                        scope="edge",
+                        index=index,
                     ))
                 elif not self._edge_evidence_anchors_endpoints(
                     root,
@@ -1712,6 +1960,8 @@ class StoryWikiService:
                         "graph.edge.unanchored_relationship",
                         f"角色关系边 {source} -> {target} 的证据没有明确锚定两端角色。",
                         f"graph.edges[{index}].evidence",
+                        scope="edge",
+                        index=index,
                     ))
             elif edge_type == "fact":
                 grounded = bool(
@@ -1727,6 +1977,8 @@ class StoryWikiService:
                         "graph.edge.ungrounded_fact",
                         f"事实边 {source} -> {target} 没有可核对证据。",
                         f"graph.edges[{index}].evidence",
+                        scope="edge",
+                        index=index,
                     ))
                 elif not self._edge_evidence_anchors_endpoints(
                     root,
@@ -1738,6 +1990,8 @@ class StoryWikiService:
                         "graph.edge.unanchored_fact",
                         f"事实边 {source} -> {target} 的证据没有明确锚定两个端点。",
                         f"graph.edges[{index}].evidence",
+                        scope="edge",
+                        index=index,
                     ))
 
         revision_present = "knowledgeRevision" in payload or "builtFromRevision" in payload
@@ -1749,6 +2003,7 @@ class StoryWikiService:
                     "graph.revision.mismatch",
                     f"builtFromRevision={built_from_revision} 与 knowledgeRevision={knowledge_revision} 不一致。",
                     "builtFromRevision",
+                    blocking=True,
                 ))
 
         if root is not None:
@@ -1760,12 +2015,14 @@ class StoryWikiService:
             for record in EntityRegistry(root).load_records():
                 if record.kind not in {"character", "person", "role"} or not record.entity_id:
                     continue
-                count = character_nodes_by_id.get(record.entity_id, 0)
+                # 节点 ID 由 _entity_node_id 清洗而来，比对时要用同一套规则。
+                resolved_id = self._sanitize_node_id(record.entity_id) or record.entity_id
+                count = character_nodes_by_id.get(resolved_id, 0)
                 if count != 1:
                     diagnostics.append(self._graph_diagnostic(
                         "graph.character.canonical_count",
                         f"active 角色 {record.canonical_name} ({record.entity_id}) 的 canonical 节点数为 {count}，应为 1。",
-                        f"graph.nodes.{record.entity_id}",
+                        f"graph.nodes.{resolved_id}",
                     ))
 
         unique: Dict[tuple[str, str, str], Dict[str, Any]] = {}
@@ -1869,11 +2126,6 @@ class StoryWikiService:
         wiki_root.mkdir(parents=True, exist_ok=True)
         previous = self._read_existing_payload(root)
         previous_status = self._read_projection_status(root)
-        raw_diagnostics = self.validate_graph_invariants(
-            payload,
-            root=root,
-            source_documents=sources,
-        )
         payload = self._normalize_wiki_payload(payload)
         payload["schemaVersion"] = PROJECTION_SCHEMA_VERSION
         payload["categorySchemaVersion"] = WIKI_CATEGORY_SCHEMA_VERSION
@@ -1904,10 +2156,7 @@ class StoryWikiService:
         payload["knowledgeRevision"] = knowledge_revision
         payload["builtFromRevision"] = knowledge_revision
         payload["sourceSetChecksum"] = source_checksum
-        payload["status"] = "ready"
-        payload["diagnostics"] = []
         payload["lastSuccessfulRevision"] = knowledge_revision
-        payload["sourceStats"] = self._source_stats(payload, sources)
         if agent_result is not None:
             payload["agent"] = {
                 "attempted": bool(agent_result.get("attempted")),
@@ -1916,22 +2165,18 @@ class StoryWikiService:
                 "errorMessage": str(agent_result.get("errorMessage") or ""),
                 "eventCount": len(agent_result.get("events") or []),
             }
-        payload["graphChecksum"] = self._graph_checksum(payload)
-        normalized_diagnostics = self.validate_graph_invariants(
+        # 隔离而非全盘否定：先按诊断摘掉坏对象，复检后只有阻断性问题才回退到 last-good。
+        payload, quarantine_notes = self._quarantine_graph_objects(
             payload,
-            root=root,
-            source_documents=sources,
+            self.validate_graph_invariants(payload, root=root, source_documents=sources),
         )
-        diagnostics_by_key: Dict[tuple[str, str, str], Dict[str, Any]] = {}
-        for diagnostic in [*raw_diagnostics, *normalized_diagnostics]:
-            key = (
-                str(diagnostic.get("code") or ""),
-                str(diagnostic.get("path") or ""),
-                str(diagnostic.get("message") or ""),
-            )
-            diagnostics_by_key.setdefault(key, diagnostic)
-        diagnostics = list(diagnostics_by_key.values())
-        if diagnostics:
+        diagnostics = [
+            *self.validate_graph_invariants(payload, root=root, source_documents=sources),
+            *quarantine_notes,
+        ]
+        payload["sourceStats"] = self._source_stats(payload, sources)
+        payload["graphChecksum"] = self._graph_checksum(payload)
+        if self._has_blocking_diagnostics(diagnostics):
             last_successful_revision = previous_revision
             failure_status = {
                 "schemaVersion": PROJECTION_SCHEMA_VERSION,
@@ -1949,11 +2194,11 @@ class StoryWikiService:
             if (
                 previous
                 and self._has_current_category_schema(previous)
-                and not self.validate_graph_invariants(
+                and not self._has_blocking_diagnostics(self.validate_graph_invariants(
                     previous,
                     root=root,
                     source_documents=sources,
-                )
+                ))
             ):
                 return self._with_projection_status(root, previous)
             return self._safe_projection_after_failure(
@@ -1963,6 +2208,8 @@ class StoryWikiService:
                 last_successful_revision=last_successful_revision,
             )
 
+        payload["status"] = "ready"
+        payload["diagnostics"] = diagnostics
         index_payload = self._build_index(
             root,
             payload,
@@ -1975,7 +2222,7 @@ class StoryWikiService:
         self._write_json_atomic(self.projection_status_path(root), {
             "schemaVersion": PROJECTION_SCHEMA_VERSION,
             "status": "ready",
-            "diagnostics": [],
+            "diagnostics": diagnostics,
             "knowledgeRevision": knowledge_revision,
             "builtFromRevision": knowledge_revision,
             "lastSuccessfulRevision": knowledge_revision,
@@ -2086,6 +2333,37 @@ class StoryWikiService:
         except Exception:
             return None
 
+    def _backup_legacy_projection(self, root: Path) -> None:
+        previous = self._read_existing_payload(root)
+        if previous is None or self._has_current_category_schema(previous):
+            return
+        raw_schema = str(
+            previous.get("categorySchemaVersion")
+            or f"projection-v{self._safe_int(previous.get('schemaVersion'), fallback=0)}"
+        )
+        schema_name = re.sub(r"[^A-Za-z0-9._-]+", "-", raw_schema).strip("-.") or "legacy"
+        backup_root = self.wiki_root(root) / "migration-backups" / schema_name[:96]
+        for source in (
+            self.wiki_json_path(root),
+            self.wiki_markdown_path(root),
+            self.wiki_index_path(root),
+        ):
+            if not source.is_file():
+                continue
+            target = backup_root / source.name
+            if target.exists():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+            try:
+                shutil.copy2(source, temporary)
+                os.replace(temporary, target)
+            finally:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
+
     def _build_agent_prompt(
         self,
         root: Path,
@@ -2136,8 +2414,9 @@ class StoryWikiService:
             "- refresh_wiki_graph: 由后端本地投影执行，不会调用你。\n"
             "- review_wiki: 输出 review.issues 与 review.recommendations，标记缺漏、冲突、过时和需人工确认内容。\n"
             "- repair_wiki: 修复缺失字段、坏结构、不完整关系，保持稳定 id。\n"
-            "category 只允许五类: overview(总览)、characters(角色)、setting(设定)、plot(剧情)、relationships(关系)。"
-            "章节/事件/时间线归入 plot；世界/地点/物品/势力/伏笔归入 setting；不要输出其他 category。\n"
+            "category 只允许三类: characters(角色)、plot(剧情)、setting(设定)。"
+            "章节/事件/时间线归入 plot；世界/地点/物品/势力/伏笔归入 setting；"
+            "角色关系是角色图里的连线，不要单列 relationships 分类；不要输出其他 category。\n"
             "图结构由后端从实体注册表、角色档案和逐字可核对证据中确定性生成；你不得新增节点或边，graph 必须返回空数组。\n"
             "不要根据同章出现、常见剧情套路、姓氏、身份或语气推断人物关系。没有明示证据就保持沉默。\n"
             "输出 JSON schema: {summary, entries:[{id,title,category,categoryLabel,summary,details,sourcePaths,confidence,needsReview}], "
@@ -2308,11 +2587,11 @@ class StoryWikiService:
         node_type = str(item.get("type") or "event").strip() or "event"
         node_id = str(item.get("id") or f"{node_type}:{self._slug(label)}").strip()
         category = self._normalize_wiki_category(item.get("category")) if str(item.get("category") or "").strip() else ""
-        # 交叉规范化：仅 category=characters 的节点强制 type=character，
+        # 交叉规范化：仅原始 category 就是 characters 的节点强制 type=character，
         # 修正 Agent 输出 "动机"/"定位"/"小说" 等中文 type。
-        # relationships 类目的节点（关系条目、索引等）不是角色，
-        # 强转会把它们混入角色关系网络，因此保持原 type。
-        if category == "characters":
+        # 别名归一过来的旧 relationships 节点（关系条目、索引等）不是角色，
+        # 强转会把它们混进角色图，因此保持原 type。
+        if str(item.get("category") or "").strip() == "characters":
             node_type = "character"
         node = {
             "id": node_id,
@@ -2436,85 +2715,6 @@ class StoryWikiService:
             return 0.68
         return max(0.0, min(1.0, number))
 
-    def _query_wiki_overview_graph(
-        self,
-        payload: Dict[str, Any],
-        *,
-        normalized_q: str,
-        normalized_category: str,
-        normalized_entry_id: str,
-        normalized_node_id: str,
-        max_depth: int,
-        max_items: int,
-        entries: Sequence[Dict[str, Any]],
-        entry_by_id: Dict[str, Dict[str, Any]],
-        category_labels: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        content_entries = [
-            entry
-            for entry in entries
-            if str(entry.get("category") or "") not in {"", "overview", "index"}
-        ]
-        overview_entry_ids = [
-            str(entry.get("id") or "")
-            for entry in entries
-            if str(entry.get("category") or "") == "overview" and str(entry.get("id") or "")
-        ][:max_items]
-        category_to_entries: Dict[str, List[Dict[str, Any]]] = {}
-        for entry in content_entries:
-            category = str(entry.get("category") or "").strip()
-            if not category:
-                continue
-            category_to_entries.setdefault(category, []).append(entry)
-
-        ordered_categories: List[str] = []
-        for category in CATEGORY_LABELS:
-            if category in category_to_entries and category not in {"overview", "index"}:
-                ordered_categories.append(category)
-        for category in sorted(category_to_entries):
-            if category not in ordered_categories:
-                ordered_categories.append(category)
-
-        project_hub = self._wiki_project_hub_node(payload, content_entries)
-        category_hubs = [
-            self._wiki_category_hub_node(category, category_labels, category_to_entries[category])
-            for category in ordered_categories
-        ][: max(0, max_items - 1)]
-        nodes = [project_hub, *category_hubs][:max_items]
-        edges = [
-            {
-                "source": "project:root",
-                "target": str(node.get("id") or ""),
-                "label": "\u5206\u7ec4",
-                "type": "group",
-                "weight": max(1, self._safe_int(node.get("count"), fallback=1)),
-                "synthetic": True,
-            }
-            for node in category_hubs
-            if str(node.get("id") or "")
-        ][:max_items]
-
-        return {
-            "mode": "overview",
-            "query": normalized_q,
-            "category": normalized_category,
-            "entryId": normalized_entry_id,
-            "nodeId": normalized_node_id,
-            "depth": max_depth,
-            "limit": max_items,
-            "entries": [entry_by_id[entry_ref] for entry_ref in overview_entry_ids if entry_ref in entry_by_id],
-            "graph": {
-                "nodes": nodes,
-                "edges": edges,
-            },
-            "matchedEntryIds": [],
-            "total": {
-                "entryCount": len(overview_entry_ids),
-                "nodeCount": len(nodes),
-                "edgeCount": len(edges),
-            },
-        }
-
     def _query_wiki_category_graph(
         self,
         category: str,
@@ -2530,8 +2730,9 @@ class StoryWikiService:
         nodes: Sequence[Dict[str, Any]],
         valid_edges: Sequence[Dict[str, Any]],
         category_labels: Dict[str, Any],
+        allow_agent_relationship_aliases: bool = False,
     ) -> Dict[str, Any]:
-        if category == "relationships":
+        if category == "characters":
             return self._query_wiki_relationship_graph(
                 category,
                 root=root,
@@ -2545,6 +2746,7 @@ class StoryWikiService:
                 nodes=nodes,
                 valid_edges=valid_edges,
                 category_labels=category_labels,
+                allow_agent_relationship_aliases=allow_agent_relationship_aliases,
             )
         category_entries = [
             entry
@@ -2572,11 +2774,13 @@ class StoryWikiService:
         primary_ids = {str(node.get("id") or "") for node in primary_nodes}
 
         # \u4e00\u8df3\u8de8\u7c7b\u90bb\u5c45\uff1a\u8865\u5168"\u7ae0\u8282\u91cc\u51fa\u573a\u4e86\u8c01 / \u8bbe\u5b9a\u5173\u8054\u4ec0\u4e48\u4e8b\u4ef6"\u8fd9\u7c7b\u8de8\u7c7b\u4e0a\u4e0b\u6587\uff0c
-        # \u6807\u8bb0 neighbor=True \u4f9b\u524d\u7aef\u5f31\u5316\u6e32\u67d3\u3002
+        # 标记 neighbor=True 供前端弱化渲染。只允许白名单里的节点类型进来，
+        # 否则剧情/设定的杂项又会漏进本视图。
+        allowed_neighbor_types = CATEGORY_NEIGHBOR_NODE_TYPES.get(category, frozenset())
         node_by_id = {str(node.get("id") or ""): node for node in nodes if str(node.get("id") or "").strip()}
         neighbor_nodes: List[Dict[str, Any]] = []
         neighbor_ids: set[str] = set()
-        neighbor_budget = max(0, max_items - len(primary_nodes))
+        neighbor_budget = max(0, max_items - len(primary_nodes)) if allowed_neighbor_types else 0
         for edge in valid_edges:
             if len(neighbor_ids) >= neighbor_budget:
                 break
@@ -2592,6 +2796,8 @@ class StoryWikiService:
             other_node = node_by_id.get(other)
             if not other_node or self._is_wiki_hub_node(other_node):
                 continue
+            if str(other_node.get("type") or "").strip().lower() not in allowed_neighbor_types:
+                continue
             copied = self._wiki_content_node(other_node)
             copied["neighbor"] = True
             neighbor_nodes.append(copied)
@@ -2606,13 +2812,6 @@ class StoryWikiService:
             and str(edge.get("target") or "") in visible_node_ids
             and (str(edge.get("source") or "") in primary_ids or str(edge.get("target") or "") in primary_ids)
         ][:max_items * 2]
-        if category == "characters":
-            visible_edges = self._merge_relationship_snapshot_edges(
-                root,
-                nodes=primary_nodes,
-                existing_edges=visible_edges,
-                allow_new_nodes=False,
-            )
 
         graph_nodes = [*primary_nodes, *neighbor_nodes][:max_items]
 
@@ -2652,6 +2851,7 @@ class StoryWikiService:
         nodes: Sequence[Dict[str, Any]],
         valid_edges: Sequence[Dict[str, Any]],
         category_labels: Dict[str, Any],
+        allow_agent_relationship_aliases: bool = False,
     ) -> Dict[str, Any]:
         """角色关系视图只发布已知角色之间、可逐字核对证据的显式关系。"""
         category_entries = [
@@ -2659,40 +2859,54 @@ class StoryWikiService:
             for entry in entries
             if str(entry.get("category") or "") == category and str(entry.get("id") or "")
         ]
-        matched_entry_ids = [str(entry.get("id") or "") for entry in category_entries][:max_items]
+        # 被隔离/未解析的角色照样显示（带 needsReview），否则 tab 计数和画布对不上，
+        # 用户看到的就是「角色又少了一个」。
         character_nodes = [
             self._wiki_content_node(node)
             for node in nodes
             if str(node.get("id") or "").strip()
             and not self._is_wiki_hub_node(node)
-            and str(node.get("type") or "") == "character"
-            and not bool(node.get("quarantined"))
+            and str(node.get("type") or "").strip().lower() == "character"
         ]
         node_by_id = {str(node.get("id") or ""): node for node in character_nodes}
 
-        source_cache = self._collect_sources(root)
-        grounded_edges = [
-            edge
-            for edge in valid_edges
-            if str(edge.get("type") or "") == "relationship"
-            and str(edge.get("source") or "") in node_by_id
-            and str(edge.get("target") or "") in node_by_id
-            and self._is_publishable_relationship_edge(
+        # 持久化的图已经过发布闸门，默认路径只读只过滤，不再为每次查询全量重扫项目。
+        # 只有 Agent 别名归一分支才需要回读源文件做逐字核对。
+        source_cache = self._collect_sources(root) if allow_agent_relationship_aliases else []
+        grounded_edges: List[Dict[str, Any]] = []
+        for edge in valid_edges:
+            if (
+                str(edge.get("source") or "") not in node_by_id
+                or str(edge.get("target") or "") not in node_by_id
+            ):
+                continue
+            if str(edge.get("type") or "").strip().lower() == "relationship":
+                if self._is_query_visible_relationship_edge(edge):
+                    grounded_edges.append(edge)
+                continue
+            if not allow_agent_relationship_aliases:
+                continue
+            normalized_edge = self._normalize_agent_relationship_alias(
                 root,
                 edge,
                 nodes=character_nodes,
                 sources=source_cache,
             )
-        ]
+            if normalized_edge is not None:
+                grounded_edges.append(normalized_edge)
 
-        graph_edges = self._merge_relationship_snapshot_edges(
-            root,
-            nodes=character_nodes,
-            existing_edges=grounded_edges,
-            allow_new_nodes=False,
-        )[: max_items * 2]
+        if allow_agent_relationship_aliases:
+            graph_edges = self._merge_relationship_snapshot_edges(
+                root,
+                nodes=character_nodes,
+                existing_edges=grounded_edges,
+                allow_new_nodes=False,
+                sources=source_cache,
+            )[: max_items * 2]
+        else:
+            graph_edges = grounded_edges[: max_items * 2]
 
-        # \u6709\u5173\u7cfb\u7684\u89d2\u8272\u6392\u524d\u9762\uff0c\u5b64\u7acb\u89d2\u8272\u6bbf\u540e\uff0c\u8d85\u51fa\u9884\u7b97\u7684\u5b64\u7acb\u89d2\u8272\u88c1\u6389\u3002
+        # 有关系的角色排前面，孤立角色殿后，超出预算的孤立角色裁掉。
         connected_ids: set[str] = set()
         for edge in graph_edges:
             connected_ids.add(str(edge.get("source") or ""))
@@ -2708,6 +2922,17 @@ class StoryWikiService:
             if str(edge.get("source") or "") in visible_ids
             and str(edge.get("target") or "") in visible_ids
         ]
+
+        matched_entry_ids: List[str] = []
+        for entry in category_entries:
+            entry_ref = str(entry.get("id") or "").strip()
+            if entry_ref and entry_ref not in matched_entry_ids:
+                matched_entry_ids.append(entry_ref)
+        for node in ordered_nodes:
+            entry_ref = str(node.get("entryId") or "").strip()
+            if entry_ref in entry_by_id and entry_ref not in matched_entry_ids:
+                matched_entry_ids.append(entry_ref)
+        matched_entry_ids = matched_entry_ids[:max_items]
 
         return {
             "mode": "category",
@@ -2729,6 +2954,105 @@ class StoryWikiService:
                 "edgeCount": len(graph_edges),
             },
         }
+
+    @staticmethod
+    def _allows_agent_relationship_aliases(payload: Dict[str, Any]) -> bool:
+        policy = payload.get("graphPolicy") if isinstance(payload.get("graphPolicy"), dict) else {}
+        generation_mode = str(payload.get("generationMode") or "").strip().lower().replace("_", "-")
+        llm_status = str(payload.get("llmStatus") or "").strip().lower()
+        return (
+            generation_mode == "agent-evidence-grounded"
+            and llm_status == "agent_reviewed"
+            and policy.get("agentGraphAccepted") is True
+        )
+
+    def _normalize_agent_relationship_alias(
+        self,
+        root: Path,
+        edge: Dict[str, Any],
+        *,
+        nodes: Sequence[Dict[str, Any]],
+        sources: Sequence[Dict[str, Any]],
+    ) -> Dict[str, Any] | None:
+        """Convert reviewed Agent domain edges into the canonical relationship schema."""
+        edge_type = re.sub(r"[\s-]+", "_", str(edge.get("type") or "").strip().lower())
+        dimension = AGENT_RELATIONSHIP_EDGE_DIMENSIONS.get(edge_type)
+        if not dimension or bool(edge.get("needsReview")):
+            return None
+        if any(key in edge for key in ("level", "strength", "confidence", "polarity")):
+            return None
+        evidence, source_path = self._ground_agent_relationship_evidence(
+            edge,
+            sources=sources,
+        )
+        if not evidence or not source_path:
+            return None
+        semantics = semantics_for_dimension(dimension)
+        normalized = dict(edge)
+        normalized.update({
+            "type": "relationship",
+            "dimension": semantics.dimension,
+            "relationType": semantics.relation_type,
+            "status": semantics.status,
+            "evidence": evidence,
+            "sourcePath": source_path,
+            "needsReview": False,
+        })
+        if not self._is_publishable_relationship_edge(
+            root,
+            normalized,
+            nodes=nodes,
+            sources=sources,
+        ):
+            return None
+        return normalized
+
+    def _ground_agent_relationship_evidence(
+        self,
+        edge: Dict[str, Any],
+        *,
+        sources: Sequence[Dict[str, Any]],
+    ) -> tuple[str, str]:
+        """Resolve an Agent line citation to the exact source paragraph it quotes."""
+        raw_evidence = re.sub(r"\s+", " ", str(edge.get("evidence") or "")).strip()
+        if not raw_evidence:
+            return "", ""
+        requested_path = str(edge.get("sourcePath") or "").strip().replace("\\", "/")
+        candidates = [raw_evidence]
+        candidates.extend(
+            match.strip()
+            for match in re.findall(r"[\"'“‘](.*?)[\"'”’]", raw_evidence)
+            if match.strip()
+        )
+        ordered_sources = [
+            *[
+                source
+                for source in sources
+                if str(source.get("relativePath") or "") == requested_path
+            ],
+            *[
+                source
+                for source in sources
+                if str(source.get("relativePath") or "") != requested_path
+            ],
+        ]
+        for source in ordered_sources:
+            if source.get("kind") not in {"chapter", "character"}:
+                continue
+            paragraphs = [
+                paragraph.strip()
+                for paragraph in re.split(r"\n\s*\n", str(source.get("text") or ""))
+                if paragraph.strip()
+            ]
+            minimum = 2 if source.get("kind") == "character" else 6
+            for candidate in candidates:
+                compact_candidate = re.sub(r"\s+", "", candidate)
+                if len(compact_candidate) < minimum:
+                    continue
+                for paragraph in paragraphs:
+                    if compact_candidate in re.sub(r"\s+", "", paragraph):
+                        return paragraph, str(source.get("relativePath") or "")
+        return "", ""
 
     def _relationship_snapshot_path(self, root: Path) -> Path:
         return root / ".storydex" / "memory" / "current" / "relationship_graph.json"
@@ -2870,6 +3194,23 @@ class StoryWikiService:
             if any(contains_name(raw_line, name) for name in other_names):
                 return True
         return False
+
+    @staticmethod
+    def _is_query_visible_relationship_edge(edge: Dict[str, Any]) -> bool:
+        """查询路径上的关系边过滤：只做不读盘的结构判断。
+
+        证据的逐字核对已经在发布闸门里做过，这里再做一遍只会让每次查询全量重扫项目。
+        """
+        if str(edge.get("type") or "") != "relationship":
+            return True
+        if edge.get("coOccurrence"):
+            return False
+        relation_type = str(edge.get("relationType") or "").strip()
+        if relation_type not in ALLOWED_RELATION_TYPES or relation_type == "unknown":
+            return False
+        if str(edge.get("status") or "").strip() != "asserted" or bool(edge.get("needsReview")):
+            return False
+        return not any(key in edge for key in ("level", "strength", "confidence", "polarity"))
 
     def _is_publishable_relationship_edge(
         self,
@@ -3162,49 +3503,6 @@ class StoryWikiService:
         )
         return merged
 
-    def _wiki_project_hub_node(self, payload: Dict[str, Any], content_entries: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
-        label = str(payload.get("projectName") or "").strip() or "\u9879\u76ee"
-        needs_review_count = sum(1 for entry in content_entries if bool(entry.get("needsReview")))
-        summary = str(payload.get("summary") or "").strip() or f"{len(content_entries)} \u4e2a WIKI \u6761\u76ee"
-        return {
-            "id": "project:root",
-            "label": label,
-            "type": "project",
-            "category": "overview",
-            "entryId": "",
-            "summary": summary,
-            "synthetic": True,
-            "role": "projectHub",
-            "selectable": False,
-            "count": len(content_entries),
-            "needsReviewCount": needs_review_count,
-        }
-
-    def _wiki_category_hub_node(
-        self,
-        category: str,
-        category_labels: Dict[str, Any],
-        category_entries: Sequence[Dict[str, Any]],
-    ) -> Dict[str, Any]:
-        label = self._wiki_category_label(category, category_labels)
-        needs_review_count = sum(1 for entry in category_entries if bool(entry.get("needsReview")))
-        summary = f"{label}: {len(category_entries)} \u4e2a\u6761\u76ee"
-        if needs_review_count:
-            summary = f"{summary}, {needs_review_count} \u4e2a\u5f85\u786e\u8ba4"
-        return {
-            "id": f"category:{category}",
-            "label": label,
-            "type": "categoryHub",
-            "category": category,
-            "entryId": "",
-            "summary": summary,
-            "synthetic": True,
-            "role": "categoryHub",
-            "selectable": False,
-            "count": len(category_entries),
-            "needsReviewCount": needs_review_count,
-        }
-
     @staticmethod
     def _wiki_category_label(category: str, category_labels: Dict[str, Any]) -> str:
         value = category_labels.get(category) if isinstance(category_labels, dict) else None
@@ -3390,8 +3688,12 @@ class StoryWikiService:
             return "planned"
         if "/templates/" in f"/{normalized}/":
             return "project"
-        if "/characters/" in f"/{normalized}":
+        if self._is_character_card_path(normalized):
             return "character"
+        if "/characters/" in f"/{normalized}":
+            # characters/states/<id>.json 这类派生文件只有 id、没有 name，
+            # 被当成角色卡会顶掉角色的真实中文名（甚至让角色整个消失）。
+            return "memory"
         if "/worldbook/" in f"/{normalized}":
             return "world"
         if "/presets/" in f"/{normalized}":
@@ -3399,6 +3701,20 @@ class StoryWikiService:
         if "/memory/" in f"/{normalized}":
             return "memory"
         return "project"
+
+    @staticmethod
+    def _is_character_card_path(relative_path: str) -> bool:
+        """角色卡白名单：`characters/<名字>.{md,txt,json}` 与 `characters/cards/<id>.*`。
+
+        白名单而非黑名单：characters/ 下将来新增的任何派生目录都不会被误当成角色卡。
+        """
+        parts = [part for part in str(relative_path or "").replace("\\", "/").split("/") if part]
+        if "characters" not in parts:
+            return False
+        tail = parts[parts.index("characters") + 1:]
+        if len(tail) == 1:
+            return Path(tail[0]).suffix.lower() in SCAN_SUFFIXES
+        return len(tail) == 2 and tail[0] == "cards"
 
     def _source_sort_key(self, value: str) -> List[Any]:
         parts: List[Any] = []
@@ -3454,8 +3770,9 @@ class StoryWikiService:
             )
 
         def is_character_card_path(relative_path: str) -> bool:
-            normalized = str(relative_path or "").strip().replace("\\", "/").lower()
-            return normalized.startswith(".storydex/characters/")
+            # 与 _source_kind 用同一套角色卡白名单，否则根级 characters/ 布局下
+            # 删卡不会归档，而 states/ 这类派生文件反倒会被当成卡。
+            return self._is_character_card_path(relative_path)
 
         has_card_managed_record = any(
             any(is_character_card_path(path) for path in record_source_paths(item))
@@ -3464,42 +3781,57 @@ class StoryWikiService:
         if not character_sources and not has_card_managed_record:
             return
 
-        matched_record_ids: set[int] = set()
+        # 一张卡认领一条记录，绝不从别的卡手里夺取：撞 id 的第二张卡另建记录，
+        # 否则第二章写完时第一个角色会被静默改名塌成同一个人。
+        claimed_record_ids: set[int] = set()
+        taken_entity_ids: set[str] = set()
+
+        def find_record(predicate: Callable[[Dict[str, Any]], bool]) -> Dict[str, Any] | None:
+            return next(
+                (
+                    item
+                    for item in entities
+                    if id(item) not in claimed_record_ids and predicate(item)
+                ),
+                None,
+            )
+
         for source in character_sources:
             names = self._character_names_from_source(source)
-            if not names:
-                continue
-            display_name = names[0]
             relative_path = str(source.get("relativePath") or "")
             stable_id = self._stable_entity_id_from_source(source)
             match: Dict[str, Any] | None = None
             if stable_id:
-                match = next((item for item in entities if record_id(item) == stable_id), None)
-            if match is None:
-                match = next(
-                    (
-                        item
-                        for item in entities
-                        if relative_path
-                        and relative_path in record_source_paths(item)
-                    ),
-                    None,
+                match = find_record(lambda item: record_id(item) == stable_id)
+            if match is None and relative_path:
+                match = find_record(lambda item: relative_path in record_source_paths(item))
+            if match is None and names:
+                display = names[0]
+                match = find_record(
+                    lambda item: display == record_name(item)
+                    or display in [str(alias).strip() for alias in item.get("aliases", [])]
                 )
             if match is None:
-                match = next(
-                    (
-                        item
-                        for item in entities
-                        if display_name == record_name(item)
-                        or display_name in [str(alias).strip() for alias in item.get("aliases", [])]
-                    ),
-                    None,
-                )
-            if match is None:
+                if not names:
+                    # 全新卡且认不出名字：不凭空造实体（正文人名抽取不在本次范围内）。
+                    continue
                 match = {}
                 entities.append(match)
+            claimed_record_ids.add(id(match))
 
             previous_name = record_name(match)
+            # 认不出名字时保留既有 canonical_name：识别失败不等于角色不存在。
+            display_name = names[0] if names else previous_name
+            id_conflict_with = ""
+            resolved_id = stable_id or record_id(match)
+            if resolved_id and resolved_id in taken_entity_ids:
+                # 撞车的一方改用路径派生的确定性 id（冷重建可复现，不用 uuid4）。
+                id_conflict_with = resolved_id
+                resolved_id = ""
+            if not resolved_id:
+                resolved_id = self._path_derived_entity_id(relative_path)
+            taken_entity_ids.add(resolved_id)
+
             aliases = [str(alias).strip() for alias in match.get("aliases", []) if str(alias).strip()]
             if previous_name and previous_name != display_name:
                 aliases.append(previous_name)
@@ -3512,32 +3844,49 @@ class StoryWikiService:
             if relative_path:
                 source_paths.append(relative_path)
             match.update({
-                "entityId": stable_id or record_id(match) or f"char_{uuid4().hex}",
+                "entityId": resolved_id,
                 "canonical_name": display_name,
                 "aliases": list(dict.fromkeys(alias for alias in aliases if alias and alias != display_name)),
                 "kind": "character",
                 "status": "active",
                 "sourcePaths": list(dict.fromkeys(source_paths)),
+                "needsReview": bool(id_conflict_with) or not names or not display_name,
             })
+            if id_conflict_with:
+                match["idConflictWith"] = id_conflict_with
+            else:
+                match.pop("idConflictWith", None)
             match.pop("source_paths", None)
-            matched_record_ids.add(id(match))
 
-        # 只有曾由角色卡拥有、且本轮没有任何现存角色卡匹配的记录才归档。
+        # 归档只看文件在不在：卡还在盘上但本轮没认出名字/被别的记录认领，角色必须留下。
         # 纯 registry 角色没有角色卡路径，仍由 Story Knowledge 自身管理。
         for item in entities:
-            if id(item) in matched_record_ids:
+            if id(item) in claimed_record_ids:
                 continue
             source_paths = record_source_paths(item)
-            if not any(is_character_card_path(path) for path in source_paths):
+            card_paths = [path for path in source_paths if is_character_card_path(path)]
+            if not card_paths:
                 continue
             kind = str(item.get("kind") or "").strip().lower()
             if kind and kind not in {"character", "person", "role"}:
                 continue
+            surviving_cards = [path for path in card_paths if (root / path).exists()]
+            item.pop("source_paths", None)
+            if surviving_cards:
+                # 卡还在，只是这一轮没认出来：保留 active 与原名，标记待人工确认。
+                item["status"] = "active"
+                item["needsReview"] = True
+                item["sourcePaths"] = [
+                    path
+                    for path in source_paths
+                    if not is_character_card_path(path) or path in surviving_cards
+                ]
+                continue
             item["status"] = "archived"
+            item["needsReview"] = False
             item["sourcePaths"] = [
                 path for path in source_paths if not is_character_card_path(path)
             ]
-            item.pop("source_paths", None)
 
         next_payload = {
             **payload,
@@ -3546,6 +3895,12 @@ class StoryWikiService:
         }
         if next_payload != loaded:
             self._write_json_atomic(registry_path, next_payload)
+
+    @staticmethod
+    def _path_derived_entity_id(relative_path: str) -> str:
+        """撞 id / 无 id 时的兜底实体 ID：由角色卡路径确定性派生，冷重建可复现。"""
+        digest = sha256(str(relative_path or "").replace("\\", "/").encode("utf-8")).hexdigest()
+        return f"char_{digest[:12]}"
 
     def _stable_entity_id_from_source(self, source: Dict[str, Any]) -> str:
         text = str(source.get("text") or "")
@@ -3592,8 +3947,12 @@ class StoryWikiService:
     def _collect_entities(self, root: Path, sources: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
         entities_by_name: Dict[str, Dict[str, Any]] = {}
         registry = EntityRegistry(root)
+        review_flags = self._registry_review_flags(root)
         for record in registry.load_records():
-            self._add_entity(entities_by_name, self._entity_from_record(record))
+            self._add_entity(
+                entities_by_name,
+                self._entity_from_record(record, review_flags.get(record.entity_id, {})),
+            )
 
         for source in sources:
             if source["kind"] == "character":
@@ -3611,7 +3970,7 @@ class StoryWikiService:
                         "needsReview": False,
                     })
 
-        return sorted(
+        entities = sorted(
             entities_by_name.values(),
             key=lambda entity: (
                 -self._entity_score(entity, sources),
@@ -3620,13 +3979,52 @@ class StoryWikiService:
                 str(entity.get("name") or ""),
             ),
         )
+        self._assign_unique_node_ids(entities)
+        return entities
+
+    def _registry_review_flags(self, root: Path) -> Dict[str, Dict[str, Any]]:
+        """读取 registry 里 reconcile 打的待确认标记（EntityRecord 不携带这些字段）。"""
+        path = root / ENTITY_SOURCE_PATH
+        if not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        records = payload.get("entities") if isinstance(payload, dict) else None
+        if not isinstance(records, list):
+            return {}
+        flags: Dict[str, Dict[str, Any]] = {}
+        for item in records:
+            if not isinstance(item, dict):
+                continue
+            entity_id = str(
+                item.get("entityId")
+                or item.get("entity_id")
+                or item.get("stableId")
+                or item.get("stable_id")
+                or item.get("id")
+                or ""
+            ).strip()
+            if not entity_id:
+                continue
+            flags[entity_id] = {
+                "needsReview": bool(item.get("needsReview")),
+                "idConflictWith": str(item.get("idConflictWith") or "").strip(),
+            }
+        return flags
 
     def _collect_character_names(self, root: Path, sources: Sequence[Dict[str, Any]]) -> List[str]:
         return [str(entity["name"]) for entity in self._collect_entities(root, sources) if entity["type"] == "character"]
 
-    def _entity_from_record(self, record: EntityRecord) -> Dict[str, Any]:
+    def _entity_from_record(
+        self,
+        record: EntityRecord,
+        review_flags: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         node_type = self._entity_type_for_kind(record.kind)
-        return {
+        flags = review_flags or {}
+        entity = {
             "name": record.canonical_name,
             "entityId": record.entity_id,
             "kind": record.kind or node_type,
@@ -3634,8 +4032,12 @@ class StoryWikiService:
             "category": self._entity_category_for_type(node_type),
             "aliases": list(record.aliases),
             "sourcePaths": list(record.source_paths) or [ENTITY_SOURCE_PATH],
-            "needsReview": False,
+            "needsReview": bool(flags.get("needsReview")),
         }
+        conflict = str(flags.get("idConflictWith") or "").strip()
+        if conflict:
+            entity["idConflictWith"] = conflict
+        return entity
 
     def _add_entity(self, entities_by_name: Dict[str, Dict[str, Any]], entity: Dict[str, Any]) -> None:
         name = str(entity.get("name") or "").strip()
@@ -3735,11 +4137,47 @@ class StoryWikiService:
         return "setting"
 
     def _entity_node_id(self, entity: Dict[str, Any]) -> str:
-        stable_id = str(entity.get("entityId") or entity.get("entity_id") or "").strip()
-        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_.:-]{1,159}", stable_id):
-            return stable_id
+        assigned = str(entity.get("nodeId") or "").strip()
+        if assigned:
+            return assigned
+        sanitized = self._sanitize_node_id(entity.get("entityId") or entity.get("entity_id"))
+        if sanitized:
+            return sanitized
         node_type = str(entity.get("type") or "setting")
         return f"{node_type}:{self._slug(str(entity.get('name') or 'item'))}"
+
+    @staticmethod
+    def _sanitize_node_id(value: Any) -> str:
+        """把 registry 里的 entityId 清洗成可用节点 ID，而不是整条丢弃。
+
+        旧实现只接受 ASCII 开头的严格 ID，一条 `林北-1` 就会让节点 ID 回退成
+        `character:林北-1`，和 registry 对不上，进而判定「canonical 节点数 != 1」，
+        最后整张图被作废。
+        """
+        raw = re.sub(r"\s+", "_", str(value or "").strip())
+        if not raw:
+            return ""
+        cleaned = re.sub(r"[^\w.:\-]", "", raw, flags=re.UNICODE).strip("._:-")
+        return cleaned[:160]
+
+    def _assign_unique_node_ids(self, entities: Sequence[Dict[str, Any]]) -> None:
+        """同一个节点 ID 只能属于一个实体：后来者降级为按名字派生的 ID 并标待确认。"""
+        taken: set[str] = set()
+        for entity in entities:
+            entity.pop("nodeId", None)
+            node_id = self._entity_node_id(entity)
+            if node_id in taken:
+                node_type = str(entity.get("type") or "setting")
+                fallback = f"{node_type}:{self._slug(str(entity.get('name') or 'item'))}"
+                candidate = fallback
+                suffix = 2
+                while candidate in taken:
+                    candidate = f"{fallback}-{suffix}"
+                    suffix += 1
+                node_id = candidate
+                entity["needsReview"] = True
+            taken.add(node_id)
+            entity["nodeId"] = node_id
 
     def _entity_summary(self, entity: Dict[str, Any]) -> str:
         node_type = str(entity.get("type") or "setting")

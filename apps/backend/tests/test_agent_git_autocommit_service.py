@@ -344,6 +344,40 @@ def test_finish_turn_all_states(tmp_path):
     assert failure["reason"] == "commit_check_failed"
 
 
+def test_changed_paths_since_turn_distinguishes_read_only_modified_and_deleted(tmp_path):
+    service = AgentGitAutoCommitService()
+    git = ScriptedGitService()
+    service.git_service = git
+
+    clean_snapshot = routes_agent.AgentGitSnapshot(workspace_root=tmp_path, available=True)
+    git.summaries = [{"changedFiles": [], "recentCommits": [{"id": "head"}]}]
+    assert service.changed_paths_since_turn(clean_snapshot) == []
+
+    chapter = tmp_path / "chapter.md"
+    chapter.write_text("before", encoding="utf-8")
+    dirty_snapshot = routes_agent.AgentGitSnapshot(
+        workspace_root=tmp_path,
+        available=True,
+        baseline_status={"chapter.md": "M"},
+        baseline_fingerprints=service._fingerprints_for_paths(tmp_path, ["chapter.md"]),
+    )
+    chapter.write_text("after", encoding="utf-8")
+    git.summaries = [{
+        "changedFiles": [{"relativePath": "chapter.md", "status": "M"}],
+        "recentCommits": [{"id": "head"}],
+    }]
+    assert service.changed_paths_since_turn(dirty_snapshot) == ["chapter.md"]
+
+    chapter.unlink()
+    git.summaries = [{"changedFiles": [], "recentCommits": [{"id": "head"}]}]
+    assert service.changed_paths_since_turn(dirty_snapshot) == ["chapter.md"]
+
+    unavailable = routes_agent.AgentGitSnapshot(workspace_root=tmp_path, available=False)
+    assert service.changed_paths_since_turn(unavailable) is None
+    git.raise_on.add("summary")
+    assert service.changed_paths_since_turn(clean_snapshot) is None
+
+
 def test_current_changes_payload_all_states(tmp_path):
     service = AgentGitAutoCommitService()
     source = service.current_changes_payload(_source_repository(tmp_path / "source"))

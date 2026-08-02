@@ -175,6 +175,38 @@ def test_trace_audit_history_tasks_and_ledger_helpers(monkeypatch, tmp_path):
     ]
     metrics = routes._extract_trace_metrics(events, "t", 10)
     assert metrics["toolCalls"] == 1 and metrics["completionTokens"] == 42
+
+    usage_events = [
+        routes._event_to_trace_event(
+            "UsageUpdate",
+            {"usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}},
+            1,
+        ),
+        routes._event_to_trace_event(
+            "UsageUpdate",
+            {
+                "usage": {
+                    "input_tokens": 5861,
+                    "output_tokens": 249,
+                    "total_tokens": 6110,
+                }
+            },
+            2,
+        ),
+        routes._event_to_trace_event("AgentCompleted", {"total_tokens": 6110}, 3),
+    ]
+    usage_metrics = routes._extract_trace_metrics(usage_events, "usage-trace", 10)
+    assert usage_metrics["promptTokens"] == 5861
+    assert usage_metrics["completionTokens"] == 249
+
+    observed_metrics = routes._extract_trace_metrics(
+        [routes._event_to_trace_event("AgentCompleted", {"total_tokens": 16}, 1)],
+        "observed-trace",
+        10,
+        {"calls": 1, "usageCalls": 1, "promptTokens": 11, "completionTokens": 5},
+    )
+    assert observed_metrics["promptTokens"] == 11
+    assert observed_metrics["completionTokens"] == 5
     audit = routes._build_audit(events)
     assert {item["action"] for item in audit} == {"coomi_tool_call", "storydex_turn_contract", "agent_git_commit"}
     tasks = routes._extract_task_plan(events, "t")
@@ -507,6 +539,78 @@ def test_stream_finalizer_reconciles_written_knowledge_after_provider_401(monkey
     assert record["executionOutcome"] == "partial_failed"
     assert record["knowledgeProjection"]["status"] == "ready"
     assert "401" in record["errorMessage"]
+
+
+def test_stream_read_only_turn_skips_knowledge_projection(monkeypatch, tmp_path):
+    persisted_records = []
+    projection_calls = []
+    coordinator = ExecutionCoordinator()
+    monkeypatch.setattr(routes, "execution_coordinator", coordinator)
+    monkeypatch.setattr(routes, "_create_agent_task_plan", lambda **kwargs: asyncio.sleep(0, result=[]))
+    monkeypatch.setattr(
+        routes,
+        "_build_chat_payload",
+        lambda **kwargs: {"record": {"traceId": kwargs["trace_id"], "events": kwargs["events"]}},
+    )
+    monkeypatch.setattr(
+        routes,
+        "_persist_execution_trace",
+        lambda workspace, record, session: persisted_records.append(dict(record)) or record,
+    )
+
+    class Git:
+        def changed_paths_since_turn(self, snapshot):
+            return []
+
+        def finish_turn(self, snapshot, **kwargs):
+            return {
+                "_type": "GitAutoCommit",
+                "status": "info",
+                "reason": "no_changes",
+                "created": False,
+            }
+
+    class ReadOnlyRuntime:
+        def cancel_execution(self, **kwargs):
+            return False
+
+        async def stream_events(self, **kwargs):
+            yield "AgentStarted", {}
+            yield "ToolDone", {"tool_name": "list_dir", "is_error": False}
+            yield "ToolDone", {"tool_name": "StorydexRuntimePresetStatus", "is_error": False}
+            yield "AgentCompleted", {"total_tokens": 1}
+
+    def reconcile(_root):
+        projection_calls.append(True)
+        raise AssertionError("read-only turns must not materialize the WIKI projection")
+
+    monkeypatch.setattr(routes, "agent_git_autocommit_service", Git())
+    monkeypatch.setattr(routes, "get_storydex_coomi_agent_service", lambda: ReadOnlyRuntime())
+    monkeypatch.setattr(routes, "_reconcile_story_knowledge_projection", reconcile)
+
+    async def collect():
+        return [
+            _decode_sse(item)
+            async for item in routes._stream_coomi_sse(
+                prompt="你好，你是谁",
+                trace_id="trace-read-only",
+                session_id="session-read-only",
+                active_file="",
+                workspace_root=tmp_path,
+                story_generation={},
+                turn_contract={"status": "ready"},
+                git_snapshot=AgentGitSnapshot(workspace_root=tmp_path, available=True),
+                request=FakeRequest(),
+                cancellation_token=routes._CancellationToken(),
+            )
+        ]
+
+    packets = asyncio.run(collect())
+    assert projection_calls == []
+    assert not any(name.startswith("KnowledgeProjection") for name, _ in packets)
+    assert not (tmp_path / ".storydex" / "wiki" / "knowledge_graph.json").exists()
+    assert persisted_records[-1]["knowledgeProjection"]["status"] == "skipped"
+    assert persisted_records[-1]["knowledgeProjection"]["reason"] == "no_project_changes"
 
 
 def test_stream_disconnect_finishes_cancelled_execution_in_background(monkeypatch, tmp_path):

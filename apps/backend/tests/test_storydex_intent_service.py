@@ -536,6 +536,56 @@ def test_classify_intent_falls_back_on_invalid_llm_output(monkeypatch):
     assert frame["method"] == "safe_fallback"
 
 
+def test_safe_fallback_contract_does_not_block_story_increment_tool(tmp_path):
+    segment_path = "chapters/Chapter2/001.md"
+    segment_text = "x" * 919
+    memory_update = {
+        "op": "set",
+        "path": "plot.location",
+        "value": "old waterworks",
+        "evidence": "The generated fragment establishes the location.",
+    }
+    contract = {
+        "intentFrame": {
+            "primary": "general",
+            "operationType": "inquiry",
+            "effect": "respond_only",
+            "decision": "needs_clarification",
+            "canWrite": False,
+            "method": "safe_fallback",
+            "ambiguities": ["invalid_or_unavailable_model_output"],
+        },
+        "executionPolicy": {
+            "directFileWrites": False,
+            "allowedWriteRoots": [],
+        },
+    }
+    tool = StorydexApplyStoryIncrementTool(
+        workspace_root=tmp_path,
+        turn_contract=contract,
+    )
+
+    tool_result = tool.run(
+        {
+            "segmentPath": segment_path,
+            "segmentText": segment_text,
+            "fragments": [
+                {"path": segment_path, "variableUpdates": [memory_update]},
+                {"path": "chapters/Chapter2/002.md", "text": ""},
+            ],
+        }
+    )
+
+    assert tool_result.success is True
+    result = json.loads(tool_result.output)
+    assert result["ok"] is True
+    assert len(result["fragments"]) == 1
+    assert result["fragments"][0]["snapshotWritten"] is True
+    written_segment = tmp_path / result["fragments"][0]["segmentPath"]
+    assert written_segment.read_text(encoding="utf-8") == segment_text + "\n"
+    assert not list((tmp_path / "chapters").rglob("002.md"))
+
+
 def test_partial_legacy_shaped_model_output_cannot_authorise_writes(monkeypatch):
     class PartialProvider:
         async def chat(self, messages, options):

@@ -119,13 +119,26 @@
 
         <div v-else-if="entry.kind === 'error'" class="cct-error-text">
           <strong>错误</strong>
-          <span>{{ entry.text }}</span>
+          <div class="cct-error-content">
+            <span class="cct-error-message">{{ entry.text }}</span>
+            <button
+              v-if="canRetry && entry.id === retryEntryId"
+              class="cct-error-retry"
+              type="button"
+              title="重新生成"
+              aria-label="重新生成"
+              :disabled="actionsBusy"
+              @click="emit('retry', run)"
+            >
+              <span class="material-symbols-rounded" :class="{ spinning: actionsBusy }">refresh</span>
+            </button>
+          </div>
         </div>
       </template>
 
       <!-- 底部元信息：耗时 · token · 状态 · 无恢复点，纯文字不重复头部；右侧为完成时刻 -->
       <div class="cct-meta">
-        <span class="cct-meta-text">{{ metaLine }}</span>
+        <span class="cct-meta-text" :title="tokenTooltip || undefined">{{ metaLine }}</span>
         <span
           v-if="run.noRestorePoint"
           class="cct-meta-warn"
@@ -171,6 +184,8 @@ const props = defineProps<{
   elapsedMs?: number;
   /** 本轮是否允许回滚（由父级按最新轮次与全局忙碌态判定） */
   canRollback?: boolean;
+  /** 本轮失败后是否允许重新生成 */
+  canRetry?: boolean;
   /** 回滚按钮是否置灰 */
   actionsBusy?: boolean;
 }>();
@@ -178,6 +193,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (event: "rollback-edit", run: AgentExecutionRun): void;
   (event: "rollback-delete", run: AgentExecutionRun): void;
+  (event: "retry", run: AgentExecutionRun): void;
   (event: "markdown-click", payload: MouseEvent): void;
 }>();
 
@@ -248,7 +264,16 @@ const entries = computed<FlowEntry[]>(() => {
       last.live = true;
     }
   }
+  const terminalError = props.run.errorMessage.trim();
+  if (terminalError && !list.some((entry) => entry.kind === "error")) {
+    list.push({ kind: "error", id: `${props.run.traceId}-terminal-error`, text: terminalError });
+  }
   return list;
+});
+
+const retryEntryId = computed(() => {
+  const error = [...entries.value].reverse().find((entry) => entry.kind === "error");
+  return error?.id || "";
 });
 
 // 运行中不显示 phase 之外的活动提示；完成后 store 会把 phase 内容覆盖为终态
@@ -357,9 +382,46 @@ const tokenText = computed(() => {
   // 单轮 token 只有 AgentCompleted 之后才有真实值，运行中留空而不是估算
   const tokens = props.run.turnTokens;
   if (tokens === null || tokens === undefined || tokens <= 0) return "";
-  if (tokens >= 1000) return `${(tokens / 1000).toFixed(1)}K tokens`;
-  return `${tokens} tokens`;
+  return `本轮总计 ${formatTokenCount(tokens)} tokens`;
 });
+
+function formatTokenCount(value: number): string {
+  return value >= 1000 ? `${(value / 1000).toFixed(1)}K` : String(value);
+}
+
+const turnUsage = computed(() => {
+  for (let index = props.run.events.length - 1; index >= 0; index -= 1) {
+    const event = props.run.events[index];
+    if (event.event !== "UsageUpdate") continue;
+    const rawUsage = event.data?.usage;
+    if (!rawUsage || typeof rawUsage !== "object" || Array.isArray(rawUsage)) continue;
+    const usage = rawUsage as Record<string, unknown>;
+    const prompt = numericUsageValue(usage, ["prompt_tokens", "promptTokens", "input_tokens"]);
+    const completion = numericUsageValue(usage, ["completion_tokens", "completionTokens", "output_tokens"]);
+    if (prompt + completion > 0) return { prompt, completion };
+  }
+  return null;
+});
+
+const tokenTooltip = computed(() => {
+  const tokens = props.run.turnTokens;
+  if (tokens === null || tokens === undefined || tokens <= 0) return "";
+  const usage = turnUsage.value;
+  if (!usage) return "本轮 Token 总量，包含输入上下文与模型输出";
+  return [
+    `本轮总计：${formatTokenCount(tokens)} tokens`,
+    `输入上下文：${formatTokenCount(usage.prompt)} tokens`,
+    `模型输出：${formatTokenCount(usage.completion)} tokens`
+  ].join("\n");
+});
+
+function numericUsageValue(value: Record<string, unknown>, keys: string[]): number {
+  for (const key of keys) {
+    const candidate = Number(value[key]);
+    if (Number.isFinite(candidate) && candidate >= 0) return candidate;
+  }
+  return 0;
+}
 
 const statusText = computed(() => {
   if (props.run.errorMessage) return "错误";
@@ -672,6 +734,55 @@ function compactText(value: unknown, limit = 1200): string {
   line-height: 1.7;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.cct-error-content {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.cct-error-message {
+  flex: 1;
+  min-width: 0;
+}
+
+.cct-error-retry {
+  flex: 0 0 26px;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  margin-top: 1px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  color: var(--danger);
+  background: transparent;
+  cursor: pointer;
+}
+
+.cct-error-retry:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+.cct-error-retry:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--danger) 45%, transparent);
+  outline-offset: 1px;
+}
+
+.cct-error-retry:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.cct-error-retry .material-symbols-rounded {
+  font-size: 18px;
+}
+
+.cct-error-retry .spinning {
+  animation: cct-spin 1s linear infinite;
 }
 
 /* 客观验收未通过等警告类提示，与上游 coomi-notice-text 同色调 */

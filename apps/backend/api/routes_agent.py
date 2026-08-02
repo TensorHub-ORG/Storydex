@@ -11,7 +11,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Dict, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence
 from uuid import uuid4
 
 from fastapi import APIRouter, Query, Request
@@ -917,7 +917,7 @@ def _exception_message(error: BaseException, fallback: str = "Coomi execution fa
 
 
 def _reconcile_story_knowledge_projection(workspace_root: Path) -> Dict[str, Any]:
-    """Run the deterministic projection finalizer for every terminal Agent outcome."""
+    """Reconcile the deterministic projection after a turn changed project files."""
     try:
         payload = get_story_wiki_service().sync_local_incremental(Path(workspace_root).resolve())
     except Exception as exc:
@@ -965,6 +965,100 @@ def _reconcile_story_knowledge_projection(workspace_root: Path) -> Dict[str, Any
         "sourceStats": dict(payload.get("sourceStats") or {}),
         "diagnostics": diagnostics,
         "errorMessage": error_message,
+    }
+
+
+_READ_ONLY_AGENT_TOOLS = frozenset(
+    {
+        "ask_user",
+        "ask_user_question",
+        "get_loop",
+        "glob",
+        "grep",
+        "grep_files",
+        "list_dir",
+        "list_skills",
+        "memory_list",
+        "memory_read",
+        "memory_search",
+        "read",
+        "read_file",
+        "read_skill",
+        "request_user_input",
+        "search",
+        "storydexhelpguidesearch",
+        "storydexprojectsearch",
+        "storydexruntimepresetstatus",
+        "storydexversionstatus",
+        "storydexwikiquery",
+        "storydexwordcount",
+        "todo",
+        "todo_write",
+        "todowrite",
+        "update_plan",
+        "view_image",
+        "wait_agent",
+        "web_fetch",
+        "web_search",
+        "webfetch",
+        "websearch",
+    }
+)
+
+
+def _has_project_mutation_attempt(events: Sequence[Dict[str, Any]]) -> bool:
+    """Return whether the runtime attempted an operation that may change project files."""
+    for item in events:
+        if not isinstance(item, dict):
+            continue
+        event_name = str(item.get("event") or "")
+        data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        if event_name == "StoryGenerationValidation" and bool(data.get("writeToolApplied")):
+            return True
+        if event_name == "StoryCommitStarted":
+            return True
+        if (
+            event_name == "SemanticBudgetProgress"
+            and str(data.get("state") or "").strip().upper() == "APPLYING"
+        ):
+            return True
+        if event_name not in {"ToolStart", "ToolDone"}:
+            continue
+        tool_name = str(data.get("tool_name") or data.get("toolName") or "").strip().lower()
+        if tool_name and tool_name not in _READ_ONLY_AGENT_TOOLS:
+            return True
+    return False
+
+
+def _turn_requires_knowledge_projection(
+    snapshot: AgentGitSnapshot,
+    events: Sequence[Dict[str, Any]],
+) -> bool:
+    mutation_attempted = _has_project_mutation_attempt(events)
+    if not mutation_attempted:
+        return False
+    detector = getattr(agent_git_autocommit_service, "changed_paths_since_turn", None)
+    if callable(detector):
+        try:
+            changed_paths = detector(snapshot)
+        except Exception:
+            _LOGGER.exception("Unable to compare Agent turn changes before knowledge projection")
+        else:
+            if changed_paths is not None:
+                return bool(changed_paths)
+    return True
+
+
+def _skipped_knowledge_projection() -> Dict[str, Any]:
+    return {
+        "_type": "KnowledgeProjectionSkipped",
+        "_version": 1,
+        "ok": True,
+        "status": "skipped",
+        "reason": "no_project_changes",
+        "changedSourcePaths": [],
+        "diagnostics": [],
+        "errorMessage": "",
     }
 
 
@@ -1274,13 +1368,56 @@ def _extract_trace_metrics(
     observed = llm_metrics if isinstance(llm_metrics, dict) else {}
     observed_calls = int(observed.get("calls") or 0)
     usage_calls = int(observed.get("usageCalls") or 0)
+    event_usage: Dict[str, int] | None = None
+    for item in reversed(events):
+        if item.get("event") != "UsageUpdate":
+            continue
+        data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        try:
+            prompt_tokens = max(
+                0,
+                int(
+                    usage.get("prompt_tokens")
+                    or usage.get("promptTokens")
+                    or usage.get("input_tokens")
+                    or 0
+                ),
+            )
+            completion_tokens = max(
+                0,
+                int(
+                    usage.get("completion_tokens")
+                    or usage.get("completionTokens")
+                    or usage.get("output_tokens")
+                    or 0
+                ),
+            )
+        except (TypeError, ValueError):
+            continue
+        if prompt_tokens + completion_tokens <= 0:
+            continue
+        event_usage = {
+            "promptTokens": prompt_tokens,
+            "completionTokens": completion_tokens,
+        }
+        break
+    if event_usage is not None:
+        prompt_tokens = event_usage["promptTokens"]
+        completion_tokens = event_usage["completionTokens"]
+    elif usage_calls:
+        prompt_tokens = int(observed.get("promptTokens") or 0)
+        completion_tokens = int(observed.get("completionTokens") or 0)
+    else:
+        prompt_tokens = 0
+        completion_tokens = total_tokens
     return {
         "traceId": trace_id,
         "durationMs": duration_ms,
         "toolCalls": tool_calls,
         "llmCalls": observed_calls or (1 if total_tokens else 0),
-        "promptTokens": int(observed.get("promptTokens") or 0) if usage_calls else 0,
-        "completionTokens": int(observed.get("completionTokens") or 0) if usage_calls else total_tokens,
+        "promptTokens": prompt_tokens,
+        "completionTokens": completion_tokens,
         "estimatedCost": 0.0,
     }
 
@@ -4441,30 +4578,38 @@ async def _stream_coomi_sse_worker(
             event_name = str(mailbox_event.get("_type") or "FollowupUpdated")
             events.append(_event_to_trace_event(event_name, mailbox_event, len(events) + 1))
 
-        knowledge_projection = await asyncio.to_thread(
-            _reconcile_story_knowledge_projection,
-            workspace_root,
+        requires_projection = await asyncio.to_thread(
+            _turn_requires_knowledge_projection,
+            git_snapshot,
+            events,
         )
-        projection_event_name = str(
-            knowledge_projection.get("_type")
-            or ("KnowledgeProjectionUpdated" if knowledge_projection.get("ok") else "KnowledgeProjectionError")
-        )
-        events.append(
-            _event_to_trace_event(
-                projection_event_name,
-                knowledge_projection,
-                len(events) + 1,
+        if requires_projection:
+            knowledge_projection = await asyncio.to_thread(
+                _reconcile_story_knowledge_projection,
+                workspace_root,
             )
-        )
-        yield _encode_sse(projection_event_name, knowledge_projection)
-        if not bool(knowledge_projection.get("ok")):
-            projection_error = str(
-                knowledge_projection.get("errorMessage")
-                or "Knowledge projection reconciliation failed."
+            projection_event_name = str(
+                knowledge_projection.get("_type")
+                or ("KnowledgeProjectionUpdated" if knowledge_projection.get("ok") else "KnowledgeProjectionError")
             )
-            if not error_message:
-                error_message = projection_error
-            completed = False
+            events.append(
+                _event_to_trace_event(
+                    projection_event_name,
+                    knowledge_projection,
+                    len(events) + 1,
+                )
+            )
+            yield _encode_sse(projection_event_name, knowledge_projection)
+            if not bool(knowledge_projection.get("ok")):
+                projection_error = str(
+                    knowledge_projection.get("errorMessage")
+                    or "Knowledge projection reconciliation failed."
+                )
+                if not error_message:
+                    error_message = projection_error
+                completed = False
+        else:
+            knowledge_projection = _skipped_knowledge_projection()
 
         if tracker is not None:
             for task_event_name, task_payload in tracker.start_version_task():

@@ -987,11 +987,7 @@ export const useAgentStore = defineStore("agent", {
       try {
         const succeeded = await this.executePromptRequest(request, { sessionId: this.currentSessionId || "default" });
         const replacementRun = this.executionHistory.find((run) => !existingTraceIds.has(run.traceId));
-        const accepted = Boolean(
-          replacementRun?.events.some(
-            (event) => event.event === "TaskPlanCreated" || event.event === "TurnContract" || event.phase === "task_planning"
-          )
-        );
+        const accepted = replacementWasAccepted(replacementRun);
         if (succeeded || accepted) {
           const original = this.executionHistory.find((run) => run.traceId === expectedTraceId);
           if (original) {
@@ -1009,6 +1005,86 @@ export const useAgentStore = defineStore("agent", {
         }
         this.currentTraceId = expectedTraceId;
         this.promptInput = prompt;
+        return false;
+      } finally {
+        this.isReexecuting = false;
+      }
+    },
+
+    async retryFailedRun(run: AgentExecutionRun): Promise<boolean> {
+      const target = this.executionHistory[0];
+      const prompt = String(run.prompt || "").trim();
+      if (
+        !prompt
+        || !run.traceId
+        || target?.traceId !== run.traceId
+        || run.status !== "failed"
+        || this.isRunning
+        || this.isRollingBack
+        || this.isReexecuting
+        || Boolean(this.editingTraceId)
+      ) {
+        return false;
+      }
+
+      const workspaceStore = useWorkspaceStore();
+      const request: AgentChatRequest = {
+        prompt,
+        activeFile: workspaceStore.activeFileBindingOrPath || workspaceStore.activeFile || "",
+        workspaceRoot: workspaceStore.currentProject?.workspaceRoot || workspaceStore.health?.workspaceRoot || "",
+        storyGeneration: {
+          fragmentCount: this.storyFragmentCount,
+          chapterLengthTier: this.chapterLengthTier,
+          chapterTemplateId: this.storyChapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID
+        }
+      };
+      // In-band AgentError runs are durable server history and must be replaced.
+      // A bare HTTP 400/503 has no event/history yet, so it is retried as a fresh run.
+      const replacePersistedRun = run.events.some((event) => event.event === "AgentError");
+      if (replacePersistedRun) {
+        request.replaceLatestTraceId = run.traceId;
+      }
+
+      const existingTraceIds = new Set(this.executionHistory.map((item) => item.traceId));
+      this.isReexecuting = true;
+      this.lastError = "";
+      this.lastErrorCode = null;
+      try {
+        const succeeded = await this.executePromptRequest(request, {
+          sessionId: run.sessionId || this.currentSessionId || "default",
+          preserveComposer: true
+        });
+        const retryRun = this.executionHistory.find((item) => !existingTraceIds.has(item.traceId));
+        if (!retryRun) {
+          return false;
+        }
+
+        if (!replacePersistedRun) {
+          this.executionHistory = this.executionHistory.filter((item) => item.traceId !== run.traceId);
+          return succeeded;
+        }
+
+        if (succeeded || replacementWasAccepted(retryRun)) {
+          const original = this.executionHistory.find((item) => item.traceId === run.traceId);
+          if (original) {
+            this.upsertExecutionRun({ ...original, status: "superseded" });
+          }
+          return true;
+        }
+
+        const retryErrorMessage = retryRun.errorMessage || this.lastError;
+        const retryErrorCode = retryRun.errorCode || this.lastErrorCode;
+        this.executionHistory = this.executionHistory.filter((item) => item.traceId !== retryRun.traceId);
+        this.currentTraceId = run.traceId;
+        const original = this.executionHistory.find((item) => item.traceId === run.traceId);
+        if (original && retryErrorMessage) {
+          this.upsertExecutionRun({
+            ...original,
+            errorMessage: retryErrorMessage,
+            errorCode: retryErrorCode,
+            updatedAt: new Date().toISOString()
+          });
+        }
         return false;
       } finally {
         this.isReexecuting = false;
@@ -1610,6 +1686,14 @@ export const useAgentStore = defineStore("agent", {
     }
   }
 });
+
+function replacementWasAccepted(run: AgentExecutionRun | undefined): boolean {
+  return Boolean(
+    run?.events.some(
+      (event) => event.event === "TaskPlanCreated" || event.event === "TurnContract" || event.phase === "task_planning"
+    )
+  );
+}
 
 function streamPacketToTraceEvent(packet: AgentStreamPacket, index: number): AgentTraceEvent {
   const eventName = String(packet._type || packet.type || "event");

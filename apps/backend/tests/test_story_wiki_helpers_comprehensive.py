@@ -226,8 +226,14 @@ def test_query_graph_all_modes_and_merge_branches(service, tmp_path, monkeypatch
         },
     }
     monkeypatch.setattr(service, "read_or_build", lambda root: payload)
-    overview = service.query_graph(tmp_path, depth="bad", limit="bad")
-    assert overview["mode"] == "overview" and overview["graph"]["nodes"][0]["id"] == "project:root"
+    # 分类为空时不再返回人造 hub 总览图，而是默认落到角色视图。
+    default_lens = service.query_graph(tmp_path, depth="bad", limit="bad")
+    assert default_lens["mode"] == "category" and default_lens["category"] == "characters"
+    assert [node["id"] for node in default_lens["graph"]["nodes"]] == ["hero-node"]
+    # relationships 是旧别名，结果必须与直接查 characters 一致。
+    aliased = service.query_graph(tmp_path, category="relationships", depth="bad", limit="bad")
+    assert aliased["category"] == "characters"
+    assert aliased["graph"] == default_lens["graph"]
     category = service.query_graph(tmp_path, category="setting", limit=2)
     assert category["mode"] == "category" and category["graph"]["nodes"][0]["id"] == "place-node"
     by_node = service.query_graph(tmp_path, node_id="hero-node", depth=9, limit=999)
@@ -393,11 +399,11 @@ def test_relationship_snapshot_and_category_edge_cases(service, tmp_path):
         {"source": "character:alice", "target": "place", "type": "appearance"},
     ]
     result = service._query_wiki_relationship_graph(
-        "relationships", root=tmp_path, normalized_q="", normalized_entry_id="", normalized_node_id="",
+        "characters", root=tmp_path, normalized_q="", normalized_entry_id="", normalized_node_id="",
         max_depth=1, max_items=2, entries=entries, entry_by_id={e["id"]: e for e in entries},
         nodes=query_nodes, valid_edges=query_edges, category_labels=CATEGORY_LABELS,
     )
-    assert result["category"] == "relationships" and len(result["graph"]["nodes"]) == 2
+    assert result["category"] == "characters" and len(result["graph"]["nodes"]) == 2
     assert any(edge["label"] == "朋友" for edge in result["graph"]["edges"])
     assert not any(edge.get("coOccurrence") and {edge["source"], edge["target"]} == {"character:alice", "character:bob"} for edge in result["graph"]["edges"])
 
@@ -408,9 +414,6 @@ def test_relationship_snapshot_and_category_edge_cases(service, tmp_path):
         category_labels=CATEGORY_LABELS,
     )
     assert category["mode"] == "category"
-    assert all(node["type"] == "character" for node in category["graph"]["nodes"] if not node.get("neighbor"))
-
-    hub = service._wiki_project_hub_node({"projectName": "", "summary": ""}, [{"needsReview": True}, {}])
-    assert hub["label"] and hub["count"] == 2 and hub["needsReviewCount"] == 1
-    category_hub = service._wiki_category_hub_node("custom", {}, [{"needsReview": True}, {}])
-    assert category_hub["count"] == 2 and category_hub["needsReviewCount"] == 1
+    # 角色图不带任何跨类邻居：章节/地点不该出现在这里。
+    assert all(node["type"] == "character" for node in category["graph"]["nodes"])
+    assert not any(node.get("neighbor") for node in category["graph"]["nodes"])

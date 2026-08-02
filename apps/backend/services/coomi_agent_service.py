@@ -189,7 +189,7 @@ def _validated_session_path(binding: Dict[str, Any]) -> Path | None:
     return path
 
 
-def _runtime_session_total_tokens(binding: Dict[str, Any]) -> int | None:
+def _runtime_session_usage(binding: Dict[str, Any]) -> Dict[str, Any] | None:
     """Read the runtime session's cumulative usage from its persisted JSON."""
     path = _validated_session_path(binding)
     if path is None or not path.is_file():
@@ -202,6 +202,14 @@ def _runtime_session_total_tokens(binding: Dict[str, Any]) -> int | None:
         return None
     usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else payload
     if not isinstance(usage, dict):
+        return None
+    return dict(usage)
+
+
+def _runtime_session_total_tokens(binding: Dict[str, Any]) -> int | None:
+    """Read the runtime session's cumulative token total."""
+    usage = _runtime_session_usage(binding)
+    if usage is None:
         return None
     total = usage.get("total_tokens")
     if total is None:
@@ -568,7 +576,13 @@ class StorydexCoomiAgentService:
         yield _agent_started(
             session_id=normalized_session, prompt=prompt, status=status, mode="coomi"
         )
-        translator = _CoomiEventTranslator(session_id=normalized_session)
+        bound_runtime_id = str(
+            binding.get("runtimeSessionId") or binding.get("coomiSessionId") or ""
+        )
+        translator = _CoomiEventTranslator(
+            session_id=normalized_session,
+            usage_baseline=_runtime_session_usage(binding),
+        )
         resolution_tasks: set[asyncio.Task[Any]] = set()
         terminal_seen = False
         try:
@@ -580,6 +594,8 @@ class StorydexCoomiAgentService:
                 if packet_type == "session_bound":
                     runtime_id = str(data.get("runtimeSessionId") or "")
                     if runtime_id:
+                        if runtime_id != bound_runtime_id:
+                            translator.reset_usage_baseline()
                         _write_coomi_session_binding(
                             workspace_root=workspace,
                             storydex_session_id=normalized_session,
@@ -732,13 +748,7 @@ class StorydexCoomiAgentService:
                     if packet_type == "approval_request":
                         approved = decision in {"allow", "approve", "approved", "yes"}
                     else:
-                        values[question_id] = str(
-                            response.get("answer")
-                            or response.get("value")
-                            or response.get("otherText")
-                            or response.get("other_text")
-                            or decision
-                        )
+                        values[question_id] = _user_input_answer(response, decision)
                 payload = {"approved": approved} if packet_type == "approval_request" else {"answers": values}
                 await bridge.resolve(bridge_request_id, payload)
             finally:
@@ -1269,9 +1279,45 @@ class CoomiStoryGenerationAdapter:
 
 
 class _CoomiEventTranslator:
-    def __init__(self, *, session_id: str) -> None:
+    def __init__(
+        self,
+        *,
+        session_id: str,
+        usage_baseline: Dict[str, Any] | None = None,
+    ) -> None:
         self.session_id = session_id
         self.started_tools: dict[str, float] = {}
+        self.usage_baseline = dict(usage_baseline or {})
+        self.turn_usage: Dict[str, Any] | None = None
+
+    def reset_usage_baseline(self) -> None:
+        self.usage_baseline = {}
+        self.turn_usage = None
+
+    def _usage_since_baseline(self, value: Dict[str, Any]) -> Dict[str, Any]:
+        current = _usage_aliases(value)
+        baseline = _usage_aliases(self.usage_baseline)
+        current_total = int(current.get("total_tokens") or 0)
+        baseline_total = int(baseline.get("total_tokens") or 0)
+        if current_total < baseline_total:
+            baseline = _usage_aliases({})
+        return _usage_aliases({
+            "input_tokens": max(
+                0,
+                int(current.get("prompt_tokens") or 0)
+                - int(baseline.get("prompt_tokens") or 0),
+            ),
+            "cached_input_tokens": max(
+                0,
+                int(current.get("cached_input_tokens") or 0)
+                - int(baseline.get("cached_input_tokens") or 0),
+            ),
+            "output_tokens": max(
+                0,
+                int(current.get("completion_tokens") or 0)
+                - int(baseline.get("completion_tokens") or 0),
+            ),
+        })
 
     def translate(self, event: Any) -> tuple[str, Dict[str, Any]] | None:
         if not isinstance(event, dict):
@@ -1337,12 +1383,21 @@ class _CoomiEventTranslator:
             if review:
                 payload["knowledge_review"] = review
             return "ToolDone", payload
-        if name in {"context_updated", "turn_completed"}:
+        if name == "context_updated":
             usage = data.get("usage") if isinstance(data.get("usage"), dict) else data
             return "UsageUpdate", {
                 "_type": "UsageUpdate",
                 "_version": 1,
                 "usage": _usage_aliases(usage),
+                **_context_snapshot_from_bridge(data),
+            }
+        if name == "turn_completed":
+            cumulative_usage = data.get("usage") if isinstance(data.get("usage"), dict) else data
+            self.turn_usage = self._usage_since_baseline(cumulative_usage)
+            return "UsageUpdate", {
+                "_type": "UsageUpdate",
+                "_version": 1,
+                "usage": self.turn_usage,
                 **_context_snapshot_from_bridge(data),
             }
         if name == "compaction_completed":
@@ -1395,13 +1450,16 @@ class _CoomiEventTranslator:
                 "reason": str(data.get("reason") or "cancelled"),
             }
         if name == "completed":
-            usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+            cumulative_usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+            usage = self.turn_usage or self._usage_since_baseline(cumulative_usage)
             return "AgentCompleted", {
                 "_type": "AgentCompleted",
                 "_version": 1,
                 "session_id": self.session_id,
                 "route": "coomi",
-                "total_tokens": int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0),
+                "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                "completion_tokens": int(usage.get("completion_tokens") or 0),
+                "total_tokens": int(usage.get("total_tokens") or 0),
             }
         if name == "error":
             return "AgentError", {
@@ -1749,8 +1807,9 @@ def _render_turn_contract(value: Dict[str, Any] | None) -> str:
             )
     elif operation_type in {"inquiry", "greeting", "other"}:
         lines.append(
-            "- operationDiscipline (read_only): answer or discuss the request without changing project state. "
-            "Do not create fragment targets, write/edit files, execute shell commands, sync WIKI, or apply story increments."
+            "- operationGuidance (respond_only): the intent classifier currently predicts an informational turn. "
+            "Treat this as routing guidance, not a permission boundary; follow the user's actual request. "
+            "If that request requires project changes, use the state-changing tools exposed for this turn."
         )
 
     lines.append(
@@ -2365,6 +2424,19 @@ def _approval_options(value: Any, *, is_permission: bool) -> list[Dict[str, Any]
         {"label": "Allow", "value": "allow", "description": "Run this tool call once.", "isRecommended": True},
         {"label": "Deny", "value": "deny", "description": "Return permission denied.", "isRecommended": False},
     ]
+
+
+def _user_input_answer(response: Dict[str, Any], decision: str) -> str:
+    """Normalize answer payloads emitted by current and older Storydex clients."""
+    for key in ("otherText", "other_text", "answer", "value", "option", "label"):
+        value = response.get(key)
+        if value is None:
+            continue
+        normalized = str(value).strip()
+        if normalized:
+            return normalized
+    fallback = str(decision or "").strip()
+    return "" if fallback == "answer" else fallback
 
 
 def _parse_slash_command(prompt: str) -> Dict[str, str]:
