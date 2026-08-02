@@ -58,6 +58,15 @@ class GitService:
     HISTORY_LIMIT = 24
     SAFE_GITIGNORE_LINES = [".storydex/.agent/", ".storydex/.cache/"]
     AGENT_RUNTIME_PREFIX = ".storydex/.agent/"
+    # All Storydex-managed .gitignore directory prefixes. Both the untracking
+    # step (_ensure_internal_paths_untracked) and the path filter
+    # (_is_internal_ignored_path) iterate over this tuple, so new entries in
+    # SAFE_GITIGNORE_LINES are enforced automatically without touching call
+    # sites. Without this, a tracked-then-ignored file (e.g. a cache DB
+    # committed before the ignore rule existed) still shows up in ``git
+    # status`` and, when passed as an explicit pathspec to ``git add -A --``,
+    # makes Git refuse with "The following paths are ignored" (exit code 1).
+    INTERNAL_IGNORE_PREFIXES = tuple(SAFE_GITIGNORE_LINES)
 
     @_serialized
     def restore_to_commit(
@@ -380,7 +389,7 @@ class GitService:
         self._assert_repository_root(root)
         self._ensure_local_identity(root)
         self._ensure_gitignore(root)
-        self._ensure_agent_runtime_untracked(root)
+        self._ensure_internal_paths_untracked(root)
         return self.read_summary(root)
 
     @_serialized
@@ -557,12 +566,25 @@ class GitService:
         next_lines.extend(additions)
         ignore_path.write_text("\n".join(next_lines).rstrip() + "\n", encoding="utf-8")
 
-    def _ensure_agent_runtime_untracked(self, workspace_root: Path) -> None:
-        self._run_git(
-            self._resolve_workspace_root(workspace_root),
-            ["rm", "-r", "--cached", "--ignore-unmatch", self.AGENT_RUNTIME_PREFIX.rstrip("/")],
-            check=False,
-        )
+    def _ensure_internal_paths_untracked(self, workspace_root: Path) -> None:
+        """Remove every Storydex-managed ignore directory from the Git index.
+
+        Files under ``.storydex/.agent/`` and ``.storydex/.cache/`` are meant
+        to stay untracked, but a repository initialised by an older Storydex
+        build (before the ignore rule existed) may still have them in the
+        index. ``git rm --cached`` detaches them from the index while keeping
+        the working-tree copy, so they stop appearing as "modified" in
+        ``git status`` and can no longer leak into Agent commit pathspecs.
+        ``--ignore-unmatch`` makes this idempotent: it is a no-op once the
+        paths are already untracked.
+        """
+        root = self._resolve_workspace_root(workspace_root)
+        for prefix in self.INTERNAL_IGNORE_PREFIXES:
+            self._run_git(
+                root,
+                ["rm", "-r", "--cached", "--ignore-unmatch", prefix.rstrip("/")],
+                check=False,
+            )
 
     def _read_current_branch(self, workspace_root: Path) -> str:
         return self._run_git(self._resolve_workspace_root(workspace_root), ["branch", "--show-current"], check=False).strip()
@@ -735,7 +757,7 @@ class GitService:
             value = posixpath.normpath(value).strip("/")
             if value == ".":
                 value = ""
-            if not value or value in seen or GitService._is_agent_runtime_path(value):
+            if not value or value in seen or GitService._is_internal_ignored_path(value):
                 continue
             seen.add(value)
             normalized.append(value)
@@ -781,7 +803,7 @@ class GitService:
         return branch, [
             item
             for item in changed_files
-            if not GitService._is_agent_runtime_path(str(item.get("relativePath") or ""))
+            if not GitService._is_internal_ignored_path(str(item.get("relativePath") or ""))
         ]
 
     @staticmethod
@@ -792,9 +814,22 @@ class GitService:
         return normalized.replace('\\"', '"')
 
     @classmethod
-    def _is_agent_runtime_path(cls, relative_path: str) -> bool:
+    def _is_internal_ignored_path(cls, relative_path: str) -> bool:
+        """Return True if ``relative_path`` lives under a Storydex-managed ignore directory.
+
+        Covers every prefix in :attr:`INTERNAL_IGNORE_PREFIXES` (currently
+        ``.storydex/.agent/`` and ``.storydex/.cache/``). Files under these
+        directories must never be staged by Agent auto-commits: they are either
+        runtime-private (``.agent/``) or regenerable caches (``.cache/``), and
+        passing them as explicit pathspecs to ``git add`` makes Git refuse
+        with "The following paths are ignored" when the file is not yet tracked.
+        """
         normalized = str(relative_path or "").replace("\\", "/").strip().lstrip("/")
-        return normalized == cls.AGENT_RUNTIME_PREFIX.rstrip("/") or normalized.startswith(cls.AGENT_RUNTIME_PREFIX)
+        for prefix in cls.INTERNAL_IGNORE_PREFIXES:
+            trimmed = prefix.rstrip("/")
+            if normalized == trimmed or normalized.startswith(prefix):
+                return True
+        return False
 
     def _build_untracked_diff(self, workspace_root: Path, relative_path: str, *, status: str) -> Dict[str, Any]:
         normalized_path = str(relative_path or "").replace("\\", "/").strip().strip("/")
