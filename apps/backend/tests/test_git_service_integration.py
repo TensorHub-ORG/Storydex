@@ -33,6 +33,9 @@ def test_full_local_git_lifecycle_and_restore(git_service: GitService, tmp_path:
     runtime = workspace / ".storydex" / ".agent"
     runtime.mkdir(parents=True)
     (runtime / "private.json").write_text("secret", encoding="utf-8")
+    cache = workspace / ".storydex" / ".cache"
+    cache.mkdir(parents=True)
+    (cache / "retrieval.db").write_bytes(b"cache-v1")
 
     initialized = git_service.initialize_repository(workspace)
     assert initialized["initialized"] is True
@@ -54,6 +57,7 @@ def test_full_local_git_lifecycle_and_restore(git_service: GitService, tmp_path:
     assert summary["clean"] is False
     assert {item["relativePath"] for item in summary["changedFiles"]} == {"chapters/001.md", "notes.md"}
     assert all(".storydex/.agent" not in item["relativePath"] for item in summary["changedFiles"])
+    assert all(".storydex/.cache" not in item["relativePath"] for item in summary["changedFiles"])
 
     working = git_service.read_diff(workspace)
     assert working["totals"]["files"] == 2
@@ -91,7 +95,11 @@ def test_first_commit_paths_empty_paths_and_validation(git_service: GitService, 
     assert git_service.read_commit_diff(workspace, commit_id="HEAD")["initialized"] is False
     assert git_service.commit_paths(workspace, paths=[], message="empty")["created"] is False
     (workspace / "a.md").write_text("a", encoding="utf-8")
-    result = git_service.commit_paths(workspace, paths=["a.md", "a.md", ".storydex/.agent/private"], message="")
+    result = git_service.commit_paths(
+        workspace,
+        paths=["a.md", "a.md", ".storydex/.agent/private", ".storydex/.cache/retrieval.db"],
+        message="",
+    )
     assert result["created"] is True
     assert result["commit"]["subject"].startswith("story: local snapshot")
     assert git_service.commit_paths(workspace, paths=["a.md"], message="unchanged")["created"] is False
@@ -101,6 +109,56 @@ def test_first_commit_paths_empty_paths_and_validation(git_service: GitService, 
         git_service.restore_to_commit(workspace, commit_id="does-not-exist")
     with pytest.raises(GitServiceError):
         git_service.read_commit_diff(workspace, commit_id="")
+
+
+def test_tracked_cache_file_does_not_break_commit_paths(git_service: GitService, tmp_path: Path):
+    """Regression: a .storydex/.cache/ file tracked by an older Storydex build
+    must not make commit_paths fail with "The following paths are ignored".
+
+    The cache file shows up in ``git status`` (tracked files bypass
+    .gitignore), so the Agent auto-commit service includes it in the pathspec
+    list. Without the internal-ignore filter, ``git add -A -- <path>`` rejects
+    the explicit ignored path with exit code 1.
+    """
+    workspace = tmp_path / "novel"
+    workspace.mkdir()
+    (workspace / "chapters").mkdir()
+    (workspace / "chapters" / "001.md").write_text("first\n", encoding="utf-8")
+
+    # Commit the baseline (chapter + .gitignore) so the worktree is clean.
+    git_service.initialize_repository(workspace)
+    git_service.commit_all(workspace, message="baseline")
+
+    # Simulate a legacy commit that tracked a .cache/ file before the ignore
+    # rule existed.
+    cache_dir = workspace / ".storydex" / ".cache"
+    cache_dir.mkdir(parents=True)
+    cache_file = cache_dir / "retrieval.fts5.v2.db"
+    cache_file.write_bytes(b"cache-v1")
+    git_service._run_git(workspace, ["add", "-f", "--", ".storydex/.cache/retrieval.fts5.v2.db"])
+    git_service._run_git(workspace, ["commit", "--no-gpg-sign", "-m", "legacy: track cache"])
+    assert git_service.read_summary(workspace)["clean"] is True
+
+    # Modify both the chapter and the tracked cache file.
+    (workspace / "chapters" / "001.md").write_text("first\nsecond\n", encoding="utf-8")
+    cache_file.write_bytes(b"cache-v2-regenerated")
+
+    # commit_paths must succeed even when the cache file is in the pathspec
+    # list (the auto-commit service passes every path from git status).
+    result = git_service.commit_paths(
+        workspace,
+        paths=["chapters/001.md", ".storydex/.cache/retrieval.fts5.v2.db"],
+        message="agent: update chapter",
+    )
+    assert result["created"] is True
+
+    commit_diff = git_service.read_commit_diff(
+        workspace,
+        commit_id=result["commit"]["id"],
+    )
+    committed_paths = {item["relativePath"] for item in commit_diff["files"]}
+    assert "chapters/001.md" in committed_paths
+    assert all(".storydex/.cache/" not in path for path in committed_paths)
 
 
 def test_create_branch_before_first_commit(git_service: GitService, tmp_path: Path):
