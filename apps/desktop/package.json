@@ -30,8 +30,11 @@
   "devDependencies": {
     "@playwright/test": "^1.53.1",
     "concurrently": "^9.2.4",
+    "core-util-is": "1.0.3",
     "electron": "^40.10.6",
     "electron-builder": "^26.15.3",
+    "isarray": "1.0.0",
+    "process-nextick-args": "2.0.1",
     "resedit": "^1.7.2",
     "wait-on": "^8.0.1"
   },

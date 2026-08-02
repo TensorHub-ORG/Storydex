@@ -110,6 +110,49 @@ beforeEach(() => {
 });
 
 describe("AgentPanel", () => {
+  it("switches between settings and history and handles session actions through the UI", async () => {
+    const store = useAgentStore();
+    api.fetchAgentSessions.mockResolvedValue({ data: { items: [
+      {
+        sessionId: "session-history",
+        firstPrompt: "历史会话",
+        updatedAt: "2026-08-02T12:00:00Z",
+        traceCount: 2
+      },
+      {
+        sessionId: "session-delete",
+        firstPrompt: "待删除会话",
+        updatedAt: "2026-08-02T13:00:00Z",
+        traceCount: 1
+      }
+    ] } });
+    store.currentSessionId = "session-current";
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    const wrapper = shallowMount(AgentPanel);
+    await wrapper.find('button[title="Settings"]').trigger("click");
+    await nextTick();
+    const configPanel = wrapper.findComponent({ name: "CoomiConfigPanel" });
+    expect(configPanel.exists()).toBe(true);
+    configPanel.vm.$emit("close");
+    await nextTick();
+    expect(wrapper.findComponent({ name: "CoomiConfigPanel" }).exists()).toBe(false);
+
+    await wrapper.find('button[title="History"]').trigger("click");
+    await vi.waitFor(() => expect(wrapper.findAll(".coomi-session-select")).toHaveLength(2));
+    expect(wrapper.text()).toContain("历史会话");
+    const deleteIndex = wrapper.findAll(".coomi-session-select").findIndex((button) => button.text().includes("待删除会话"));
+    expect(deleteIndex).toBeGreaterThanOrEqual(0);
+    await wrapper.findAll(".coomi-session-delete")[deleteIndex].trigger("click");
+    await vi.waitFor(() => expect(api.deleteAgentSession).toHaveBeenCalledWith("session-delete"));
+
+    const historyIndex = wrapper.findAll(".coomi-session-select").findIndex((button) => button.text().includes("历史会话"));
+    expect(historyIndex).toBeGreaterThanOrEqual(0);
+    await wrapper.findAll(".coomi-session-select")[historyIndex].trigger("click");
+    await vi.waitFor(() => expect(store.currentSessionId).toBe("session-history"));
+    wrapper.unmount();
+  });
+
   it("enters cancellable edit mode without rolling back and keeps delete semantics separate", async () => {
     const store = useAgentStore();
     const previous = {

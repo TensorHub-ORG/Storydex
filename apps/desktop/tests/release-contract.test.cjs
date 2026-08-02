@@ -16,6 +16,18 @@ test("package, lockfile, extra metadata, and artifact naming agree", () => {
   assert.equal(pkg.build.win.artifactName, "StorydexSetup-x64-${version}.${ext}");
 });
 
+test("desktop builder pins the legacy stream modules required by electron-builder", () => {
+  const requiredBuilderModules = {
+    "core-util-is": "1.0.3",
+    isarray: "1.0.0",
+    "process-nextick-args": "2.0.1"
+  };
+  for (const [name, version] of Object.entries(requiredBuilderModules)) {
+    assert.equal(pkg.devDependencies[name], version);
+    assert.equal(lock.packages[`node_modules/${name}`]?.version, version);
+  }
+});
+
 test("release configuration is offline-capable and updater-aware", () => {
   assert.equal(pkg.build.asar, true);
   assert.ok(pkg.build.files.includes("app/**/*"));

@@ -243,6 +243,22 @@ describe("AgentPanel computed branch coverage", () => {
     wrapper.unmount();
   });
 
+  it("builds the execution float signature when ledger counters are omitted", async () => {
+    const store = useAgentStore();
+    store.executionHistory = [{
+      traceId: "trace-ledger-defaults", sessionId: "session-a", prompt: "continue", route: "coomi", agentMode: "coomi", llmModel: "", llmProvider: "",
+      status: "running", noRestorePoint: false, createdAt: "2026-08-02T12:00:00Z", updatedAt: "2026-08-02T12:00:01Z", lastAction: "chat", reply: "", trace: null,
+      audit: [], events: [], tasks: [], changeLedger: null, items: [], errorMessage: "", errorCode: null
+    }] as any;
+    store.currentTraceId = "trace-ledger-defaults";
+    store.liveChangeLedger = { changedFiles: ["chapters/002.md"] } as any;
+
+    const wrapper = shallowMount(AgentPanel);
+    await nextTick();
+    expect(wrapper.find(".coomi-execution-float-slot").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
   it("labels every follow-up pause reason including the fallback branch", async () => {
     const wrapper = shallowMount(AgentPanel);
     await nextTick();
