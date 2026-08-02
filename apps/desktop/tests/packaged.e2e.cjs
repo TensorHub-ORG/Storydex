@@ -447,7 +447,12 @@ test("packaged Electron validates icons, streaming responsiveness, session recov
     const baselinePayload = await baseline.json();
     assert.equal(baselinePayload.data?.created, true, `baseline commit failed: ${JSON.stringify(baselinePayload)}`);
     await app.page.reload({ waitUntil: "domcontentloaded" });
-    await app.page.getByTitle("新建会话").click();
+    const recentProject = app.page.locator(".welcome-recent-row").first();
+    await recentProject.waitFor({ state: "visible", timeout: 30_000 });
+    await recentProject.click();
+    const newSessionButton = app.page.getByTitle("新建会话");
+    await newSessionButton.waitFor({ state: "visible", timeout: 30_000 });
+    await newSessionButton.click();
     const input = app.page.locator(".coomi-input");
     await input.waitFor({ state: "visible", timeout: 30_000 });
     await input.fill("请检查版本状态");
