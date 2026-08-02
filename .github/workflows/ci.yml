@@ -5,6 +5,12 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      full:
+        description: Run packaging and packaged Electron E2E in addition to the standard gate
+        required: true
+        default: false
+        type: boolean
 
 concurrency:
   group: storydex-ci-${{ github.workflow }}-${{ github.ref }}
@@ -16,4 +22,6 @@ permissions:
 jobs:
   quality-gate:
     uses: ./.github/workflows/quality-gate.yml
+    with:
+      full: ${{ inputs.full || false }}
 

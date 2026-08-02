@@ -102,11 +102,19 @@ test("GitHub Actions failures expose the complete ratchet result as an annotatio
   assert.match(result.stderr, /%0ATo adjust an intentional baseline increase/);
 });
 
-test("backend coverage ratchet has exactly one canonical CI matrix job", () => {
+test("standard CI has one canonical coverage job while full CI retains its compatibility matrix", () => {
   const workflow = fs.readFileSync(path.resolve(__dirname, "..", "..", ".github", "workflows", "quality-gate.yml"), "utf8");
-  assert.equal((workflow.match(/coverage_ratchet:\s*true/g) || []).length, 1);
-  assert.equal((workflow.match(/coverage_ratchet:\s*false/g) || []).length, 2);
+  assert.match(workflow, /inputs\.full\s*&&/);
+  assert.equal((workflow.match(/"coverage_ratchet":true/g) || []).length, 2);
+  assert.equal((workflow.match(/"coverage_ratchet":false/g) || []).length, 2);
   assert.match(workflow, /if:\s*matrix\.coverage_ratchet/);
+  assert.match(workflow, /desktop-package-smoke:\s*[\s\S]*?if:\s*inputs\.full/);
+  assert.match(workflow, /electron-e2e:\s*[\s\S]*?if:\s*inputs\.full/);
+
+  const ci = fs.readFileSync(path.resolve(__dirname, "..", "..", ".github", "workflows", "ci.yml"), "utf8");
+  const release = fs.readFileSync(path.resolve(__dirname, "..", "..", ".github", "workflows", "release-windows.yml"), "utf8");
+  assert.match(ci, /full:\s*\$\{\{ inputs\.full \|\| false \}\}/);
+  assert.match(release, /enforce_coverage:\s*true\s+full:\s*true/);
 });
 
 test("missing, malformed, and incomplete reports fail closed", (t) => {
