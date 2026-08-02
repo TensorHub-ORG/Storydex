@@ -62,9 +62,11 @@ assert(!workflow.includes(`release-notes-v${packageVersion}.md`), "release workf
 assert(workflow.includes("package.json") && workflow.includes("GITHUB_OUTPUT"), "release workflow must derive release metadata from package.json/tag outputs.");
 assert(workflow.includes("steps.release.outputs"), "release workflow must publish files selected by the release preparation step.");
 assert(workflow.includes("test:update-feed"), "release workflow must run the desktop update feed regression test.");
-assert(workflow.includes("WINDOWS_CSC_LINK") && workflow.includes("WINDOWS_CSC_KEY_PASSWORD"), "production release must require Windows signing secrets.");
-assert(workflow.includes("Get-AuthenticodeSignature") && workflow.includes('Status -ne "Valid"'), "production release must verify app and installer signatures.");
-assert(workflow.includes("publisherName"), "production release must require publisherName in app-update.yml for update signature verification.");
+assert(workflow.includes("WINDOWS_CSC_LINK") && workflow.includes("WINDOWS_CSC_KEY_PASSWORD"), "release workflow must support Windows signing secrets.");
+assert(workflow.includes("steps.signing.outputs.enabled") && workflow.includes("STORYDEX_REQUIRE_SIGNING"), "release workflow must enable signing only when both secrets are configured.");
+assert(workflow.includes("Unsigned Windows release"), "release workflow must explicitly report unsigned production artifacts.");
+assert(workflow.includes("Get-AuthenticodeSignature") && workflow.includes('Status -ne "Valid"'), "signed releases must verify app and installer signatures.");
+assert(workflow.includes("publisherName"), "signed releases must require publisherName in app-update.yml for update signature verification.");
 assert(!mainSource.includes('setAppUserModelId("'), "Electron AppUserModelId must be derived from package build.appId.");
 assert(appId && mainSource.includes("DESKTOP_APP_ID"), "Electron main process must expose a DESKTOP_APP_ID derived from package metadata.");
 assert(mainSource.includes("resolveUpdateFeedUrl") && mainSource.includes("autoUpdater.setFeedURL"), "Electron updater must set a default generic feed URL at runtime.");
