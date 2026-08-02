@@ -1158,7 +1158,7 @@ impl ToolRuntime for CoreTools {
             },
             ToolSpec {
                 name: "request_user_input".into(),
-                description: "Ask the user one to three short questions and wait for answers.".into(),
+                description: "Ask the user one to three short questions with two to four options each and wait for answers.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -1171,7 +1171,7 @@ impl ToolRuntime for CoreTools {
                                     "header": {"type": "string"},
                                     "question": {"type": "string"},
                                     "options": {
-                                        "type": "array", "minItems": 2, "maxItems": 3,
+                                        "type": "array", "minItems": 2, "maxItems": 4,
                                         "items": {
                                             "type": "object",
                                             "properties": {
@@ -1528,9 +1528,9 @@ fn validate_user_input_request(request: &coomi_engine::UserInputRequest) -> Resu
         if !ids.insert(question.id.as_str()) {
             return Err(format!("duplicate question id: {}", question.id));
         }
-        if !(2..=3).contains(&question.options.len()) {
+        if !(2..=4).contains(&question.options.len()) {
             return Err(format!(
-                "question `{}` requires two or three options",
+                "question `{}` requires two to four options",
                 question.id
             ));
         }
@@ -1592,6 +1592,27 @@ mod tests {
         async fn approve(&self, _call: &ToolCall, _reason: &str) -> bool {
             true
         }
+    }
+
+    #[test]
+    fn accepts_four_user_input_options() {
+        let request = coomi_engine::UserInputRequest {
+            questions: vec![coomi_engine::UserInputQuestion {
+                id: "protagonist".into(),
+                header: "Protagonist".into(),
+                question: "Choose a route".into(),
+                options: ["Underdog", "Rebirth", "Mortal", "Transmigrator"]
+                    .into_iter()
+                    .map(|label| coomi_engine::UserInputOption {
+                        label: label.into(),
+                        description: String::new(),
+                    })
+                    .collect(),
+            }],
+            auto_resolution_ms: None,
+        };
+
+        assert_eq!(validate_user_input_request(&request), Ok(()));
     }
 
     #[tokio::test]

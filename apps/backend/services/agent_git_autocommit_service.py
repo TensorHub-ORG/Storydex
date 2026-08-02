@@ -142,6 +142,32 @@ class AgentGitAutoCommitService:
                 initial_commit=snapshot.initial_commit,
             )
 
+    def changed_paths_since_turn(self, snapshot: AgentGitSnapshot) -> List[str] | None:
+        """Return real working-tree changes introduced after ``begin_turn``.
+
+        ``None`` means Git could not provide a reliable comparison. Callers can
+        then fall back to runtime write events instead of treating uncertainty as
+        a clean turn.
+        """
+        if not snapshot.available:
+            return None
+        try:
+            summary = self.git_service.read_summary(snapshot.workspace_root)
+            current_status = self._status_map(summary.get("changedFiles"))
+            candidate_paths = set(snapshot.baseline_status) | set(current_status)
+            current_fingerprints = self._fingerprints_for_paths(
+                snapshot.workspace_root,
+                candidate_paths,
+            )
+            return self._changed_paths_since(
+                snapshot.baseline_status,
+                current_status,
+                snapshot.baseline_fingerprints,
+                current_fingerprints,
+            )
+        except GitServiceError:
+            return None
+
     def current_changes_payload(
         self,
         workspace_root: Path,
@@ -347,13 +373,13 @@ class AgentGitAutoCommitService:
         paths: List[str] = []
         baseline_fingerprints = baseline_fingerprints or {}
         current_fingerprints = current_fingerprints or {}
-        for path, status in current.items():
-            if baseline.get(path) != status:
+        for path in sorted(set(baseline) | set(current)):
+            if baseline.get(path) != current.get(path):
                 paths.append(path)
                 continue
             if baseline_fingerprints.get(path) != current_fingerprints.get(path):
                 paths.append(path)
-        return sorted(paths)
+        return paths
 
     @staticmethod
     def _fingerprints_for_paths(workspace_root: Path, paths: Iterable[str] | Dict[str, Any]) -> Dict[str, str]:

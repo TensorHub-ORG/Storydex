@@ -50,6 +50,33 @@ def test_increment_normalizers_relationships_and_nested_operations():
     assert service._normalize_story_increment_fragments({"fragments": [None, {"text": "a"}]}) == [{"text": "a"}]
     assert service._normalize_story_increment_fragments({"segment_path": "chapters/a.md", "content": "body"}) == [{"path": "chapters/a.md", "text": "body"}]
     assert service._normalize_story_increment_fragments({}) == []
+
+    memory_update = {
+        "op": "set",
+        "path": "plot.location",
+        "value": "old waterworks",
+        "evidence": "The generated fragment establishes the location.",
+    }
+    assert service._normalize_story_increment_fragments(
+        {
+            "segmentPath": "chapters/Chapter2/001.md",
+            "segmentText": "generated chapter opening",
+            "fragments": [
+                {
+                    "path": "chapters/Chapter2/001.md",
+                    "variableUpdates": [memory_update],
+                },
+                {"path": "chapters/Chapter2/002.md", "text": ""},
+            ],
+        }
+    ) == [
+        {
+            "path": "chapters/Chapter2/001.md",
+            "text": "generated chapter opening",
+            "variableUpdates": [memory_update],
+        }
+    ]
+
     assert service._story_increment_fragment_text({"segment_text": " a\r\nb "}) == "a\nb"
     assert service._story_increment_fragment_text({}) == ""
     assert service._segment_metadata_from_relative_path("chapters/a.md")["chapter_id"] == "a"

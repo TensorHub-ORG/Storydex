@@ -80,9 +80,11 @@
             :run="run"
             :elapsed-ms="runElapsedMs(run)"
             :can-rollback="canRollbackRun(run)"
-            :actions-busy="agentStore.isRollingBack || agentStore.isReexecuting"
+            :can-retry="canRetryRun(run)"
+            :actions-busy="agentStore.isRunning || agentStore.isRollingBack || agentStore.isReexecuting"
             @rollback-edit="handleRollbackEdit"
             @rollback-delete="handleRollbackDelete"
+            @retry="handleRetryRun"
             @markdown-click="handleMarkdownLinkClick"
           />
         </article>
@@ -1419,6 +1421,23 @@ function canRollbackRun(run: AgentExecutionRun): boolean {
   );
 }
 
+function canRetryRun(run: AgentExecutionRun): boolean {
+  return Boolean(
+    run.traceId
+    && run.traceId === latestConversationTraceId.value
+    && run.status === "failed"
+    && run.prompt.trim()
+    && !agentStore.editingTraceId
+  );
+}
+
+async function handleRetryRun(run: AgentExecutionRun): Promise<void> {
+  if (!canRetryRun(run) || agentStore.isRunning || agentStore.isReexecuting) {
+    return;
+  }
+  await agentStore.retryFailedRun(run);
+}
+
 async function handleRollbackEdit(run: AgentExecutionRun): Promise<void> {
   if (!canRollbackRun(run)) {
     return;
@@ -1643,10 +1662,14 @@ async function handleApprovalConfirm(): Promise<void> {
     const draft = approvalDrafts.value[approval.approvalId] || { value: "", text: "" };
     const selectedOption = approval.options.find((option) => option.value === draft.value);
     const selectedValue = draft.value || selectedOption?.value || "answer";
+    const otherText = draft.text.trim();
+    const selectedLabel = selectedOption?.label || selectedValue;
     const response = {
+      answer: otherText || selectedLabel,
+      value: selectedValue,
       option: selectedValue,
-      label: selectedOption?.label || selectedValue,
-      other_text: draft.text.trim() || null
+      label: selectedLabel,
+      other_text: otherText || null
     };
     const decision: "allow" | "deny" | "answer" =
       selectedValue === "allow" ? "allow" : selectedValue === "deny" ? "deny" : "answer";
@@ -2157,6 +2180,8 @@ defineExpose({
     toggleSessionMenu,
     openConfigPanel,
     canRollbackRun,
+    canRetryRun,
+    handleRetryRun,
     handleRollbackEdit,
     handleRollbackDelete,
     handleCancelEdit,

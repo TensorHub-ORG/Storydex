@@ -101,7 +101,7 @@ describe("StoryStatePanel deterministic graph and inspector behavior", () => {
       strength: 0.65,
     })).toBe("专业合作 · 中立 · 中等强度");
 
-    u.selectedWikiCategory.value = "relationships";
+    u.selectedWikiCategory.value = "characters";
     u.wikiGraphQueryData.value = {
       graph: {
         nodes: [
@@ -228,7 +228,9 @@ describe("StoryStatePanel deterministic graph and inspector behavior", () => {
 
   it("covers category/search/zoom/reset/selection workflows", async () => {
     const wrapper = mountPanel(); const u = (wrapper.vm as any).__testUtils;
-    expect(u.normalizeWikiCategory(undefined)).toBe("overview"); expect(u.normalizeWikiCategory("unknown")).toBe("overview"); expect(u.normalizeWikiCategory("plot")).toBe("plot");
+    expect(u.normalizeWikiCategory(undefined)).toBe("characters"); expect(u.normalizeWikiCategory("unknown")).toBe("characters"); expect(u.normalizeWikiCategory("plot")).toBe("plot");
+    expect(u.normalizeWikiCategory("relationships")).toBe("characters");
+    expect(u.wikiCategoryTabs.value.map((tab: { id: string }) => tab.id)).toEqual(["characters", "plot", "setting"]);
     expect(u.preferredWikiCategory()).toBeTruthy(); expect(typeof u.hasWikiRelationshipNetwork()).toBe("boolean");
     u.selectWikiCategory("plot"); expect(u.selectedWikiCategory.value).toBe("plot"); u.selectWikiEntry(""); u.selectWikiEntry("entry");
     u.wikiGraphSearchInput.value = " query "; u.submitWikiGraphSearch(); expect(u.wikiGraphSearchQuery.value).toBe("query");

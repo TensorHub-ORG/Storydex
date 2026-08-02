@@ -228,6 +228,7 @@
                 <span>{{ wikiGenerationModeLabel }}</span>
                 <span>{{ wikiUpdatedAtLabel }}</span>
               </div>
+              <p v-if="wikiProjectSummary" class="ssp-wiki-project-summary">{{ wikiProjectSummary }}</p>
             </header>
 
             <div class="ssp-wiki-inspector-body">
@@ -697,7 +698,8 @@ interface EvolutionSnapshot {
 interface StoryWikiEntry {
   id: string;
   title: string;
-  category: StoryWikiCategory;
+  // 后端仍会下发 overview（项目总览）等不可见分类，这里按原样收下再归一。
+  category: string;
   categoryLabel: string;
   summary: string;
   details?: string[];
@@ -709,7 +711,7 @@ interface StoryWikiEntry {
 }
 
 type StoryWikiSyntheticRole = "categoryHub" | "projectHub";
-type StoryWikiCategory = "overview" | "characters" | "setting" | "plot" | "relationships";
+type StoryWikiCategory = "characters" | "plot" | "setting";
 
 interface StoryWikiNodePayload {
   id: string;
@@ -889,7 +891,7 @@ const wikiGraphSearchInput = ref("");
 const wikiGraphSearchQuery = ref("");
 const wikiKnowledgeStatusFilter = ref("all");
 const wikiSyncErrorMessage = ref("");
-const selectedWikiCategory = ref<StoryWikiCategory>("relationships");
+const selectedWikiCategory = ref<StoryWikiCategory>("characters");
 const selectedWikiEntryId = ref("");
 const selectedWikiNodeId = ref("");
 const selectedWikiEdgeId = ref("");
@@ -941,11 +943,9 @@ const RELATION_GRAPH_HEIGHT = 520;
 const RELATION_GRAPH_CENTER_X = RELATION_GRAPH_WIDTH / 2;
 const RELATION_GRAPH_CENTER_Y = RELATION_GRAPH_HEIGHT / 2;
 const WIKI_CATEGORY_TABS: Array<{ id: StoryWikiCategory; label: string; icon: string }> = [
-  { id: "relationships", label: "关系", icon: "hub" },
   { id: "characters", label: "角色", icon: "groups" },
   { id: "plot", label: "剧情", icon: "timeline" },
   { id: "setting", label: "设定", icon: "auto_stories" },
-  { id: "overview", label: "总览", icon: "dashboard" },
 ];
 // 节点色组：type -> 图例色调。granular type 折叠成四个视觉组，避免五颜六色。
 const WIKI_NODE_TONES: Record<string, string> = {
@@ -1123,9 +1123,10 @@ const visibleTabs = computed(() => (
 const wikiEntries = computed<StoryWikiEntry[]>(() => wikiData.value?.entries ?? []);
 
 const wikiCategoryTabs = computed(() => {
-  const counts = new Map<StoryWikiCategory, number>();
+  // 计数按条目自身分类，overview 这类不可见分类不该被兜底算进角色 tab。
+  const counts = new Map<string, number>();
   wikiEntries.value.forEach((entry) => {
-    const category = normalizeWikiCategory(entry.category);
+    const category = String(entry.category ?? "").trim();
     counts.set(category, (counts.get(category) ?? 0) + 1);
   });
   const labels = wikiData.value?.categoryLabels ?? {};
@@ -1177,7 +1178,7 @@ const selectedWikiEntry = computed<StoryWikiEntry | null>(() => {
 });
 
 const selectedWikiCategoryLabel = computed(() => (
-  wikiCategoryTabs.value.find((category) => category.id === selectedWikiCategory.value)?.label || "关系"
+  wikiCategoryTabs.value.find((category) => category.id === selectedWikiCategory.value)?.label || "角色"
 ));
 
 const selectedWikiNode = computed<WikiGraphNode | null>(() => {
@@ -1497,7 +1498,8 @@ const visibleWikiGraphLabelEdges = computed(() => (
 
 const wikiGraphLegend = computed(() => {
   const present = new Set(wikiGraphNodes.value.map((node) => node.tone));
-  return ["character", "plot", "setting", "hub", "misc"]
+  // 三视图对应三色，misc 兜底未归类节点；hub 节点已经不再产出。
+  return ["character", "plot", "setting", "misc"]
     .filter((key) => present.has(key))
     .map((key) => ({ key, label: WIKI_TONE_LABELS[key] ?? key }));
 });
@@ -1522,18 +1524,19 @@ const selectedWikiDetailKicker = computed(() => {
   return selectedWikiEntry.value?.categoryLabel || "条目";
 });
 
-const wikiInspectorEmptyTitle = computed(() => (
-  selectedWikiCategory.value === "relationships" ? "角色关系网络" : `${selectedWikiCategoryLabel.value}图谱`
-));
+const wikiInspectorEmptyTitle = computed(() => `${selectedWikiCategoryLabel.value}图谱`);
 
 const wikiInspectorEmptyHint = computed(() => {
   if (wikiGraphSearchQuery.value) {
     return `正在展示“${wikiGraphSearchQuery.value}”的搜索结果，点击节点或连线查看详情。`;
   }
-  if (selectedWikiCategory.value === "relationships") {
-    return "仅展示有项目证据的角色关系。点击节点聚焦它的邻居，点击连线查看关系详情。";
+  if (selectedWikiCategory.value === "characters") {
+    return "只展示角色与有项目证据的角色关系。点击节点聚焦它的邻居，点击连线查看关系详情。";
   }
-  return "点击节点或连线查看详情；半透明小节点是跨分类的关联上下文。";
+  if (selectedWikiCategory.value === "plot") {
+    return "章节按叙事顺序串联，虚线小节点是该章出场的角色。点击节点查看章节详情。";
+  }
+  return "展示世界观、地点、物品、势力与伏笔。点击节点查看它的证据来源与关联章节。";
 });
 
 const wikiGenerationModeLabel = computed(() => {
@@ -1547,6 +1550,12 @@ const wikiUpdatedAtLabel = computed(() => {
 });
 
 const wikiNeedsReviewCount = computed(() => wikiEntries.value.filter((entry) => entry.needsReview).length);
+
+// 项目总览摘要：overview 分类不再是可见 tab，它的内容改在检查器头部常驻一行。
+const wikiProjectSummary = computed(() => {
+  const overviewEntry = wikiEntries.value.find((entry) => entry.category === "overview");
+  return String(overviewEntry?.summary || wikiData.value?.summary || "").trim();
+});
 
 const selectedWikiSourceLabel = computed(() => {
   const generator = wikiData.value?.generator || "";
@@ -2095,8 +2104,7 @@ function scheduleWikiSync(): void {
 }
 
 function ensureWikiSelection(): void {
-  // 默认坚持关系视图：真实关系边由查询端注入（写作演进快照），
-  // 是否回退在拿到查询结果后由 ensureWikiGraphSelection 决定。
+  // 默认角色视图：角色是读者与作者最常回看的一层，其余两类通过 tab 切换。
   selectedWikiCategory.value = normalizeWikiCategory(selectedWikiCategory.value || preferredWikiCategory());
   if (!wikiEntries.value.some((entry) => entry.id === selectedWikiEntryId.value)) {
     selectedWikiEntryId.value = selectedWikiCategoryEntries.value[0]?.id || wikiEntries.value[0]?.id || "";
@@ -2104,21 +2112,6 @@ function ensureWikiSelection(): void {
 }
 
 function ensureWikiGraphSelection(): void {
-  const data = wikiGraphQueryData.value;
-  if (
-    data &&
-    data.mode === "category" &&
-    data.category === "relationships" &&
-    selectedWikiCategory.value === "relationships" &&
-    !(data.graph?.nodes?.length)
-  ) {
-    const fallback = preferredWikiCategory();
-    if (fallback !== "relationships") {
-      selectedWikiCategory.value = fallback;
-      void loadWikiGraph({ category: fallback });
-      return;
-    }
-  }
   const visibleEntries = visibleWikiEntries.value;
   if (visibleEntries.length && !visibleEntries.some((entry) => entry.id === selectedWikiEntryId.value)) {
     selectedWikiEntryId.value = visibleEntries[0].id;
@@ -2132,22 +2125,28 @@ function ensureWikiGraphSelection(): void {
 }
 
 function normalizeWikiCategory(value: string | undefined): StoryWikiCategory {
-  return WIKI_CATEGORY_TABS.some((category) => category.id === value) ? value as StoryWikiCategory : "overview";
+  // 旧数据与旧 URL 里的 relationships 视图已并入角色视图。
+  const normalized = value === "relationships" ? "characters" : value;
+  return WIKI_CATEGORY_TABS.some((category) => category.id === normalized)
+    ? normalized as StoryWikiCategory
+    : "characters";
 }
 
 function preferredWikiCategory(): StoryWikiCategory {
-  const counts = new Map<StoryWikiCategory, number>();
+  // 按条目自身的分类计数，不能走 normalizeWikiCategory——它把未知分类兜底成
+  // characters，会让「有没有角色」这个判断永远为真。
+  const counts = new Map<string, number>();
   wikiEntries.value.forEach((entry) => {
-    const category = normalizeWikiCategory(entry.category);
+    const category = String(entry.category ?? "").trim();
     counts.set(category, (counts.get(category) ?? 0) + 1);
   });
-  if (hasWikiRelationshipNetwork()) {
-    return "relationships";
-  }
   if ((counts.get("characters") ?? 0) > 0) {
     return "characters";
   }
-  return "overview";
+  if ((counts.get("plot") ?? 0) > 0) {
+    return "plot";
+  }
+  return "setting";
 }
 
 function hasWikiRelationshipNetwork(): boolean {
@@ -2641,6 +2640,7 @@ defineExpose({
     wikiGenerationModeLabel,
     wikiUpdatedAtLabel,
     wikiNeedsReviewCount,
+    wikiProjectSummary,
     selectedWikiSourceLabel,
     wikiWorkflowLabel,
     snapshot,
@@ -3345,6 +3345,16 @@ defineExpose({
   color: var(--text-faint);
   font-size: 10px;
   line-height: 1.4;
+}
+.ssp-wiki-project-summary {
+  margin: 8px 0 0;
+  color: var(--text-soft);
+  font-size: 11px;
+  line-height: 1.55;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 .ssp-wiki-inspector-body {
   flex: 1 1 auto;

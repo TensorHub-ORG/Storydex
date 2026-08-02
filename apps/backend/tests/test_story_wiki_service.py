@@ -2,6 +2,7 @@ import asyncio
 import copy
 import json
 
+from services.story_project_service import StoryProjectService
 from services.story_wiki_service import WIKI_CATEGORY_SCHEMA_VERSION, StoryWikiService
 
 
@@ -184,6 +185,159 @@ def test_relationship_projection_requires_known_endpoint_and_asserted_semantics(
     assert not any(edge.get("relationType") == "unknown" for edge in payload["graph"]["edges"])
 
 
+def test_relationship_query_accepts_agent_domain_edge_types_without_structural_edges(tmp_path, monkeypatch):
+    """Regression for the agent-evidence-grounded/agent_reviewed 13/21 projection."""
+    chapter_path = "chapters/第1章 雨夜旧水厂/001.md"
+    chapter = tmp_path / chapter_path
+    chapter.parent.mkdir(parents=True)
+    chapter.write_text(
+        "沈砚把陆遥往自己身边拉近，压低声音说：\"从现在开始，你跟着我\"。陆遥点头跟随。\n",
+        encoding="utf-8",
+    )
+
+    entries = [
+        {"id": "overview:project", "title": "项目总览", "category": "overview", "sourcePaths": []},
+        {"id": "plot:mainline", "title": "主线", "category": "plot", "sourcePaths": [chapter_path]},
+        {"id": "chapter:001", "title": "雨夜旧水厂", "category": "plot", "sourcePaths": [chapter_path]},
+        {"id": "entity-001", "title": "沈砚", "category": "characters", "sourcePaths": [chapter_path]},
+        {"id": "entity-002", "title": "陆遥", "category": "characters", "sourcePaths": [chapter_path]},
+        {"id": "entity-003", "title": "灰塔", "category": "setting", "sourcePaths": [chapter_path]},
+        {"id": "entity-004", "title": "匿名报信者", "category": "characters", "sourcePaths": [chapter_path]},
+        {"id": "item-001", "title": "北门铜钥匙", "category": "setting", "sourcePaths": [chapter_path]},
+        {"id": "location-001", "title": "三河镇旧水厂", "category": "setting", "sourcePaths": [chapter_path]},
+        {"id": "location-002", "title": "三河镇", "category": "setting", "sourcePaths": [chapter_path]},
+        {"id": "foreshadow-001", "title": "三角形符号", "category": "plot", "sourcePaths": [chapter_path]},
+        {"id": "foreshadow-002", "title": "沈砚亦是目标", "category": "plot", "sourcePaths": [chapter_path]},
+        {"id": "foreshadow-003", "title": "报信者身份", "category": "plot", "sourcePaths": [chapter_path]},
+    ]
+    node_specs = [
+        ("project:root", "test0802", "project", "overview:project"),
+        ("plot:mainline", "主线", "event", "plot:mainline"),
+        ("chapter:001", "雨夜旧水厂", "chapter", "chapter:001"),
+        ("entity-001", "沈砚", "character", "entity-001"),
+        ("entity-002", "陆遥", "character", "entity-002"),
+        ("entity-003", "灰塔", "faction", "entity-003"),
+        ("entity-004", "匿名报信者", "character", "entity-004"),
+        ("item-001", "北门铜钥匙", "item", "item-001"),
+        ("location-001", "三河镇旧水厂", "location", "location-001"),
+        ("location-002", "三河镇", "location", "location-002"),
+        ("foreshadow-001", "三角形符号", "foreshadow", "foreshadow-001"),
+        ("foreshadow-002", "沈砚亦是目标", "foreshadow", "foreshadow-002"),
+        ("foreshadow-003", "报信者身份", "foreshadow", "foreshadow-003"),
+    ]
+    category_by_entry = {entry["id"]: entry["category"] for entry in entries}
+    nodes = [
+        {
+            "id": node_id,
+            "label": label,
+            "type": node_type,
+            "category": category_by_entry[entry_id],
+            "entryId": entry_id,
+        }
+        for node_id, label, node_type, entry_id in node_specs
+    ]
+
+    def graph_edge(source, target, edge_type, label, *, evidence="结构证据", needs_review=False):
+        return {
+            "source": source,
+            "target": target,
+            "type": edge_type,
+            "label": label,
+            "evidence": evidence,
+            "sourcePath": chapter_path,
+            "needsReview": needs_review,
+        }
+
+    edges = [
+        graph_edge("project:root", "plot:mainline", "plot", "推进"),
+        graph_edge("plot:mainline", "chapter:001", "timeline", "章节"),
+        graph_edge("chapter:001", "entity-001", "appearance", "登场"),
+        graph_edge("chapter:001", "entity-002", "appearance", "登场"),
+        graph_edge("chapter:001", "entity-003", "appearance", "间接登场"),
+        graph_edge("chapter:001", "item-001", "introduction", "引入"),
+        graph_edge("chapter:001", "location-001", "setting", "场景"),
+        graph_edge(
+            "entity-001",
+            "entity-002",
+            "ally",
+            "暂时合作",
+            evidence="001.md 第7行：'从现在开始，你跟着我'；陆遥点头跟随",
+        ),
+        graph_edge(
+            "entity-001",
+            "entity-003",
+            "hostile",
+            "敌对",
+            evidence="001.md 第3行：'我恰好不喜欢他们'",
+        ),
+        graph_edge(
+            "entity-002",
+            "entity-003",
+            "hostile",
+            "被追踪",
+            evidence="001.md 第5行：'三天前有人开始追我。他们自称灰塔'",
+        ),
+        graph_edge("entity-001", "item-001", "possession", "持有"),
+        graph_edge("entity-002", "item-001", "discovery", "发现"),
+        graph_edge("entity-003", "item-001", "pursuit", "追寻"),
+        graph_edge("entity-001", "entity-004", "communication", "收到消息", needs_review=True),
+        graph_edge("entity-004", "entity-003", "suspected_link", "可能关联", needs_review=True),
+        graph_edge("entity-001", "location-001", "location", "行动于"),
+        graph_edge("entity-002", "location-001", "location", "被困于"),
+        graph_edge("location-001", "location-002", "spatial", "位于北边"),
+        graph_edge("item-001", "foreshadow-001", "foreshadowing", "关联伏笔"),
+        graph_edge("entity-001", "foreshadow-002", "foreshadowing", "关联伏笔"),
+        graph_edge("entity-004", "foreshadow-003", "foreshadowing", "关联伏笔", needs_review=True),
+    ]
+    payload = {
+        "schemaVersion": 2,
+        "categorySchemaVersion": WIKI_CATEGORY_SCHEMA_VERSION,
+        "generator": "agent-deep-analysis",
+        "generationMode": "agent-evidence-grounded",
+        "llmStatus": "agent_reviewed",
+        "graphPolicy": {"agentGraphAccepted": True},
+        "knowledgeRevision": 3,
+        "builtFromRevision": 3,
+        "entries": entries,
+        "graph": {"nodes": nodes, "edges": edges},
+    }
+    assert len(nodes) == 13
+    assert len(edges) == 21
+
+    service = StoryWikiService()
+    monkeypatch.setattr(service, "read_or_build", lambda _root: payload)
+
+    relation_view = service.query_graph(tmp_path, category="relationships")
+
+    assert {node["id"] for node in relation_view["graph"]["nodes"]} == {
+        "entity-001", "entity-002", "entity-004",
+    }
+    assert {entry["id"] for entry in relation_view["entries"]} == {
+        "entity-001", "entity-002", "entity-004",
+    }
+    assert len(relation_view["graph"]["edges"]) == 1
+    relation_edge = relation_view["graph"]["edges"][0]
+    assert relation_edge["type"] == "relationship"
+    assert relation_edge["relationType"] == "alliance"
+    assert relation_edge["status"] == "asserted"
+    assert relation_edge["needsReview"] is False
+    assert "沈砚" in relation_edge["evidence"] and "陆遥" in relation_edge["evidence"]
+    assert not {
+        "plot", "timeline", "appearance", "introduction", "setting", "possession",
+        "discovery", "pursuit", "location", "spatial", "foreshadowing",
+    }.intersection(edge["type"] for edge in relation_view["graph"]["edges"])
+    assert relation_view["total"] == {"entryCount": 3, "nodeCount": 3, "edgeCount": 1}
+
+    payload["graphPolicy"]["agentGraphAccepted"] = False
+    unaccepted_view = service.query_graph(tmp_path, category="relationships")
+    assert unaccepted_view["graph"]["edges"] == []
+
+    payload["graphPolicy"]["agentGraphAccepted"] = True
+    edges[7]["evidence"] = "001.md 第7行：'正文中不存在的合作承诺'"
+    ungrounded_view = service.query_graph(tmp_path, category="relationships")
+    assert ungrounded_view["graph"]["edges"] == []
+
+
 def test_rebuild_does_not_guess_character_names_or_create_placeholder_topics(tmp_path):
     chapters = tmp_path / "chapters"
     chapters.mkdir()
@@ -295,6 +449,126 @@ def test_read_or_build_rebuilds_old_category_schema_payload(tmp_path):
     assert payload["categorySchemaVersion"] == WIKI_CATEGORY_SCHEMA_VERSION
     assert not any(node["id"] == "stale:node" for node in payload["graph"]["nodes"])
     assert payload["sourceStats"]["chapterFiles"] == 1
+
+
+def test_v1_five_category_project_upgrades_without_changing_story_sources(tmp_path):
+    chapter = tmp_path / "chapters" / "001.md"
+    first_card = tmp_path / ".storydex" / "characters" / "01_沈青.md"
+    second_card = tmp_path / ".storydex" / "characters" / "02_林岚.md"
+    world = tmp_path / ".storydex" / "worldbook" / "云桥.md"
+    chapter.parent.mkdir(parents=True)
+    first_card.parent.mkdir(parents=True)
+    world.parent.mkdir(parents=True)
+    chapter.write_text("沈青与林岚抵达云桥。\n", encoding="utf-8")
+    first_card.write_text(
+        "# 沈青\n\n> 稳定实体ID: `char:shenqing`\n\n## 关系网络\n"
+        "- 林岚（char:linlan）：亲姐姐，两人从小一起生活\n",
+        encoding="utf-8",
+    )
+    second_card.write_text(
+        "# 林岚\n\n> 稳定实体ID: `char:linlan`\n",
+        encoding="utf-8",
+    )
+    world.write_text("# 云桥\n\n连接南北城区的石桥。\n", encoding="utf-8")
+
+    wiki_path = tmp_path / ".storydex" / "wiki" / "knowledge_graph.json"
+    _write_json(wiki_path, {
+        "version": 1,
+        "schemaVersion": 2,
+        "categorySchemaVersion": "story-wiki-v5-evidence-grounded-graph",
+        "entries": [
+            {"id": "character:shenqing", "title": "沈青", "category": "characters"},
+            {"id": "chapter:001", "title": "第一章", "category": "plot"},
+            {"id": "setting:cloud-bridge", "title": "云桥", "category": "setting"},
+            {"id": "relationships:shen-lin", "title": "沈青与林岚", "category": "relationships"},
+        ],
+        "graph": {
+            "nodes": [
+                {"id": "character:shenqing", "label": "沈青", "type": "character", "category": "characters"}
+            ],
+            "edges": [],
+        },
+    })
+    legacy_wiki = wiki_path.read_bytes()
+    source_paths = [chapter, first_card, second_card, world]
+    source_bytes = {path: path.read_bytes() for path in source_paths}
+
+    StoryProjectService().ensure_project_structure(tmp_path)
+    service = StoryWikiService()
+    payload = service.read_or_build(tmp_path)
+
+    assert payload["status"] == "ready"
+    assert payload["categorySchemaVersion"] == WIKI_CATEGORY_SCHEMA_VERSION
+    assert {
+        str(entry.get("category") or "")
+        for entry in payload["entries"]
+        if isinstance(entry, dict)
+    } <= {"overview", "characters", "plot", "setting"}
+    assert all(path.read_bytes() == source_bytes[path] for path in source_paths)
+
+    legacy_backup = (
+        tmp_path
+        / ".storydex"
+        / "wiki"
+        / "migration-backups"
+        / "story-wiki-v5-evidence-grounded-graph"
+        / "knowledge_graph.json"
+    )
+    assert legacy_backup.read_bytes() == legacy_wiki
+
+    old_route = service.query_graph(tmp_path, category="relationships", limit=60)
+    characters = service.query_graph(tmp_path, category="characters", limit=60)
+    assert old_route["category"] == "characters"
+    assert old_route["graph"] == characters["graph"]
+    assert any(
+        edge.get("type") == "relationship"
+        and {edge.get("source"), edge.get("target")} == {"char:shenqing", "char:linlan"}
+        for edge in characters["graph"]["edges"]
+    )
+
+
+def test_legacy_schema_rebuild_failure_keeps_old_projection(tmp_path, monkeypatch):
+    chapter = tmp_path / "chapters" / "001.md"
+    chapter.parent.mkdir(parents=True)
+    chapter.write_text("沈青抵达云桥。\n", encoding="utf-8")
+    wiki_path = tmp_path / ".storydex" / "wiki" / "knowledge_graph.json"
+    _write_json(wiki_path, {
+        "version": 1,
+        "schemaVersion": 2,
+        "categorySchemaVersion": "story-wiki-v5-evidence-grounded-graph",
+        "entries": [
+            {"id": "relationships:legacy", "title": "旧关系", "category": "relationships"}
+        ],
+        "graph": {"nodes": [], "edges": []},
+    })
+    old_projection = wiki_path.read_bytes()
+    service = StoryWikiService()
+    monkeypatch.setattr(
+        service,
+        "validate_graph_invariants",
+        lambda *_args, **_kwargs: [
+            {
+                "code": "graph.revision.mismatch",
+                "message": "forced migration failure",
+                "path": "builtFromRevision",
+                "blocking": True,
+            }
+        ],
+    )
+
+    result = service.read_or_build(tmp_path)
+
+    assert result["status"] == "error"
+    assert wiki_path.read_bytes() == old_projection
+    backup = (
+        tmp_path
+        / ".storydex"
+        / "wiki"
+        / "migration-backups"
+        / "story-wiki-v5-evidence-grounded-graph"
+        / "knowledge_graph.json"
+    )
+    assert backup.read_bytes() == old_projection
 
 
 def test_read_or_build_rebuilds_current_schema_payload_with_invalid_relationship(tmp_path):
@@ -443,7 +717,7 @@ def test_rebuild_layers_planned_and_observed_sources_with_aligned_revision(tmp_p
     assert index["sourceStats"] == refreshed["sourceStats"]
 
 
-def test_invalid_projection_keeps_last_good_and_reports_diagnostics(tmp_path):
+def test_invalid_projection_quarantines_bad_objects_and_keeps_publishing(tmp_path):
     cards = tmp_path / ".storydex" / "characters"
     cards.mkdir(parents=True)
     cards.joinpath("林澈.md").write_text(
@@ -540,11 +814,12 @@ def test_invalid_projection_keeps_last_good_and_reports_diagnostics(tmp_path):
     )["sourcePaths"] = []
     candidates.append((missing_source, "graph.entry.missing_source"))
 
+    baseline_edge_count = len(baseline["graph"]["edges"])
     for candidate, expected_code in candidates:
         diagnostics = service.validate_graph_invariants(candidate, root=tmp_path)
         assert expected_code in {item["code"] for item in diagnostics}
 
-        rejected = service._persist_payload(
+        published = service._persist_payload(
             tmp_path,
             candidate,
             workflow="test_invalid_projection",
@@ -555,14 +830,71 @@ def test_invalid_projection_keeps_last_good_and_reports_diagnostics(tmp_path):
         )
         persisted = json.loads(service.wiki_json_path(tmp_path).read_text(encoding="utf-8"))
 
-        assert rejected["status"] == "error"
-        assert expected_code in {item["code"] for item in rejected["diagnostics"]}
-        assert rejected["lastSuccessfulRevision"] == baseline["knowledgeRevision"]
-        assert persisted["graphChecksum"] == baseline["graphChecksum"]
+        # 坏对象被隔离，其余知识库照常发布：一条坏边不该让整张图消失。
+        assert published["status"] == "ready"
         assert persisted["status"] == "ready"
+        assert persisted["graphChecksum"] == published["graphChecksum"]
+        # 角色始终留在图上，不因为一条坏边/缺证据而消失。
+        assert any(node["id"] == "char:linche" for node in published["graph"]["nodes"])
+        assert len(published["graph"]["edges"]) <= baseline_edge_count
+        assert not any(edge.get("coOccurrence") for edge in published["graph"]["edges"])
+        assert not any(
+            edge.get("type") == "relationship" and edge.get("relationType") in {None, "", "unknown"}
+            for edge in published["graph"]["edges"]
+        )
+        assert not any(
+            "char:missing" in {edge.get("source"), edge.get("target")}
+            for edge in published["graph"]["edges"]
+        )
+        assert not service._has_blocking_diagnostics(published["diagnostics"])
 
 
-def test_invalid_projection_never_republishes_an_invalid_previous_projection(tmp_path):
+def test_blocking_revision_mismatch_keeps_last_good_projection(tmp_path):
+    cards = tmp_path / ".storydex" / "characters"
+    cards.mkdir(parents=True)
+    cards.joinpath("林澈.md").write_text(
+        "# 林澈\n\n> 稳定实体ID: `char:linche`\n\n调查记者。\n",
+        encoding="utf-8",
+    )
+    service = StoryWikiService()
+    baseline = service.rebuild(tmp_path)
+    sources = service._collect_sources(tmp_path)
+
+    broken = copy.deepcopy(baseline)
+    original_validate = service.validate_graph_invariants
+
+    def validate_with_revision_mismatch(payload, **kwargs):
+        diagnostics = original_validate(payload, **kwargs)
+        if payload is not baseline:
+            diagnostics.append(service._graph_diagnostic(
+                "graph.revision.mismatch",
+                "注入的阻断性诊断。",
+                "builtFromRevision",
+                blocking=True,
+            ))
+        return diagnostics
+
+    service.validate_graph_invariants = validate_with_revision_mismatch  # type: ignore[assignment]
+    try:
+        rejected = service._persist_payload(
+            tmp_path,
+            broken,
+            workflow="test_blocking_diagnostic",
+            status="completed",
+            agent_result=None,
+            sources=sources,
+            changed_paths=[],
+        )
+    finally:
+        service.validate_graph_invariants = original_validate  # type: ignore[assignment]
+
+    persisted = json.loads(service.wiki_json_path(tmp_path).read_text(encoding="utf-8"))
+    assert rejected["lastSuccessfulRevision"] == baseline["knowledgeRevision"]
+    assert persisted["graphChecksum"] == baseline["graphChecksum"]
+    assert service._read_projection_status(tmp_path)["status"] == "error"
+
+
+def test_invalid_previous_projection_is_never_served_as_is(tmp_path):
     cards = tmp_path / ".storydex" / "characters"
     cards.mkdir(parents=True)
     cards.joinpath("林澈.md").write_text(
@@ -594,7 +926,7 @@ def test_invalid_projection_never_republishes_an_invalid_previous_projection(tmp
         "type": "relationship",
         "relationType": "unknown",
     })
-    rejected = service._persist_payload(
+    published = service._persist_payload(
         tmp_path,
         invalid_candidate,
         workflow="test_invalid_projection",
@@ -604,14 +936,18 @@ def test_invalid_projection_never_republishes_an_invalid_previous_projection(tmp
         changed_paths=[],
     )
 
-    assert rejected["status"] == "error"
-    assert rejected["graph"]["edges"] == []
-    assert [node["id"] for node in rejected["graph"]["nodes"]] == ["project:root"]
-    assert rejected["lastSuccessfulRevision"] == baseline["knowledgeRevision"]
+    assert published["status"] == "ready"
+    assert any(node["id"] == "char:linche" for node in published["graph"]["nodes"])
+    assert not any(
+        "char:missing" in {edge.get("source"), edge.get("target")}
+        for edge in published["graph"]["edges"]
+    )
+    assert not any(edge.get("coOccurrence") for edge in published["graph"]["edges"])
 
     recovered = service.read_or_build(tmp_path)
     assert recovered["status"] == "ready"
     assert not any(edge.get("coOccurrence") for edge in recovered["graph"]["edges"])
+    assert any(node["id"] == "char:linche" for node in recovered["graph"]["nodes"])
 
 
 def test_character_rename_keeps_structured_entity_id_and_old_alias(tmp_path):
@@ -855,3 +1191,186 @@ def test_dedupe_edges_evicts_by_weight_over_limit():
 
     assert len(result) == MAX_WIKI_GRAPH_EDGES
     assert any(edge["source"] == "hero" and edge["target"] == "rival" for edge in result)
+
+
+def test_colliding_stable_ids_keep_both_characters_and_flag_the_second(tmp_path):
+    cards = tmp_path / ".storydex" / "characters"
+    cards.mkdir(parents=True)
+    cards.joinpath("江言.md").write_text("# 江言\n\n> 稳定实体ID: `char:hero`\n\n少年剑客。\n", encoding="utf-8")
+    cards.joinpath("林北.md").write_text("# 林北\n\n> 稳定实体ID: `char:hero`\n\n北境游侠。\n", encoding="utf-8")
+
+    service = StoryWikiService()
+    payload = service.rebuild(tmp_path)
+
+    labels = {node["label"] for node in payload["graph"]["nodes"] if node["type"] == "character"}
+    assert labels == {"江言", "林北"}
+
+    registry = json.loads(
+        (tmp_path / ".storydex" / "memory" / "current" / "entities.json").read_text(encoding="utf-8")
+    )
+    records = [item for item in registry["entities"] if item.get("kind") == "character"]
+    assert len(records) == 2
+    assert len({item["entityId"] for item in records}) == 2
+    conflicted = [item for item in records if item.get("idConflictWith")]
+    assert len(conflicted) == 1
+    assert conflicted[0]["idConflictWith"] == "char:hero"
+    assert conflicted[0]["needsReview"] is True
+    # 兜底 id 由路径确定性派生，冷重建可复现，不是 uuid4。
+    assert conflicted[0]["entityId"] == service._path_derived_entity_id(conflicted[0]["sourcePaths"][0])
+
+
+def test_unrecognizable_card_title_keeps_the_character_and_flags_review(tmp_path):
+    cards = tmp_path / ".storydex" / "characters"
+    cards.mkdir(parents=True)
+    # 文件名本身是通用词，名字只能从标题里认：标题一坏就彻底认不出名字。
+    card = cards / "人物卡.md"
+    card.write_text("# 江言\n\n> 稳定实体ID: `char:jiangyan`\n\n少年剑客。\n", encoding="utf-8")
+    service = StoryWikiService()
+    service.rebuild(tmp_path)
+
+    card.write_text("# 角色设定\n\n> 稳定实体ID: `char:jiangyan`\n\n少年剑客。\n", encoding="utf-8")
+    payload = service.rebuild(tmp_path)
+
+    node = next(node for node in payload["graph"]["nodes"] if node["id"] == "char:jiangyan")
+    assert node["label"] == "江言"
+    assert node["needsReview"] is True
+
+    registry = json.loads(
+        (tmp_path / ".storydex" / "memory" / "current" / "entities.json").read_text(encoding="utf-8")
+    )
+    record = next(item for item in registry["entities"] if item.get("entityId") == "char:jiangyan")
+    assert record["status"] == "active"
+    assert record["canonical_name"] == "江言"
+    assert record["needsReview"] is True
+
+
+def test_non_ascii_entity_id_still_publishes_every_character(tmp_path):
+    cards = tmp_path / ".storydex" / "characters"
+    cards.mkdir(parents=True)
+    cards.joinpath("江言.md").write_text("# 江言\n\n少年剑客。\n", encoding="utf-8")
+    cards.joinpath("林北.md").write_text("# 林北\n\n北境游侠。\n", encoding="utf-8")
+    _write_json(
+        tmp_path / ".storydex" / "memory" / "current" / "entities.json",
+        {
+            "version": 2,
+            "entities": [
+                {
+                    "entityId": "林北-1",
+                    "canonical_name": "林北",
+                    "kind": "character",
+                    "status": "active",
+                    "sourcePaths": [".storydex/characters/林北.md"],
+                },
+            ],
+        },
+    )
+
+    payload = StoryWikiService().rebuild(tmp_path)
+
+    assert payload["status"] == "ready"
+    labels = {node["label"] for node in payload["graph"]["nodes"] if node["type"] == "character"}
+    assert labels == {"江言", "林北"}
+    assert not any(item.get("code") == "graph.character.canonical_count" for item in payload["diagnostics"])
+
+
+def test_character_state_files_do_not_become_characters(tmp_path):
+    cards = tmp_path / ".storydex" / "characters"
+    cards.joinpath("cards").mkdir(parents=True)
+    cards.joinpath("states").mkdir(parents=True)
+    _write_json(cards / "cards" / "jiangyan.json", {"name": "江言", "summary": "少年剑客。"})
+    _write_json(cards / "states" / "jiangyan.json", {"id": "jiangyan", "mood": "冷静"})
+
+    service = StoryWikiService()
+    assert service._source_kind(".storydex/characters/states/jiangyan.json") == "memory"
+    assert service._source_kind(".storydex/characters/cards/jiangyan.json") == "character"
+
+    payload = service.rebuild(tmp_path)
+
+    character_labels = [node["label"] for node in payload["graph"]["nodes"] if node["type"] == "character"]
+    assert character_labels == ["江言"]
+
+
+def test_ungrounded_relationship_edge_is_dropped_without_losing_the_graph(tmp_path):
+    cards = tmp_path / ".storydex" / "characters"
+    cards.mkdir(parents=True)
+    cards.joinpath("林澈.md").write_text("# 林澈\n\n> 稳定实体ID: `char:linche`\n\n调查记者。\n", encoding="utf-8")
+    cards.joinpath("沈乔.md").write_text("# 沈乔\n\n> 稳定实体ID: `char:shenqiao`\n\n法医。\n", encoding="utf-8")
+    service = StoryWikiService()
+    baseline = service.rebuild(tmp_path)
+    sources = service._collect_sources(tmp_path)
+
+    candidate = copy.deepcopy(baseline)
+    candidate["graph"]["edges"].append({
+        "source": "char:linche",
+        "target": "char:shenqiao",
+        "label": "家族",
+        "type": "relationship",
+        "relationType": "family",
+        "status": "asserted",
+        "evidence": "两人是远房表亲。",
+        "sourcePath": ".storydex/characters/林澈.md",
+    })
+
+    published = service._persist_payload(
+        tmp_path,
+        candidate,
+        workflow="test_quarantine",
+        status="completed",
+        agent_result=None,
+        sources=sources,
+        changed_paths=[],
+    )
+
+    assert published["status"] == "ready"
+    assert {node["id"] for node in published["graph"]["nodes"]} >= {"char:linche", "char:shenqiao"}
+    assert not any(edge.get("label") == "家族" for edge in published["graph"]["edges"])
+    quarantine = next(item for item in published["diagnostics"] if item["code"] == "graph.quarantine")
+    assert quarantine["severity"] == "warning"
+    assert quarantine["blocking"] is False
+    assert quarantine["dropped"]["edges"] == 1
+    assert any(reason["scope"] == "edge" for reason in quarantine["reasons"])
+
+
+def test_character_lens_never_contains_chapter_nodes(tmp_path):
+    chapters = tmp_path / "chapters"
+    chapters.mkdir()
+    chapters.joinpath("001.md").write_text("林澈在雨夜里翻开旧案卷。\n", encoding="utf-8")
+    chapters.joinpath("002.md").write_text("林澈把线索交给沈乔。\n", encoding="utf-8")
+    cards = tmp_path / ".storydex" / "characters"
+    cards.mkdir(parents=True)
+    cards.joinpath("林澈.md").write_text("# 林澈\n\n> 稳定实体ID: `char:linche`\n\n调查记者。\n", encoding="utf-8")
+    cards.joinpath("沈乔.md").write_text("# 沈乔\n\n> 稳定实体ID: `char:shenqiao`\n\n法医。\n", encoding="utf-8")
+
+    service = StoryWikiService()
+    service.rebuild(tmp_path)
+    result = service.query_graph(tmp_path, category="characters", limit=60)
+
+    assert result["category"] == "characters"
+    assert {node["type"] for node in result["graph"]["nodes"]} == {"character"}
+
+    plot = service.query_graph(tmp_path, category="plot", limit=60)
+    chapter_ids = [node["id"] for node in plot["graph"]["nodes"] if node["type"] == "chapter"]
+    assert len(chapter_ids) == 2
+    # 剧情图里章节按叙事顺序链式相接，不再挂在人造 hub 上。
+    assert not any(node["id"] == "plot:mainline" for node in plot["graph"]["nodes"])
+    assert any(
+        edge["source"] == chapter_ids[0] and edge["target"] == chapter_ids[1] and edge["label"] == "承接"
+        for edge in plot["graph"]["edges"]
+    )
+
+
+def test_relationships_category_alias_matches_characters_lens(tmp_path):
+    cards = tmp_path / ".storydex" / "characters"
+    cards.mkdir(parents=True)
+    cards.joinpath("林澈.md").write_text("# 林澈\n\n> 稳定实体ID: `char:linche`\n\n调查记者。\n", encoding="utf-8")
+    cards.joinpath("沈乔.md").write_text("# 沈乔\n\n> 稳定实体ID: `char:shenqiao`\n\n法医。\n", encoding="utf-8")
+
+    service = StoryWikiService()
+    service.rebuild(tmp_path)
+
+    aliased = service.query_graph(tmp_path, category="relationships", limit=60)
+    direct = service.query_graph(tmp_path, category="characters", limit=60)
+
+    assert aliased["category"] == "characters"
+    assert aliased["graph"] == direct["graph"]
+    assert aliased["matchedEntryIds"] == direct["matchedEntryIds"]

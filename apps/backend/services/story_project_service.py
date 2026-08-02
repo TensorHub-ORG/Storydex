@@ -6050,22 +6050,75 @@ class StoryProjectService:
     def _normalize_story_increment_fragments(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         raw_fragments = payload.get("fragments") if isinstance(payload.get("fragments"), list) else []
         fragments = [dict(item) for item in raw_fragments if isinstance(item, dict)]
-        if fragments:
-            return fragments
-        fallback: Dict[str, Any] = {}
-        for source_key, target_key in (
-            ("segmentPath", "path"),
-            ("segment_path", "path"),
-            ("path", "path"),
-            ("segmentText", "text"),
-            ("segment_text", "text"),
-            ("text", "text"),
-            ("content", "text"),
-        ):
-            value = payload.get(source_key)
-            if value not in (None, ""):
-                fallback[target_key] = value
-        return [fallback] if fallback else []
+        path_keys = ("segmentPath", "segment_path", "path")
+        text_keys = ("segmentText", "segment_text", "text", "content")
+        fallback_path = next(
+            (payload.get(key) for key in path_keys if payload.get(key) not in (None, "")),
+            None,
+        )
+        fallback_text = next(
+            (payload.get(key) for key in text_keys if payload.get(key) not in (None, "")),
+            None,
+        )
+        fallback_relative_path = self._normalize_relative_path(str(fallback_path or ""))
+
+        matching_fragment: Dict[str, Any] | None = None
+        if fallback_text not in (None, ""):
+            if fallback_relative_path:
+                matching_fragment = next(
+                    (
+                        fragment
+                        for fragment in fragments
+                        if self._normalize_relative_path(
+                            str(next((fragment.get(key) for key in path_keys if fragment.get(key)), ""))
+                        )
+                        == fallback_relative_path
+                    ),
+                    None,
+                )
+            elif fragments:
+                matching_fragment = fragments[0]
+
+            if matching_fragment is None:
+                matching_fragment = {"text": fallback_text}
+                if fallback_path not in (None, ""):
+                    matching_fragment["path"] = fallback_path
+                fragments.append(matching_fragment)
+            elif not self._story_increment_fragment_text(matching_fragment):
+                matching_fragment["text"] = fallback_text
+
+        if not fragments:
+            fallback: Dict[str, Any] = {}
+            if fallback_path not in (None, ""):
+                fallback["path"] = fallback_path
+            if fallback_text not in (None, ""):
+                fallback["text"] = fallback_text
+            return [fallback] if fallback else []
+
+        normalized_top_level = self._normalize_story_increment_payload(payload)
+        has_top_level_increment = any(
+            value not in (None, "", [], {}) for value in normalized_top_level.values()
+        )
+        route_keys = {*path_keys, *text_keys}
+        normalized: List[Dict[str, Any]] = []
+        for fragment in fragments:
+            if self._story_increment_fragment_text(fragment):
+                normalized.append(fragment)
+                continue
+            has_fragment_increment = any(
+                key not in route_keys and value not in (None, "", [], {})
+                for key, value in fragment.items()
+            )
+            fragment_path = self._normalize_relative_path(
+                str(next((fragment.get(key) for key in path_keys if fragment.get(key)), ""))
+            )
+            if has_fragment_increment or (
+                has_top_level_increment
+                and fallback_relative_path
+                and fragment_path == fallback_relative_path
+            ):
+                normalized.append(fragment)
+        return normalized
 
     @staticmethod
     def _story_increment_fragment_text(fragment: Dict[str, Any]) -> str:

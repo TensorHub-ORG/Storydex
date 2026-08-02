@@ -47,6 +47,41 @@ def test_binding_rejects_session_path_outside_runtime(monkeypatch, tmp_path) -> 
         coomi._validated_session_path({"sessionPath": str(tmp_path / "escape.json")})
 
 
+def test_translator_reports_turn_usage_instead_of_runtime_cumulative_usage() -> None:
+    translator = coomi._CoomiEventTranslator(
+        session_id="story-session",
+        usage_baseline={
+            "input_tokens": 4000,
+            "cached_input_tokens": 500,
+            "output_tokens": 300,
+        },
+    )
+
+    usage_event = translator.translate({
+        "type": "turn_completed",
+        "data": {
+            "usage": {
+                "input_tokens": 9861,
+                "cached_input_tokens": 500,
+                "output_tokens": 549,
+            }
+        },
+    })
+    completed_event = translator.translate({
+        "type": "completed",
+        "data": {"usage": {"input_tokens": 9861, "output_tokens": 549}},
+    })
+
+    assert usage_event is not None
+    assert usage_event[1]["usage"]["prompt_tokens"] == 5861
+    assert usage_event[1]["usage"]["completion_tokens"] == 249
+    assert usage_event[1]["usage"]["total_tokens"] == 6110
+    assert completed_event is not None
+    assert completed_event[1]["total_tokens"] == 6110
+    assert completed_event[1]["prompt_tokens"] == 5861
+    assert completed_event[1]["completion_tokens"] == 249
+
+
 def test_session_snapshot_restore_and_rollback(monkeypatch, tmp_path) -> None:
     sessions = tmp_path / "sessions"
     sessions.mkdir()
@@ -165,6 +200,62 @@ async def test_storydex_tool_callback_resolves_bridge_request(monkeypatch, tmp_p
         "request-1",
         {"success": True, "output": "wiki-result"},
     )
+
+
+@pytest.mark.asyncio
+async def test_user_input_options_reach_bridge_as_complete_answers() -> None:
+    class Bridge:
+        resolved = None
+
+        async def resolve(self, request_id, value):
+            self.resolved = (request_id, value)
+
+    service = coomi.StorydexCoomiAgentService()
+    bridge = Bridge()
+    events, forwarding = service._prepare_interaction(
+        bridge=bridge,
+        packet_type="user_input_request",
+        data={
+            "requestId": "request-questions",
+            "request": {
+                "questions": [
+                    {"id": "protagonist", "header": "主角", "question": "主角路线？", "options": []},
+                    {"id": "tone", "header": "风格", "question": "故事风格？", "options": []},
+                    {"id": "length", "header": "篇幅", "question": "篇幅规模？", "options": []},
+                ]
+            },
+        },
+        trace_id="trace-questions",
+        session_id="session-questions",
+    )
+
+    selected = ["废材逆袭", "史诗宏大", "长篇"]
+    for (_event_name, event), answer in zip(events, selected):
+        service.resolve_approval(
+            event["approvalId"],
+            "answer",
+            response={"option": answer, "label": answer, "other_text": None},
+        )
+    await forwarding
+
+    assert bridge.resolved == (
+        "request-questions",
+        {
+            "answers": {
+                "protagonist": "废材逆袭",
+                "tone": "史诗宏大",
+                "length": "长篇",
+            }
+        },
+    )
+
+
+def test_user_input_answer_prefers_free_text_and_never_uses_control_decision() -> None:
+    assert coomi._user_input_answer(
+        {"option": "其他", "label": "其他", "other_text": "自定义设定"},
+        "answer",
+    ) == "自定义设定"
+    assert coomi._user_input_answer({}, "answer") == ""
 
 
 @pytest.mark.asyncio
@@ -491,7 +582,16 @@ def test_system_prompt_assigns_core_and_domain_tool_ownership(tmp_path) -> None:
         coomi._build_coomi_system_prompt(
             workspace_root=tmp_path,
             prompt="write",
-            turn_contract={"executionPolicy": {"directFileWrites": False}},
+            turn_contract={
+                "intentFrame": {
+                    "primary": "general",
+                    "operationType": "inquiry",
+                    "effect": "respond_only",
+                    "canWrite": False,
+                    "method": "safe_fallback",
+                },
+                "executionPolicy": {"directFileWrites": False},
+            },
         )
     )
     assert "Rust runtime tools" in prompt
@@ -500,3 +600,6 @@ def test_system_prompt_assigns_core_and_domain_tool_ownership(tmp_path) -> None:
     assert "This turn is read-only" not in prompt
     assert "directFileWrites" not in prompt
     assert "only the user's /plan command activates read-only Plan mode" in prompt
+    assert "operationDiscipline (read_only)" not in prompt
+    assert "operationGuidance (respond_only)" in prompt
+    assert "routing guidance, not a permission boundary" in prompt

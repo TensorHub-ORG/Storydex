@@ -629,25 +629,6 @@ class StorydexApplyStoryIncrementTool(_StorydexWorkspaceToolMixin, BaseTool):
         }
 
     def run(self, arguments: Dict[str, Any]) -> ToolResult:
-        if self.turn_contract:
-            from services.storydex_intent_service import intent_frame_allows_project_writes
-
-            intent = (
-                self.turn_contract.get("intentFrame")
-                if isinstance(self.turn_contract.get("intentFrame"), dict)
-                else {}
-            )
-            operation_type = str(intent.get("operationType") or "").strip().lower()
-            is_story_create = bool(
-                str(intent.get("primary") or "").strip().lower() == "story_generation"
-                and operation_type in {"", "create_new"}
-            )
-            if not intent_frame_allows_project_writes(intent) or not is_story_create:
-                return ToolResult(
-                    success=False,
-                    output="",
-                    error="This turn contract does not authorise a story-generation increment.",
-                )
         payload = dict(arguments or {})
         workspace_root = self._resolve_workspace_root(payload.get("workspaceRoot"))
         result = get_story_project_service().apply_story_generation_increment(

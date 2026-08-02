@@ -53,6 +53,10 @@ function sessions(items: unknown[] = []) {
 beforeEach(() => {
   setActivePinia(createPinia());
   vi.clearAllMocks();
+  workspace.activeFileBindingOrPath = "chapters/001.md";
+  workspace.activeFile = "chapters/001.md";
+  workspace.currentProject = { workspaceRoot: "C:/isolated/story" };
+  workspace.health = null;
   api.fetchAgentSessions.mockResolvedValue(sessions([]));
   api.fetchAgentCoomiStatus.mockResolvedValue({
     data: { runtime: "coomi", installed: true, model: "fake", permissionMode: "full_access" }
@@ -460,6 +464,180 @@ describe("agent store sessions and Git decision UX", () => {
     expect(api.rollbackLatestExecution).not.toHaveBeenCalled();
   });
 
+  it("retries an HTTP failure without requiring a server-side replacement record", async () => {
+    const store = useAgentStore();
+    const failed = {
+      traceId: "trace-http-503", sessionId: "session-a", prompt: "继续生成", route: "coomi", agentMode: "coomi",
+      llmModel: "", llmProvider: "", status: "failed", noRestorePoint: false,
+      createdAt: "2026-07-21T11:00:00Z", updatedAt: "2026-07-21T11:00:00Z", lastAction: "chat", reply: "", trace: null,
+      audit: [], events: [], tasks: [], changeLedger: { traceId: "trace-http-503", sessionId: "session-a", changedFiles: [], changedFileCount: 0, added: 0, removed: 0, commitHash: "", shortHash: "", diffSource: "", updatedAt: "" },
+      items: [], errorMessage: "Request failed with status code 503", errorCode: "service_unavailable", turnTokens: null, turnDurationMs: null
+    } as any;
+    store.currentSessionId = "session-a";
+    store.executionHistory = [failed];
+    store.promptInput = "尚未发送的草稿";
+    api.streamAgentPrompt.mockImplementationOnce(async (request: any, onPacket: (packet: any) => void) => {
+      expect(request.prompt).toBe("继续生成");
+      expect(request.replaceLatestTraceId).toBeUndefined();
+      onPacket({ _type: "AgentCompleted" });
+    });
+
+    await expect(store.retryFailedRun(failed)).resolves.toBe(true);
+
+    expect(store.executionHistory).toHaveLength(1);
+    expect(store.executionHistory[0].traceId).not.toBe("trace-http-503");
+    expect(store.executionHistory[0].status).toBe("completed");
+    expect(store.promptInput).toBe("尚未发送的草稿");
+  });
+
+  it("replaces a persisted failed turn when regenerating it", async () => {
+    const store = useAgentStore();
+    const failed = {
+      traceId: "trace-provider-error", sessionId: "session-a", prompt: "重写这一段", route: "coomi", agentMode: "coomi",
+      llmModel: "", llmProvider: "", status: "failed", noRestorePoint: false,
+      createdAt: "2026-07-21T11:00:00Z", updatedAt: "2026-07-21T11:00:00Z", lastAction: "chat", reply: "", trace: null,
+      audit: [],
+      events: [{ index: 1, event: "AgentError", phase: "agent", status: "error", detail: "503", timestamp: "2026-07-21T11:00:00Z", data: { message: "503" } }],
+      tasks: [], changeLedger: { traceId: "trace-provider-error", sessionId: "session-a", changedFiles: [], changedFileCount: 0, added: 0, removed: 0, commitHash: "", shortHash: "", diffSource: "", updatedAt: "" },
+      items: [], errorMessage: "Provider returned 503", errorCode: "provider_error", turnTokens: null, turnDurationMs: null
+    } as any;
+    store.currentSessionId = "session-a";
+    store.executionHistory = [failed];
+    store.promptInput = "保留这个草稿";
+    api.streamAgentPrompt.mockImplementationOnce(async (request: any, onPacket: (packet: any) => void) => {
+      expect(request.replaceLatestTraceId).toBe("trace-provider-error");
+      onPacket({ _type: "TurnContract", status: "ready" });
+      onPacket({ _type: "TextChunk", content: "新的结果" });
+      onPacket({ _type: "AgentCompleted" });
+    });
+
+    await expect(store.retryFailedRun(failed)).resolves.toBe(true);
+
+    expect(store.executionHistory[0].reply).toBe("新的结果");
+    expect(store.executionHistory.find((run) => run.traceId === "trace-provider-error")?.status).toBe("superseded");
+    expect(store.promptInput).toBe("保留这个草稿");
+  });
+
+  it("rejects retry when the failed run is not eligible", async () => {
+    const store = useAgentStore();
+    const failed = {
+      traceId: "trace-guarded", sessionId: "session-a", prompt: "retry me", route: "coomi", agentMode: "coomi",
+      llmModel: "", llmProvider: "", status: "failed", noRestorePoint: false,
+      createdAt: "2026-07-21T11:00:00Z", updatedAt: "2026-07-21T11:00:00Z", lastAction: "chat", reply: "", trace: null,
+      audit: [], events: [], tasks: [], changeLedger: { traceId: "trace-guarded", sessionId: "session-a", changedFiles: [], changedFileCount: 0, added: 0, removed: 0, commitHash: "", shortHash: "", diffSource: "", updatedAt: "" },
+      items: [], errorMessage: "failed", errorCode: "provider_error", turnTokens: null, turnDurationMs: null
+    } as any;
+    store.executionHistory = [failed];
+
+    await expect(store.retryFailedRun({ ...failed, prompt: undefined })).resolves.toBe(false);
+    await expect(store.retryFailedRun({ ...failed, traceId: "" })).resolves.toBe(false);
+    await expect(store.retryFailedRun({ ...failed, traceId: "trace-older" })).resolves.toBe(false);
+    await expect(store.retryFailedRun({ ...failed, status: "completed" })).resolves.toBe(false);
+
+    store.isRunning = true;
+    await expect(store.retryFailedRun(failed)).resolves.toBe(false);
+    store.isRunning = false;
+    store.isRollingBack = true;
+    await expect(store.retryFailedRun(failed)).resolves.toBe(false);
+    store.isRollingBack = false;
+    store.isReexecuting = true;
+    await expect(store.retryFailedRun(failed)).resolves.toBe(false);
+    store.isReexecuting = false;
+    store.editingTraceId = "trace-editing";
+    await expect(store.retryFailedRun(failed)).resolves.toBe(false);
+
+    expect(api.streamAgentPrompt).not.toHaveBeenCalled();
+  });
+
+  it("keeps the original failed turn when retry creates no replacement run", async () => {
+    const store = useAgentStore();
+    const failed = {
+      traceId: "trace-no-replacement", sessionId: "", prompt: "retry me", route: "coomi", agentMode: "coomi",
+      llmModel: "", llmProvider: "", status: "failed", noRestorePoint: false,
+      createdAt: "2026-07-21T11:00:00Z", updatedAt: "2026-07-21T11:00:00Z", lastAction: "chat", reply: "", trace: null,
+      audit: [], events: [], tasks: [], changeLedger: { traceId: "trace-no-replacement", sessionId: "", changedFiles: [], changedFileCount: 0, added: 0, removed: 0, commitHash: "", shortHash: "", diffSource: "", updatedAt: "" },
+      items: [], errorMessage: "failed", errorCode: "provider_error", turnTokens: null, turnDurationMs: null
+    } as any;
+    store.executionHistory = [failed];
+    store.currentSessionId = "";
+    store.storyChapterTemplateId = "";
+    workspace.activeFileBindingOrPath = "";
+    workspace.activeFile = "chapters/fallback.md";
+    workspace.currentProject = null as any;
+    workspace.health = { workspaceRoot: "C:/health/story" } as any;
+    const execute = vi.spyOn(store, "executePromptRequest").mockResolvedValue(false);
+
+    await expect(store.retryFailedRun(failed)).resolves.toBe(false);
+
+    expect(execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        activeFile: "chapters/fallback.md",
+        workspaceRoot: "C:/health/story",
+        storyGeneration: expect.objectContaining({ chapterTemplateId: "default_chapter_directory" })
+      }),
+      { sessionId: "default", preserveComposer: true }
+    );
+    expect(store.executionHistory).toEqual([failed]);
+    expect(store.isReexecuting).toBe(false);
+  });
+
+  it("restores a persisted failed turn when regeneration fails again", async () => {
+    const store = useAgentStore();
+    const failed = {
+      traceId: "trace-retry-failed", sessionId: "session-a", prompt: "retry me", route: "coomi", agentMode: "coomi",
+      llmModel: "", llmProvider: "", status: "failed", noRestorePoint: false,
+      createdAt: "2026-07-21T11:00:00Z", updatedAt: "2026-07-21T11:00:00Z", lastAction: "chat", reply: "", trace: null,
+      audit: [],
+      events: [{ index: 1, event: "AgentError", phase: "agent", status: "error", detail: "503", timestamp: "2026-07-21T11:00:00Z", data: { message: "503" } }],
+      tasks: [], changeLedger: { traceId: "trace-retry-failed", sessionId: "session-a", changedFiles: [], changedFileCount: 0, added: 0, removed: 0, commitHash: "", shortHash: "", diffSource: "", updatedAt: "" },
+      items: [], errorMessage: "first failure", errorCode: "provider_error", turnTokens: null, turnDurationMs: null
+    } as any;
+    store.currentSessionId = "session-a";
+    store.executionHistory = [failed];
+    api.streamAgentPrompt.mockRejectedValueOnce(new AgentApiError("retry also failed", "service_unavailable"));
+
+    await expect(store.retryFailedRun(failed)).resolves.toBe(false);
+
+    expect(store.executionHistory).toHaveLength(1);
+    expect(store.executionHistory[0]).toMatchObject({
+      traceId: "trace-retry-failed",
+      status: "failed",
+      errorMessage: "retry also failed",
+      errorCode: "service_unavailable"
+    });
+    expect(store.currentTraceId).toBe("trace-retry-failed");
+    expect(store.isReexecuting).toBe(false);
+  });
+
+  it("accepts a persisted retry after planning starts even if history refresh removed the original", async () => {
+    const store = useAgentStore();
+    const failed = {
+      traceId: "trace-original-removed", sessionId: "session-a", prompt: "retry me", route: "coomi", agentMode: "coomi",
+      llmModel: "", llmProvider: "", status: "failed", noRestorePoint: false,
+      createdAt: "2026-07-21T11:00:00Z", updatedAt: "2026-07-21T11:00:00Z", lastAction: "chat", reply: "", trace: null,
+      audit: [],
+      events: [{ index: 1, event: "AgentError", phase: "agent", status: "error", detail: "503", timestamp: "2026-07-21T11:00:00Z", data: { message: "503" } }],
+      tasks: [], changeLedger: { traceId: "trace-original-removed", sessionId: "session-a", changedFiles: [], changedFileCount: 0, added: 0, removed: 0, commitHash: "", shortHash: "", diffSource: "", updatedAt: "" },
+      items: [], errorMessage: "first failure", errorCode: "provider_error", turnTokens: null, turnDurationMs: null
+    } as any;
+    const replacement = {
+      ...failed,
+      traceId: "trace-replacement-accepted",
+      status: "failed",
+      events: [{ index: 1, event: "RunAccepted", phase: "task_planning", status: "running", detail: "", timestamp: "2026-07-21T11:01:00Z", data: {} }]
+    } as any;
+    store.executionHistory = [failed];
+    vi.spyOn(store, "executePromptRequest").mockImplementation(async () => {
+      store.executionHistory = [replacement];
+      return false;
+    });
+
+    await expect(store.retryFailedRun(failed)).resolves.toBe(true);
+
+    expect(store.executionHistory).toEqual([replacement]);
+    expect(store.isReexecuting).toBe(false);
+  });
+
   it("persists queued follow-ups and resumes the first pending message with an idempotent source id", async () => {
     const store = useAgentStore();
     store.currentSessionId = "session-a";
@@ -561,6 +739,71 @@ describe("agent store sessions and Git decision UX", () => {
       updatedAt: new Date().toISOString()
     });
     expect(store.followups.map((message) => message.messageId)).toEqual(["queued-1"]);
+  });
+
+  it("reconstructs missing continuation runs across current and legacy packet shapes", () => {
+    const store = useAgentStore();
+    store.currentSessionId = "";
+    store.coomiStatus = {
+      runtime: "coomi", installed: true, model: "model-a", providerId: "provider-a"
+    } as any;
+
+    store.applyStreamPacket("trace-default-session", {
+      type: "ContinuationStarted",
+      content: "resume queued prompt",
+      messageId: "followup-default",
+      mode: "queued",
+      status: "dispatching",
+      noRestorePoint: true,
+      coomiStatus: { runtime: "coomi", installed: true, model: "model-b", providerId: "provider-b" }
+    } as any);
+
+    const defaultSessionRun = store.executionHistory.find((run) => run.traceId === "trace-default-session");
+    expect(defaultSessionRun).toMatchObject({
+      sessionId: "default",
+      prompt: "resume queued prompt",
+      status: "running",
+      noRestorePoint: true,
+      llmModel: "model-a",
+      llmProvider: "provider-a"
+    });
+    expect(store.coomiStatus).toMatchObject({ model: "model-b", providerId: "provider-b" });
+    expect(store.followups[0]).toMatchObject({ messageId: "followup-default", sessionId: "default" });
+
+    store.currentSessionId = "session-current";
+    store.coomiStatus = null;
+    store.applyStreamPacket("trace-current-session", {
+      _type: "ContinuationStarted",
+      content: "resume current session",
+      messageId: "followup-current",
+      mode: "steer",
+      status: "steering"
+    } as any);
+    expect(store.executionHistory.find((run) => run.traceId === "trace-current-session")).toMatchObject({
+      sessionId: "session-current",
+      llmModel: "",
+      llmProvider: ""
+    });
+
+    store.applyStreamPacket("trace-explicit-session", {
+      _type: "ContinuationStarted",
+      content: "resume explicit session",
+      sessionId: "session-explicit",
+      createdAt: "2026-07-21T12:00:00Z",
+      messageId: "followup-explicit",
+      mode: "queued",
+      status: "pending"
+    } as any);
+    expect(store.executionHistory.find((run) => run.traceId === "trace-explicit-session")).toMatchObject({
+      sessionId: "session-explicit",
+      createdAt: "2026-07-21T12:00:00Z"
+    });
+
+    const runCount = store.executionHistory.length;
+    store.applyStreamPacket("trace-ignored-reasoning", { _type: "ReasoningChunk", content: "hidden" } as any);
+    store.applyStreamPacket("trace-ignored-text", { _type: "TextChunk", content: "" } as any);
+    store.applyStreamPacket("trace-ignored-event", { _type: "UnknownEvent" } as any);
+    expect(store.executionHistory).toHaveLength(runCount);
   });
 });
 

@@ -316,6 +316,93 @@ describe("AgentPanel", () => {
     wrapper.unmount();
   });
 
+  it("offers retry beside the latest error and delegates regeneration to the store", async () => {
+    const store = useAgentStore();
+    const failedRun = makeRun({
+      traceId: "trace-failed",
+      status: "failed",
+      errorMessage: "Request failed with status code 503",
+      errorCode: "service_unavailable"
+    });
+    store.executionHistory = [failedRun];
+    const retry = vi.spyOn(store, "retryFailedRun").mockResolvedValue(true);
+    const wrapper = shallowMount(AgentPanel);
+    await nextTick();
+
+    const turn = wrapper.findComponent(CoomiClaudeTurn);
+    expect(turn.props("canRetry")).toBe(true);
+    turn.vm.$emit("retry", failedRun);
+    await nextTick();
+    expect(retry).toHaveBeenCalledWith(failedRun);
+
+    const utils = (wrapper.vm as any).__testUtils;
+    store.isRunning = true;
+    await nextTick();
+    expect(wrapper.findComponent(CoomiClaudeTurn).props("actionsBusy")).toBe(true);
+    await utils.handleRetryRun(failedRun);
+    expect(retry).toHaveBeenCalledTimes(1);
+
+    store.isRunning = false;
+    store.isReexecuting = true;
+    await utils.handleRetryRun(failedRun);
+    expect(retry).toHaveBeenCalledTimes(1);
+
+    store.isReexecuting = false;
+    await utils.handleRetryRun(makeRun({ traceId: failedRun.traceId, status: "completed" }));
+    expect(retry).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it("renders an accessible refresh icon next to a transport error", async () => {
+    const failedRun = makeRun({
+      status: "failed",
+      errorMessage: "Request failed with status code 400",
+      errorCode: "bad_request"
+    });
+    const wrapper = mount(CoomiClaudeTurn, {
+      props: { run: failedRun, canRetry: true }
+    });
+
+    expect(wrapper.find(".cct-error-message").text()).toContain("400");
+    const retry = wrapper.find("button.cct-error-retry");
+    expect(retry.attributes("title")).toBe("重新生成");
+    expect(retry.attributes("aria-label")).toBe("重新生成");
+    expect(retry.find(".material-symbols-rounded").text()).toBe("refresh");
+    await retry.trigger("click");
+    expect(wrapper.emitted("retry")?.[0]).toEqual([failedRun]);
+
+    await wrapper.setProps({ actionsBusy: true });
+    expect(wrapper.find("button.cct-error-retry").attributes("disabled")).toBeDefined();
+    expect(wrapper.find("button.cct-error-retry .spinning").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("does not duplicate a streamed error when its terminal message is less detailed", () => {
+    const wrapper = mount(CoomiClaudeTurn, {
+      props: {
+        run: makeRun({
+          status: "failed",
+          errorMessage: "Provider returned 503",
+          items: [{
+            id: "trace-1-error",
+            type: "error",
+            status: "error",
+            title: "provider_error",
+            content: "Provider returned 503\nOrigin: upstream /chat/completions",
+            timestamp: new Date().toISOString(),
+            raw: {}
+          }]
+        }),
+        canRetry: true
+      }
+    });
+
+    expect(wrapper.findAll(".cct-error-text")).toHaveLength(1);
+    expect(wrapper.find(".cct-error-message").text()).toContain("Origin: upstream");
+    expect(wrapper.find("button.cct-error-retry").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
   it("renders phase timing and never puts collapsed reasoning text in the DOM", async () => {
     // 已完成的一轮：推理块折叠，正文展开。折叠必须是 v-if 移除节点，
     // 而不是 CSS 隐藏，否则原始思维链仍会留在 DOM 里被读到。
@@ -341,6 +428,115 @@ describe("AgentPanel", () => {
     // 用户主动展开后才可见
     await wrapper.findAll(".cct-summary")[0].trigger("click");
     expect(wrapper.find(".cct-reasoning-text").text()).toContain("chain-of-thought-secret");
+    wrapper.unmount();
+  });
+
+  it("labels token usage as a turn total and exposes the input/output split", () => {
+    const wrapper = mount(CoomiClaudeTurn, {
+      props: {
+        run: makeRun({
+          status: "completed",
+          turnTokens: 6110,
+          events: [
+            {
+              index: 1,
+              event: "UsageUpdate",
+              phase: "runtime",
+              status: "info",
+              detail: "",
+              timestamp: new Date().toISOString(),
+              data: {
+                usage: {
+                  prompt_tokens: 5861,
+                  completion_tokens: 249,
+                  total_tokens: 6110
+                }
+              }
+            }
+          ]
+        })
+      }
+    });
+
+    const meta = wrapper.find(".cct-meta-text");
+    expect(meta.text()).toContain("本轮总计 6.1K tokens");
+    expect(meta.attributes("title")).toContain("输入上下文：5.9K tokens");
+    expect(meta.attributes("title")).toContain("模型输出：249 tokens");
+    wrapper.unmount();
+  });
+
+  it("submits every selected question option as an explicit answer", async () => {
+    const store = useAgentStore();
+    store.pendingApprovals = [
+      {
+        approvalId: "protagonist-approval",
+        kind: "question",
+        header: "主角设定",
+        question: "主角走哪条路线？",
+        allowText: true,
+        options: [
+          { label: "废材逆袭", value: "废材逆袭" },
+          { label: "凡人修仙", value: "凡人修仙" }
+        ]
+      },
+      {
+        approvalId: "tone-approval",
+        kind: "question",
+        header: "故事风格",
+        question: "整体风格是什么？",
+        allowText: true,
+        options: [
+          { label: "热血爽文", value: "热血爽文" },
+          { label: "史诗宏大", value: "史诗宏大" }
+        ]
+      },
+      {
+        approvalId: "length-approval",
+        kind: "question",
+        header: "篇幅规模",
+        question: "准备写多长？",
+        allowText: true,
+        options: [
+          { label: "短篇", value: "短篇" },
+          { label: "长篇", value: "长篇" }
+        ]
+      }
+    ];
+    const wrapper = shallowMount(AgentPanel);
+    const utils = (wrapper.vm as any).__testUtils;
+    await nextTick();
+    utils.approvalDrafts.value = {
+      "protagonist-approval": { value: "废材逆袭", text: "" },
+      "tone-approval": { value: "史诗宏大", text: "" },
+      "length-approval": { value: "长篇", text: "" }
+    };
+
+    await utils.handleApprovalConfirm();
+
+    expect(api.resolveAgentCoomiApproval).toHaveBeenNthCalledWith(
+      1,
+      "protagonist-approval",
+      "answer",
+      {
+        answer: "废材逆袭",
+        value: "废材逆袭",
+        option: "废材逆袭",
+        label: "废材逆袭",
+        other_text: null
+      }
+    );
+    expect(api.resolveAgentCoomiApproval).toHaveBeenNthCalledWith(
+      2,
+      "tone-approval",
+      "answer",
+      expect.objectContaining({ answer: "史诗宏大", value: "史诗宏大" })
+    );
+    expect(api.resolveAgentCoomiApproval).toHaveBeenNthCalledWith(
+      3,
+      "length-approval",
+      "answer",
+      expect.objectContaining({ answer: "长篇", value: "长篇" })
+    );
     wrapper.unmount();
   });
 
