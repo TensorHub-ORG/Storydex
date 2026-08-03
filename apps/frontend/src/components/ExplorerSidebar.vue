@@ -166,7 +166,7 @@
                 type="button"
                 class="tree-row"
                 :class="{
-                  active: row.node.relativePath === workspaceStore.activeFile,
+                  active: row.node.relativePath === workspaceStore.activeFile && (selectedPaths.size === 0 || selectedPaths.has(nodePath(row.node))),
                   'is-selected': selectedPaths.has(nodePath(row.node)),
                   'is-folder': row.node.kind === 'directory',
                   'is-drop-target': isDirectoryDropTarget(row.node),
