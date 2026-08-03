@@ -26,6 +26,7 @@ vi.mock("@/api/client", async (load) => {
 });
 
 import { useWorkspaceStore } from "@/stores/workspace";
+import { ApiResponseError } from "@/api/client";
 
 const result = (data: unknown) => ({ data, trace: null, audit: [] });
 const project = { projectName: "Demo", workspaceRoot: "C:/story", storydexRoot: "C:/story/.storydex", storydexDirName: ".storydex", hasStorydexConfig: true, requiresInitialization: false, missingDirectories: [], projectState: "ready", openedAt: "now" };
@@ -162,6 +163,19 @@ describe("workspace store full action lifecycle", () => {
     store.removePathState("renamed"); expect(store.documents["renamed/a.md"]).toBeUndefined();
     store.tree = [{ kind: "file", relativePath: "keep.md" }] as any; store.reconcileWorkspaceStateWithTree();
     expect(store.pathExistsInTree("keep.md")).toBe(true); expect(store.resolveExistingPath("missing")).toBe("");
+  });
+
+  it("surfaces file operation errors to workspaceError and rethrows", async () => {
+    const store = useWorkspaceStore(); store.launchScreenVisible = false; store.currentProject = project as any;
+    vi.spyOn(store, "refreshTree").mockResolvedValue(undefined);
+    api.createWorkspaceDirectory.mockRejectedValueOnce(new ApiResponseError("目录已存在", "directory_exists"));
+
+    await expect(store.createDirectory("notes")).rejects.toThrow("目录已存在");
+    expect(store.workspaceError).toBe("目录已存在");
+
+    api.createWorkspaceFile.mockResolvedValueOnce(result(file("notes/a.md", "a")));
+    await store.createFile("notes/a.md", "a");
+    expect(store.workspaceError).toBe("");
   });
 
   it("opens large files progressively, jumps windows, cancels stale reads and allows explicit full loading", async () => {

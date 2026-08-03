@@ -945,59 +945,94 @@ export const useWorkspaceStore = defineStore("workspace", {
     },
 
     async createFile(relativePath: string, content = ""): Promise<WorkspaceFileDocument> {
-      const result = await createWorkspaceFile({ relativePath, content });
-      this.workspaceError = "";
-      await this.refreshTree();
-      this.applyFileDocument(result.data);
-      return result.data;
+      try {
+        const result = await createWorkspaceFile({ relativePath, content });
+        this.workspaceError = "";
+        await this.refreshTree();
+        this.applyFileDocument(result.data);
+        return result.data;
+      } catch (error: unknown) {
+        this.workspaceError = normalizeWorkspaceError(error);
+        throw error;
+      }
     },
 
     async createDirectory(relativePath: string): Promise<WorkspacePathInfo> {
-      const result = await createWorkspaceDirectory({ relativePath });
-      this.workspaceError = "";
-      await this.refreshTree();
-      return result.data;
+      try {
+        const result = await createWorkspaceDirectory({ relativePath });
+        this.workspaceError = "";
+        await this.refreshTree();
+        return result.data;
+      } catch (error: unknown) {
+        this.workspaceError = normalizeWorkspaceError(error);
+        throw error;
+      }
     },
 
     async importFiles(targetDirectory: string, files: WorkspaceImportFileItem[]): Promise<WorkspacePathInfo[]> {
-      const result = await importWorkspaceFiles({ targetDirectory, files });
-      this.workspaceError = "";
-      await this.refreshTree();
-      return result.data.items;
+      try {
+        const result = await importWorkspaceFiles({ targetDirectory, files });
+        this.workspaceError = "";
+        await this.refreshTree();
+        return result.data.items;
+      } catch (error: unknown) {
+        this.workspaceError = normalizeWorkspaceError(error);
+        throw error;
+      }
     },
 
     async renamePath(fromRelativePath: string, toRelativePath: string): Promise<WorkspacePathInfo> {
-      const result = await renameWorkspacePath({ fromRelativePath, toRelativePath });
-      this.workspaceError = "";
-      this.remapPathState(fromRelativePath, toRelativePath);
-      await this.refreshTree();
-      return result.data;
+      try {
+        const result = await renameWorkspacePath({ fromRelativePath, toRelativePath });
+        this.workspaceError = "";
+        this.remapPathState(fromRelativePath, toRelativePath);
+        await this.refreshTree();
+        return result.data;
+      } catch (error: unknown) {
+        this.workspaceError = normalizeWorkspaceError(error);
+        throw error;
+      }
     },
 
     async deletePath(relativePath: string): Promise<WorkspacePathInfo> {
-      const result = await deleteWorkspacePath({ relativePath });
-      this.workspaceError = "";
-      this.removePathState(relativePath);
-      await this.refreshTree();
-      return result.data;
+      try {
+        const result = await deleteWorkspacePath({ relativePath });
+        this.workspaceError = "";
+        this.removePathState(relativePath);
+        await this.refreshTree();
+        return result.data;
+      } catch (error: unknown) {
+        this.workspaceError = normalizeWorkspaceError(error);
+        throw error;
+      }
     },
 
     async copyPath(fromRelativePath: string, toRelativePath: string): Promise<WorkspacePathInfo> {
-      const result = await copyWorkspacePath({ fromRelativePath, toRelativePath });
-      this.workspaceError = "";
-      await this.refreshTree();
-      if (result.data.kind === "file") {
-        await this.openFile(toRelativePath);
+      try {
+        const result = await copyWorkspacePath({ fromRelativePath, toRelativePath });
+        this.workspaceError = "";
+        await this.refreshTree();
+        if (result.data.kind === "file") {
+          await this.openFile(toRelativePath);
+        }
+        return result.data;
+      } catch (error: unknown) {
+        this.workspaceError = normalizeWorkspaceError(error);
+        throw error;
       }
-      return result.data;
     },
 
     async movePath(fromRelativePath: string, toRelativePath: string): Promise<WorkspacePathInfo> {
-      const result = await moveWorkspacePath({ fromRelativePath, toRelativePath });
-      this.workspaceError = "";
-      this.remapPathState(fromRelativePath, toRelativePath);
-      await this.refreshTree();
-      return result.data;
+      try {
+        const result = await moveWorkspacePath({ fromRelativePath, toRelativePath });
+        this.workspaceError = "";
+        this.remapPathState(fromRelativePath, toRelativePath);
+        await this.refreshTree();
+        return result.data;
+      } catch (error: unknown) {
+        this.workspaceError = normalizeWorkspaceError(error);
+        throw error;
+      }
     },
 
     async refreshAfterCommit(segmentPath: string): Promise<void> {
