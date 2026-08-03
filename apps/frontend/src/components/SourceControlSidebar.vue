@@ -2,7 +2,7 @@
   <aside class="scm-panel">
     <header class="scm-header">
       <div class="scm-header-copy">
-        <h2 class="scm-title">版本控制</h2>
+        <h2 class="scm-title">时空线</h2>
         <p class="scm-project" :title="projectLabel">{{ projectLabel }}</p>
       </div>
 
@@ -10,7 +10,7 @@
         class="scm-icon-btn"
         type="button"
         :title="refreshTitle"
-        aria-label="刷新版本控制状态"
+        aria-label="刷新时空线状态"
         :disabled="workspaceStore.launchScreenVisible"
         @click="refreshSummary"
       >
@@ -23,14 +23,14 @@
         <div class="scm-empty-state">
           <span class="material-symbols-rounded scm-empty-icon">folder_open</span>
           <p class="scm-empty-title">尚未打开项目</p>
-          <p class="scm-empty-hint">先打开一个 Storydex 项目，这里会显示它的改动与历史版本。</p>
+          <p class="scm-empty-hint">先打开一个 Storydex 项目，这里会显示它的改动与时空线。</p>
         </div>
       </template>
 
       <template v-else-if="summary && !summary.gitInstalled">
         <div class="scm-empty-state is-warning">
           <span class="material-symbols-rounded scm-empty-icon">warning</span>
-          <p class="scm-empty-title">版本控制不可用</p>
+          <p class="scm-empty-title">时空线不可用</p>
           <p class="scm-empty-hint">{{ summary.message || "当前环境未安装 Git。" }}</p>
         </div>
       </template>
@@ -254,7 +254,7 @@ const nowTick = ref(Date.now());
  * the moment the user switches to this panel, so a fresh commit could stay
  * invisible until the project was reopened.
  */
-const AUTO_REFRESH_INTERVAL_MS = 5000;
+const AUTO_REFRESH_INTERVAL_MS = 3000;
 let autoRefreshTimer: number | null = null;
 let clockTimer: number | null = null;
 
@@ -341,7 +341,12 @@ watch(
 );
 
 function handleAutoRefresh(): void {
-  if (workspaceStore.launchScreenVisible || document.hidden || gitStore.isBusy) {
+  if (workspaceStore.launchScreenVisible || document.hidden) {
+    return;
+  }
+  // 只在正在提交/恢复时跳过（这些操作会改变仓库状态），不在 isLoading
+  // 时跳过——否则服务器慢时每次轮询都被跳过，状态永远不刷新。
+  if (gitStore.isCommitting || gitStore.isRestoring || gitStore.isInitializing) {
     return;
   }
   void gitStore.refreshSummary({ silent: true });
@@ -1079,10 +1084,14 @@ defineExpose({
   padding: 2px 8px 8px;
 }
 
-/* 平行时空线：TimelineGraph 内部自带滚动和 padding，外层去掉纵向 padding 避免双倍间距 */
+/* 平行时空线：TimelineGraph 自带高度和滚动，外层去掉 padding/overflow 避免冲突 */
 .scm-pane-body-timeline {
-  padding: 4px 4px 8px;
+  padding: 0;
   overflow: visible;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .scm-inline-empty {

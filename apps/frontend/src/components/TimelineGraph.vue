@@ -1,5 +1,19 @@
 <template>
-  <div ref="containerRef" class="timeline-graph">
+  <div ref="containerRef" class="timeline-graph" :style="{ height: containerHeight + 'px' }">
+    <!-- 拖动手柄（调整高度） -->
+    <div
+      class="timeline-resize-handle"
+      role="separator"
+      aria-orientation="horizontal"
+      aria-label="拖动调整时空线高度"
+      tabindex="0"
+      @mousedown.prevent="startResize"
+      @touchstart.prevent="startResize"
+      @keydown="onResizeKeydown"
+    >
+      <span class="timeline-resize-grip"></span>
+    </div>
+
     <!-- 空状态 -->
     <p v-if="!hasNodes" class="timeline-empty">
       {{ emptyHint }}
@@ -27,7 +41,15 @@
         </li>
       </ul>
 
-      <div class="timeline-canvas-wrap" @scroll.passive="onScroll">
+      <!-- 方向标注 -->
+      <div class="timeline-axis-hint">
+        <span>旧</span>
+        <span class="timeline-axis-arrow">→</span>
+        <span>新</span>
+      </div>
+
+      <!-- SVG 画布区域（占据剩余高度，横向滚动） -->
+      <div ref="canvasWrapRef" class="timeline-canvas-wrap">
         <svg
           :width="svgWidth"
           :height="svgHeight"
@@ -35,18 +57,29 @@
           class="timeline-svg"
           role="img"
           aria-label="平行时空线树状图"
+          preserveAspectRatio="xMin yMin meet"
         >
-          <!-- 分支 lane 背景条（让同一世界线的节点视觉连成一条带） -->
+          <!-- 分支 lane 背景条 -->
           <rect
             v-for="lane in laneBackgrounds"
             :key="`lane-${lane.row}`"
-            :x="PADDING_X"
+            :x="0"
             :y="lane.y - LANE_HEIGHT / 2"
-            :width="svgWidth - PADDING_X * 2"
+            :width="svgWidth"
             :height="LANE_HEIGHT"
             :class="['timeline-lane-bg', { 'is-current': lane.isCurrent }]"
             :style="{ fill: laneColor(lane.row) }"
           />
+
+          <!-- 分支标签（左侧） -->
+          <text
+            v-for="lane in laneBackgrounds"
+            :key="`lane-label-${lane.row}`"
+            :x="4"
+            :y="lane.y + 3"
+            class="timeline-lane-label"
+            :style="{ fill: laneColor(lane.row) }"
+          >{{ laneLabel(lane.row) }}</text>
 
           <!-- 边（父子提交连线） -->
           <path
@@ -88,12 +121,27 @@
               class="timeline-node-dot"
               :fill="laneColor(node.row)"
             />
-            <!-- 当前 HEAD 节点的中心标记 -->
+            <!-- 当前 HEAD 节点：双环 + 中心十字标记 -->
             <circle
               v-if="node.isCurrent"
-              :r="NODE_RADIUS - 3"
+              :r="NODE_RADIUS + 5"
+              class="timeline-node-current-ring"
+              :stroke="laneColor(node.row)"
+              fill="none"
+            />
+            <circle
+              v-if="node.isCurrent"
+              :r="NODE_RADIUS - 2"
               class="timeline-node-core"
             />
+            <!-- 当前节点文字标注 -->
+            <text
+              v-if="node.isCurrent"
+              :x="0"
+              :y="-NODE_RADIUS - 8"
+              class="timeline-node-label"
+              text-anchor="middle"
+            >当前</text>
           </g>
         </svg>
       </div>
@@ -136,7 +184,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import type {
   WorkspaceGitTimelineBranch,
   WorkspaceGitTimelineNode,
@@ -156,13 +204,17 @@ const emit = defineEmits<{
 }>();
 
 // 布局常量
-const NODE_RADIUS = 6;
-const COLUMN_WIDTH = 32;
-const ROW_HEIGHT = 40;
-const LANE_HEIGHT = 28;
-const PADDING_X = 20;
-const PADDING_Y = 24;
+const NODE_RADIUS = 7;
+const COLUMN_WIDTH = 36;
+const ROW_HEIGHT = 44;
+const LANE_HEIGHT = 30;
+const PADDING_X = 24;
+const PADDING_Y = 20;
 const MIN_SVG_WIDTH = 280;
+const MIN_HEIGHT = 120;
+const MAX_HEIGHT = 600;
+const DEFAULT_HEIGHT = 260;
+const STORAGE_KEY_HEIGHT = "storydex.timeline.height";
 
 // 分支 lane 配色（循环取色）。当前分支用第一个颜色（蓝），其他分支按 lane 索引取。
 const LANE_COLORS = [
@@ -177,9 +229,25 @@ const LANE_COLORS = [
 ];
 
 const containerRef = ref<HTMLElement | null>(null);
+const canvasWrapRef = ref<HTMLElement | null>(null);
 const hoveredNodeId = ref<string | null>(null);
-const hoverClientX = ref(0);
-const hoverClientY = ref(0);
+const containerHeight = ref(DEFAULT_HEIGHT);
+let resizing = false;
+let resizeStartY = 0;
+let resizeStartHeight = 0;
+
+// 从 localStorage 恢复高度
+try {
+  const saved = localStorage.getItem(STORAGE_KEY_HEIGHT);
+  if (saved) {
+    const val = parseInt(saved, 10);
+    if (Number.isFinite(val) && val >= MIN_HEIGHT && val <= MAX_HEIGHT) {
+      containerHeight.value = val;
+    }
+  }
+} catch {
+  // ignore
+}
 
 const detached = computed(() => Boolean(props.detachedOverride || props.timeline?.detached));
 const branches = computed<WorkspaceGitTimelineBranch[]>(() => props.timeline?.branches || []);
@@ -225,9 +293,13 @@ const svgWidth = computed(() => {
   return Math.max(MIN_SVG_WIDTH, width);
 });
 
-const svgHeight = computed(() => PADDING_Y * 2 + (maxRow.value + 1) * ROW_HEIGHT);
+/** SVG 高度至少容纳所有 lane，但不小于容器高度（让 lane 背景填满）。 */
+const svgHeight = computed(() => {
+  const laneHeight = PADDING_Y * 2 + (maxRow.value + 1) * ROW_HEIGHT;
+  return laneHeight;
+});
 
-/** 为节点附加 SVG 坐标。 */
+/** 为节点附加 SVG 坐标。column=0 在左（旧），column=max 在右（新）。 */
 const layoutNodes = computed(() =>
   rawNodes.value.map((node) => ({
     ...node,
@@ -250,19 +322,23 @@ interface EdgePath {
   isCurrentLine: boolean;
 }
 
-/** 计算每条边的 SVG path（cubic bezier 水平曲线）。 */
+/**
+ * 计算每条边的 SVG path。
+ * edge.from = parent（旧，左），edge.to = child（新，右）。
+ * 线从 parent(x小,左) 指向 child(x大,右)。
+ */
 const edgePaths = computed<EdgePath[]>(() => {
   const edges = props.timeline?.edges || [];
   const result: EdgePath[] = [];
   for (const edge of edges) {
-    const child = nodeById.value.get(edge.to);
     const parent = nodeById.value.get(edge.from);
-    if (!child || !parent) continue;
-    // child 在左（column 小），parent 在右（column 大）
-    const x1 = child.x;
-    const y1 = child.y;
-    const x2 = parent.x;
-    const y2 = parent.y;
+    const child = nodeById.value.get(edge.to);
+    if (!parent || !child) continue;
+    // parent 在左（column 小），child 在右（column 大）
+    const x1 = parent.x;
+    const y1 = parent.y;
+    const x2 = child.x;
+    const y2 = child.y;
     const dx = Math.max(8, Math.min(24, Math.abs(x2 - x1) / 2));
     const path = `M ${x1},${y1} C ${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`;
     const color = laneColor(child.row);
@@ -300,27 +376,42 @@ const hoveredNode = computed(() => {
 });
 
 const tooltipStyle = computed(() => {
-  if (!containerRef.value || !hoveredNode.value) {
+  if (!canvasWrapRef.value || !hoveredNode.value) {
     return { display: "none" };
   }
-  const rect = containerRef.value.getBoundingClientRect();
-  // tooltip 出现在节点右侧（最新节点在左侧，向右展开更自然），超出右边时翻到左侧。
+  const wrap = canvasWrapRef.value;
+  const wrapRect = wrap.getBoundingClientRect();
+  const containerRect = containerRef.value?.getBoundingClientRect();
+  if (!containerRect) return { display: "none" };
+  // tooltip 相对于 containerRef 定位
   const nodeX = hoveredNode.value.x;
   const nodeY = hoveredNode.value.y;
+  // 考虑横向滚动偏移
+  const scrollLeft = wrap.scrollLeft;
   const tooltipWidth = 240;
   const tooltipHeight = 120;
-  const placeLeft = nodeX + tooltipWidth + 16 > rect.width;
-  const left = placeLeft ? nodeX - tooltipWidth - 12 : nodeX + 12;
-  // 垂直居中节点，但不超过容器边界
-  const top = Math.max(4, Math.min(rect.height - tooltipHeight - 4, nodeY - tooltipHeight / 2));
+  // 节点在容器中的实际 X 位置（减去画布偏移）
+  const visibleX = nodeX - scrollLeft + (wrapRect.left - containerRect.left);
+  const visibleY = nodeY + (wrapRect.top - containerRect.top);
+  const placeLeft = visibleX + tooltipWidth + 16 > containerRect.width;
+  const left = placeLeft ? visibleX - tooltipWidth - 12 : visibleX + 14;
+  const top = Math.max(4, Math.min(containerRect.height - tooltipHeight - 4, visibleY - tooltipHeight / 2));
   return {
-    left: `${left}px`,
+    left: `${Math.max(4, left)}px`,
     top: `${top}px`
   };
 });
 
 function laneColor(lane: number): string {
   return LANE_COLORS[lane % LANE_COLORS.length];
+}
+
+function laneLabel(row: number): string {
+  const branch = branches.value.find((b) => b.lane === row);
+  if (!branch) return "";
+  const name = branch.name;
+  // 截断长分支名
+  return name.length > 12 ? name.slice(0, 11) + "…" : name;
 }
 
 function nodeClass(node: (typeof layoutNodes.value)[number]): string {
@@ -350,8 +441,7 @@ function onNodeClick(node: (typeof layoutNodes.value)[number]): void {
 function onNodeHover(node: (typeof layoutNodes.value)[number], event: MouseEvent | FocusEvent): void {
   hoveredNodeId.value = node.id;
   if (event instanceof MouseEvent) {
-    hoverClientX.value = event.clientX;
-    hoverClientY.value = event.clientY;
+    // 不再需要 client 坐标，tooltip 基于 SVG 坐标定位
   }
 }
 
@@ -360,9 +450,73 @@ function onNodeLeave(): void {
 }
 
 function onScroll(): void {
-  // 滚动时隐藏 tooltip，避免定位错乱
   hoveredNodeId.value = null;
 }
+
+// ---- 拖动调整高度 ----
+function startResize(event: MouseEvent | TouchEvent): void {
+  resizing = true;
+  const clientY = "touches" in event ? event.touches[0].clientY : event.clientY;
+  resizeStartY = clientY;
+  resizeStartHeight = containerHeight.value;
+  document.addEventListener("mousemove", onResizeMove);
+  document.addEventListener("mouseup", stopResize);
+  document.addEventListener("touchmove", onResizeMove, { passive: false });
+  document.addEventListener("touchend", stopResize);
+  document.body.style.cursor = "ns-resize";
+  document.body.style.userSelect = "none";
+}
+
+function onResizeMove(event: MouseEvent | TouchEvent): void {
+  if (!resizing) return;
+  event.preventDefault();
+  const clientY = "touches" in event ? event.touches[0].clientY : (event as MouseEvent).clientY;
+  const delta = clientY - resizeStartY;
+  const newHeight = Math.max(MIN_HEIGHT, Math.min(MAX_HEIGHT, resizeStartHeight + delta));
+  containerHeight.value = newHeight;
+}
+
+function stopResize(): void {
+  resizing = false;
+  document.removeEventListener("mousemove", onResizeMove);
+  document.removeEventListener("mouseup", stopResize);
+  document.removeEventListener("touchmove", onResizeMove);
+  document.removeEventListener("touchend", stopResize);
+  document.body.style.cursor = "";
+  document.body.style.userSelect = "";
+  try {
+    localStorage.setItem(STORAGE_KEY_HEIGHT, String(containerHeight.value));
+  } catch {
+    // ignore
+  }
+}
+
+function onResizeKeydown(event: KeyboardEvent): void {
+  let delta = 0;
+  if (event.key === "ArrowUp") delta = -20;
+  else if (event.key === "ArrowDown") delta = 20;
+  else return;
+  event.preventDefault();
+  containerHeight.value = Math.max(MIN_HEIGHT, Math.min(MAX_HEIGHT, containerHeight.value + delta));
+  try {
+    localStorage.setItem(STORAGE_KEY_HEIGHT, String(containerHeight.value));
+  } catch {
+    // ignore
+  }
+}
+
+onMounted(() => {
+  if (canvasWrapRef.value) {
+    canvasWrapRef.value.addEventListener("scroll", onScroll, { passive: true });
+  }
+});
+
+onBeforeUnmount(() => {
+  stopResize();
+  if (canvasWrapRef.value) {
+    canvasWrapRef.value.removeEventListener("scroll", onScroll);
+  }
+});
 
 function formatTimestamp(value: string): string {
   const date = new Date(value);
@@ -392,11 +546,42 @@ defineExpose({
 .timeline-graph {
   position: relative;
   width: 100%;
-  min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
   font-size: 12px;
+  overflow: hidden;
+}
+
+/* 拖动手柄 */
+.timeline-resize-handle {
+  flex: 0 0 auto;
+  height: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: ns-resize;
+  background: var(--bg-ghost, rgba(0, 0, 0, 0.04));
+  border-top: 1px solid var(--border-ghost, rgba(0, 0, 0, 0.06));
+  border-bottom: 1px solid var(--border-ghost, rgba(0, 0, 0, 0.06));
+  transition: background 0.15s;
+}
+
+.timeline-resize-handle:hover,
+.timeline-resize-handle:focus-visible {
+  background: var(--bg-hover, rgba(0, 0, 0, 0.08));
+  outline: none;
+}
+
+.timeline-resize-grip {
+  width: 36px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--text-faint, #aaa);
+  transition: background 0.15s;
+}
+
+.timeline-resize-handle:hover .timeline-resize-grip {
+  background: var(--text-muted, #666);
 }
 
 .timeline-empty {
@@ -413,13 +598,14 @@ defineExpose({
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 10px;
+  padding: 5px 10px;
   margin: 0 4px;
   border-radius: 6px;
   background: rgba(245, 158, 11, 0.12);
   color: #b45309;
   font-size: 11px;
   line-height: 1.4;
+  flex: 0 0 auto;
 }
 
 .timeline-detached-banner .material-symbols-rounded {
@@ -429,12 +615,13 @@ defineExpose({
 
 .timeline-legend {
   list-style: none;
-  margin: 0 4px;
+  margin: 2px 4px;
   padding: 0;
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 10px;
+  gap: 3px 8px;
   font-size: 11px;
+  flex: 0 0 auto;
 }
 
 .timeline-legend-item {
@@ -442,7 +629,7 @@ defineExpose({
   align-items: center;
   gap: 4px;
   max-width: 160px;
-  padding: 2px 6px;
+  padding: 1px 6px;
   border-radius: 10px;
   background: var(--bg-ghost, rgba(0, 0, 0, 0.04));
 }
@@ -475,35 +662,58 @@ defineExpose({
   line-height: 16px;
 }
 
+.timeline-axis-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 2px;
+  font-size: 10px;
+  color: var(--text-faint, #999);
+  flex: 0 0 auto;
+}
+
+.timeline-axis-arrow {
+  flex: 1 1 auto;
+  text-align: center;
+  border-bottom: 1px dashed var(--border-ghost, rgba(0, 0, 0, 0.1));
+  padding-bottom: 1px;
+}
+
+/* SVG 画布区域：占据剩余高度，底部滚动条 */
 .timeline-canvas-wrap {
-  width: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-x: auto;
-  overflow-y: hidden;
-  padding: 4px 0;
-  /* 让滚动条不占位 */
+  overflow-y: auto;
   scrollbar-width: thin;
 }
 
 .timeline-svg {
   display: block;
-  /* 节点点击区域稍大一些 */
   cursor: default;
 }
 
 .timeline-lane-bg {
-  opacity: 0.06;
+  opacity: 0.05;
   rx: 4;
   ry: 4;
 }
 
 .timeline-lane-bg.is-current {
-  opacity: 0.1;
+  opacity: 0.09;
+}
+
+.timeline-lane-label {
+  font-size: 9px;
+  font-family: var(--font-mono, monospace);
+  opacity: 0.5;
+  pointer-events: none;
 }
 
 .timeline-edge {
   stroke-width: 2;
   fill: none;
-  opacity: 0.7;
+  opacity: 0.65;
   transition: opacity 0.15s;
 }
 
@@ -537,8 +747,27 @@ defineExpose({
   stroke-width: 2;
 }
 
+.timeline-node-current-ring {
+  stroke-width: 2;
+  opacity: 0.8;
+  animation: timeline-pulse 2s ease-in-out infinite;
+}
+
+@keyframes timeline-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.9; }
+}
+
 .timeline-node-core {
   fill: var(--bg-panel, #fff);
+}
+
+.timeline-node-label {
+  font-size: 9px;
+  font-weight: 600;
+  fill: var(--accent, #3b82f6);
+  pointer-events: none;
+  text-shadow: 0 0 4px var(--bg-panel, #fff);
 }
 
 .timeline-node.is-current .timeline-node-dot {
