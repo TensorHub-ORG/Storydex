@@ -347,7 +347,7 @@ export interface WorkspaceGitTimelineNode {
   headBranches: string[];
   isBranchHead: boolean;
   isCurrent: boolean;
-  /** X 轴时间深度，最新提交=0，越早越大。 */
+  /** X 轴位置，最旧提交=0（左），最新=最大（右）。 */
   column: number;
   /** Y 轴分支 lane，对应所属分支的 lane。 */
   row: number;

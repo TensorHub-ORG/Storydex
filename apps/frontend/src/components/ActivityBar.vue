@@ -134,7 +134,7 @@ const openMenu = ref<OpenMenu>(null);
 const topItems: ActivityItem[] = [
   { id: "resources", label: "文件", icon: "description" },
   { id: "search", label: "搜索", icon: "search" },
-  { id: "source-control", label: "版本控制", icon: "account_tree" },
+  { id: "source-control", label: "时空线", icon: "account_tree" },
   { id: "presets", label: "预设管理", icon: "tune" },
   { id: "relationships", label: "知识图谱", icon: "hub", iconClass: "activity-icon-symbol-compact" },
   { id: "prompts", label: "指令仓库", icon: "prompt_suggestion" }

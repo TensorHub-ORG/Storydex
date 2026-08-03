@@ -420,7 +420,8 @@ class GitService:
         else:
             self._run_git(root, ["branch", branch])
         if checkout and self._has_head_commit(root):
-            self._run_git(root, ["switch", branch])
+            self._clean_internal_paths(root)
+            self._run_git(root, ["checkout", branch])
         return {**self.list_branches(root), "summary": self.read_summary(root)}
 
     @_serialized
@@ -439,7 +440,14 @@ class GitService:
                 details={"branch": branch, "hint": "Commit or discard changes first."},
                 status_code=409,
             )
-        self._run_git(root, ["switch", branch])
+        # 清理内部忽略路径下的未跟踪文件。这些文件（.storydex/.cache/ 数据库
+        # 等）在 .gitignore 中，但在旧版 Storydex 中可能被提交到某些分支。
+        # _ensure_internal_paths_untracked 已从当前分支删除了跟踪，但其他
+        # 分支可能仍有跟踪。切换时 git 会尝试 checkout 这些文件，与工作区
+        # 中已存在的未跟踪版本冲突 → "untracked working tree files would be
+        # overwritten"。git clean -fd 只删除未跟踪文件，安全（缓存会重建）。
+        self._clean_internal_paths(root)
+        self._run_git(root, ["checkout", branch])
         return {**self.list_branches(root), "summary": self.read_summary(root)}
 
     @_serialized
@@ -449,9 +457,9 @@ class GitService:
         返回所有分支的提交节点、节点间父子关系和分支信息。Storydex 的分支
         语义是"只分不合"：每个分支代表一条独立的世界线，分支可以分叉但不
         会合并。布局算法据此为每个节点分配 ``(column, row)`` 坐标，前端按
-        横向树状图渲染（``column`` 对应 X 轴时间深度，``row`` 对应 Y 轴分支
-        lane）。``column`` 从 0 开始，最新提交为 0，越早越大；``row`` 同样
-        从 0 开始，当前分支 lane=0，其他分支按字母序排列。
+        横向树状图渲染（``column`` 对应 X 轴，``row`` 对应 Y 轴分支 lane）。
+        ``column`` 从 0 开始，**最旧的提交为 0（左），最新的最大（右）**；
+        ``row`` 从 0 开始，当前分支 lane=0，其他分支按字母序排列。
         """
         root = self._resolve_workspace_root(workspace_root)
         if not self.is_git_available():
@@ -528,16 +536,27 @@ class GitService:
             }
 
         # 3. 拉取所有 commits（含 parents）。`--all` 让所有分支的提交都进入
-        #    结果，detached HEAD 的当前提交也由 HEAD 引用可达。
-        log_output = self._run_git(
-            root,
-            [
-                "log",
-                "--all",
-                "--date=iso-strict",
-                "--pretty=format:%H%x1f%P%x1f%h%x1f%an%x1f%ad%x1f%D%x1f%s",
-            ],
-        )
+        #    结果；显式加上 `HEAD` 确保 detached HEAD 的当前提交也被包含
+        #    （--all 只遍历 refs/，不包含游离 HEAD）。
+        log_args = [
+            "log",
+            "--all",
+            "HEAD",
+            "--date=iso-strict",
+            "--pretty=format:%H%x1f%P%x1f%h%x1f%an%x1f%ad%x1f%D%x1f%s",
+        ]
+        log_output = self._run_git(root, log_args, check=False)
+        if not log_output.strip():
+            log_output = self._run_git(
+                root,
+                [
+                    "log",
+                    "--all",
+                    "--date=iso-strict",
+                    "--pretty=format:%H%x1f%P%x1f%h%x1f%an%x1f%ad%x1f%D%x1f%s",
+                ],
+                check=False,
+            )
         raw_commits: List[Dict[str, Any]] = []
         for line in log_output.splitlines():
             parts = line.split("\x1f")
@@ -606,10 +625,10 @@ class GitService:
                 if parent_id in commit_ids:
                     edges.append({"from": parent_id, "to": cid})
 
-        # 7. 布局坐标：column = 全局时间倒序索引（最新=0）；row = 所属分支
-        #    lane 最小值。Storydex 分支只分不合，节点通常只属于一个分支，
-        #    merge 节点（属于多分支）取 lane 最小者以保持视觉连续。
-        sorted_nodes = sorted(nodes, key=lambda n: n["authoredAt"], reverse=True)
+        # 7. 布局坐标：column = 时间正序索引（最旧=0 在左，最新=最大在右）；
+        #    row = 所属分支 lane 最小值。Storydex 分支只分不合，节点通常只
+        #    属于一个分支，merge 节点（属于多分支）取 lane 最小者以保持视觉连续。
+        sorted_nodes = sorted(nodes, key=lambda n: n["authoredAt"])
         for index, node in enumerate(sorted_nodes):
             node["column"] = index
             if node["branches"]:
@@ -684,6 +703,8 @@ class GitService:
                 "summary": self.read_summary(root),
             }
 
+        # 清理内部忽略路径下的未跟踪文件，避免与目标提交中的 tracked 版本冲突
+        self._clean_internal_paths(root)
         self._run_git(root, ["checkout", "--detach", str(target.get("id") or normalized)])
         return {
             "detached": True,
@@ -869,12 +890,42 @@ class GitService:
         ``git status`` and can no longer leak into Agent commit pathspecs.
         ``--ignore-unmatch`` makes this idempotent: it is a no-op once the
         paths are already untracked.
+
+        If ``git rm --cached`` actually staged a deletion (legacy repo), the
+        staged change would block ``git switch`` / ``git checkout`` with
+        "Your local changes would be overwritten by checkout" — the target
+        branch still has the file tracked. We auto-commit the deletion with a
+        chore message so the index is clean and branch operations succeed.
+        This commit only fires once per legacy repo; once the paths are
+        untracked, subsequent calls are no-ops.
         """
         root = self._resolve_workspace_root(workspace_root)
+        staged_any = False
         for prefix in self.INTERNAL_IGNORE_PREFIXES:
+            before = self._run_git(
+                root,
+                ["diff", "--cached", "--name-only", "--", prefix.rstrip("/")],
+                check=False,
+            )
             self._run_git(
                 root,
                 ["rm", "-r", "--cached", "--ignore-unmatch", prefix.rstrip("/")],
+                check=False,
+            )
+            after = self._run_git(
+                root,
+                ["diff", "--cached", "--name-only", "--", prefix.rstrip("/")],
+                check=False,
+            )
+            # If rm --cached staged new deletions (after has entries not in before)
+            after_set = {line.strip() for line in after.splitlines() if line.strip()}
+            before_set = {line.strip() for line in before.splitlines() if line.strip()}
+            if after_set - before_set:
+                staged_any = True
+        if staged_any and self._has_head_commit(root):
+            self._run_git(
+                root,
+                ["commit", "--no-gpg-sign", "-m", "chore: untrack internal Storydex paths"],
                 check=False,
             )
 
@@ -1341,6 +1392,23 @@ class GitService:
         )
         return bool(result.strip())
 
+    def _clean_internal_paths(self, workspace_root: Path) -> None:
+        """删除内部忽略路径下的未跟踪文件，避免分支切换/跳转时与目标版本冲突。
+
+        ``.storydex/.cache/`` 数据库等文件在 .gitignore 中，但旧版 Storydex
+        可能将它们提交到某些分支。从当前分支删除跟踪后（_ensure_internal_paths_untracked），
+        这些文件变成未跟踪文件留在工作区。切换到仍有跟踪的分支时，git checkout
+        会因 "untracked working tree files would be overwritten" 失败。
+        ``git clean -fd`` 只删除未跟踪文件，缓存文件会在应用运行时自动重建。
+        """
+        root = self._resolve_workspace_root(workspace_root)
+        for prefix in self.INTERNAL_IGNORE_PREFIXES:
+            self._run_git(
+                root,
+                ["clean", "-fd", "--", prefix.rstrip("/")],
+                check=False,
+            )
+
     @classmethod
     def _run_git(cls, workspace_root: Path, args: List[str], *, check: bool = True) -> str:
         root = cls._resolve_workspace_root(workspace_root)
@@ -1351,13 +1419,19 @@ class GitService:
     def _run_git_process(cls, workspace_root: Path, args: List[str], *, check: bool = True) -> str:
         result = cls._run_git_process_result(workspace_root, args)
         if check and result.returncode != 0:
+            stderr = result.stderr.strip()
+            # 将 stderr 的首行并入 message，让前端直接显示真正的 git 错误原因
+            # （如 "error: Your local changes would be overwritten by checkout"），
+            # 而不是笼统的 "Local Git command failed."
+            first_line = stderr.splitlines()[0] if stderr else ""
+            message = f"Local Git command failed: {first_line}" if first_line else "Local Git command failed."
             raise GitServiceError(
-                "Local Git command failed.",
+                message,
                 details={
                     "args": args,
                     "gitExecutable": cls._resolve_git_executable(),
                     "returncode": result.returncode,
-                    "stderr": result.stderr.strip(),
+                    "stderr": stderr,
                     "stdout": result.stdout.strip(),
                 },
             )

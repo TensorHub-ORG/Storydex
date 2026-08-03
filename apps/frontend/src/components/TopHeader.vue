@@ -380,8 +380,8 @@ const STATIC_COMMANDS: StaticCommandDefinition[] = [
   },
   {
     key: "activity:source-control",
-    label: "打开版本控制",
-    keywords: "git 版本 提交 diff",
+    label: "打开时空线",
+    keywords: "git 版本 时空线 提交 diff",
     icon: "account_tree",
     requiresProject: true,
     run: () => switchActivity("source-control"),
