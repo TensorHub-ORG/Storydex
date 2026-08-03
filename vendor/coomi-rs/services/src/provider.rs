@@ -692,10 +692,64 @@ struct PartialToolCall {
     arguments: String,
 }
 
+fn merge_streamed_identifier(target: &mut String, fragment: &str) {
+    if target.is_empty() {
+        target.push_str(fragment);
+    } else if fragment.starts_with(target.as_str()) {
+        *target = fragment.to_owned();
+    } else if target != fragment && !target.ends_with(fragment) {
+        target.push_str(fragment);
+    }
+}
+
+fn merge_partial_tool_call(target: &mut PartialToolCall, source: PartialToolCall) {
+    if target.id.is_empty() {
+        target.id = source.id;
+    }
+    if target.name.is_empty() {
+        target.name = source.name;
+    }
+    if target.arguments.is_empty() || source.arguments.starts_with(&target.arguments) {
+        target.arguments = source.arguments;
+    } else if !source.arguments.is_empty()
+        && source.arguments != target.arguments
+        && !target.arguments.starts_with(&source.arguments)
+    {
+        target.arguments.push_str(&source.arguments);
+    }
+}
+
+fn response_tool_aliases(value: &Value, item: Option<&Value>) -> Vec<String> {
+    let mut aliases = Vec::new();
+    if let Some(index) = value.get("output_index").and_then(|index| {
+        index
+            .as_u64()
+            .map(|value| value.to_string())
+            .or_else(|| index.as_str().map(str::to_owned))
+    }) {
+        aliases.push(format!("output-index:{index}"));
+    }
+    for (prefix, id) in [
+        ("item", value.get("item_id")),
+        ("call", value.get("call_id")),
+        ("item", item.and_then(|item| item.get("id"))),
+        ("call", item.and_then(|item| item.get("call_id"))),
+    ] {
+        if let Some(id) = id.and_then(Value::as_str).filter(|id| !id.is_empty()) {
+            let alias = format!("{prefix}:{id}");
+            if !aliases.contains(&alias) {
+                aliases.push(alias);
+            }
+        }
+    }
+    aliases
+}
+
 #[derive(Default)]
 struct ChatStreamState {
     content: String,
     tools: BTreeMap<usize, PartialToolCall>,
+    implicit_tools: BTreeMap<usize, usize>,
     usage: TokenUsage,
 }
 
@@ -718,24 +772,52 @@ impl ChatStreamState {
             self.content.push_str(content);
             observer.on_text_delta(content);
         }
-        for item in delta
+        for (position, item) in delta
             .get("tool_calls")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
+            .enumerate()
         {
-            let index = item
+            let explicit_index = item
                 .get("index")
                 .and_then(Value::as_u64)
-                .and_then(|value| usize::try_from(value).ok())
-                .unwrap_or(self.tools.len());
+                .and_then(|value| usize::try_from(value).ok());
+            let item_id = item.get("id").and_then(Value::as_str).unwrap_or_default();
+            let item_name = item
+                .pointer("/function/name")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let index = explicit_index.unwrap_or_else(|| {
+                self.tools
+                    .iter()
+                    .find_map(|(index, call)| {
+                        (!item_id.is_empty() && call.id == item_id).then_some(*index)
+                    })
+                    .or_else(|| {
+                        self.implicit_tools.get(&position).copied().filter(|index| {
+                            self.tools.get(index).is_some_and(|call| {
+                                (item_id.is_empty() || call.id.is_empty() || call.id == item_id)
+                                    && (item_name.is_empty()
+                                        || call.name.is_empty()
+                                        || call.name == item_name)
+                            })
+                        })
+                    })
+                    .unwrap_or_else(|| {
+                        self.tools
+                            .last_key_value()
+                            .map_or(0, |(index, _)| index + 1)
+                    })
+            });
+            self.implicit_tools.insert(position, index);
             let target = self.tools.entry(index).or_default();
-            if let Some(id) = item.get("id").and_then(Value::as_str) {
-                target.id.push_str(id);
+            if !item_id.is_empty() {
+                merge_streamed_identifier(&mut target.id, item_id);
             }
             if let Some(function) = item.get("function") {
                 if let Some(name) = function.get("name").and_then(Value::as_str) {
-                    target.name.push_str(name);
+                    merge_streamed_identifier(&mut target.name, name);
                 }
                 if let Some(arguments) = function.get("arguments").and_then(Value::as_str) {
                     target.arguments.push_str(arguments);
@@ -826,10 +908,61 @@ impl CompactionStreamState {
 struct ResponsesStreamState {
     content: String,
     tools: BTreeMap<String, PartialToolCall>,
+    tool_aliases: BTreeMap<String, String>,
     usage: TokenUsage,
 }
 
 impl ResponsesStreamState {
+    fn resolve_tool_key(&mut self, value: &Value, item: Option<&Value>) -> String {
+        let aliases = response_tool_aliases(value, item);
+        let mut existing_keys = aliases
+            .iter()
+            .filter_map(|alias| {
+                self.tool_aliases
+                    .get(alias)
+                    .cloned()
+                    .or_else(|| self.tools.contains_key(alias).then(|| alias.clone()))
+            })
+            .collect::<Vec<_>>();
+        existing_keys.dedup();
+
+        let key = existing_keys.first().cloned().unwrap_or_else(|| {
+            aliases.first().cloned().unwrap_or_else(|| {
+                if self.tools.len() == 1
+                    && let Some((key, _)) = self.tools.first_key_value()
+                {
+                    return key.clone();
+                }
+                let mut index = self.tools.len();
+                loop {
+                    let candidate = format!("anonymous-tool-{index}");
+                    if !self.tools.contains_key(&candidate) {
+                        return candidate;
+                    }
+                    index += 1;
+                }
+            })
+        });
+
+        for old_key in existing_keys.into_iter().skip(1) {
+            if old_key == key {
+                continue;
+            }
+            if let Some(source) = self.tools.remove(&old_key) {
+                merge_partial_tool_call(self.tools.entry(key.clone()).or_default(), source);
+            }
+            for target in self.tool_aliases.values_mut() {
+                if *target == old_key {
+                    *target = key.clone();
+                }
+            }
+        }
+        for alias in aliases {
+            self.tool_aliases.insert(alias, key.clone());
+        }
+        key
+    }
+
     fn consume(&mut self, value: &Value, observer: &dyn ModelStreamObserver) -> Result<()> {
         match value.get("type").and_then(Value::as_str) {
             Some("response.output_text.delta") => {
@@ -847,31 +980,36 @@ impl ResponsesStreamState {
                 if let Some(item) = value.get("item")
                     && item.get("type").and_then(Value::as_str) == Some("function_call")
                 {
+                    let key = self.resolve_tool_key(value, Some(item));
                     let id = item
                         .get("call_id")
                         .or_else(|| item.get("id"))
                         .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned();
-                    let target = self.tools.entry(id.clone()).or_default();
-                    target.id = id;
+                        .unwrap_or_default();
+                    let target = self.tools.entry(key).or_default();
+                    if !id.is_empty() {
+                        target.id = id.to_owned();
+                    }
                     if let Some(name) = item.get("name").and_then(Value::as_str) {
                         target.name = name.to_owned();
                     }
-                    if let Some(arguments) = item.get("arguments").and_then(Value::as_str) {
+                    if let Some(arguments) = item.get("arguments").and_then(Value::as_str)
+                        && (!arguments.is_empty() || target.arguments.is_empty())
+                    {
                         target.arguments = arguments.to_owned();
                     }
                 }
             }
             Some("response.function_call_arguments.delta") => {
-                let id = value
-                    .get("call_id")
-                    .or_else(|| value.get("item_id"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned();
+                let key = self.resolve_tool_key(value, None);
                 if let Some(delta) = value.get("delta").and_then(Value::as_str) {
-                    self.tools.entry(id).or_default().arguments.push_str(delta);
+                    let target = self.tools.entry(key).or_default();
+                    if target.id.is_empty()
+                        && let Some(call_id) = value.get("call_id").and_then(Value::as_str)
+                    {
+                        target.id = call_id.to_owned();
+                    }
+                    target.arguments.push_str(delta);
                 }
             }
             Some("response.completed") => {
@@ -1318,6 +1456,14 @@ fn nested_u64(value: Option<&Value>, key: &str) -> u64 {
 mod tests {
     use super::*;
 
+    struct TestStreamObserver;
+
+    impl ModelStreamObserver for TestStreamObserver {
+        fn on_text_delta(&self, _delta: &str) {}
+
+        fn on_reasoning_delta(&self, _delta: &str) {}
+    }
+
     #[test]
     fn rejects_non_object_tool_arguments() {
         assert!(parse_arguments(&Value::String("[]".into())).is_err());
@@ -1337,6 +1483,98 @@ mod tests {
         assert_eq!(
             rendered[0].pointer("/tool_calls/0/function/name"),
             Some(&Value::String("read_file".into()))
+        );
+    }
+
+    #[test]
+    fn chat_stream_merges_tool_fragments_without_indexes() {
+        let mut state = ChatStreamState::default();
+        for value in [
+            json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "id": "call-1",
+                            "function": {"name": "read_file", "arguments": ""}
+                        }]
+                    }
+                }]
+            }),
+            json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{"function": {"arguments": "{\"path\":"}}]
+                    }
+                }]
+            }),
+            json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{"function": {"arguments": "\"README.md\"}"}}]
+                    }
+                }]
+            }),
+        ] {
+            state
+                .consume(&value, &TestStreamObserver)
+                .expect("consume chat stream fragment");
+        }
+
+        let response = state.finish().expect("finish chat stream");
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].id, "call-1");
+        assert_eq!(response.tool_calls[0].name, "read_file");
+        assert_eq!(
+            response.tool_calls[0].arguments,
+            json!({"path": "README.md"})
+        );
+    }
+
+    #[test]
+    fn responses_stream_merges_item_and_call_id_fragments() {
+        let mut state = ResponsesStreamState::default();
+        for value in [
+            json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "id": "fc-1",
+                    "call_id": "call-1",
+                    "type": "function_call",
+                    "name": "read_file",
+                    "arguments": ""
+                }
+            }),
+            json!({
+                "type": "response.function_call_arguments.delta",
+                "output_index": 0,
+                "item_id": "fc-1",
+                "delta": "{\"path\":\"README.md\"}"
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "id": "fc-1",
+                    "call_id": "call-1",
+                    "type": "function_call",
+                    "name": "read_file",
+                    "arguments": "{\"path\":\"README.md\"}"
+                }
+            }),
+        ] {
+            state
+                .consume(&value, &TestStreamObserver)
+                .expect("consume Responses stream event");
+        }
+
+        let response = state.finish().expect("finish Responses stream");
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].id, "call-1");
+        assert_eq!(response.tool_calls[0].name, "read_file");
+        assert_eq!(
+            response.tool_calls[0].arguments,
+            json!({"path": "README.md"})
         );
     }
 
