@@ -1106,6 +1106,7 @@ function startRootCreate(kind: "file" | "directory"): void {
 function startCreate(kind: "file" | "directory", node: WorkspaceTreeNode | null = null): void {
   closeContextMenu();
   cancelPendingRename();
+  workspaceStore.workspaceError = "";
   const parentPath = node ? getDirectoryPath(node) : ROOT_PARENT_PATH;
   if (node?.kind === "directory") {
     expandedPaths.value = {
@@ -1136,6 +1137,7 @@ function startRename(node: WorkspaceTreeNode | null): void {
   }
   closeContextMenu();
   cancelPendingCreate();
+  workspaceStore.workspaceError = "";
   pendingRename.value = {
     relativePath: node.relativePath,
     parentPath: getParentPath(node.relativePath),
@@ -1204,7 +1206,9 @@ async function submitPendingCreate(): Promise<void> {
     }
     cancelPendingCreate();
   } catch {
-    // handled by store
+    // store 已将错误写入 workspaceError；保留输入框供用户改名后重试
+    pendingCreateInputRef.value?.focus();
+    pendingCreateInputRef.value?.select();
   }
 }
 
