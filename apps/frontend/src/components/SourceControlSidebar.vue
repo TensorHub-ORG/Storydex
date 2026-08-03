@@ -191,7 +191,7 @@
             </div>
           </section>
 
-          <!-- 历史版本 -->
+          <!-- 平行时空线 -->
           <section class="scm-pane" :class="{ collapsed: !historyExpanded }">
             <header
               class="scm-pane-header"
@@ -205,76 +205,17 @@
               <span class="scm-pane-caret material-symbols-rounded">
                 {{ historyExpanded ? "expand_more" : "chevron_right" }}
               </span>
-              <span class="scm-pane-title">历史版本</span>
-              <span class="scm-pane-count">{{ branchCommits.length }}</span>
+              <span class="scm-pane-title">平行时空线</span>
+              <span class="scm-pane-count">{{ gitStore.timelineNodes.length }}</span>
             </header>
 
-            <div v-if="historyExpanded" class="scm-pane-body">
-              <p v-if="branchCommits.length === 0" class="scm-inline-empty">
-                还没有任何版本记录，先写下改动说明并提交一次。
-              </p>
-
-              <!-- 行本身只做展示；回退是显式按钮，避免点一下就进入危险操作 -->
-              <div
-                v-for="(item, index) in branchCommits"
-                :key="item.id"
-                class="scm-history-row"
-                :class="{ current: isCurrentCommit(item.id) }"
-                :title="historyRowTitle(item)"
-              >
-                <span class="scm-graph-lane" :class="{ tail: index === branchCommits.length - 1 }">
-                  <span class="scm-graph-node"></span>
-                </span>
-                <span class="scm-row-line scm-row-line-history">
-                  <span class="scm-history-subject">{{ item.subject }}</span>
-                  <span class="scm-history-meta">{{ historyMetaText(item) }}</span>
-                </span>
-                <span v-if="isCurrentCommit(item.id)" class="scm-current-badge">当前</span>
-                <button
-                  v-else
-                  class="scm-restore-btn"
-                  type="button"
-                  title="回退到此版本（会先自动保留当前状态的备份分支）"
-                  aria-label="回退到此版本"
-                  :disabled="gitStore.isRestoring"
-                  @click="restoreCommit(item.id, item.subject)"
-                >
-                  <span class="material-symbols-rounded">history</span>
-                </button>
-              </div>
-
-              <!-- 回退产生的备份提交单独归组，否则它们会按时间混进主线，看起来像凭空多出的记录 -->
-              <template v-if="backupCommits.length > 0">
-                <div class="scm-subgroup-header">
-                  <span class="material-symbols-rounded">inventory_2</span>
-                  <span>回退前保留的备份（{{ backupCommits.length }}）</span>
-                </div>
-                <div
-                  v-for="item in backupCommits"
-                  :key="item.id"
-                  class="scm-history-row is-backup"
-                  :title="historyRowTitle(item)"
-                >
-                  <span class="scm-graph-lane is-backup">
-                    <span class="scm-graph-node"></span>
-                  </span>
-                  <span class="scm-row-line scm-row-line-history">
-                    <span class="scm-history-subject">{{ item.subject }}</span>
-                    <span class="scm-history-meta">{{ historyMetaText(item) }}</span>
-                    <span v-if="historyRefLabel(item)" class="scm-history-ref">{{ historyRefLabel(item) }}</span>
-                  </span>
-                  <button
-                    class="scm-restore-btn"
-                    type="button"
-                    title="恢复到这个备份版本"
-                    aria-label="恢复到这个备份版本"
-                    :disabled="gitStore.isRestoring"
-                    @click="restoreCommit(item.id, item.subject)"
-                  >
-                    <span class="material-symbols-rounded">history</span>
-                  </button>
-                </div>
-              </template>
+            <div v-if="historyExpanded" class="scm-pane-body scm-pane-body-timeline">
+              <TimelineGraph
+                :timeline="gitStore.timeline"
+                :loading="gitStore.isTimelineLoading"
+                :detached-override="gitStore.isDetached"
+                @jump="handleTimelineJump"
+              />
             </div>
           </section>
         </div>
@@ -293,6 +234,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useGitStore } from "@/stores/git";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type { WorkspaceGitCommitEntry } from "@/types/workspace";
+import TimelineGraph from "@/components/TimelineGraph.vue";
 
 const gitStore = useGitStore();
 const workspaceStore = useWorkspaceStore();
@@ -365,6 +307,7 @@ onMounted(() => {
   if (!workspaceStore.launchScreenVisible) {
     void gitStore.refreshSummary({ silent: true });
     void gitStore.refreshBranches();
+    void gitStore.refreshTimeline();
   }
   autoRefreshTimer = window.setInterval(handleAutoRefresh, AUTO_REFRESH_INTERVAL_MS);
   clockTimer = window.setInterval(() => {
@@ -392,6 +335,7 @@ watch(
   () => {
     if (!workspaceStore.launchScreenVisible) {
       void gitStore.refreshSummary({ silent: true });
+      void gitStore.refreshTimeline();
     }
   }
 );
@@ -408,6 +352,7 @@ function handleWindowFocus(): void {
     return;
   }
   void gitStore.refreshSummary({ silent: true });
+  void gitStore.refreshTimeline();
 }
 
 // An explicit click must always hit the backend, even while a background poll is
@@ -415,6 +360,21 @@ function handleWindowFocus(): void {
 function refreshSummary(): void {
   void gitStore.refreshSummary({ force: true });
   void gitStore.refreshBranches();
+  void gitStore.refreshTimeline();
+}
+
+/**
+ * 平行时空线节点跳转：进入 detached HEAD 查看该历史节点。工作区文件会恢复
+ * 到该提交的状态。用户在此基础上提交时，后端会自动创建新世界线分支。
+ */
+async function handleTimelineJump(commitId: string): Promise<void> {
+  if (!commitId || gitStore.isJumping) return;
+  const confirmed = window.confirm(
+    "确认跳转到这个历史节点吗？\n\n工作区文件会恢复到该节点的状态。如果你在此基础上做了改动并提交，系统会自动创建一条新的平行时空线分支，不会影响原分支。"
+  );
+  if (!confirmed) return;
+  await gitStore.jumpToCommit(commitId);
+  await workspaceStore.reloadProjectContext();
 }
 
 function handleBranchSelect(event: Event): void {
@@ -1117,6 +1077,12 @@ defineExpose({
   overflow-x: hidden;
   overflow-y: auto;
   padding: 2px 8px 8px;
+}
+
+/* 平行时空线：TimelineGraph 内部自带滚动和 padding，外层去掉纵向 padding 避免双倍间距 */
+.scm-pane-body-timeline {
+  padding: 4px 4px 8px;
+  overflow: visible;
 }
 
 .scm-inline-empty {

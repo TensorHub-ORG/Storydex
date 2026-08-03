@@ -5,11 +5,17 @@ import {
   createWorkspaceGitBranch,
   fetchWorkspaceGitBranches,
   fetchWorkspaceGitSummary,
+  fetchWorkspaceGitTimeline,
   initializeWorkspaceGitRepository,
+  jumpWorkspaceGitCommit,
   restoreWorkspaceGitCommit,
   switchWorkspaceGitBranch
 } from "@/api/workspace";
-import type { WorkspaceGitBranchEntry, WorkspaceGitSummaryResponse } from "@/types/workspace";
+import type {
+  WorkspaceGitBranchEntry,
+  WorkspaceGitSummaryResponse,
+  WorkspaceGitTimelineResponse
+} from "@/types/workspace";
 
 interface GitState {
   summary: WorkspaceGitSummaryResponse | null;
@@ -23,6 +29,10 @@ interface GitState {
   lastSyncedAt: number;
   branches: WorkspaceGitBranchEntry[];
   isBranchBusy: boolean;
+  /** 平行时空线：全分支提交树数据。 */
+  timeline: WorkspaceGitTimelineResponse | null;
+  isTimelineLoading: boolean;
+  isJumping: boolean;
 }
 
 /**
@@ -55,7 +65,10 @@ export const useGitStore = defineStore("git", {
     successMessage: "",
     lastSyncedAt: 0,
     branches: [],
-    isBranchBusy: false
+    isBranchBusy: false,
+    timeline: null,
+    isTimelineLoading: false,
+    isJumping: false
   }),
 
   getters: {
@@ -81,6 +94,19 @@ export const useGitStore = defineStore("git", {
 
     isBusy(state): boolean {
       return state.isLoading || state.isInitializing || state.isCommitting || state.isRestoring;
+    },
+
+    /** 平行时空线节点（按 column 升序，最新节点在前）。 */
+    timelineNodes(state) {
+      return Array.isArray(state.timeline?.nodes) ? state.timeline.nodes : [];
+    },
+
+    timelineBranches(state) {
+      return Array.isArray(state.timeline?.branches) ? state.timeline.branches : [];
+    },
+
+    isDetached(state): boolean {
+      return Boolean(state.timeline?.detached);
     }
   },
 
@@ -96,6 +122,9 @@ export const useGitStore = defineStore("git", {
       this.lastSyncedAt = 0;
       this.branches = [];
       this.isBranchBusy = false;
+      this.timeline = null;
+      this.isTimelineLoading = false;
+      this.isJumping = false;
       // Invalidate any in-flight read so it cannot repopulate the panel with the
       // previous project's summary after the workspace was closed or switched.
       appliedSummarySeq = ++summaryRequestSeq;
@@ -230,7 +259,16 @@ export const useGitStore = defineStore("git", {
         this.applySummary(result.data.summary);
         if (result.data.created) {
           const shortId = result.data.commit?.shortId || "";
-          this.successMessage = shortId ? `已创建本地提交 ${shortId}。` : "已创建本地提交。";
+          const worldline = result.data.worldlineBranch;
+          if (worldline) {
+            // 延迟分叉：在历史节点上首次提交时自动创建了新世界线分支。
+            this.successMessage = `已在新世界线 ${worldline} 上创建提交 ${shortId}。`;
+            // 分叉后刷新分支列表和时间线，让新世界线立即出现在树状图里。
+            void this.refreshBranches();
+            void this.refreshTimeline();
+          } else {
+            this.successMessage = shortId ? `已创建本地提交 ${shortId}。` : "已创建本地提交。";
+          }
         } else {
           this.successMessage = "当前没有可提交的更改。";
         }
@@ -256,10 +294,57 @@ export const useGitStore = defineStore("git", {
         const restoredSubject = result.data.restoredCommit?.subject || "已恢复到目标版本";
         const backupInfo = result.data.backupRef ? `，已保留备份分支 ${result.data.backupRef}` : "";
         this.successMessage = `${restoredSubject}${backupInfo}`;
+        void this.refreshTimeline();
       } catch (error: unknown) {
         this.error = normalizeGitError(error);
       } finally {
         this.isRestoring = false;
+      }
+    },
+
+    /**
+     * 读取平行时空线数据（全分支提交树）。写入操作（commit/restore/jump）
+     * 完成后会自动调用本方法刷新树状图。
+     */
+    async refreshTimeline(): Promise<void> {
+      if (this.isTimelineLoading) {
+        return;
+      }
+      this.isTimelineLoading = true;
+      try {
+        const result = await fetchWorkspaceGitTimeline();
+        this.timeline = result.data;
+      } catch (error: unknown) {
+        // 时间线加载失败不应阻塞主面板，仅在 error 中记录。
+        this.error = normalizeGitError(error);
+      } finally {
+        this.isTimelineLoading = false;
+      }
+    },
+
+    /**
+     * 跳转到历史提交节点（进入 detached HEAD）。后续在 detached HEAD 状态下
+     * 首次提交时，后端会自动创建新世界线分支（延迟分叉）。
+     */
+    async jumpToCommit(commitId: string): Promise<boolean> {
+      if (this.isJumping) {
+        return false;
+      }
+      this.isJumping = true;
+      this.error = "";
+      this.successMessage = "";
+      try {
+        const result = await jumpWorkspaceGitCommit({ commitId });
+        this.applySummary(result.data.summary);
+        const subject = result.data.commit?.subject || "历史节点";
+        this.successMessage = `已跳转到节点 ${result.data.commit?.shortId || ""}（${subject}）。在此基础上的提交将创建新世界线。`;
+        void this.refreshTimeline();
+        return true;
+      } catch (error: unknown) {
+        this.error = normalizeGitError(error);
+        return false;
+      } finally {
+        this.isJumping = false;
       }
     },
 

@@ -94,6 +94,13 @@ export function describeTransportError(error: unknown, fallbackMessage: string):
       }
       return "无法连接后端服务，请确认应用后端已经启动。";
     }
+    // 后端 StorydexError 会把真实错误消息放在 envelope.error.message 里。
+    // axios 收到 4xx/5xx 会直接抛 AxiosError，跳过 unwrapEnvelope，
+    // 所以需要从 error.response.data 读取 envelope 里的消息展示给用户。
+    const envelopeMessage = readEnvelopeErrorMessage(error.response.data);
+    if (envelopeMessage) {
+      return envelopeMessage;
+    }
     return error.message || fallbackMessage;
   }
 
@@ -102,4 +109,11 @@ export function describeTransportError(error: unknown, fallbackMessage: string):
   }
 
   return fallbackMessage;
+}
+
+function readEnvelopeErrorMessage(data: unknown): string | null {
+  if (!data || typeof data !== "object") return null;
+  const envelope = data as { error?: { message?: unknown } };
+  const message = envelope.error?.message;
+  return typeof message === "string" && message.trim() ? message : null;
 }

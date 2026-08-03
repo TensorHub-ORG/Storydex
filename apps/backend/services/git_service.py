@@ -432,20 +432,295 @@ class GitService:
         if branch == current:
             return {**self.list_branches(root), "summary": self.read_summary(root)}
         if not self._branch_exists(root, branch):
-            raise GitServiceError("Branch does not exist.", details={"branch": branch})
+            raise GitServiceError("Branch does not exist.", details={"branch": branch}, status_code=404)
         if not self._is_worktree_clean(root):
             raise GitServiceError(
                 "Cannot switch branches with uncommitted changes.",
                 details={"branch": branch, "hint": "Commit or discard changes first."},
+                status_code=409,
             )
         self._run_git(root, ["switch", branch])
         return {**self.list_branches(root), "summary": self.read_summary(root)}
+
+    @_serialized
+    def read_timeline(self, workspace_root: Path) -> Dict[str, Any]:
+        """读取全分支提交历史，用于绘制"平行时空线"树状图。
+
+        返回所有分支的提交节点、节点间父子关系和分支信息。Storydex 的分支
+        语义是"只分不合"：每个分支代表一条独立的世界线，分支可以分叉但不
+        会合并。布局算法据此为每个节点分配 ``(column, row)`` 坐标，前端按
+        横向树状图渲染（``column`` 对应 X 轴时间深度，``row`` 对应 Y 轴分支
+        lane）。``column`` 从 0 开始，最新提交为 0，越早越大；``row`` 同样
+        从 0 开始，当前分支 lane=0，其他分支按字母序排列。
+        """
+        root = self._resolve_workspace_root(workspace_root)
+        if not self.is_git_available():
+            return {
+                "available": False,
+                "gitInstalled": False,
+                "initialized": False,
+                "currentBranch": "",
+                "currentHead": None,
+                "detached": False,
+                "branches": [],
+                "nodes": [],
+                "edges": [],
+                "message": "Storydex bundled Git is not available.",
+            }
+        if not self.is_repository_initialized(root):
+            return {
+                "available": True,
+                "gitInstalled": True,
+                "initialized": False,
+                "currentBranch": self.DEFAULT_BRANCH,
+                "currentHead": None,
+                "detached": False,
+                "branches": [],
+                "nodes": [],
+                "edges": [],
+                "message": "Local repository is not initialized yet.",
+            }
+
+        # 1. 收集所有分支 head（refname -> objectname）。
+        #    用空格分隔而非 \x1f：`for-each-ref --format` 在某些 Git 版本上
+        #    对 `%x1f` 转义的处理与 `log --pretty=format:` 不一致，会返回
+        #    空输出。分支名已被 `_validate_branch_name` 限制为
+        #    `[A-Za-z0-9._/-]+`，objectname 是 40 位 hex，都不含空格。
+        branch_output = self._run_git(
+            root,
+            ["for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads/"],
+            check=False,
+        )
+        branch_heads: List[Dict[str, Any]] = []
+        head_to_branches: Dict[str, List[str]] = {}
+        for line in branch_output.splitlines():
+            parts = line.split()
+            if len(parts) != 2:
+                continue
+            name, head_id = parts[0], parts[1]
+            branch_heads.append({"name": name, "head": head_id})
+            head_to_branches.setdefault(head_id, []).append(name)
+
+        # 2. 当前 HEAD（可能 detached）
+        current_branch = self._read_current_branch(root)
+        current_head = self._read_head_commit(root)
+        detached = not current_branch and current_head is not None
+
+        base = {
+            "available": True,
+            "gitInstalled": True,
+            "initialized": True,
+            "currentBranch": current_branch,
+            "currentHead": current_head,
+            "detached": detached,
+            "message": "",
+        }
+
+        if not current_head:
+            return {
+                **base,
+                "branches": [
+                    {"name": b["name"], "head": b["head"], "isCurrent": False, "lane": idx}
+                    for idx, b in enumerate(branch_heads)
+                ],
+                "nodes": [],
+                "edges": [],
+            }
+
+        # 3. 拉取所有 commits（含 parents）。`--all` 让所有分支的提交都进入
+        #    结果，detached HEAD 的当前提交也由 HEAD 引用可达。
+        log_output = self._run_git(
+            root,
+            [
+                "log",
+                "--all",
+                "--date=iso-strict",
+                "--pretty=format:%H%x1f%P%x1f%h%x1f%an%x1f%ad%x1f%D%x1f%s",
+            ],
+        )
+        raw_commits: List[Dict[str, Any]] = []
+        for line in log_output.splitlines():
+            parts = line.split("\x1f")
+            if len(parts) != 7:
+                continue
+            commit_id, parents, short_id, author_name, authored_at, refs, subject = parts
+            parent_list = [p.strip() for p in parents.split() if p.strip()]
+            raw_commits.append(
+                {
+                    "id": commit_id.strip(),
+                    "shortId": short_id.strip(),
+                    "authorName": author_name.strip(),
+                    "authoredAt": authored_at.strip(),
+                    "refs": refs.strip(),
+                    "subject": subject.strip(),
+                    "parents": parent_list,
+                }
+            )
+
+        # 4. 每个分支可达的 commit 集合（用于节点归属判定）
+        branch_reachable: Dict[str, set] = {}
+        for b in branch_heads:
+            rev_output = self._run_git(root, ["rev-list", b["head"]], check=False)
+            branch_reachable[b["name"]] = {
+                line.strip() for line in rev_output.splitlines() if line.strip()
+            }
+
+        # 5. lane 分配：当前分支 lane=0，其他按字母序排列。当前分支排到
+        #    最前是为了让"正在编辑的世界线"在树状图最顶部。
+        sorted_branches = sorted(branch_heads, key=lambda b: b["name"])
+        if current_branch:
+            sorted_branches.sort(key=lambda b: 0 if b["name"] == current_branch else 1)
+        branch_lane: Dict[str, int] = {
+            b["name"]: idx for idx, b in enumerate(sorted_branches)
+        }
+        fallback_lane = len(sorted_branches)
+
+        # 6. 节点 + 边
+        commit_ids = {c["id"] for c in raw_commits}
+        nodes: List[Dict[str, Any]] = []
+        edges: List[Dict[str, Any]] = []
+        current_head_id = current_head.get("id") if current_head else None
+        for c in raw_commits:
+            cid = c["id"]
+            containing_branches = [
+                name
+                for name, reachable in branch_reachable.items()
+                if cid in reachable
+            ]
+            nodes.append(
+                {
+                    "id": cid,
+                    "shortId": c["shortId"],
+                    "authorName": c["authorName"],
+                    "authoredAt": c["authoredAt"],
+                    "subject": c["subject"],
+                    "refs": c["refs"],
+                    "parents": c["parents"],
+                    "branches": containing_branches,
+                    "headBranches": head_to_branches.get(cid, []),
+                    "isBranchHead": cid in head_to_branches,
+                    "isCurrent": cid == current_head_id,
+                }
+            )
+            for parent_id in c["parents"]:
+                if parent_id in commit_ids:
+                    edges.append({"from": parent_id, "to": cid})
+
+        # 7. 布局坐标：column = 全局时间倒序索引（最新=0）；row = 所属分支
+        #    lane 最小值。Storydex 分支只分不合，节点通常只属于一个分支，
+        #    merge 节点（属于多分支）取 lane 最小者以保持视觉连续。
+        sorted_nodes = sorted(nodes, key=lambda n: n["authoredAt"], reverse=True)
+        for index, node in enumerate(sorted_nodes):
+            node["column"] = index
+            if node["branches"]:
+                node["row"] = min(
+                    branch_lane.get(b, fallback_lane) for b in node["branches"]
+                )
+            else:
+                # 不属于任何分支的游离提交（理论上只发生在 detached HEAD
+                # 已经新提交但还没建立分支的中间态，正常流程不会出现）。
+                node["row"] = fallback_lane
+
+        branches_payload = [
+            {
+                "name": b["name"],
+                "head": b["head"],
+                "isCurrent": b["name"] == current_branch,
+                "lane": branch_lane.get(b["name"], fallback_lane),
+            }
+            for b in sorted_branches
+        ]
+
+        return {
+            **base,
+            "branches": branches_payload,
+            "nodes": sorted_nodes,
+            "edges": edges,
+        }
+
+    @_serialized
+    def jump_to_commit(self, workspace_root: Path, *, commit_id: str) -> Dict[str, Any]:
+        """跳转到历史提交节点，进入 detached HEAD 状态查看该时空线。
+
+        Storydex 的"平行时空线"语义：用户在历史节点上 jump 进入 detached
+        HEAD 后可以查看该节点的文件状态。如果用户在此基础上做了改动并提交，
+        系统会自动创建一个新分支（延迟分叉），不会污染原分支。详见
+        :meth:`_ensure_branch_before_commit`。
+        """
+        root = self._resolve_workspace_root(workspace_root)
+        self.initialize_repository(root)
+        normalized = str(commit_id or "").strip()
+        if not normalized:
+            raise GitServiceError(
+                "Target commit id is required for jump.",
+                status_code=400,
+            )
+        if not self._has_head_commit(root):
+            raise GitServiceError(
+                "Repository has no commits yet, so there is nothing to jump to.",
+                status_code=409,
+            )
+
+        # _read_commit 在 commit 不存在时会抛 GitServiceError
+        target = self._read_commit(root, normalized)
+
+        if not self._is_worktree_clean(root):
+            raise GitServiceError(
+                "Cannot jump to commit with uncommitted changes.",
+                details={"commitId": normalized, "hint": "Commit or discard changes first."},
+                status_code=409,
+            )
+
+        current_head = self._read_head_commit(root)
+        if (
+            current_head
+            and current_head.get("id") == target.get("id")
+            and not self._read_current_branch(root)
+        ):
+            # 已经在该 commit 的 detached HEAD 状态，幂等返回
+            return {
+                "detached": True,
+                "commit": current_head,
+                "summary": self.read_summary(root),
+            }
+
+        self._run_git(root, ["checkout", "--detach", str(target.get("id") or normalized)])
+        return {
+            "detached": True,
+            "commit": self._read_head_commit(root),
+            "summary": self.read_summary(root),
+        }
+
+    def _ensure_branch_before_commit(self, workspace_root: Path) -> Optional[str]:
+        """如果处于 detached HEAD 状态，自动创建一个新分支并切换过去。
+
+        Storydex 的"平行时空线"语义：分支只分不合。用户在历史节点上 jump
+        进入 detached HEAD 后，第一次提交时自动创建一个新分支（延迟分叉），
+        避免提交落到游离 HEAD 上而丢失。命名规范：``worldline/{timestamp}``。
+        """
+        root = self._resolve_workspace_root(workspace_root)
+        current_branch = self._read_current_branch(root)
+        if current_branch:
+            return None
+        if not self._has_head_commit(root):
+            return None
+        # detached HEAD：从当前 HEAD 创建新分支并切换。`checkout -b` 同时
+        # 更新 HEAD 和工作区索引，但工作区文件不变，后续 add/commit 正常。
+        timestamp = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d-%H%M%S")
+        base_name = f"worldline/{timestamp}"
+        candidate = base_name
+        index = 2
+        while self._branch_exists(root, candidate):
+            candidate = f"{base_name}-{index}"
+            index += 1
+        self._run_git(root, ["checkout", "-b", candidate])
+        return candidate
 
     @staticmethod
     def _validate_branch_name(name: str) -> str:
         branch = str(name or "").strip()
         if not branch or len(branch) > 120 or branch.startswith("-") or ".." in branch or not re.fullmatch(r"[A-Za-z0-9._/-]+", branch):
-            raise GitServiceError("Invalid branch name.", details={"branch": branch})
+            raise GitServiceError("Invalid branch name.", details={"branch": branch}, status_code=400)
         return branch
 
     @_serialized
@@ -460,16 +735,24 @@ class GitService:
                 "summary": self.read_summary(root),
             }
 
+        # 平行时空线延迟分叉：detached HEAD 状态下首次提交时自动创建新分支，
+        # 避免用户在历史节点上 jump 后的提交落到游离 HEAD 上丢失。命名规范
+        # worldline/{timestamp}，详见 _ensure_branch_before_commit。
+        worldline_branch = self._ensure_branch_before_commit(root)
+
         final_message = self._normalize_commit_message(
             message,
             fallback_prefix="workspace: snapshot",
         )
         self._run_git(root, ["commit", "--no-gpg-sign", "-m", final_message])
-        return {
+        result = {
             "created": True,
             "commit": self._read_head_commit(root),
             "summary": self.read_summary(root),
         }
+        if worldline_branch:
+            result["worldlineBranch"] = worldline_branch
+        return result
 
     @_serialized
     def commit_paths(self, workspace_root: Path, *, paths: Iterable[str], message: str = "") -> Dict[str, Any]:
@@ -493,6 +776,12 @@ class GitService:
                 "summary": self.read_summary(root),
             }
 
+        # 平行时空线延迟分叉：detached HEAD 状态下首次提交时自动创建新分支。
+        # first commit 不可能是 detached HEAD（无 commits 无法 jump），跳过。
+        worldline_branch = (
+            self._ensure_branch_before_commit(root) if not is_first_commit else None
+        )
+
         self._run_git(root, ["add", "-A", "--", *normalized_paths])
         final_message = self._normalize_commit_message(
             message,
@@ -503,11 +792,14 @@ class GitService:
             self._run_git(root, ["commit", "--no-gpg-sign", "-m", final_message])
         else:
             self._run_git(root, ["commit", "--no-gpg-sign", "--only", "-m", final_message, "--", *normalized_paths])
-        return {
+        result = {
             "created": True,
             "commit": self._read_head_commit(root),
             "summary": self.read_summary(root),
         }
+        if worldline_branch:
+            result["worldlineBranch"] = worldline_branch
+        return result
 
     def is_repository_initialized(self, workspace_root: Path) -> bool:
         root = self._resolve_workspace_root(workspace_root)
@@ -727,7 +1019,16 @@ class GitService:
             ["-c", "core.quotePath=false", "status", "--porcelain=v1"],
             check=False,
         )
-        return not status.strip()
+        # 与 _parse_status 保持一致：过滤 .storydex/.agent/ 和 .storydex/.cache/
+        # 内部忽略路径。旧版 Storydex 可能已将 .cache/ 文件提交到索引，
+        # _ensure_internal_paths_untracked 的 git rm --cached 会暂存删除，
+        # 原始 porcelain 会把它当作"未提交改动"——但 UI 侧 _parse_status
+        # 过滤了这些路径，导致前端显示干净但后端拒绝切换分支。
+        for line in status.splitlines():
+            path = line[3:].strip().strip('"')
+            if path and not self._is_internal_ignored_path(path):
+                return False
+        return True
 
     def _paths_have_changes(self, workspace_root: Path, paths: List[str]) -> bool:
         status = self._run_git(
