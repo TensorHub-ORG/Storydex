@@ -182,6 +182,57 @@ def test_create_branch_before_first_commit(git_service: GitService, tmp_path: Pa
     assert committed["summary"]["branch"] == "draft/opening"
 
 
+def test_switch_branch_with_tracked_cache_file(git_service: GitService, tmp_path: Path):
+    """Regression: 旧版 Storydex 提交过 .storydex/.cache/ 文件后切换分支报 500。
+
+    _ensure_internal_paths_untracked 的 git rm --cached 会暂存删除，
+    原始 _is_worktree_clean 检测到暂存删除判定为脏→拒绝切换→500。
+    修复后 _is_worktree_clean 与 _parse_status 一致过滤内部忽略路径。
+    """
+    workspace = tmp_path / "branch-switch"
+    workspace.mkdir()
+    (workspace / "chapters").mkdir()
+    (workspace / "chapters" / "001.md").write_text("first\n", encoding="utf-8")
+    git_service.initialize_repository(workspace)
+    git_service.commit_all(workspace, message="baseline")
+
+    # 模拟旧版遗留的已跟踪缓存文件
+    cache_dir = workspace / ".storydex" / ".cache"
+    cache_dir.mkdir(parents=True)
+    cache_file = cache_dir / "retrieval.db"
+    cache_file.write_bytes(b"cache-v1")
+    git_service._run_git(workspace, ["add", "-f", "--", ".storydex/.cache/retrieval.db"])
+    git_service._run_git(workspace, ["commit", "--no-gpg-sign", "-m", "legacy: track cache"])
+
+    # 创建第二个分支
+    git_service.create_branch(workspace, name="draft/alt-path", checkout=False)
+
+    # initialize_repository 会触发 git rm --cached 暂存删除，
+    # switch_branch 必须能成功切换（不被暂存删除阻塞）
+    result = git_service.switch_branch(workspace, name="draft/alt-path")
+    assert result["current"] == "draft/alt-path"
+    assert result["summary"]["branch"] == "draft/alt-path"
+
+
+def test_switch_branch_status_codes(git_service: GitService, tmp_path: Path):
+    """switch_branch 的用户态错误应返回正确的 HTTP 状态码而非 500。"""
+    workspace = tmp_path / "status-codes"
+    workspace.mkdir()
+    (workspace / "a.md").write_text("a\n", encoding="utf-8")
+    git_service.initialize_repository(workspace)
+    git_service.commit_all(workspace, message="init")
+
+    # 分支不存在 → 404
+    with pytest.raises(GitServiceError) as exc_info:
+        git_service.switch_branch(workspace, name="nonexistent")
+    assert exc_info.value.status_code == 404
+
+    # 非法分支名 → 400
+    with pytest.raises(GitServiceError) as exc_info:
+        git_service.switch_branch(workspace, name="bad..name")
+    assert exc_info.value.status_code == 400
+
+
 def test_snapshot_and_diff_parsers_cover_text_binary_truncation_and_renames(git_service: GitService, tmp_path: Path):
     workspace = tmp_path / "files"
     workspace.mkdir()
@@ -408,3 +459,244 @@ def test_windows_repository_path_comparison_accepts_case_variants(git_service: G
     case_variant = Path(str(workspace).swapcase())
     assert git_service.is_repository_initialized(case_variant) is True
     assert git_service._paths_refer_to_same_location(workspace, case_variant) is True
+
+
+# -----------------------------------------------------------------------------
+# 平行时空线 (Parallel Timeline)
+# -----------------------------------------------------------------------------
+
+
+def _seed_timeline_workspace(git_service: GitService, workspace: Path) -> list[str]:
+    """创建一个 develop 主线 + 一个分叉分支的测试仓库，返回 develop 上的 commit id。"""
+    (workspace / "chapters").mkdir()
+    (workspace / "chapters" / "001.md").write_text("first\n", encoding="utf-8")
+    git_service.initialize_repository(workspace)
+    first = git_service.commit_all(workspace, message="c1")["commit"]["id"]
+    (workspace / "chapters" / "001.md").write_text("first\nsecond\n", encoding="utf-8")
+    git_service.commit_all(workspace, message="c2")
+    return [first]
+
+
+def test_read_timeline_returns_all_branches_and_layout(git_service: GitService, tmp_path: Path):
+    """timeline 必须返回所有分支的提交节点、边和 (column, row) 布局坐标。
+
+    Storydex 分支只分不合，节点通常只属于一个分支；当前分支 lane=0。
+    """
+    workspace = tmp_path / "timeline"
+    workspace.mkdir()
+    first_ids = _seed_timeline_workspace(git_service, workspace)
+    first_id = first_ids[0]
+
+    # 创建分叉分支：从 first commit 拉出新分支
+    git_service.create_branch(workspace, name="worldline/alt", checkout=False)
+
+    timeline = git_service.read_timeline(workspace)
+    assert timeline["available"] is True
+    assert timeline["initialized"] is True
+    assert timeline["detached"] is False
+    assert timeline["currentBranch"] == GitService.DEFAULT_BRANCH
+
+    branch_names = [b["name"] for b in timeline["branches"]]
+    assert GitService.DEFAULT_BRANCH in branch_names
+    assert "worldline/alt" in branch_names
+
+    # 当前分支 lane=0
+    current_branch_info = next(b for b in timeline["branches"] if b["isCurrent"])
+    assert current_branch_info["lane"] == 0
+
+    # 节点：develop 两个 commit + worldline/alt 一个 head（共享 first commit）
+    node_ids = {n["id"] for n in timeline["nodes"]}
+    assert first_id in node_ids
+    assert len(timeline["nodes"]) >= 2
+
+    # 边：至少包含 first->c2 这条
+    assert any(e["from"] == first_id for e in timeline["edges"])
+
+    # 布局坐标已分配
+    for node in timeline["nodes"]:
+        assert isinstance(node["column"], int)
+        assert isinstance(node["row"], int)
+        assert node["column"] >= 0
+        assert node["row"] >= 0
+
+    # 当前 HEAD 节点被标记 isCurrent
+    current_nodes = [n for n in timeline["nodes"] if n["isCurrent"]]
+    assert len(current_nodes) == 1
+    assert current_nodes[0]["id"] == timeline["currentHead"]["id"]
+
+    # column=0 是最新提交
+    newest = min(timeline["nodes"], key=lambda n: n["column"])
+    assert newest["column"] == 0
+
+
+def test_jump_to_commit_enters_detached_head(git_service: GitService, tmp_path: Path):
+    """jump_to_commit 必须进入 detached HEAD 状态，让用户查看历史节点。"""
+    workspace = tmp_path / "jump"
+    workspace.mkdir()
+    first_ids = _seed_timeline_workspace(git_service, workspace)
+    first_id = first_ids[0]
+
+    result = git_service.jump_to_commit(workspace, commit_id=first_id)
+    assert result["detached"] is True
+    assert result["commit"]["id"] == first_id
+
+    # 当前无分支（detached HEAD）
+    assert git_service._read_current_branch(workspace) == ""
+
+    # timeline 反映 detached 状态
+    timeline = git_service.read_timeline(workspace)
+    assert timeline["detached"] is True
+    assert timeline["currentBranch"] == ""
+    assert timeline["currentHead"]["id"] == first_id
+
+
+def test_jump_to_commit_idempotent_when_already_detached(git_service: GitService, tmp_path: Path):
+    """重复 jump 到同一个 commit 应当幂等返回，不报错。"""
+    workspace = tmp_path / "jump-idempotent"
+    workspace.mkdir()
+    first_ids = _seed_timeline_workspace(git_service, workspace)
+    first_id = first_ids[0]
+
+    first_jump = git_service.jump_to_commit(workspace, commit_id=first_id)
+    second_jump = git_service.jump_to_commit(workspace, commit_id=first_id)
+    assert first_jump["commit"]["id"] == second_jump["commit"]["id"] == first_id
+    assert second_jump["detached"] is True
+
+
+def test_jump_to_commit_blocked_by_dirty_worktree(git_service: GitService, tmp_path: Path):
+    """工作区有未提交改动时 jump 必须拒绝（409），避免丢失改动。"""
+    workspace = tmp_path / "jump-dirty"
+    workspace.mkdir()
+    first_ids = _seed_timeline_workspace(git_service, workspace)
+    first_id = first_ids[0]
+
+    (workspace / "chapters" / "001.md").write_text("dirty\n", encoding="utf-8")
+    with pytest.raises(GitServiceError) as exc_info:
+        git_service.jump_to_commit(workspace, commit_id=first_id)
+    assert exc_info.value.status_code == 409
+
+
+def test_jump_to_commit_validates_arguments(git_service: GitService, tmp_path: Path):
+    """jump 的参数校验：空 commit_id → 400；不存在的 commit → 抛 GitServiceError。"""
+    workspace = tmp_path / "jump-validate"
+    workspace.mkdir()
+    (workspace / "a.md").write_text("a\n", encoding="utf-8")
+    git_service.initialize_repository(workspace)
+    git_service.commit_all(workspace, message="seed")
+
+    with pytest.raises(GitServiceError) as exc_info:
+        git_service.jump_to_commit(workspace, commit_id="")
+    assert exc_info.value.status_code == 400
+
+    with pytest.raises(GitServiceError):
+        git_service.jump_to_commit(workspace, commit_id="deadbeefdeadbeef")
+
+
+def test_commit_in_detached_head_creates_worldline_branch(git_service: GitService, tmp_path: Path):
+    """延迟分叉：detached HEAD 状态下首次提交时自动创建 worldline/{timestamp} 分支。
+
+    这是平行时空线的核心语义：用户 jump 到历史节点查看，然后做改动提交，
+    系统自动为新提交建立新分支（新世界线），不污染原分支。
+    """
+    workspace = tmp_path / "worldline-fork"
+    workspace.mkdir()
+    first_ids = _seed_timeline_workspace(git_service, workspace)
+    first_id = first_ids[0]
+
+    # jump 到历史节点
+    git_service.jump_to_commit(workspace, commit_id=first_id)
+
+    # 在历史节点上做改动并提交
+    (workspace / "chapters" / "alt.md").write_text("alternate timeline\n", encoding="utf-8")
+    result = git_service.commit_all(workspace, message="alt branch commit")
+
+    assert result["created"] is True
+    assert "worldlineBranch" in result
+    new_branch = result["worldlineBranch"]
+    assert new_branch.startswith("worldline/")
+
+    # HEAD 现在指向新分支
+    assert git_service._read_current_branch(workspace) == new_branch
+
+    # 新分支的 head 就是这次提交
+    summary = git_service.read_summary(workspace)
+    assert summary["branch"] == new_branch
+    assert summary["head"]["subject"] == "alt branch commit"
+
+    # 新分支出现在分支列表里
+    branches = git_service.list_branches(workspace)
+    branch_names = [b["name"] for b in branches["branches"]]
+    assert new_branch in branch_names
+    assert GitService.DEFAULT_BRANCH in branch_names
+
+    # 原 develop 分支的 head 不变（仍是 c2，未被污染）
+    develop_head = git_service._run_git(workspace, ["rev-parse", GitService.DEFAULT_BRANCH]).strip()
+    c2_summary = git_service.read_summary(workspace)
+    # 切回 develop 验证
+    git_service.switch_branch(workspace, name=GitService.DEFAULT_BRANCH)
+    develop_summary = git_service.read_summary(workspace)
+    assert develop_summary["head"]["subject"] == "c2"
+    assert develop_head == develop_summary["head"]["id"]
+
+
+def test_commit_paths_in_detached_head_creates_worldline_branch(git_service: GitService, tmp_path: Path):
+    """commit_paths 在 detached HEAD 状态下同样要触发延迟分叉。"""
+    workspace = tmp_path / "worldline-fork-paths"
+    workspace.mkdir()
+    first_ids = _seed_timeline_workspace(git_service, workspace)
+    first_id = first_ids[0]
+
+    git_service.jump_to_commit(workspace, commit_id=first_id)
+
+    (workspace / "chapters" / "new.md").write_text("partial\n", encoding="utf-8")
+    result = git_service.commit_paths(
+        workspace,
+        paths=["chapters/new.md"],
+        message="partial commit on detached head",
+    )
+    assert result["created"] is True
+    assert result.get("worldlineBranch", "").startswith("worldline/")
+    assert git_service._read_current_branch(workspace) == result["worldlineBranch"]
+
+
+def test_commit_on_branch_does_not_create_worldline(git_service: GitService, tmp_path: Path):
+    """正常分支上的提交不应创建 worldline 分支，worldlineBranch 字段不存在。"""
+    workspace = tmp_path / "normal-commit"
+    workspace.mkdir()
+    _seed_timeline_workspace(git_service, workspace)
+
+    (workspace / "chapters" / "extra.md").write_text("extra\n", encoding="utf-8")
+    result = git_service.commit_all(workspace, message="normal commit")
+    assert result["created"] is True
+    assert "worldlineBranch" not in result
+    assert git_service._read_current_branch(workspace) == GitService.DEFAULT_BRANCH
+
+
+def test_timeline_includes_worldline_branch_after_fork(git_service: GitService, tmp_path: Path):
+    """延迟分叉后，timeline 必须把新世界线分支纳入树状图。"""
+    workspace = tmp_path / "timeline-after-fork"
+    workspace.mkdir()
+    first_ids = _seed_timeline_workspace(git_service, workspace)
+    first_id = first_ids[0]
+
+    git_service.jump_to_commit(workspace, commit_id=first_id)
+    (workspace / "chapters" / "alt.md").write_text("alt\n", encoding="utf-8")
+    fork_result = git_service.commit_all(workspace, message="fork point")
+    new_branch = fork_result["worldlineBranch"]
+
+    timeline = git_service.read_timeline(workspace)
+    branch_names = [b["name"] for b in timeline["branches"]]
+    assert new_branch in branch_names
+    # 新分支是当前分支，lane=0
+    new_branch_info = next(b for b in timeline["branches"] if b["name"] == new_branch)
+    assert new_branch_info["isCurrent"] is True
+    assert new_branch_info["lane"] == 0
+
+    # 新提交节点在 timeline 中，且 isCurrent=True
+    current_nodes = [n for n in timeline["nodes"] if n["isCurrent"]]
+    assert len(current_nodes) == 1
+    assert current_nodes[0]["subject"] == "fork point"
+
+    # 新分支 head 节点的 headBranches 包含新分支名
+    head_node = next(n for n in timeline["nodes"] if n["id"] == current_nodes[0]["id"])
+    assert new_branch in head_node["headBranches"]

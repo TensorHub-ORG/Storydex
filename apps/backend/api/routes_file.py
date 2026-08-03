@@ -280,6 +280,12 @@ class WorkspaceGitBranchRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class WorkspaceGitJumpRequest(BaseModel):
+    commit_id: str = Field(alias="commitId")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class WorkspaceSearchRequest(BaseModel):
     query: str
     limit: int = Field(default=20, ge=1, le=50)
@@ -663,6 +669,60 @@ def restore_workspace_git_commit(payload: WorkspaceGitRestoreRequest) -> ApiEnve
             "createBackup": payload.create_backup,
             "restored": bool(result.get("restored")),
             "backupRef": str(result.get("backupRef") or ""),
+        }
+    ]
+    return success_response(
+        data=result,
+        trace=_build_trace(started=started, trace_id=trace_id),
+        audit=audit,
+    )
+
+
+@router.get("/workspace/git/timeline", response_model=ApiEnvelope)
+def read_workspace_git_timeline() -> ApiEnvelope:
+    """平行时空线：返回全分支提交树（节点/边/分支/布局坐标）。
+
+    供前端 SourceControlSidebar 的"平行时空线"横向树状图渲染使用。
+    Storydex 分支只分不合（每个分支是一条独立的世界线），布局据此为
+    每个节点分配 (column, row) 坐标。
+    """
+    started = perf_counter()
+    trace_id = str(uuid4())
+    data = git_service.read_timeline(project_service.workspace_root)
+    audit = [
+        {
+            "action": "read_workspace_git_timeline",
+            "initialized": bool(data.get("initialized")),
+            "branchCount": len(data.get("branches") if isinstance(data.get("branches"), list) else []),
+            "nodeCount": len(data.get("nodes") if isinstance(data.get("nodes"), list) else []),
+            "detached": bool(data.get("detached")),
+        }
+    ]
+    return success_response(
+        data=data,
+        trace=_build_trace(started=started, trace_id=trace_id),
+        audit=audit,
+    )
+
+
+@router.post("/workspace/git/jump", response_model=ApiEnvelope)
+def jump_workspace_git_commit(payload: WorkspaceGitJumpRequest) -> ApiEnvelope:
+    """跳转到历史提交节点（进入 detached HEAD）查看该时空线。
+
+    后续在 detached HEAD 状态下首次提交时，git_service 会自动创建新分支
+    （延迟分叉），不会污染原分支。
+    """
+    started = perf_counter()
+    trace_id = str(uuid4())
+    result = git_service.jump_to_commit(
+        project_service.workspace_root,
+        commit_id=payload.commit_id,
+    )
+    audit = [
+        {
+            "action": "jump_workspace_git_commit",
+            "commitId": payload.commit_id,
+            "detached": bool(result.get("detached")),
         }
     ]
     return success_response(

@@ -14,10 +14,13 @@ import type {
   WorkspaceGitCommitRequest,
   WorkspaceGitCommitResponse,
   WorkspaceGitDiffResponse,
+  WorkspaceGitJumpRequest,
+  WorkspaceGitJumpResponse,
   WorkspaceGitRestoreRequest,
   WorkspaceGitRestoreResponse,
   WorkspaceGitSummaryResponse,
   WorkspaceGitBranchesResponse,
+  WorkspaceGitTimelineResponse,
   WorkspaceSearchResponse,
   WorkspaceImportFilesRequest,
   WorkspaceImportFilesResponse,
@@ -340,6 +343,32 @@ export async function restoreWorkspaceGitCommit(
   const response = await apiClient.post<ApiEnvelope<WorkspaceGitRestoreResponse>>("/workspace/git/restore", payload);
   try {
     return unwrapEnvelope(response.data, "Workspace Git restore failed.");
+  } catch (error: unknown) {
+    if (error instanceof ApiResponseError) {
+      throw new WorkspaceApiError(error.message, error.code, error.details, error.trace, error.audit);
+    }
+    throw error;
+  }
+}
+
+export async function fetchWorkspaceGitTimeline(): Promise<ApiResult<WorkspaceGitTimelineResponse>> {
+  const response = await apiClient.get<ApiEnvelope<WorkspaceGitTimelineResponse>>("/workspace/git/timeline");
+  try {
+    return unwrapEnvelope(response.data, "Workspace Git timeline request failed.");
+  } catch (error: unknown) {
+    if (error instanceof ApiResponseError) {
+      throw new WorkspaceApiError(error.message, error.code, error.details, error.trace, error.audit);
+    }
+    throw error;
+  }
+}
+
+export async function jumpWorkspaceGitCommit(
+  payload: WorkspaceGitJumpRequest
+): Promise<ApiResult<WorkspaceGitJumpResponse>> {
+  const response = await apiClient.post<ApiEnvelope<WorkspaceGitJumpResponse>>("/workspace/git/jump", payload);
+  try {
+    return unwrapEnvelope(response.data, "Workspace Git jump failed.");
   } catch (error: unknown) {
     if (error instanceof ApiResponseError) {
       throw new WorkspaceApiError(error.message, error.code, error.details, error.trace, error.audit);

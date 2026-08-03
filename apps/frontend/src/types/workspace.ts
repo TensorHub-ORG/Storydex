@@ -297,6 +297,8 @@ export interface WorkspaceGitCommitResponse {
   created: boolean;
   commit: WorkspaceGitCommitEntry | null;
   summary: WorkspaceGitSummaryResponse;
+  /** 延迟分叉：detached HEAD 状态下首次提交时自动创建的新世界线分支名。 */
+  worldlineBranch?: string;
 }
 
 export interface WorkspaceGitCommitRequest {
@@ -313,6 +315,70 @@ export interface WorkspaceGitRestoreResponse {
   restoredCommit: WorkspaceGitCommitEntry | null;
   backupCommit: WorkspaceGitCommitEntry | null;
   backupRef: string;
+  summary: WorkspaceGitSummaryResponse;
+}
+
+// ---------------------------------------------------------------------------
+// 平行时空线 (Parallel Timeline)
+//
+// Storydex 的分支语义是"只分不合"：每个分支代表一条独立的世界线，分支可以
+// 分叉但不会合并。前端据此用横向树状图渲染所有分支的提交历史。
+// ---------------------------------------------------------------------------
+
+export interface WorkspaceGitTimelineBranch {
+  name: string;
+  head: string;
+  isCurrent: boolean;
+  /** Y 轴 lane 索引；当前分支 lane=0。 */
+  lane: number;
+}
+
+export interface WorkspaceGitTimelineNode {
+  id: string;
+  shortId: string;
+  authorName: string;
+  authoredAt: string;
+  subject: string;
+  refs: string;
+  parents: string[];
+  /** 包含此提交的所有分支名（从该分支 head 可达）。 */
+  branches: string[];
+  /** 以此提交为 head 的分支名。 */
+  headBranches: string[];
+  isBranchHead: boolean;
+  isCurrent: boolean;
+  /** X 轴时间深度，最新提交=0，越早越大。 */
+  column: number;
+  /** Y 轴分支 lane，对应所属分支的 lane。 */
+  row: number;
+}
+
+export interface WorkspaceGitTimelineEdge {
+  from: string;
+  to: string;
+}
+
+export interface WorkspaceGitTimelineResponse {
+  available: boolean;
+  gitInstalled: boolean;
+  initialized: boolean;
+  currentBranch: string;
+  currentHead: WorkspaceGitCommitEntry | null;
+  /** 当前是否处于 detached HEAD（用户 jump 到历史节点后）。 */
+  detached: boolean;
+  branches: WorkspaceGitTimelineBranch[];
+  nodes: WorkspaceGitTimelineNode[];
+  edges: WorkspaceGitTimelineEdge[];
+  message: string;
+}
+
+export interface WorkspaceGitJumpRequest {
+  commitId: string;
+}
+
+export interface WorkspaceGitJumpResponse {
+  detached: boolean;
+  commit: WorkspaceGitCommitEntry | null;
   summary: WorkspaceGitSummaryResponse;
 }
 
