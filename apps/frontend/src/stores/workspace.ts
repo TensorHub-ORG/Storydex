@@ -112,6 +112,9 @@ interface WorkspaceState {
 const MAX_RECENT_PROJECTS = 8;
 const PROGRESSIVE_FILE_BYTES = 2 * 1024 * 1024;
 let largeFileAbortController: AbortController | null = null;
+// 缓存上次目录树序列化签名，refreshTree 在内容未变时跳过 this.tree 重赋值，
+// 避免 4 秒自动刷新触发无谓的整树重渲染（会加剧主线程压力、与内联输入竞态）。
+let lastTreeSignature = "";
 
 export const useWorkspaceStore = defineStore("workspace", {
   state: (): WorkspaceState => ({
@@ -416,6 +419,7 @@ export const useWorkspaceStore = defineStore("workspace", {
 
         this.tree = treeResult.data.roots;
         this.treeTrace = treeResult.trace;
+        lastTreeSignature = JSON.stringify(treeResult.data.roots);
         this.currentProject = projectResult.data;
         await Promise.all([this.refreshStorySettings(), this.refreshDiagnostics()]);
         if (projectResult.data.requiresInitialization) {
@@ -485,8 +489,12 @@ export const useWorkspaceStore = defineStore("workspace", {
             );
           }
         }
-        this.tree = result.data.roots;
-        this.treeTrace = result.trace;
+        const nextTreeSignature = JSON.stringify(result.data.roots);
+        if (nextTreeSignature !== lastTreeSignature) {
+          this.tree = result.data.roots;
+          this.treeTrace = result.trace;
+          lastTreeSignature = nextTreeSignature;
+        }
         this.applyTreeProjectInfo(result.data);
         this.reconcileWorkspaceStateWithTree();
         await Promise.all([this.refreshStorySettings(), this.refreshDiagnostics()]);
@@ -1330,6 +1338,7 @@ export const useWorkspaceStore = defineStore("workspace", {
       agentStore.resetSession({ clearSessionId: true, clearAvailableSessions: true });
       this.launchScreenVisible = false;
       this.treeResetToken += 1;
+      lastTreeSignature = "";
 
       this.openTabs = [];
       this.documents = {};
@@ -1357,6 +1366,7 @@ export const useWorkspaceStore = defineStore("workspace", {
       this.currentProject = null;
       this.tree = [];
       this.treeTrace = null;
+      lastTreeSignature = "";
       this.openTabs = [];
       this.documents = {};
       this.resetStoryWorkspaceState();
