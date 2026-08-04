@@ -605,6 +605,21 @@ class StorydexCoomiAgentService:
                 if packet_type == "tool_request":
                     await self._dispatch_tool_request(bridge, registry, data)
                     continue
+                if packet_type == "provider_retry":
+                    attempt = int(data.get("attempt") or 1)
+                    max_attempts = int(data.get("maxAttempts") or max(attempt, 1))
+                    yield "ConnectionRetry", {
+                        "_type": "ConnectionRetry",
+                        "_version": 1,
+                        "attempt": attempt,
+                        "maxAttempts": max_attempts,
+                        "message": (
+                            "当前上游提供商服务不稳定，正在自动重试"
+                            f"（第 {attempt}/{max_attempts} 次）。"
+                        ),
+                        "details": {"runtime": "storydex-coomi-rs", "source": "agent"},
+                    }
+                    continue
                 if packet_type in {"approval_request", "user_input_request"}:
                     events, task = self._prepare_interaction(
                         bridge=bridge,

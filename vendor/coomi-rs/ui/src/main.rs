@@ -546,6 +546,10 @@ impl AgentObserver for TerminalObserver {
             }
             AgentEvent::TurnCompleted(usage) => print_usage(usage),
             AgentEvent::ModelStarted { .. } => {}
+            AgentEvent::ProviderRetry {
+                attempt,
+                max_attempts,
+            } => eprintln!("[provider stream stalled, retrying {attempt}/{max_attempts}]"),
         }
     }
 }

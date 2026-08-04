@@ -508,6 +508,11 @@ impl ModelStreamObserver for ObserverStream<'_> {
         self.observer
             .on_event(&AgentEvent::ReasoningDelta(delta.to_owned()));
     }
+
+    fn on_provider_retry(&self, attempt: usize, max_attempts: usize) {
+        self.observer
+            .on_event(&AgentEvent::ProviderRetry { attempt, max_attempts });
+    }
 }
 
 fn is_context_window_error(error: &anyhow::Error) -> bool {
