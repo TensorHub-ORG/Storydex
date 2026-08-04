@@ -139,8 +139,8 @@ function run(argv = process.argv.slice(2)) {
   if (!['backend', 'frontend'].includes(component)) {
     throw new CoverageGateError("--component must be backend or frontend.");
   }
-  if (!['ci', 'release'].includes(mode)) {
-    throw new CoverageGateError("--mode must be ci or release.");
+  if (!['advisory', 'ci', 'release'].includes(mode)) {
+    throw new CoverageGateError("--mode must be advisory, ci, or release.");
   }
   if (!reportPath || reportPath === path.parse(reportPath).root) {
     throw new CoverageGateError("--report must point to a coverage JSON file.");
@@ -160,7 +160,7 @@ function run(argv = process.argv.slice(2)) {
   }
   const payload = readJson(reportPath, "Coverage report");
   const report = component === "backend" ? parseBackendReport(payload) : parseFrontendReport(payload);
-  const tolerance = mode === "ci" ? Number(config.ciTolerance || 0) : 0;
+  const tolerance = mode === "release" ? 0 : Number(config.ciTolerance || 0);
   if (!Number.isFinite(tolerance) || tolerance < 0 || tolerance > 0.5) {
     throw new CoverageGateError("ciTolerance must be between 0 and 0.5 percentage points.");
   }
@@ -171,13 +171,21 @@ function run(argv = process.argv.slice(2)) {
       `- ${item.scope} ${item.metric}: actual ${item.actual.toFixed(2)}%, required ${item.required.toFixed(2)}%` +
       (tolerance ? ` (CI measurement tolerance ${tolerance.toFixed(2)} points)` : "")
     );
-    throw new CoverageGateError(
-      [
-        `Coverage gate failed for ${component} (${mode}):`,
-        ...lines,
-        `To adjust an intentional baseline increase, edit ${path.relative(repoRoot, configPath)} explicitly; never lower it to bypass missing tests.`
-      ].join("\n")
-    );
+    const message = [
+      mode === "advisory"
+        ? `Coverage advisory for ${component}:`
+        : `Coverage gate failed for ${component} (${mode}):`,
+      ...lines,
+      `To adjust an intentional baseline increase, edit ${path.relative(repoRoot, configPath)} explicitly; never lower it to bypass missing tests.`
+    ].join("\n");
+    if (mode === "advisory") {
+      console.warn(message);
+      if (process.env.GITHUB_ACTIONS === "true") {
+        console.warn(`::warning title=Coverage advisory::${escapeWorkflowCommand(message)}`);
+      }
+      return;
+    }
+    throw new CoverageGateError(message);
   }
 
   const totals = results

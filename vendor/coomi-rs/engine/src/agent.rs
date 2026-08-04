@@ -29,8 +29,8 @@ pub enum AgentError {
 impl fmt::Display for AgentError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Provider(error) => write!(formatter, "provider request failed: {error}"),
-            Self::Compaction(error) => write!(formatter, "context compaction failed: {error}"),
+            Self::Provider(error) => write!(formatter, "provider request failed: {error:#}"),
+            Self::Compaction(error) => write!(formatter, "context compaction failed: {error:#}"),
             Self::ToolRoundLimit { limit } => {
                 write!(formatter, "tool round limit reached ({limit})")
             }
@@ -532,6 +532,17 @@ mod tests {
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Mutex;
+
+    #[test]
+    fn provider_errors_include_the_underlying_context_chain() {
+        let error = anyhow::anyhow!("connection reset").context("provider stream failed");
+        let message = AgentError::Provider(error).to_string();
+
+        assert_eq!(
+            message,
+            "provider request failed: provider stream failed: connection reset"
+        );
+    }
 
     struct Approve;
 

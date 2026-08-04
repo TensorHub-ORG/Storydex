@@ -211,9 +211,9 @@ npm ci --prefix apps/desktop
 
 测试代码分别位于 `apps/backend/tests`、`apps/frontend/tests` 和 `apps/desktop/tests`。后端覆盖 unit、API contract、integration、security、SSE 性能、会话恢复和并发失败恢复；前端覆盖 SSE parser、Pinia store、AgentPanel 与字体状态机；桌面覆盖 Node 契约、打包资源、Electron 冷启动和更新元数据。所有自动化测试使用临时 HOME、临时项目和 fake/mock provider，不访问真实付费 LLM 或用户配置。
 
-`.github/workflows/ci.yml` 在 PR、main push 和手动触发时调用可复用的 `quality-gate.yml`。日常 CI 和 `release-windows.yml` 都通过 `scripts/check_coverage.cjs` 读取 `coverage-baseline.json` 执行覆盖率 ratchet；普通 CI 只允许 0.05 个百分点的测量误差，发布门禁不允许误差。覆盖率提升时应同步上调基线；只有统计工具或纳入范围发生有意变化时才可显式重置基线，并在工程风险文档记录旧口径、新口径和原因。CI 不会自动改低基线，禁止为绕过缺失测试而降低。后端只由 Windows Python 3.13 规范 job 计算 ratchet，避免不同 OS/解释器的 coverage.py 分支统计漂移；Python 3.9 的 Windows/Ubuntu 矩阵仍运行完整测试并上传覆盖率报告。质量门禁同时覆盖 Node 20，并上传 JUnit、覆盖率和失败诊断产物。
+`.github/workflows/ci.yml` 在 PR、main push 和手动触发时调用可复用的 `quality-gate.yml`。日常 CI 和 `release-windows.yml` 都通过 `scripts/check_coverage.cjs` 读取 `coverage-baseline.json` 检查覆盖率：普通 CI 使用 `advisory` 模式，覆盖率下降会生成 GitHub warning 和诊断产物，但不会掩盖已经通过的测试、类型检查与构建；缺报告、非法 JSON、缺字段或测试命令失败仍会直接阻断。发布门禁使用零容差 `release` 模式，覆盖率未达到版本基线时继续失败。覆盖率提升时应同步上调基线；只有统计工具或纳入范围发生有意变化时才可显式重置基线，并在工程风险文档记录旧口径、新口径和原因。CI 不会自动改低基线，禁止为绕过缺失测试而降低。后端只由规范 job 生成覆盖率报告，避免不同 OS/解释器的 coverage.py 分支统计漂移。质量门禁同时覆盖 Node 20，并上传 JUnit、覆盖率和失败诊断产物。
 
-本地执行与普通 CI 一致的覆盖率门禁：
+本地执行提交前硬性覆盖率复核：
 
 ```powershell
 .\scripts\run_full_test_suite.ps1 -Mode Fast

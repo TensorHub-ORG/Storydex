@@ -30,6 +30,8 @@ use std::time::Duration;
 const PROVIDER_REQUEST_ATTEMPTS: usize = 3;
 const PROVIDER_RETRY_DELAYS: [Duration; 2] =
     [Duration::from_millis(250), Duration::from_millis(750)];
+const PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const PROVIDER_READ_TIMEOUT: Duration = Duration::from_secs(180);
 
 pub struct HttpModelProvider {
     config: ProviderConfig,
@@ -39,7 +41,8 @@ pub struct HttpModelProvider {
 impl HttpModelProvider {
     pub fn new(config: ProviderConfig) -> Result<Self> {
         let client = Client::builder()
-            .timeout(Duration::from_secs(180))
+            .connect_timeout(PROVIDER_CONNECT_TIMEOUT)
+            .read_timeout(PROVIDER_READ_TIMEOUT)
             .build()
             .context("failed to build provider HTTP client")?;
         Ok(Self { config, client })
@@ -676,10 +679,18 @@ async fn read_sse(response: Response, mut consume: impl FnMut(Value) -> Result<(
                 continue;
             };
             let data = data.trim();
-            if data.is_empty() || data == "[DONE]" {
+            if data.is_empty() {
                 continue;
             }
-            consume(serde_json::from_str(data).context("invalid provider SSE JSON")?)?;
+            if data == "[DONE]" {
+                return Ok(());
+            }
+            let value = serde_json::from_str::<Value>(data).context("invalid provider SSE JSON")?;
+            let completed = value.get("type").and_then(Value::as_str) == Some("response.completed");
+            consume(value)?;
+            if completed {
+                return Ok(());
+            }
         }
     }
     Ok(())
@@ -698,6 +709,14 @@ fn merge_streamed_identifier(target: &mut String, fragment: &str) {
     } else if fragment.starts_with(target.as_str()) {
         *target = fragment.to_owned();
     } else if target != fragment && !target.ends_with(fragment) {
+        target.push_str(fragment);
+    }
+}
+
+fn merge_streamed_arguments(target: &mut String, fragment: &str) {
+    if target.is_empty() || fragment.starts_with(target.as_str()) {
+        *target = fragment.to_owned();
+    } else if !fragment.is_empty() && fragment != target && !target.starts_with(fragment) {
         target.push_str(fragment);
     }
 }
@@ -820,7 +839,7 @@ impl ChatStreamState {
                     merge_streamed_identifier(&mut target.name, name);
                 }
                 if let Some(arguments) = function.get("arguments").and_then(Value::as_str) {
-                    target.arguments.push_str(arguments);
+                    merge_streamed_arguments(&mut target.arguments, arguments);
                 }
             }
         }
@@ -1455,6 +1474,10 @@ fn nested_u64(value: Option<&Value>, key: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
+    use std::io::Write;
+    use std::net::TcpListener;
+    use std::thread::JoinHandle;
 
     struct TestStreamObserver;
 
@@ -1462,6 +1485,96 @@ mod tests {
         fn on_text_delta(&self, _delta: &str) {}
 
         fn on_reasoning_delta(&self, _delta: &str) {}
+    }
+
+    fn spawn_truncated_sse(body: &str) -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind SSE test server");
+        let address = listener.local_addr().expect("read SSE test address");
+        let body = body.as_bytes().to_vec();
+        let handle = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept SSE test request");
+            let mut request = [0_u8; 2048];
+            let _ = socket.read(&mut request).expect("read SSE test request");
+            let declared_length = body.len() + 128;
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {declared_length}\r\nConnection: close\r\n\r\n"
+            )
+            .expect("write SSE test headers");
+            socket.write_all(&body).expect("write SSE test body");
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    #[tokio::test]
+    async fn done_marker_finishes_before_a_truncated_transport_close() {
+        let (url, server) = spawn_truncated_sse(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n",
+        );
+        let response = Client::new()
+            .get(url)
+            .send()
+            .await
+            .expect("request SSE stream");
+        let mut values = Vec::new();
+
+        read_sse(response, |value| {
+            values.push(value);
+            Ok(())
+        })
+        .await
+        .expect("terminal marker should finish the stream");
+        server.join().expect("join SSE test server");
+
+        assert_eq!(values.len(), 1);
+        assert_eq!(
+            values[0].pointer("/choices/0/delta/content"),
+            Some(&json!("ok"))
+        );
+    }
+
+    #[tokio::test]
+    async fn responses_completed_finishes_before_a_truncated_transport_close() {
+        let (url, server) = spawn_truncated_sse(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{}}}\n\n",
+        );
+        let response = Client::new()
+            .get(url)
+            .send()
+            .await
+            .expect("request SSE stream");
+        let mut values = Vec::new();
+
+        read_sse(response, |value| {
+            values.push(value);
+            Ok(())
+        })
+        .await
+        .expect("completed event should finish the stream");
+        server.join().expect("join SSE test server");
+
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[1].get("type"), Some(&json!("response.completed")));
+    }
+
+    #[tokio::test]
+    async fn truncated_stream_without_a_terminal_marker_remains_an_error() {
+        let (url, server) =
+            spawn_truncated_sse("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n");
+        let response = Client::new()
+            .get(url)
+            .send()
+            .await
+            .expect("request SSE stream");
+
+        let error = read_sse(response, |_| Ok(()))
+            .await
+            .expect_err("incomplete stream must not be accepted");
+        server.join().expect("join SSE test server");
+
+        let detail = format!("{error:#}");
+        assert!(detail.starts_with("provider stream failed: "));
+        assert!(detail.split(": ").count() >= 3);
     }
 
     #[test]
@@ -1524,6 +1637,47 @@ mod tests {
         assert_eq!(response.tool_calls.len(), 1);
         assert_eq!(response.tool_calls[0].id, "call-1");
         assert_eq!(response.tool_calls[0].name, "read_file");
+        assert_eq!(
+            response.tool_calls[0].arguments,
+            json!({"path": "README.md"})
+        );
+    }
+
+    #[test]
+    fn chat_stream_accepts_cumulative_tool_arguments() {
+        let mut state = ChatStreamState::default();
+        for value in [
+            json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "id": "call-1",
+                            "function": {"name": "read_file", "arguments": "{\"path\":"}
+                        }]
+                    }
+                }]
+            }),
+            json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "id": "call-1",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": "{\"path\":\"README.md\"}"
+                            }
+                        }]
+                    }
+                }]
+            }),
+        ] {
+            state
+                .consume(&value, &TestStreamObserver)
+                .expect("consume cumulative chat stream fragment");
+        }
+
+        let response = state.finish().expect("finish cumulative chat stream");
+        assert_eq!(response.tool_calls.len(), 1);
         assert_eq!(
             response.tool_calls[0].arguments,
             json!({"path": "README.md"})
