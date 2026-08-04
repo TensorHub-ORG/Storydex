@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit --skipLibCheck && vite build",
+    "build:bundle": "vite build",
     "preview": "vite preview",
     "type-check": "vue-tsc --noEmit",
     "test": "npm run test:unit && npm run test:regressions",

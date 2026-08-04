@@ -39,8 +39,33 @@
 如果需要生成安装包：
 
 ```powershell
-npm run package:win
+npm --prefix apps/desktop run package:win
 ```
+
+完整入口会依次构建前端和 Coomi、同步桌面资源、验证内置 Python，然后执行一次 Electron pack。正常封装使用完整入口，不需要手工组合子命令。
+
+封装过程按以下层级验证：
+
+- `run_full_test_suite.ps1 -Mode Full`：生成目录包并运行快速 packaged smoke。
+- `run_full_test_suite.ps1 -Mode Release`：生成 NSIS、校验正式产物并运行完整 packaged E2E。
+
+如果封装阶段失败，但源码、前端构建、Coomi 二进制和打包资源均未改变，可以只重跑失败阶段：
+
+```powershell
+# Electron 目录包失败
+npm --prefix apps/desktop run build:desktop:prepared
+
+# NSIS 安装包失败
+npm --prefix apps/desktop run package:win:prepared
+
+# 快速 smoke 或完整 E2E 失败
+npm --prefix apps/desktop run test:smoke
+npm --prefix apps/desktop run test:e2e
+```
+
+一旦源码、依赖、前端产物、Coomi 或内置运行时发生变化，必须重新执行 `build:desktop` 或 `package:win` 完整入口，禁止复用旧的 prepared 资源。
+
+便携 ZIP 默认使用 `Fastest` 压缩，以避免对 Electron、Python 和 MinGit 中已经压缩过的二进制进行长时间重复压缩。如果发布场景更重视体积，可以单独执行 `prepare_release_bundle.ps1 -CompressionLevel Optimal`，但该模式预期耗时更长。
 
 ## 差分更新（增量更新）
 
@@ -58,4 +83,3 @@ npm run package:win
 2. 服务器上需要保留旧版本的 `.exe.blockmap`，否则客户端会回退为全量下载。
 3. 应用内入口：系统设置 → 更新与关于 → 检查更新 / 下载更新（增量）/ 重启并安装。
 4. 自动更新仅对打包后的版本生效，开发模式（`npm run dev`）不支持。
-

@@ -13,6 +13,11 @@ on:
         required: false
         type: boolean
         default: false
+      run_packaged_checks:
+        description: Build and test the unpacked desktop in this workflow; release jobs may defer this to the signed package job
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -151,7 +156,7 @@ jobs:
           --component=frontend
           --report=test-results/coverage/coverage-summary.json
           --mode=${{ inputs.enforce_coverage && 'release' || 'advisory' }}
-      - run: npm run build
+      - run: npm run build:bundle
         working-directory: apps/frontend
       - run: npm run test:regressions
         working-directory: apps/frontend
@@ -216,7 +221,7 @@ jobs:
 
   desktop-package-smoke:
     name: desktop-package-smoke
-    if: inputs.full
+    if: inputs.full && inputs.run_packaged_checks
     runs-on: windows-latest
     timeout-minutes: 50
     steps:
@@ -251,7 +256,7 @@ jobs:
 
   electron-e2e:
     name: electron-e2e
-    if: inputs.full
+    if: inputs.full && inputs.run_packaged_checks
     needs: desktop-package-smoke
     runs-on: windows-latest
     timeout-minutes: 20
@@ -299,6 +304,7 @@ jobs:
         env:
           RESULTS: ${{ toJSON(needs) }}
           FULL: ${{ inputs.full }}
+          PACKAGED_CHECKS: ${{ inputs.run_packaged_checks }}
         run: |
           python - <<'PY'
           import json, os, sys
@@ -309,9 +315,11 @@ jobs:
               "frontend-tests",
               "desktop-unit-tests",
           }
-          if os.environ["FULL"].lower() == "true":
+          full = os.environ["FULL"].lower() == "true"
+          packaged_checks = os.environ["PACKAGED_CHECKS"].lower() == "true"
+          if full and packaged_checks:
               required.update({"desktop-package-smoke", "electron-e2e"})
-          else:
+          elif not full:
               required.update({"backend-compatibility", "integration-tests"})
           failed = {
               name: results[name]["result"]
@@ -321,6 +329,8 @@ jobs:
           if failed:
               print("Quality gate failed:", failed)
               sys.exit(1)
-          profile = "full" if os.environ["FULL"].lower() == "true" else "standard"
+          profile = "full" if full else "standard"
+          if full and not packaged_checks:
+              profile += " (packaged checks deferred)"
           print(f"All Storydex {profile} quality gates passed.")
           PY

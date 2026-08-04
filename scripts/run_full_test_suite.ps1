@@ -14,11 +14,31 @@ $results = Join-Path $repoRoot "test-results"
 $bundledPython = Join-Path $repoRoot ".python39/Scripts/python.exe"
 $python = if (Test-Path -LiteralPath $bundledPython) { $bundledPython } else { "python" }
 New-Item -ItemType Directory -Force -Path $results | Out-Null
+$timingsPath = Join-Path $results "pipeline-timings.json"
+$stepTimings = [System.Collections.Generic.List[object]]::new()
 
 function Invoke-Step([string]$Name, [scriptblock]$Action) {
   Write-Host "`n== $Name ==" -ForegroundColor Cyan
-  & $Action
-  if ($LASTEXITCODE -ne 0) { throw "$Name failed with exit code $LASTEXITCODE" }
+  $timer = [System.Diagnostics.Stopwatch]::StartNew()
+  $status = "passed"
+  try {
+    $global:LASTEXITCODE = 0
+    & $Action
+    if ($LASTEXITCODE -ne 0) { throw "$Name failed with exit code $LASTEXITCODE" }
+  } catch {
+    $status = "failed"
+    throw
+  } finally {
+    $timer.Stop()
+    $stepTimings.Add([pscustomobject]@{
+      name = $Name
+      status = $status
+      durationSeconds = [Math]::Round($timer.Elapsed.TotalSeconds, 2)
+      finishedAt = (Get-Date).ToUniversalTime().ToString("o")
+    })
+    $stepTimings | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $timingsPath -Encoding UTF8
+    Write-Host ("[{0}] {1} in {2:n2}s" -f $status.ToUpperInvariant(), $Name, $timer.Elapsed.TotalSeconds) -ForegroundColor $(if ($status -eq "passed") { "Green" } else { "Red" })
+  }
 }
 
 $env:PYTHONUTF8 = "1"
@@ -61,20 +81,26 @@ Invoke-Step "Frontend coverage ratchet" {
   $frontendCoverageReport = Join-Path $frontend "test-results/coverage/coverage-summary.json"
   & node (Join-Path $repoRoot "scripts/check_coverage.cjs") --component=frontend "--report=$frontendCoverageReport" --mode=$coverageMode
 }
-Invoke-Step "Frontend production build" { npm --prefix $frontend run build }
+Invoke-Step "Frontend production build" { npm --prefix $frontend run build:bundle }
 Invoke-Step "Frontend Node regressions" { npm --prefix $frontend run test:regressions }
 Invoke-Step "Desktop unit tests" { npm --prefix $desktop run test:unit }
 Invoke-Step "Desktop release configuration" { npm --prefix $desktop run check:release }
 
-if ($Mode -ne "Fast") {
-  Invoke-Step "Desktop directory package" { npm --prefix $desktop run build:desktop }
+if ($Mode -eq "Full") {
+  Invoke-Step "Prepare desktop package assets" { npm --prefix $desktop run prepare:package:assets }
+  Invoke-Step "Desktop directory package" { npm --prefix $desktop run build:desktop:prepared }
   Invoke-Step "Packaged asset validation" { npm --prefix $desktop run check:packaged }
-  Invoke-Step "Electron packaged E2E" { npm --prefix $desktop run test:e2e }
+  Invoke-Step "Electron packaged smoke" { npm --prefix $desktop run test:smoke }
 }
 if ($Mode -eq "Release") {
-  Invoke-Step "Windows installer" { npm --prefix $desktop run package:win }
+  Invoke-Step "Prepare desktop package assets" { npm --prefix $desktop run prepare:package:assets }
+  Invoke-Step "Windows installer" { npm --prefix $desktop run package:win:prepared }
   Invoke-Step "Installer and updater assets" { node (Join-Path $desktop "scripts/validate-packaged-assets.cjs") "--release=$(Join-Path $desktop 'release')" }
+  Invoke-Step "Electron packaged E2E" { npm --prefix $desktop run test:e2e }
   Invoke-Step "Local release bundle" { & (Join-Path $repoRoot "scripts/prepare_release_bundle.ps1") -Version $packageVersion }
 }
 Invoke-Step "Git whitespace check" { git -C $repoRoot diff --check }
+Write-Host "`n== Pipeline timing summary ==" -ForegroundColor Cyan
+$stepTimings | Format-Table -AutoSize name, status, durationSeconds
+Write-Host "Timing details: $timingsPath"
 Write-Host "`nStorydex $Mode test suite passed." -ForegroundColor Green

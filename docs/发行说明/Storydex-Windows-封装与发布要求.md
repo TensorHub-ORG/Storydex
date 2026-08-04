@@ -34,6 +34,10 @@ node scripts/validate_version_consistency.cjs --expected=1.0.0
 .\scripts\run_full_test_suite.ps1 -Mode Release
 ```
 
+本地门禁采用分级策略：`Full` 生成目录包并运行 updater/端口避让快速 smoke；`Release` 只执行一次正式 NSIS pack，并对该次 pack 产生的同一份 `win-unpacked` 运行完整 Electron E2E。每个阶段的耗时与状态写入 `test-results/pipeline-timings.json`。
+
+GitHub 正式发布同样只执行一次 Windows pack：复用质量门禁负责源码、覆盖率和跨平台测试，packaged E2E 延后到发布 Job，并直接验证该 Job 生成和签名的最终 `win-unpacked`，不得先测试另一份目录包再重新封装发布。
+
 如果仅重新验证封装流程，也必须至少执行（例如）：
 
 ```powershell
@@ -45,6 +49,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare_release_bund
 ```
 
 任何命令返回非零退出码时禁止发布。
+
+### 2.1 失败恢复与阶段复用
+
+封装流程禁止对确定性失败进行无条件自动重试。失败后必须根据阶段处理：
+
+- 测试、源码检查、资源同步或内置 Python 校验失败：修复后重新执行完整门禁。
+- Electron 目录包失败且准备后的输入未变化：只重跑 `npm --prefix apps/desktop run build:desktop:prepared`。
+- NSIS 失败且准备后的输入未变化：只重跑 `npm --prefix apps/desktop run package:win:prepared`。
+- packaged smoke/E2E 失败且封装产物未变化：只重跑 `test:smoke` 或 `test:e2e`。
+- 发布 ZIP、manifest 或 checksum 阶段失败且 `apps/desktop/release` 未变化：只重跑 `prepare_release_bundle.ps1`。
+
+prepared 命令只允许复用当前工作区刚刚完成的 `prepare:package` 或 `prepare:package:assets` 结果。源码、依赖、前端构建、Coomi、内置 Python、MinGit 或文档资源任一发生变化后，prepared 状态立即失效，必须改用 `build:desktop` 或 `package:win` 完整入口。
+
+便携 ZIP 默认使用 `Fastest` 压缩，并通过 ZIP 条目名称、数量和未压缩大小与 `win-unpacked` 逐文件核对，禁止再用全量解压作为常规存在性探测。只有明确需要优先减小便携包体积时，才使用 `prepare_release_bundle.ps1 -CompressionLevel Optimal`。
 
 ## 3. 构建环境要求
 
