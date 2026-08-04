@@ -102,12 +102,41 @@ test("GitHub Actions failures expose the complete ratchet result as an annotatio
   assert.match(result.stderr, /%0ATo adjust an intentional baseline increase/);
 });
 
+test("advisory mode reports regressions without failing standard CI", (t) => {
+  const { root, configPath } = fixture();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const reportPath = path.join(root, "frontend.json");
+  fs.writeFileSync(reportPath, JSON.stringify({
+    total: frontendSummary(79, 79, 79, 69),
+    "src/core.ts": frontendSummary(84, 84, 84, 74)
+  }));
+
+  const result = run(
+    ["--component=frontend", `--report=${reportPath}`, `--config=${configPath}`, "--mode=advisory"],
+    { GITHUB_ACTIONS: "true" }
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /Coverage advisory for frontend/);
+  assert.match(result.stderr, /::warning title=Coverage advisory::/);
+  assert.doesNotMatch(result.stderr, /::error/);
+
+  const releaseResult = run([
+    "--component=frontend",
+    `--report=${reportPath}`,
+    `--config=${configPath}`,
+    "--mode=release"
+  ]);
+  assert.equal(releaseResult.status, 1);
+  assert.match(releaseResult.stderr, /Coverage gate failed for frontend \(release\)/);
+});
+
 test("standard CI has one canonical coverage job while full CI retains its compatibility matrix", () => {
   const workflow = fs.readFileSync(path.resolve(__dirname, "..", "..", ".github", "workflows", "quality-gate.yml"), "utf8");
   assert.match(workflow, /inputs\.full\s*&&/);
   assert.equal((workflow.match(/"coverage_ratchet":true/g) || []).length, 2);
   assert.equal((workflow.match(/"coverage_ratchet":false/g) || []).length, 2);
   assert.match(workflow, /if:\s*matrix\.coverage_ratchet/);
+  assert.equal((workflow.match(/\|\| 'advisory'/g) || []).length, 2);
   assert.match(workflow, /desktop-package-smoke:\s*[\s\S]*?if:\s*inputs\.full/);
   assert.match(workflow, /electron-e2e:\s*[\s\S]*?if:\s*inputs\.full/);
 
@@ -123,6 +152,15 @@ test("missing, malformed, and incomplete reports fail closed", (t) => {
   const missing = run(["--component=backend", `--report=${path.join(root, "missing.json")}`, `--config=${configPath}`]);
   assert.equal(missing.status, 1);
   assert.match(missing.stderr, /is missing/);
+
+  const missingAdvisory = run([
+    "--component=backend",
+    `--report=${path.join(root, "missing-advisory.json")}`,
+    `--config=${configPath}`,
+    "--mode=advisory"
+  ]);
+  assert.equal(missingAdvisory.status, 1);
+  assert.match(missingAdvisory.stderr, /is missing/);
 
   const malformedPath = path.join(root, "malformed.json");
   fs.writeFileSync(malformedPath, "{not-json");

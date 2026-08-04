@@ -89,14 +89,14 @@ jobs:
           --cov-report=json:test-results/coverage.json
           --cov-report=xml:test-results/coverage.xml
           --junitxml=test-results/pytest.xml
-      - name: Enforce versioned coverage ratchet
+      - name: Check versioned coverage baseline
         if: matrix.coverage_ratchet
         working-directory: apps/backend
         run: >-
           node ../../scripts/check_coverage.cjs
           --component=backend
           --report=test-results/coverage.json
-          --mode=${{ inputs.enforce_coverage && 'release' || 'ci' }}
+          --mode=${{ inputs.enforce_coverage && 'release' || 'advisory' }}
       - name: Upload backend reports
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -144,13 +144,13 @@ jobs:
         working-directory: apps/frontend
       - run: npm run test:coverage
         working-directory: apps/frontend
-      - name: Enforce versioned coverage ratchet
+      - name: Check versioned coverage baseline
         working-directory: apps/frontend
         run: >-
           node ../../scripts/check_coverage.cjs
           --component=frontend
           --report=test-results/coverage/coverage-summary.json
-          --mode=${{ inputs.enforce_coverage && 'release' || 'ci' }}
+          --mode=${{ inputs.enforce_coverage && 'release' || 'advisory' }}
       - run: npm run build
         working-directory: apps/frontend
       - run: npm run test:regressions

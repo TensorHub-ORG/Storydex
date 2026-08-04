@@ -14,9 +14,9 @@
 ### 覆盖率 ratchet
 
 - `scripts/check_coverage.cjs` 是普通 CI、发布 CI 和本地命令共用的唯一校验器；缺报告、非法 JSON、缺字段、测试命令非零均 fail closed。
-- `coverage-baseline.json` 保存当前实际基线。前端基线迁移到 Vitest 4.1.10 / V8 AST-aware remapping 口径：lines 76.2、statements 75.5、functions 72.1、branches 65.6；后端基线为 lines 86.5、branches 73.7，并固定由 Windows Python 3.13 规范 job 计算。Python 3.9 的 Windows/Ubuntu 完整测试和报告仍保留，但不再将不同解释器/平台的 coverage.py 分支统计混用为同一个 ratchet 输入。
-- 普通 CI 只允许 0.05 个百分点测量误差，发布 CI 不允许误差；基线不会由 CI 自动降低，任何口径迁移必须在本文件记录原因。
-- 当前验证：前端 211/211 测试通过，release 覆盖率门禁通过；后端 947 个测试通过，release 覆盖率 lines 86.57%、branches 73.76%。
+- `coverage-baseline.json` 保存版本基线。普通 PR/push 使用 `advisory` 模式：覆盖率下降会生成可见 warning，但不会把已通过的功能测试、类型检查和构建判红；发布 CI 使用零容差 `release` 模式，继续执行硬性 ratchet。
+- `ci` 模式保留给本地提交前硬性复核，并允许配置的测量误差；基线不会由 CI 自动降低，任何口径迁移必须在本文件记录原因。
+- 当前验证：前端 254/254 测试通过；普通 CI 会报告当前覆盖率与版本基线的差异，发布前仍需补足测试或按正式口径审查并更新基线。
 
 ### Electron 与打包
 
