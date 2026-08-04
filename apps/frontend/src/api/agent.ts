@@ -20,6 +20,8 @@ import { parseSseFrameData, splitSseFrames } from "@/api/sseParser.mjs";
 import type { ApiEnvelope, ApiResult, ApiTrace } from "@/types/api";
 import type { WorkspaceGitDiffResponse } from "@/types/workspace";
 
+const STREAM_TEXT_FLUSH_INTERVAL_MS = 50;
+
 export class AgentApiError extends ApiResponseError {}
 
 function unwrapAgentEnvelope<T>(envelope: ApiEnvelope<T>, fallback: string): ApiResult<T> {
@@ -80,6 +82,47 @@ export async function streamAgentPrompt(
   sessionId?: string,
   signal?: AbortSignal
 ): Promise<void> {
+  let pendingTextPacket: AgentStreamPacket | null = null;
+  let textFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  let callbackError: unknown = null;
+
+  const flushPendingText = (): void => {
+    if (textFlushTimer !== null) {
+      clearTimeout(textFlushTimer);
+      textFlushTimer = null;
+    }
+    if (callbackError) {
+      throw callbackError;
+    }
+    const packet = pendingTextPacket;
+    pendingTextPacket = null;
+    if (packet) {
+      onMessage(packet);
+    }
+  };
+
+  const queueTextPacket = (packet: AgentStreamPacket): void => {
+    if (pendingTextPacket && pendingTextPacket.traceId !== packet.traceId) {
+      flushPendingText();
+    }
+    pendingTextPacket = pendingTextPacket
+      ? {
+          ...pendingTextPacket,
+          ...packet,
+          content: `${pendingTextPacket.content || ""}${packet.content || ""}`
+        }
+      : { ...packet };
+    if (textFlushTimer === null) {
+      textFlushTimer = setTimeout(() => {
+        try {
+          flushPendingText();
+        } catch (error: unknown) {
+          callbackError = error;
+        }
+      }, STREAM_TEXT_FLUSH_INTERVAL_MS);
+    }
+  };
+
   try {
     const authToken = getApiAuthToken();
     const response = await fetch(appendSessionQuery(resolveApiUrl("/agent/chat/stream"), sessionId), {
@@ -109,7 +152,11 @@ export async function streamAgentPrompt(
 
     while (true) {
       const { done, value } = await reader.read();
+      if (callbackError) {
+        throw callbackError;
+      }
       if (done) {
+        flushPendingText();
         if (sawTerminalPacket) {
           return;
         }
@@ -127,6 +174,7 @@ export async function streamAgentPrompt(
         }
 
         if (packet.type === "error" && packet.error) {
+          flushPendingText();
           sawTerminalPacket = true;
           throw new AgentApiError(
             packet.error.message,
@@ -138,6 +186,7 @@ export async function streamAgentPrompt(
         }
 
         if (packet.type === "AgentError") {
+          flushPendingText();
           sawTerminalPacket = true;
           onMessage(packet);
           deferredAgentError = new AgentApiError(
@@ -158,13 +207,19 @@ export async function streamAgentPrompt(
         }
 
         if (packet.type === "done") {
+          flushPendingText();
           if (deferredAgentError) {
             throw deferredAgentError;
           }
           return;
         }
 
-        onMessage(packet);
+        if (packet.type === "TextChunk") {
+          queueTextPacket(packet);
+        } else {
+          flushPendingText();
+          onMessage(packet);
+        }
       }
     }
   } catch (error: unknown) {
@@ -172,6 +227,10 @@ export async function streamAgentPrompt(
       throw new AgentApiError("Current Coomi run was stopped.", "request_aborted");
     }
     throw error;
+  } finally {
+    if (textFlushTimer !== null) {
+      clearTimeout(textFlushTimer);
+    }
   }
 }
 

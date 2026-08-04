@@ -164,6 +164,21 @@ describe("agent store lifecycle and normalization", () => {
 });
 
 describe("agent packet state machine", () => {
+  it("keeps high-volume text streaming in one bounded trace event", () => {
+    const store = useAgentStore();
+    store.executionHistory = [run()];
+
+    for (let index = 0; index < 500; index += 1) {
+      store.applyStreamPacket("trace", { type: "TextChunk", content: "x" } as never);
+    }
+
+    expect(store.executionHistory[0].reply).toBe(`old${"x".repeat(500)}`);
+    expect(store.executionHistory[0].events).toHaveLength(1);
+    expect(store.executionHistory[0].events[0].detail).toBe("x".repeat(500));
+    expect(store.executionHistory[0].items).toHaveLength(1);
+    expect(store.executionHistory[0].items[0].content).toBe("x".repeat(500));
+  });
+
   it("processes every stream packet family and task terminal state", () => {
     const store = useAgentStore();
     store.executionHistory = [run()];

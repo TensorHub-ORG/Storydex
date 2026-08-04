@@ -125,17 +125,21 @@
             ref="pendingCreateInputRef"
             v-model.trim="pendingCreate.value"
             class="tree-inline-create-input"
+            :disabled="pendingCreateSubmitting"
             :placeholder="pendingCreate.kind === 'file' ? '输入文件名，例如 chapter.md' : '输入文件夹名'"
             @keydown.enter.prevent="submitPendingCreate"
             @keydown.esc.prevent="cancelPendingCreate"
           />
         </div>
 
+        <div
+          v-if="workspaceStore.workspaceError && !workspaceStore.isBootstrapping && !workspaceStore.isTreeLoading"
+          class="tree-empty tree-error"
+        >
+          {{ workspaceStore.workspaceError }}
+        </div>
         <div v-if="workspaceStore.isBootstrapping || workspaceStore.isTreeLoading" class="tree-empty tree-loading">
           正在加载工作区资源...
-        </div>
-        <div v-else-if="workspaceStore.workspaceError" class="tree-empty tree-error">
-          {{ workspaceStore.workspaceError }}
         </div>
         <div v-else-if="rows.length === 0 && !pendingCreate" class="tree-empty tree-empty-resources">
           当前目录下还没有可展示的资源。可通过顶部图标或右键空白区域创建内容。
@@ -249,6 +253,7 @@
                 ref="pendingCreateInputRef"
                 v-model.trim="pendingCreate.value"
                 class="tree-inline-create-input"
+                :disabled="pendingCreateSubmitting"
                 :placeholder="pendingCreate.kind === 'file' ? '输入文件名，例如 chapter.md' : '输入文件夹名'"
                 @keydown.enter.prevent="submitPendingCreate"
                 @keydown.esc.prevent="cancelPendingCreate"
@@ -416,7 +421,8 @@ const contextMenu = ref<ContextMenuState>({
 });
 const clipboardState = ref<ClipboardState | null>(null);
 const pendingCreate = ref<PendingCreateState | null>(null);
-const pendingCreateInputRef = ref<HTMLInputElement | null>(null);
+const pendingCreateInputRef = ref<HTMLInputElement | HTMLInputElement[] | null>(null);
+const pendingCreateSubmitting = ref(false);
 const pendingRename = ref<PendingRenameState | null>(null);
 const pendingRenameInputRef = ref<HTMLInputElement | null>(null);
 const contextMenuRef = ref<HTMLDivElement | null>(null);
@@ -450,7 +456,8 @@ const toolbarDisabled = computed(
   () =>
     !workspaceStore.projectRootLabel ||
     workspaceStore.isBootstrapping ||
-    workspaceStore.isProjectSwitching
+    workspaceStore.isProjectSwitching ||
+    pendingCreateSubmitting.value
 );
 const saveDisabled = computed(() => !workspaceStore.isDirty || workspaceStore.isSaving);
 
@@ -493,6 +500,39 @@ function normalizeNodePath(relativePath: string | null | undefined): string {
     .replace(/\\/g, "/")
     .replace(/^\/+|\/+$/g, "")
     .trim();
+}
+
+function selectOnly(path: string): void {
+  const normalized = normalizeNodePath(path);
+  selectedPaths.value = normalized ? new Set([normalized]) : new Set();
+  selectionAnchor.value = normalized;
+}
+
+function clearSelection(): void {
+  selectedPaths.value = new Set();
+  selectionAnchor.value = "";
+}
+
+function pruneSelection(nodes: WorkspaceTreeNode[]): void {
+  if (selectedPaths.value.size === 0) {
+    return;
+  }
+  const existingPaths = new Set<string>();
+  const collect = (items: WorkspaceTreeNode[]): void => {
+    for (const item of items) {
+      const path = nodePath(item);
+      if (path) existingPaths.add(path);
+      if (item.children?.length) collect(item.children);
+    }
+  };
+  collect(nodes);
+  const next = new Set([...selectedPaths.value].filter((path) => existingPaths.has(path)));
+  if (next.size !== selectedPaths.value.size) {
+    selectedPaths.value = next;
+  }
+  if (selectionAnchor.value && !existingPaths.has(selectionAnchor.value)) {
+    selectionAnchor.value = next.values().next().value || "";
+  }
 }
 
 function isChapterDirectory(node: WorkspaceTreeNode): boolean {
@@ -708,10 +748,14 @@ watch(
   () => {
     expandedPaths.value = {};
     pendingCreate.value = null;
+    pendingCreateSubmitting.value = false;
     pendingRename.value = null;
+    clearSelection();
     closeContextMenu();
   }
 );
+
+watch(displayTree, (nodes) => pruneSelection(nodes));
 
 watch(
   () => workspaceStore.launchScreenVisible,
@@ -721,8 +765,10 @@ watch(
     }
     expandedPaths.value = {};
     clipboardState.value = null;
-    cancelPendingCreate();
+    pendingCreate.value = null;
+    pendingCreateSubmitting.value = false;
     cancelPendingRename();
+    clearSelection();
     closeContextMenu();
   }
 );
@@ -820,7 +866,7 @@ function handleRowClick(node: WorkspaceTreeNode, event?: MouseEvent): void {
       return;
     }
   }
-  if (path) { selectedPaths.value = new Set([path]); selectionAnchor.value = path; }
+  if (path) selectOnly(path);
   if (node.kind === "directory") {
     toggleDirectory(node);
     return;
@@ -862,6 +908,12 @@ async function openContextMenuAt(
   node: WorkspaceTreeNode | null
 ): Promise<void> {
   cancelPendingRename();
+  if (node) {
+    const path = nodePath(node);
+    if (path && !selectedPaths.value.has(path)) {
+      selectOnly(path);
+    }
+  }
   if (!contextMenuFocusSnapshot) {
     contextMenuFocusSnapshot = captureEditableFocus();
   }
@@ -1104,6 +1156,9 @@ function startRootCreate(kind: "file" | "directory"): void {
 }
 
 function startCreate(kind: "file" | "directory", node: WorkspaceTreeNode | null = null): void {
+  if (pendingCreateSubmitting.value) {
+    return;
+  }
   closeContextMenu();
   cancelPendingRename();
   workspaceStore.workspaceError = "";
@@ -1119,10 +1174,21 @@ function startCreate(kind: "file" | "directory", node: WorkspaceTreeNode | null 
     parentPath,
     value: ""
   };
-  void nextTick(() => pendingCreateInputRef.value?.focus());
+  void nextTick(() => pendingCreateInputElement()?.focus());
+}
+
+function pendingCreateInputElement(): HTMLInputElement | null {
+  const candidate = pendingCreateInputRef.value;
+  if (Array.isArray(candidate)) {
+    return candidate.find((input) => input.isConnected) || candidate[0] || null;
+  }
+  return candidate;
 }
 
 function cancelPendingCreate(): void {
+  if (pendingCreateSubmitting.value) {
+    return;
+  }
   pendingCreate.value = null;
 }
 
@@ -1180,23 +1246,29 @@ async function submitPendingRename(): Promise<void> {
 }
 
 async function submitPendingCreate(): Promise<void> {
+  if (pendingCreateSubmitting.value) {
+    return;
+  }
   const draft = pendingCreate.value;
   if (!draft) {
     return;
   }
   const name = sanitizeLeafName(draft.value);
   if (!name) {
-    pendingCreateInputRef.value?.focus();
+    workspaceStore.workspaceError = draft.kind === "file" ? "请输入有效的文件名。" : "请输入有效的文件夹名。";
+    pendingCreateInputElement()?.focus();
+    pendingCreateInputElement()?.select();
     return;
   }
   const relativePath = joinRelativePath(draft.parentPath, name);
   if (!relativePath) {
+    workspaceStore.workspaceError = "创建路径不能为空。";
     return;
   }
+  pendingCreateSubmitting.value = true;
   try {
     if (draft.kind === "file") {
       await workspaceStore.createFile(relativePath, "");
-      await workspaceStore.openFile(relativePath);
     } else {
       await workspaceStore.createDirectory(relativePath);
       expandedPaths.value = {
@@ -1204,11 +1276,15 @@ async function submitPendingCreate(): Promise<void> {
         [relativePath]: true
       };
     }
+    selectOnly(relativePath);
+    pendingCreateSubmitting.value = false;
     cancelPendingCreate();
   } catch {
     // store 已将错误写入 workspaceError；保留输入框供用户改名后重试
-    pendingCreateInputRef.value?.focus();
-    pendingCreateInputRef.value?.select();
+    pendingCreateSubmitting.value = false;
+    await nextTick();
+    pendingCreateInputElement()?.focus();
+    pendingCreateInputElement()?.select();
   }
 }
 
@@ -1578,12 +1654,14 @@ async function writeClipboard(text: string): Promise<void> {
 }
 defineExpose({
   __testUtils: import.meta.env.MODE === "test" ? {
-    expandedPaths, contextMenu, clipboardState, pendingCreate, pendingRename, pendingRenameValue, dragTargetPath, rows,
+    expandedPaths, contextMenu, clipboardState, pendingCreate, pendingCreateSubmitting, pendingRename, pendingRenameValue,
+    dragTargetPath, selectedPaths, selectionAnchor, rows,
     nodePath, normalizeNodePath, isChapterDirectory, diagnosticCount, directDiagnosticCount, hasDiagnostics,
     diagnosticsForNode, diagnosticCounts, gitFilesForNode, gitDecoration, gitFileDecoration, buildPathIndex, hasNodeDecorations, treeRowTrailingWidth, formatBadgeCount,
     hasDirectDiagnostics, diagnosticSeverity, diagnosticHint, shouldShowRowActions, showDiagnosticDot, chapterCompletionLabel,
     isStorySegmentNode, storyDiagnosticCount, storyDiagnosticHint, shouldShowStoryRowActions, chapterStateTitle,
-    isRenamingNode, handleRefresh, handleAutoRefresh, handleWindowPointerDown, handleSave, handleRowClick,
+    isRenamingNode, selectOnly, clearSelection, pruneSelection, handleRefresh, handleAutoRefresh, handleWindowPointerDown,
+    handleSave, handleRowClick,
     handleChapterCompletionToggle, openNodeContextMenu, handleRootContextMenu, openContextMenuAt, closeContextMenu,
     isDirectoryDropTarget, handleRootDragEnter, handleRootDragOver, handleRootDragLeave, handleRootDrop,
     handleNodeDragEnter, handleNodeDragOver, handleNodeDragLeave, handleNodeDrop, repositionContextMenu,

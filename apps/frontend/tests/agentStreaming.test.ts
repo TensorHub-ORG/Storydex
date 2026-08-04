@@ -34,6 +34,41 @@ describe("Coomi streaming API contract", () => {
     }));
   });
 
+  it("coalesces consecutive text chunks while preserving event order", async () => {
+    const firstText = Array.from({ length: 100 }, (_, index) => sse({
+      type: "TextChunk",
+      traceId: "trace-1",
+      content: String(index % 10)
+    }));
+    const secondText = Array.from({ length: 20 }, () => sse({
+      type: "TextChunk",
+      traceId: "trace-1",
+      content: "x"
+    }));
+    const frames = [
+      sse({ type: "RunAccepted" }),
+      ...firstText,
+      sse({ type: "ToolStart", tool_name: "read_file" }),
+      ...secondText,
+      sse({ type: "AgentCompleted" }),
+      sse({ type: "done" })
+    ];
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(streamResponse(frames));
+    const packets: Record<string, unknown>[] = [];
+
+    await streamAgentPrompt({ prompt: "x" }, (packet) => packets.push(packet));
+
+    expect(packets.map((packet) => packet.type)).toEqual([
+      "RunAccepted",
+      "TextChunk",
+      "ToolStart",
+      "TextChunk",
+      "AgentCompleted"
+    ]);
+    expect(packets[1].content).toBe(Array.from({ length: 100 }, (_, index) => String(index % 10)).join(""));
+    expect(packets[3].content).toBe("x".repeat(20));
+  });
+
   it("supports absolute API bases and terminal final packets", async () => {
     apiClient.defaults.baseURL = "https://api.example.test/v1";
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(streamResponse([sse({ type: "final" })]));
