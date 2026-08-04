@@ -7,7 +7,7 @@ SQLite FTS5 表 ``docs(content, path)``，提供 ``search(query, top_k, filters)
 
 * DB 路径：``.storydex/.cache/retrieval.fts5.db``（manifest 已声明 create_on_init=False）。
 * ``build_index(project_root)``：全量扫一次入库；幂等（删旧表重建）。
-* ``watch_files(...)``：增量更新只扫 mtime > last_indexed_at 的文件。
+* ``watch_files(...)``：增量更新比较文件当前 mtime/size 与已索引元数据。
 * 受 ``CONTEXT_PIPELINE_FTS5`` Flag 控制；Off 时调用方走旧 index_service。
 """
 from __future__ import annotations
@@ -20,7 +20,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
-from core.bounded_text_io import read_text_limited, read_text_preview
+from core.bounded_text_io import read_text_limited
 from services.storydex_retrieval import _build_snippet, tokenize
 
 logger = logging.getLogger(__name__)
@@ -43,6 +43,18 @@ CREATE TABLE IF NOT EXISTS doc_meta (
     size INTEGER
 );
 """
+
+
+@contextmanager
+def _immediate_transaction(conn: sqlite3.Connection) -> Iterator[None]:
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield
+    except BaseException:
+        conn.rollback()
+        raise
+    else:
+        conn.commit()
 
 
 class RetrievalService:
@@ -89,34 +101,38 @@ class RetrievalService:
     def build_index(self) -> int:
         """全量重建索引；返回入库文件数。"""
         with self._lock, self._connect() as conn:
-            conn.execute("DELETE FROM docs")
-            conn.execute("DELETE FROM doc_meta")
             count = 0
             now = time.time()
-            for p in self._candidate_files():
-                indexed = self._read_indexable_text(p)
-                if indexed is None:
-                    continue
-                text, size, mtime = indexed
-                rel = str(p.relative_to(self.project_root)).replace("\\", "/")
-                conn.execute("INSERT INTO docs(tokens, path) VALUES(?, ?)", (self._tokenized(text), rel))
-                conn.execute(
-                    "INSERT OR REPLACE INTO doc_meta(path, mtime, indexed_at, size) VALUES(?, ?, ?, ?)",
-                    (rel, mtime, now, size),
-                )
-                count += 1
+            with _immediate_transaction(conn):
+                conn.execute("DELETE FROM docs")
+                conn.execute("DELETE FROM doc_meta")
+                for p in self._candidate_files():
+                    indexed = self._read_indexable_text(p)
+                    if indexed is None:
+                        continue
+                    text, size, mtime = indexed
+                    rel = str(p.relative_to(self.project_root)).replace("\\", "/")
+                    conn.execute("INSERT INTO docs(tokens, path) VALUES(?, ?)", (self._tokenized(text), rel))
+                    conn.execute(
+                        "INSERT OR REPLACE INTO doc_meta(path, mtime, indexed_at, size) VALUES(?, ?, ?, ?)",
+                        (rel, mtime, now, size),
+                    )
+                    count += 1
             return count
 
     def watch_files(self) -> int:
-        """增量：只对 mtime 比上次 indexed_at 新的文件重新入库。返回处理数。"""
+        """增量：重新入库 mtime 或 size 与已索引元数据不同的文件。"""
         with self._lock, self._connect() as conn:
             existing = {
-                row["path"]: float(row["indexed_at"])
-                for row in conn.execute("SELECT path, indexed_at FROM doc_meta").fetchall()
+                row["path"]: (
+                    float(row["mtime"]),
+                    int(row["size"]) if row["size"] is not None else None,
+                )
+                for row in conn.execute("SELECT path, mtime, size FROM doc_meta").fetchall()
             }
             updated = 0
-            now = time.time()
             seen_paths: set[str] = set()
+            pending: List[Tuple[Path, str, Any]] = []
             for p in self._candidate_files():
                 rel = str(p.relative_to(self.project_root)).replace("\\", "/")
                 seen_paths.add(rel)
@@ -124,24 +140,33 @@ class RetrievalService:
                     stat = p.stat()
                 except OSError:
                     continue
-                mtime = stat.st_mtime
-                if rel in existing and mtime <= existing[rel]:
-                    continue
-                indexed = self._read_indexable_text(p, stat=stat)
-                if indexed is None:
-                    continue
-                text, size, _mtime = indexed
-                conn.execute("DELETE FROM docs WHERE path=?", (rel,))
-                conn.execute("INSERT INTO docs(tokens, path) VALUES(?, ?)", (self._tokenized(text), rel))
-                conn.execute(
-                    "INSERT OR REPLACE INTO doc_meta(path, mtime, indexed_at, size) VALUES(?, ?, ?, ?)",
-                    (rel, mtime, now, size),
-                )
-                updated += 1
-            for rel in set(existing) - seen_paths:
-                conn.execute("DELETE FROM docs WHERE path=?", (rel,))
-                conn.execute("DELETE FROM doc_meta WHERE path=?", (rel,))
-                updated += 1
+                mtime = float(stat.st_mtime)
+                size = int(stat.st_size)
+                if existing.get(rel) != (mtime, size):
+                    pending.append((p, rel, stat))
+            removed_paths = set(existing) - seen_paths
+            if not pending and not removed_paths:
+                return 0
+
+            now = time.time()
+            with _immediate_transaction(conn):
+                for p, rel, stat in pending:
+                    mtime = float(stat.st_mtime)
+                    indexed = self._read_indexable_text(p, stat=stat)
+                    if indexed is None:
+                        continue
+                    text, size, _mtime = indexed
+                    conn.execute("DELETE FROM docs WHERE path=?", (rel,))
+                    conn.execute("INSERT INTO docs(tokens, path) VALUES(?, ?)", (self._tokenized(text), rel))
+                    conn.execute(
+                        "INSERT OR REPLACE INTO doc_meta(path, mtime, indexed_at, size) VALUES(?, ?, ?, ?)",
+                        (rel, mtime, now, size),
+                    )
+                    updated += 1
+                for rel in removed_paths:
+                    conn.execute("DELETE FROM docs WHERE path=?", (rel,))
+                    conn.execute("DELETE FROM doc_meta WHERE path=?", (rel,))
+                    updated += 1
             return updated
 
     # ─────────────────── 检索 ───────────────────
@@ -208,11 +233,16 @@ class RetrievalService:
             # tokens 列是 bigram 流，FTS5 自带 snippet 不可读；从原文生成摘录。
             snippet = ""
             try:
-                snippet = _build_snippet(read_text_preview(self.project_root / path, max_chars=4000), query_tokens)
+                snippet = self._snippet_from_source(self.project_root / path, query_tokens)
             except Exception:
                 snippet = ""
             results.append((path, score, snippet))
         return results
+
+    @staticmethod
+    def _snippet_from_source(path: Path, query_tokens: List[str]) -> str:
+        indexed = read_text_limited(path, FTS5_INDEX_CHAR_LIMIT, preserve_tail=True)
+        return _build_snippet(indexed.text, query_tokens)
 
     def search(self, query: str, *, top_k: int = 20, path_prefix: Optional[str] = None) -> List[Tuple[str, float, str]]:
         """返回 (path, score, snippet)。score 越小越相关（FTS5 bm25）。"""

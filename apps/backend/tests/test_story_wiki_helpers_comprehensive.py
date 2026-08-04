@@ -120,6 +120,7 @@ def test_source_collection_kind_sort_and_read_failures(service, tmp_path, monkey
     (tmp_path / "characters" / "hero.json").write_text(json.dumps({"name": "Hero"}), encoding="utf-8")
     sources = service._collect_sources(tmp_path)
     assert [s["relativePath"] for s in sources][:2] == ["chapters/2.txt", "chapters/10.md"]
+    assert [s["relativePath"] for s in service._collect_character_sources(tmp_path)] == ["characters/hero.json"]
     assert all(s["relativePath"] != "README.md" for s in sources)
     assert service._should_skip_source_path("folder/README.md")
     assert service._should_skip_source_path(".storydex/wiki/a.json")
@@ -138,6 +139,76 @@ def test_source_collection_kind_sort_and_read_failures(service, tmp_path, monkey
     assert service._read_source_text(bad) == "not json"
     monkeypatch.setattr(Path, "read_text", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("fail")))
     assert service._read_source_text(bad) == ""
+
+
+def test_entity_reconciliation_does_not_call_full_source_scan(service, tmp_path, monkeypatch):
+    cards = tmp_path / ".storydex" / "characters"
+    cards.mkdir(parents=True)
+    cards.joinpath("沈青.md").write_text(
+        "# 沈青\n\n> 稳定实体ID: `char:shenqing`\n",
+        encoding="utf-8",
+    )
+    states = cards / "states"
+    states.mkdir()
+    states.joinpath("derived.json").write_text(
+        json.dumps({"name": "不应成为角色", "entityId": "char:derived"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        service,
+        "_collect_sources",
+        lambda _root: (_ for _ in ()).throw(AssertionError("full source scan should not run")),
+    )
+
+    service._reconcile_entity_registry(tmp_path)
+
+    registry = json.loads(
+        (tmp_path / ".storydex" / "memory" / "current" / "entities.json").read_text(encoding="utf-8")
+    )
+    assert [item["entityId"] for item in registry["entities"]] == ["char:shenqing"]
+    assert registry["entities"][0]["sourcePaths"] == [".storydex/characters/沈青.md"]
+
+
+def test_build_index_preserves_entry_and_node_order_with_reverse_maps(service, tmp_path):
+    source_path = "chapters/001.md"
+    payload = {
+        "schemaVersion": 2,
+        "entries": [
+            {"id": "entry-a", "sourcePaths": [source_path, source_path]},
+            {"id": "entry-b", "sourcePaths": [source_path]},
+            {"id": "entry-c", "sourcePaths": ["chapters/002.md"]},
+        ],
+        "graph": {
+            "nodes": [
+                {"id": "node-b", "entryId": "entry-b"},
+                {"id": "node-a", "entryId": "entry-a"},
+                {"id": "node-c", "entryId": "entry-c"},
+            ],
+            "edges": [],
+        },
+    }
+    sources = [
+        {
+            "relativePath": source_path,
+            "sha256": "hash",
+            "kind": "chapter",
+            "size": 10,
+            "mtime": "2026-01-01T00:00:00+00:00",
+        }
+    ]
+
+    index = service._build_index(
+        tmp_path,
+        payload,
+        sources=sources,
+        workflow="test",
+        status="completed",
+        changed_paths=[],
+    )
+
+    source_index = index["sources"][source_path]
+    assert source_index["relatedEntryIds"] == ["entry-a", "entry-b"]
+    assert source_index["relatedNodeIds"] == ["node-b", "node-a"]
 
 
 def test_entity_and_text_helpers_cover_optional_paths(service, tmp_path):

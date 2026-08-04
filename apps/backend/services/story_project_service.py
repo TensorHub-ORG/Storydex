@@ -3776,6 +3776,7 @@ class StoryProjectService:
         limit: int = 3,
         include_content: bool = False,
         max_chars: int = 900,
+        read_from_tail: bool = False,
         exclude_chapter_numbers: Optional[List[int]] = None,
     ) -> List[Dict[str, Any]]:
         root = Path(workspace_root).resolve()
@@ -3818,7 +3819,11 @@ class StoryProjectService:
             segment_path = root / relative
             relative_path_obj = Path(relative)
             chapter_path = relative if len(relative_path_obj.parts) == 2 and relative_path_obj.parent.as_posix() == "chapters" else relative_path_obj.parent.as_posix()
-            preview = self._read_text_preview(segment_path, max_chars=max_chars)
+            preview = (
+                self._read_text_tail(segment_path, max_chars=max_chars)
+                if read_from_tail
+                else self._read_text_preview(segment_path, max_chars=max_chars)
+            )
             item = {
                 "relativePath": relative,
                 "chapterPath": chapter_path,
