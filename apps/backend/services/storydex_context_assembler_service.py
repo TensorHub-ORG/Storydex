@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Set, Tuple
 
+from core.bounded_text_io import read_text_limited as read_bounded_text_limited
 from core.bounded_text_io import read_text_preview as read_bounded_text_preview
 from services.context_trace_service import (
     MAX_CONTEXT_SOURCE_PATHS,
@@ -755,11 +756,17 @@ class StorydexContextAssemblerService:
         lines = [
             "[Related Project Passages]",
             "Retrieval hits for this turn only; treat as reference excerpts, not full documents.",
-            "Candidate paths include lower-ranked matches; read selectively before concluding evidence is absent.",
-            ", ".join(normalized_candidates),
         ]
         for path, snippet in selected:
             lines.extend(["", f"### {path}", snippet])
+        lines.extend(
+            [
+                "",
+                "Additional candidate paths:",
+                "Lower-ranked matches are included; read selectively before concluding evidence is absent.",
+                ", ".join(normalized_candidates),
+            ]
+        )
         return "\n".join(lines).strip(), normalized_candidates
 
     _RETRIEVABLE_CONTENT_PREFIXES = (
@@ -933,6 +940,7 @@ class StorydexContextAssemblerService:
             limit=3,
             include_content=True,
             max_chars=700,
+            read_from_tail=True,
         )
         if recent:
             return recent
@@ -942,6 +950,7 @@ class StorydexContextAssemblerService:
             limit=3,
             include_content=True,
             max_chars=700,
+            read_from_tail=True,
         )
 
     def _infer_active_entities(self, root: Path, *, prompt: str, active_file: str) -> Sequence[str]:
@@ -949,7 +958,11 @@ class StorydexContextAssemblerService:
         active_path = self._safe_workspace_file(root, active_file)
         if active_path is not None and active_path.exists() and active_path.is_file():
             try:
-                text += "\n" + read_bounded_text_preview(active_path, max_chars=3000)
+                text += "\n" + read_bounded_text_limited(
+                    active_path,
+                    3000,
+                    preserve_tail=True,
+                ).text
             except Exception:
                 pass
         if not text.strip():

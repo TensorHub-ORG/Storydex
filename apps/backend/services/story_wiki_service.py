@@ -2275,27 +2275,47 @@ class StoryWikiService:
     ) -> Dict[str, Any]:
         entries = [entry for entry in payload.get("entries", []) if isinstance(entry, dict)]
         nodes = [node for node in payload.get("graph", {}).get("nodes", []) if isinstance(node, dict)]
+
+        entry_ids_by_source: Dict[str, List[str]] = {}
+        source_paths_by_entry_id: Dict[str, List[str]] = {}
+        for entry in entries:
+            entry_id = str(entry.get("id") or "")
+            raw_source_paths = entry.get("sourcePaths")
+            source_paths = (
+                list(
+                    dict.fromkeys(
+                        str(item)
+                        for item in raw_source_paths
+                        if str(item)
+                    )
+                )
+                if isinstance(raw_source_paths, list)
+                else []
+            )
+            for rel in source_paths:
+                entry_ids_by_source.setdefault(rel, []).append(entry_id)
+            source_paths_by_entry_id[entry_id] = list(
+                dict.fromkeys([*source_paths_by_entry_id.get(entry_id, []), *source_paths])
+            )
+
+        node_ids_by_source: Dict[str, List[str]] = {}
+        for node in nodes:
+            entry_id = str(node.get("entryId") or "")
+            node_id = str(node.get("id") or "")
+            for rel in source_paths_by_entry_id.get(entry_id, []):
+                node_ids_by_source.setdefault(rel, []).append(node_id)
+
         sources_index: Dict[str, Any] = {}
         for source in sources:
             rel = str(source.get("relativePath") or "")
-            related_entries = [
-                str(entry.get("id"))
-                for entry in entries
-                if rel in [str(item) for item in entry.get("sourcePaths", [])]
-            ]
-            related_nodes = [
-                str(node.get("id"))
-                for node in nodes
-                if str(node.get("entryId") or "") in related_entries
-            ]
             sources_index[rel] = {
                 "sha256": source.get("sha256"),
                 "kind": source.get("kind"),
                 "size": source.get("size"),
                 "mtime": source.get("mtime"),
                 "lastAnalyzedAt": datetime.now(timezone.utc).isoformat(),
-                "relatedEntryIds": related_entries,
-                "relatedNodeIds": related_nodes,
+                "relatedEntryIds": list(entry_ids_by_source.get(rel, [])),
+                "relatedNodeIds": list(node_ids_by_source.get(rel, [])),
             }
         return {
             "version": 2,
@@ -3638,28 +3658,53 @@ class StoryWikiService:
         if not root.exists():
             return sources
         for path in root.rglob("*"):
-            if not path.is_file() or path.suffix.lower() not in SCAN_SUFFIXES:
-                continue
-            rel_parts = path.relative_to(root).parts
-            if any(part in EXCLUDED_PARTS for part in rel_parts):
-                continue
-            rel = path.relative_to(root).as_posix()
-            if self._should_skip_source_path(rel):
-                continue
-            text = self._read_source_text(path)
-            if not text:
-                continue
-            kind = self._source_kind(rel)
-            sources.append({
-                "relativePath": rel,
-                "title": path.stem,
-                "kind": kind,
-                "text": text,
-                "size": path.stat().st_size,
-                "sha256": sha256(text.encode("utf-8", errors="ignore")).hexdigest(),
-                "mtime": datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(),
-            })
+            source = self._source_from_path(root, path)
+            if source is not None:
+                sources.append(source)
         return sorted(sources, key=lambda item: self._source_sort_key(str(item["relativePath"])))
+
+    def _collect_character_sources(self, root: Path) -> List[Dict[str, Any]]:
+        """实体归并只读取规范/兼容角色卡目录，避免重复全库源扫描。"""
+        sources: List[Dict[str, Any]] = []
+        character_roots = (root / ".storydex" / "characters", root / "characters")
+        for character_root in character_roots:
+            if not character_root.is_dir():
+                continue
+            candidates = [path for path in character_root.iterdir() if path.is_file()]
+            cards_root = character_root / "cards"
+            if cards_root.is_dir():
+                candidates.extend(path for path in cards_root.iterdir() if path.is_file())
+            for path in candidates:
+                source = self._source_from_path(root, path)
+                if source is not None and source.get("kind") == "character":
+                    sources.append(source)
+        return sorted(sources, key=lambda item: self._source_sort_key(str(item["relativePath"])))
+
+    def _source_from_path(self, root: Path, path: Path) -> Dict[str, Any] | None:
+        if not path.is_file() or path.suffix.lower() not in SCAN_SUFFIXES:
+            return None
+        try:
+            relative = path.relative_to(root)
+        except ValueError:
+            return None
+        if any(part in EXCLUDED_PARTS for part in relative.parts):
+            return None
+        rel = relative.as_posix()
+        if self._should_skip_source_path(rel):
+            return None
+        text = self._read_source_text(path)
+        if not text:
+            return None
+        stat = path.stat()
+        return {
+            "relativePath": rel,
+            "title": path.stem,
+            "kind": self._source_kind(rel),
+            "text": text,
+            "size": stat.st_size,
+            "sha256": sha256(text.encode("utf-8", errors="ignore")).hexdigest(),
+            "mtime": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+        }
 
     def _should_skip_source_path(self, relative_path: str) -> bool:
         normalized = relative_path.replace("\\", "/")
@@ -3728,7 +3773,7 @@ class StoryWikiService:
     def _reconcile_entity_registry(self, root: Path) -> None:
         """把角色卡身份归并到 canonical registry，保证改名不更换 entityId。"""
         registry_path = root / ENTITY_SOURCE_PATH
-        character_sources = [source for source in self._collect_sources(root) if source.get("kind") == "character"]
+        character_sources = self._collect_character_sources(root)
         if not character_sources and not registry_path.exists():
             return
 

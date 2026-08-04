@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
-from services import coomi_agent_service
+import pytest
+
+from core import feature_flags
+from services import coomi_agent_service, retrieval_service
 from services.coomi_agent_service import (
     DEFAULT_CONTEXT_WINDOW,
     _coomi_binding_path,
     _create_storydex_tool_registry,
     _resolve_context_window,
 )
-from services.retrieval_service import reset_retrieval_cache
+from services.retrieval_service import RetrievalService, reset_retrieval_cache
 from services.story_project_service import get_story_project_service
 from services.storydex_agent_tools import StorydexProjectSearchTool, StorydexWikiQueryTool
 from services.storydex_context_assembler_service import StorydexContextAssemblerService
@@ -91,6 +95,152 @@ def test_project_search_tool_returns_ranked_workspace_hits(tmp_path) -> None:
     payload = json.loads(result.output)
     assert payload["results"]
     assert payload["results"][0]["path"] == "chapters/001.md"
+
+
+def test_project_search_returns_snippet_for_match_after_first_4000_chars(tmp_path) -> None:
+    chapters = tmp_path / "chapters"
+    chapters.mkdir(parents=True)
+    chapters.joinpath("001.md").write_text(
+        ("普通背景段落。\n" * 900) + "暮色钥印藏在废弃钟楼的暗格中。\n",
+        encoding="utf-8",
+    )
+    reset_retrieval_cache()
+
+    result = StorydexProjectSearchTool(workspace_root=tmp_path).run({"query": "暮色钥印"})
+
+    assert result.success is True
+    payload = json.loads(result.output)
+    assert payload["results"]
+    assert "暮色钥印" in payload["results"][0]["snippet"]
+
+
+def test_retrieval_watch_compares_stored_mtime_instead_of_index_time(tmp_path) -> None:
+    chapters = tmp_path / "chapters"
+    chapters.mkdir(parents=True)
+    chapter = chapters / "001.md"
+    indexed_mtime = 1_700_000_000.0
+    changed_mtime = indexed_mtime + 60
+    chapter.write_text("oldtoken marker\n", encoding="utf-8")
+    os.utime(chapter, (indexed_mtime, indexed_mtime))
+    service = RetrievalService(tmp_path)
+    assert service.build_index() == 1
+
+    chapter.write_text("newtoken marker\n", encoding="utf-8")
+    os.utime(chapter, (changed_mtime, changed_mtime))
+
+    assert service.watch_files() == 1
+    assert service.search("newtoken")
+    assert service.search("oldtoken") == []
+
+
+def test_retrieval_full_build_rolls_back_on_indexing_failure(tmp_path, monkeypatch) -> None:
+    chapters = tmp_path / "chapters"
+    chapters.mkdir(parents=True)
+    chapters.joinpath("001.md").write_text("stabletoken remains indexed\n", encoding="utf-8")
+    service = RetrievalService(tmp_path)
+    assert service.build_index() == 1
+    chapters.joinpath("002.md").write_text("explode-token\n", encoding="utf-8")
+    original_tokenized = service._tokenized
+
+    def fail_on_marker(text: str) -> str:
+        if "explode-token" in text:
+            raise RuntimeError("forced indexing failure")
+        return original_tokenized(text)
+
+    monkeypatch.setattr(service, "_tokenized", fail_on_marker)
+    with pytest.raises(RuntimeError, match="forced indexing failure"):
+        service.build_index()
+
+    assert service.search("stabletoken")
+
+
+def test_agent_recent_segments_use_tail_without_changing_default_preview(tmp_path) -> None:
+    service = get_story_project_service()
+    service.ensure_project_structure(tmp_path)
+    chapters = tmp_path / "chapters"
+    chapters.mkdir(exist_ok=True)
+    chapters.joinpath("第1章 测试.md").write_text(
+        "HEAD_MARKER\n" + ("x" * 3000) + "\nTAIL_MARKER",
+        encoding="utf-8",
+    )
+
+    default_recent = service.list_recent_segments(
+        tmp_path,
+        limit=1,
+        include_content=True,
+        max_chars=160,
+    )
+    agent_recent = StorydexContextAssemblerService(service)._recent_segments(
+        tmp_path,
+        generation_context={},
+        active_file="",
+    )
+
+    assert "HEAD_MARKER" in default_recent[0]["content"]
+    assert "TAIL_MARKER" not in default_recent[0]["content"]
+    assert "TAIL_MARKER" in agent_recent[0]["content"]
+    assert "HEAD_MARKER" not in agent_recent[0]["content"]
+
+
+def test_active_entity_inference_reads_active_file_head_and_tail(tmp_path) -> None:
+    registry_path = tmp_path / ".storydex" / "memory" / "current" / "entities.json"
+    _write_providers_config(
+        registry_path,
+        {
+            "version": 2,
+            "entities": [
+                {
+                    "entityId": "char:shenqing",
+                    "canonical_name": "沈青",
+                    "kind": "character",
+                }
+            ],
+        },
+    )
+    active_path = tmp_path / "chapters" / "001.md"
+    active_path.parent.mkdir(parents=True)
+    active_path.write_text("开头没有人物。\n" + ("x" * 5000) + "\n章尾由沈青推门而入。", encoding="utf-8")
+    assembler = StorydexContextAssemblerService(get_story_project_service())
+
+    entities = assembler._infer_active_entities(
+        tmp_path,
+        prompt="继续",
+        active_file="chapters/001.md",
+    )
+
+    assert entities == ("沈青",)
+
+
+def test_related_passage_snippets_precede_long_candidate_path_list(tmp_path, monkeypatch) -> None:
+    candidate_paths = [
+        f"chapters/archive/{index:02d}-{'long-name-' * 6}.md"
+        for index in range(30)
+    ]
+    fake_service = SimpleNamespace(
+        watch_files=lambda: 0,
+        search_with_candidates=lambda *_args, **_kwargs: (
+            [(candidate_paths[0], -1.0, "关键命中证据位于这里。")],
+            candidate_paths,
+        ),
+    )
+    monkeypatch.setattr(
+        feature_flags,
+        "get_flags",
+        lambda: SimpleNamespace(get_bool=lambda _name: True),
+    )
+    monkeypatch.setattr(retrieval_service, "get_retrieval_service", lambda _root: fake_service)
+    assembler = StorydexContextAssemblerService(get_story_project_service())
+
+    block, returned_paths = assembler._render_related_passages(
+        tmp_path,
+        prompt="『暮色钥印』",
+        active_entities=(),
+        exclude_paths=set(),
+    )
+
+    assert returned_paths == candidate_paths
+    assert block.index("关键命中证据") < block.index("Additional candidate paths:")
+    assert "关键命中证据" in block[:1600]
 
 
 def test_execution_trace_is_persisted_to_its_workspace(tmp_path) -> None:
