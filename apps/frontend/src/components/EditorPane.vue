@@ -126,8 +126,10 @@
             <button type="button" title="关闭" @click="closeFind"><span class="material-symbols-rounded">close</span></button>
           </div>
 
+          <WorldlineMapPane v-if="workspaceStore.isWorldlineMapActive" />
+
           <GitReviewPane
-            v-if="workspaceStore.isGitReviewActive"
+            v-else-if="workspaceStore.isGitReviewActive"
             :diff="workspaceStore.activeGitReviewDiff"
             :title="workspaceStore.activeFileName"
             :focus-path="workspaceStore.activeGitReviewFocusPath"
@@ -249,6 +251,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import GitReviewPane from "@/components/GitReviewPane.vue";
+import WorldlineMapPane from "@/components/WorldlineMapPane.vue";
 import LargeFileViewer from "@/components/LargeFileViewer.vue";
 import WelcomeStartPage from "@/components/WelcomeStartPage.vue";
 import { useWorkspaceStore } from "@/stores/workspace";

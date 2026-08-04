@@ -6,6 +6,7 @@ import posixpath
 import re
 import threading
 import time
+from collections import Counter, defaultdict, deque
 from datetime import datetime, timezone
 from functools import lru_cache, wraps
 from pathlib import Path
@@ -451,6 +452,140 @@ class GitService:
         return {**self.list_branches(root), "summary": self.read_summary(root)}
 
     @_serialized
+    def create_worldline(
+        self, workspace_root: Path, *, from_commit: str, name: str
+    ) -> Dict[str, Any]:
+        """从任意版本节点开辟一条命名的新世界线，并切换过去。
+
+        这是 :meth:`_ensure_branch_before_commit` 那条"延迟分叉"路径的显式版
+        本：延迟分叉只有在用户已经改了文件并提交之后才会发生，而且名字是机器
+        生成的时间戳。作者想从某个旧节点重新写一条支线时，需要的是当场就能
+        给这条世界线起个名字。
+        """
+        root = self._resolve_workspace_root(workspace_root)
+        self.initialize_repository(root)
+        branch = self._validate_branch_name(name)
+        if not self._has_head_commit(root):
+            raise GitServiceError(
+                "Repository has no commits yet, so there is no node to branch from.",
+                status_code=409,
+            )
+        if branch == self._read_current_branch(root) or self._branch_exists(root, branch):
+            raise GitServiceError(
+                "A worldline with this name already exists.",
+                details={"branch": branch},
+                status_code=409,
+            )
+        target = self._read_commit(root, str(from_commit or "").strip())
+        target_id = str(target.get("id") or "")
+        if not target_id:
+            raise GitServiceError(
+                "Source commit id is required to open a worldline.",
+                status_code=400,
+            )
+        if not self._is_worktree_clean(root):
+            raise GitServiceError(
+                "Cannot open a new worldline with uncommitted changes.",
+                details={"branch": branch, "hint": "Commit or discard changes first."},
+                status_code=409,
+            )
+        self._clean_internal_paths(root)
+        self._run_git(root, ["checkout", "-b", branch, target_id])
+        return {
+            **self.list_branches(root),
+            "summary": self.read_summary(root),
+            "worldline": branch,
+            "fromCommit": target_id,
+        }
+
+    @_serialized
+    def rename_worldline(
+        self, workspace_root: Path, *, name: str, new_name: str
+    ) -> Dict[str, Any]:
+        """给世界线改名。``worldline/20260804-131500`` 对作者没有意义。"""
+        root = self._resolve_workspace_root(workspace_root)
+        self.initialize_repository(root)
+        current_name = self._validate_branch_name(name)
+        target_name = self._validate_branch_name(new_name)
+        if current_name == target_name:
+            return {**self.list_branches(root), "summary": self.read_summary(root)}
+        if not self._branch_exists(root, current_name):
+            raise GitServiceError(
+                "Worldline does not exist.",
+                details={"branch": current_name},
+                status_code=404,
+            )
+        if self._branch_exists(root, target_name):
+            raise GitServiceError(
+                "A worldline with this name already exists.",
+                details={"branch": target_name},
+                status_code=409,
+            )
+        self._run_git(root, ["branch", "-m", current_name, target_name])
+        return {
+            **self.list_branches(root),
+            "summary": self.read_summary(root),
+            "renamedFrom": current_name,
+            "renamedTo": target_name,
+        }
+
+    @_serialized
+    def delete_worldline(self, workspace_root: Path, *, name: str) -> Dict[str, Any]:
+        """删除一条世界线。
+
+        这是**不可逆**操作：Storydex 只分不合，所以每条世界线上的节点都是
+        "未合并"的，删掉这条线就等于永久丢弃它独有的那些版本。``git branch
+        -d`` 的安全检查在这个语义下永远拒绝，只能用 ``-D``；因此调用方必须在
+        删除前向用户展示 ``exclusiveCommits``（本次会丢掉多少个版本）。
+        """
+        root = self._resolve_workspace_root(workspace_root)
+        self.initialize_repository(root)
+        branch = self._validate_branch_name(name)
+        if not self._branch_exists(root, branch):
+            raise GitServiceError(
+                "Worldline does not exist.",
+                details={"branch": branch},
+                status_code=404,
+            )
+        if branch == self._read_current_branch(root):
+            raise GitServiceError(
+                "Cannot delete the worldline you are currently on.",
+                details={"branch": branch, "hint": "Switch to another worldline first."},
+                status_code=409,
+            )
+        all_names = [
+            item["name"] for item in self.list_branches(root).get("branches", [])
+        ]
+        if len(all_names) <= 1:
+            raise GitServiceError(
+                "Cannot delete the only worldline in the project.",
+                details={"branch": branch},
+                status_code=409,
+            )
+        exclusive = self._count_exclusive_commits(root, branch=branch, others=[n for n in all_names if n != branch])
+        self._run_git(root, ["branch", "-D", branch])
+        return {
+            **self.list_branches(root),
+            "summary": self.read_summary(root),
+            "deleted": branch,
+            "exclusiveCommits": exclusive,
+        }
+
+    def _count_exclusive_commits(
+        self, workspace_root: Path, *, branch: str, others: List[str]
+    ) -> int:
+        """Count commits reachable from ``branch`` but from no other branch."""
+        args = ["rev-list", "--count", branch]
+        if others:
+            args.append("--not")
+            args.extend(others)
+        output = self._run_git(workspace_root, args, check=False).strip()
+        try:
+            return int(output.splitlines()[0]) if output else 0
+        except (ValueError, IndexError):
+            return 0
+
+    @_serialized
     def read_timeline(self, workspace_root: Path) -> Dict[str, Any]:
         """读取全分支提交历史，用于绘制"平行时空线"树状图。
 
@@ -576,26 +711,106 @@ class GitService:
                 }
             )
 
-        # 4. 每个分支可达的 commit 集合（用于节点归属判定）
-        branch_reachable: Dict[str, set] = {}
-        for b in branch_heads:
-            rev_output = self._run_git(root, ["rev-list", b["head"]], check=False)
-            branch_reachable[b["name"]] = {
-                line.strip() for line in rev_output.splitlines() if line.strip()
-            }
+        commit_ids = {c["id"] for c in raw_commits}
+        parents_by_id: Dict[str, List[str]] = {
+            c["id"]: [p for p in c["parents"] if p in commit_ids] for c in raw_commits
+        }
 
-        # 5. lane 分配：当前分支 lane=0，其他按字母序排列。当前分支排到
-        #    最前是为了让"正在编辑的世界线"在树状图最顶部。
-        sorted_branches = sorted(branch_heads, key=lambda b: b["name"])
-        if current_branch:
-            sorted_branches.sort(key=lambda b: 0 if b["name"] == current_branch else 1)
+        # 4. 每条世界线可达的 commit 集合，用于判定节点归属。
+        #    从内存中的父子图 BFS 计算，而不是每条分支跑一次 `git rev-list`：
+        #    树状图会被面板定期刷新，每条世界线一个子进程在 Windows 上是实打
+        #    实的开销，而上一步的 `git log --all` 已经把所有 refs 的提交连同
+        #    parents 一次性取回来了。
+        def _ancestors(head_id: str) -> set:
+            if head_id not in parents_by_id:
+                return set()
+            seen = {head_id}
+            pending = deque([head_id])
+            while pending:
+                current = pending.popleft()
+                for parent_id in parents_by_id.get(current, ()):
+                    if parent_id not in seen:
+                        seen.add(parent_id)
+                        pending.append(parent_id)
+            return seen
+
+        branch_reachable: Dict[str, set] = {
+            b["name"]: _ancestors(b["head"]) for b in branch_heads
+        }
+
+        # 5. 横轴列号 = 拓扑深度：column = max(parent.column) + 1，无父节点的
+        #    根节点为 0。这让同一条世界线上的连续提交在横轴上紧挨着，分叉出去
+        #    的两条线在分叉点垂直对齐，总列数等于最长世界线的长度。
+        #
+        #    旧实现用「全局时间正序索引」当列号，于是 100 次提交就要 100 列，
+        #    而且同一条线的两次相邻提交会被其它世界线的提交插进来撑开，一条线
+        #    被拉成断断续续的长条——树的结构（在哪分叉、哪条线更长）完全看不
+        #    出来。用拓扑深度以后，横向长度就是这条世界线自己写了多少个版本。
+        children_by_id: Dict[str, List[str]] = defaultdict(list)
+        indegree: Dict[str, int] = {}
+        for commit_id, parent_ids in parents_by_id.items():
+            indegree[commit_id] = len(parent_ids)
+            for parent_id in parent_ids:
+                children_by_id[parent_id].append(commit_id)
+
+        # Kahn 最长路径。提交图是 DAG，所以每个节点都会在其全部父节点定稿后
+        # 恰好出队一次；迭代实现避免了递归版本在长历史上撞 Python 递归上限。
+        column_by_id: Dict[str, int] = {commit_id: 0 for commit_id in commit_ids}
+        ready = deque(
+            commit_id for commit_id, degree in indegree.items() if degree == 0
+        )
+        while ready:
+            current = ready.popleft()
+            next_column = column_by_id[current] + 1
+            for child_id in children_by_id.get(current, ()):
+                if column_by_id[child_id] < next_column:
+                    column_by_id[child_id] = next_column
+                indegree[child_id] -= 1
+                if indegree[child_id] == 0:
+                    ready.append(child_id)
+
+        # 6. 每条世界线的分叉列：该线独有节点（不被任何其它世界线包含）中最靠
+        #    左的那个，也就是它从母线上分出去的位置。
+        containing_count: Counter = Counter()
+        for reachable in branch_reachable.values():
+            containing_count.update(reachable)
+
+        fork_column: Dict[str, int] = {}
+        exclusive_count: Dict[str, int] = {}
+        for b in branch_heads:
+            name = b["name"]
+            exclusive = [
+                cid for cid in branch_reachable[name] if containing_count[cid] == 1
+            ]
+            exclusive_count[name] = len(exclusive)
+            if exclusive:
+                fork_column[name] = min(column_by_id.get(cid, 0) for cid in exclusive)
+            else:
+                # 该线的每个节点都被别的线包含——例如刚从历史节点开辟、还没写过
+                # 任何新版本的世界线。用它自己 tip 所在的列，视觉上贴住它实际
+                # 所处的位置而不是被挤到最左边。
+                fork_column[name] = column_by_id.get(b["head"], 0)
+
+        # 7. lane 分配：当前世界线固定 lane 0（正在写的那条线永远在最上面），
+        #    其余按分叉列升序——先分出去的线排在上面，和树从左向右生长的方向
+        #    一致。旧实现按字母序排，视觉顺序和分叉顺序无关，线会互相跨越。
+        sorted_branches = sorted(
+            branch_heads,
+            key=lambda b: (
+                0 if b["name"] == current_branch else 1,
+                fork_column.get(b["name"], 0),
+                b["name"],
+            ),
+        )
         branch_lane: Dict[str, int] = {
             b["name"]: idx for idx, b in enumerate(sorted_branches)
         }
+        lane_to_branch: Dict[int, str] = {
+            idx: b["name"] for idx, b in enumerate(sorted_branches)
+        }
         fallback_lane = len(sorted_branches)
 
-        # 6. 节点 + 边
-        commit_ids = {c["id"] for c in raw_commits}
+        # 8. 节点与边
         nodes: List[Dict[str, Any]] = []
         edges: List[Dict[str, Any]] = []
         current_head_id = current_head.get("id") if current_head else None
@@ -606,6 +821,19 @@ class GitService:
                 for name, reachable in branch_reachable.items()
                 if cid in reachable
             ]
+            if containing_branches:
+                # 节点画在包含它的世界线里 lane 最小的那条轨道上。Storydex 只
+                # 分不合，所以这条规则的实际含义是：公共前史画在母线上，分出去
+                # 的线只从分叉点往右画。
+                row = min(
+                    branch_lane.get(name, fallback_lane) for name in containing_branches
+                )
+                lane_branch = lane_to_branch.get(row, "")
+            else:
+                # 不属于任何世界线的游离节点：只可能是 detached HEAD 指向的、
+                # 还没落到任何分支上的提交。
+                row = fallback_lane
+                lane_branch = ""
             nodes.append(
                 {
                     "id": cid,
@@ -619,26 +847,17 @@ class GitService:
                     "headBranches": head_to_branches.get(cid, []),
                     "isBranchHead": cid in head_to_branches,
                     "isCurrent": cid == current_head_id,
+                    "column": column_by_id.get(cid, 0),
+                    "row": row,
+                    # 该节点被画在哪条世界线的轨道上，前端用来做同线高亮。
+                    "laneBranch": lane_branch,
                 }
             )
             for parent_id in c["parents"]:
                 if parent_id in commit_ids:
                     edges.append({"from": parent_id, "to": cid})
 
-        # 7. 布局坐标：column = 时间正序索引（最旧=0 在左，最新=最大在右）；
-        #    row = 所属分支 lane 最小值。Storydex 分支只分不合，节点通常只
-        #    属于一个分支，merge 节点（属于多分支）取 lane 最小者以保持视觉连续。
-        sorted_nodes = sorted(nodes, key=lambda n: n["authoredAt"])
-        for index, node in enumerate(sorted_nodes):
-            node["column"] = index
-            if node["branches"]:
-                node["row"] = min(
-                    branch_lane.get(b, fallback_lane) for b in node["branches"]
-                )
-            else:
-                # 不属于任何分支的游离提交（理论上只发生在 detached HEAD
-                # 已经新提交但还没建立分支的中间态，正常流程不会出现）。
-                node["row"] = fallback_lane
+        nodes.sort(key=lambda n: (n["column"], n["row"]))
 
         branches_payload = [
             {
@@ -646,6 +865,12 @@ class GitService:
                 "head": b["head"],
                 "isCurrent": b["name"] == current_branch,
                 "lane": branch_lane.get(b["name"], fallback_lane),
+                # 从母线分出去的列号，前端据此画分叉连线。
+                "forkColumn": fork_column.get(b["name"], 0),
+                "tipColumn": column_by_id.get(b["head"], 0),
+                # 这条世界线独有的版本数（不含与其它线共享的前史）。
+                "commitCount": exclusive_count.get(b["name"], 0),
+                "totalCount": len(branch_reachable.get(b["name"], ())),
             }
             for b in sorted_branches
         ]
@@ -653,18 +878,25 @@ class GitService:
         return {
             **base,
             "branches": branches_payload,
-            "nodes": sorted_nodes,
+            "nodes": nodes,
             "edges": edges,
         }
 
     @_serialized
     def jump_to_commit(self, workspace_root: Path, *, commit_id: str) -> Dict[str, Any]:
-        """跳转到历史提交节点，进入 detached HEAD 状态查看该时空线。
+        """跳转到某个版本节点，把整个工作区恢复成该节点的状态。
 
-        Storydex 的"平行时空线"语义：用户在历史节点上 jump 进入 detached
-        HEAD 后可以查看该节点的文件状态。如果用户在此基础上做了改动并提交，
-        系统会自动创建一个新分支（延迟分叉），不会污染原分支。详见
-        :meth:`_ensure_branch_before_commit`。
+        Storydex 的"平行时空线"语义是只分不合，跳转因此有两种落点：
+
+        * 目标正好是某条世界线的最新节点 → 直接切到那条世界线（``detached``
+          为 False）。用户回到一个有名字的、可以继续往下写的状态。
+        * 目标是某条线中间的历史节点 → 进入**观测态**（detached HEAD）。用户
+          可以查看该时刻的全部文件；一旦在此基础上改动并提交，
+          :meth:`_ensure_branch_before_commit` 会自动开辟一条新世界线，原线
+          不受影响。
+
+        旧实现无论目标是什么都进观测态，于是"切回主线"这种最常见的操作也会
+        把用户丢进一个没有世界线名字的状态里。
         """
         root = self._resolve_workspace_root(workspace_root)
         self.initialize_repository(root)
@@ -682,6 +914,7 @@ class GitService:
 
         # _read_commit 在 commit 不存在时会抛 GitServiceError
         target = self._read_commit(root, normalized)
+        target_id = str(target.get("id") or normalized)
 
         if not self._is_worktree_clean(root):
             raise GitServiceError(
@@ -690,27 +923,61 @@ class GitService:
                 status_code=409,
             )
 
+        current_branch = self._read_current_branch(root)
         current_head = self._read_head_commit(root)
-        if (
-            current_head
-            and current_head.get("id") == target.get("id")
-            and not self._read_current_branch(root)
+        target_branches = self._branches_at_commit(root, target_id)
+
+        # 目标是某条世界线的最新节点：切到那条线而不是进观测态。多条线同时
+        # 指向该节点时优先留在当前线上，避免一次无谓的 checkout。
+        landing_branch = ""
+        if target_branches:
+            landing_branch = (
+                current_branch if current_branch in target_branches else target_branches[0]
+            )
+
+        already_there = current_head and current_head.get("id") == target_id
+        if already_there and (
+            (landing_branch and current_branch == landing_branch)
+            or (not landing_branch and not current_branch)
         ):
-            # 已经在该 commit 的 detached HEAD 状态，幂等返回
+            # 已经站在目标节点上且落点一致，幂等返回。
             return {
-                "detached": True,
+                "detached": not current_branch,
+                "branch": current_branch,
                 "commit": current_head,
                 "summary": self.read_summary(root),
             }
 
         # 清理内部忽略路径下的未跟踪文件，避免与目标提交中的 tracked 版本冲突
         self._clean_internal_paths(root)
-        self._run_git(root, ["checkout", "--detach", str(target.get("id") or normalized)])
+        if landing_branch:
+            self._run_git(root, ["checkout", landing_branch])
+        else:
+            self._run_git(root, ["checkout", "--detach", target_id])
         return {
-            "detached": True,
+            "detached": not landing_branch,
+            "branch": landing_branch,
             "commit": self._read_head_commit(root),
             "summary": self.read_summary(root),
         }
+
+    def _branches_at_commit(self, workspace_root: Path, commit_id: str) -> List[str]:
+        """Return branch names whose tip is exactly ``commit_id``, sorted by name."""
+        output = self._run_git(
+            workspace_root,
+            [
+                "for-each-ref",
+                "--format=%(refname:short) %(objectname)",
+                "refs/heads/",
+            ],
+            check=False,
+        )
+        names: List[str] = []
+        for line in output.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[1] == commit_id:
+                names.append(parts[0])
+        return sorted(names)
 
     def _ensure_branch_before_commit(self, workspace_root: Path) -> Optional[str]:
         """如果处于 detached HEAD 状态，自动创建一个新分支并切换过去。
@@ -1135,6 +1402,13 @@ class GitService:
                 header = line[2:].strip()
                 if header.startswith("No commits yet on "):
                     branch = header.replace("No commits yet on ", "", 1).strip()
+                elif header.startswith("HEAD (no branch)"):
+                    # 观测态（detached HEAD）没有分支名。旧实现把 Git 的这行
+                    # 字面量当成分支名存下来，于是面板上会出现「当前世界线：
+                    # HEAD (no branch)」、世界线下拉框选中一个不存在的值、
+                    # 提交按钮提示「提交到 HEAD (no branch)」。返回空串让上层
+                    # 明确地知道「现在不在任何世界线上」。
+                    branch = ""
                 else:
                     branch = header.split("...", 1)[0].strip()
                 continue

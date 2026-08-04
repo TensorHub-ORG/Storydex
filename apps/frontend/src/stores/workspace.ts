@@ -13,6 +13,7 @@ import {
   fetchStoryProjectSettings,
   fetchCurrentProject,
   fetchWorkspaceGitDiff,
+  fetchWorkspaceGitCommitDiff,
   fetchWorkspaceDiagnostics,
   fetchWorkspaceTree,
   importWorkspaceFiles,
@@ -106,6 +107,8 @@ interface WorkspaceState {
   gitReviewFocusPath: string;
   gitReviewTraceId: string;
   gitReviewSessionId: string;
+  /** 正在审阅的版本节点 id（「这个节点改了什么」）；空串表示不是节点 diff。 */
+  gitReviewCommitId: string;
   gitReviewError: string;
 }
 
@@ -165,6 +168,7 @@ export const useWorkspaceStore = defineStore("workspace", {
     gitReviewFocusPath: "",
     gitReviewTraceId: "",
     gitReviewSessionId: "",
+    gitReviewCommitId: "",
     gitReviewError: ""
   }),
 
@@ -232,6 +236,12 @@ export const useWorkspaceStore = defineStore("workspace", {
     isHelpGuideActive(state): boolean {
       const activeDocument = state.activeFile ? state.documents[state.activeFile] : null;
       return Boolean(activeDocument?.transient && activeDocument?.kind === "help-guide");
+    },
+
+    /** 主区是否正在显示放大版的平行时空线。 */
+    isWorldlineMapActive(state): boolean {
+      const activeDocument = state.activeFile ? state.documents[state.activeFile] : null;
+      return Boolean(activeDocument?.transient && activeDocument?.kind === "worldline-map");
     },
 
     activeGitReviewDiff(state): WorkspaceGitDiffResponse | null {
@@ -1123,32 +1133,41 @@ export const useWorkspaceStore = defineStore("workspace", {
       sessionId?: string;
       changedFiles?: string[];
       commitHash?: string;
+      commitId?: string;
     }): Promise<WorkspaceGitDiffResponse | null> {
       if (this.launchScreenVisible) {
         this.gitReviewDiff = null;
         this.gitReviewFocusPath = "";
         this.gitReviewTraceId = "";
         this.gitReviewSessionId = "";
+        this.gitReviewCommitId = "";
         this.gitReviewError = "";
         return null;
       }
 
       const focusPath = normalizeRelativePath(options?.focusPath || "");
-      const traceId = String(options?.traceId || this.gitReviewTraceId || "").trim();
-      const sessionId = String(options?.sessionId || this.gitReviewSessionId || "").trim();
+      // 节点 diff 是一个独立的审阅源。它必须先于 traceId 判定，并且清掉遗留的
+      // trace，否则上一次打开的「本轮修改」会因为 traceId 仍在 state 里而把
+      // 这次的节点 diff 顶掉。
+      const commitId = String(options?.commitId || "").trim();
+      const traceId = commitId ? "" : String(options?.traceId || this.gitReviewTraceId || "").trim();
+      const sessionId = commitId ? "" : String(options?.sessionId || this.gitReviewSessionId || "").trim();
       const changedFiles = normalizePathList(options?.changedFiles || []);
       const commitHash = String(options?.commitHash || "").trim();
       this.gitReviewFocusPath = focusPath;
       this.gitReviewTraceId = traceId;
       this.gitReviewSessionId = sessionId;
+      this.gitReviewCommitId = commitId;
       this.isGitReviewLoading = true;
       if (!options?.silent) {
         this.gitReviewError = "";
       }
       try {
-        const result = traceId
-          ? await fetchAgentRunDiff(traceId, sessionId || undefined, changedFiles, commitHash)
-          : await fetchWorkspaceGitDiff();
+        const result = commitId
+          ? await fetchWorkspaceGitCommitDiff(commitId)
+          : traceId
+            ? await fetchAgentRunDiff(traceId, sessionId || undefined, changedFiles, commitHash)
+            : await fetchWorkspaceGitDiff();
         this.gitReviewDiff = normalizeGitDiffResponse(result.data);
         this.gitReviewError = "";
         this.syncActiveGitReviewDocument();
@@ -1168,6 +1187,16 @@ export const useWorkspaceStore = defineStore("workspace", {
 
     async openGitReview(options?: { focusPath?: string }): Promise<void> {
       await this.openGitReviewDocument({ focusPath: options?.focusPath || "" });
+    },
+
+    /** 打开某个版本节点相对其父节点的改动（「这个节点改了什么」）。 */
+    async openCommitDiff(options: { commitId: string; label?: string }): Promise<void> {
+      const commitId = String(options.commitId || "").trim();
+      if (!commitId) {
+        this.gitReviewError = "缺少版本节点标识，无法查看该节点的改动。";
+        return;
+      }
+      await this.openGitReviewDocument({ commitId, commitLabel: options.label || "" });
     },
 
     async openAgentRunDiff(options: {
@@ -1197,6 +1226,8 @@ export const useWorkspaceStore = defineStore("workspace", {
       sessionId?: string;
       changedFiles?: string[];
       commitHash?: string;
+      commitId?: string;
+      commitLabel?: string;
     }): Promise<void> {
       const saved = await this.saveDirtyActiveFileIfNeeded();
       if (!saved) {
@@ -1206,12 +1237,21 @@ export const useWorkspaceStore = defineStore("workspace", {
       this.clearTransientPreviews();
 
       const focusPath = normalizeRelativePath(options?.focusPath || "");
-      const traceId = String(options?.traceId || "").trim();
-      const sessionId = String(options?.sessionId || "").trim();
+      const commitId = String(options?.commitId || "").trim();
+      const traceId = commitId ? "" : String(options?.traceId || "").trim();
+      const sessionId = commitId ? "" : String(options?.sessionId || "").trim();
       const changedFiles = normalizePathList(options?.changedFiles || []);
       const commitHash = String(options?.commitHash || "").trim();
-      const diff = await this.refreshGitReviewDiff({ focusPath, traceId, sessionId, changedFiles, commitHash });
-      const reviewId = buildGitReviewId(traceId);
+      const commitLabel = String(options?.commitLabel || "").trim();
+      const diff = await this.refreshGitReviewDiff({
+        focusPath,
+        traceId,
+        sessionId,
+        changedFiles,
+        commitHash,
+        commitId
+      });
+      const reviewId = buildGitReviewId(traceId, commitId);
       const nowIso = new Date().toISOString();
       const content = buildGitReviewContent(diff, this.gitReviewError);
       const document: CachedWorkspaceDocument = {
@@ -1223,21 +1263,24 @@ export const useWorkspaceStore = defineStore("workspace", {
         updatedAt: nowIso,
         extension: ".diff",
         kind: "git-review",
-        title: traceId ? "本轮修改审阅" : "变更审阅",
-        displayPath: traceId
-          ? (focusPath ? `本轮修改 · ${focusPath}` : "本轮修改")
-          : (focusPath ? `本地变更 · ${focusPath}` : "本地变更"),
+        title: commitId ? "节点改动" : traceId ? "本轮修改审阅" : "变更审阅",
+        displayPath: commitId
+          ? `节点改动 · ${commitLabel || commitId.slice(0, 8)}`
+          : traceId
+            ? (focusPath ? `本轮修改 · ${focusPath}` : "本轮修改")
+            : (focusPath ? `本地变更 · ${focusPath}` : "本地变更"),
         readOnly: true,
         transient: true,
         boundRelativePath: focusPath,
         media: {
-          reviewSource: traceId ? "agent-run" : "git",
+          reviewSource: commitId ? "commit" : traceId ? "agent-run" : "git",
           gitDiff: diff,
           focusPath,
           traceId,
           sessionId,
           changedFiles,
           commitHash,
+          commitId,
         },
       };
 
@@ -1308,8 +1351,54 @@ export const useWorkspaceStore = defineStore("workspace", {
       }
     },
 
-    clearTransientPreviews(): void {
-      const transientPaths = Object.entries(this.documents)
+    /**
+     * 在主编辑区打开放大版的平行时空线。
+     *
+     * 侧栏最宽只有 520px，一旦世界线多起来就画不开；这里复用 git-review 那套
+     * 临时文档机制，把树当成一个只读页签打开，用户可以在全宽画布上浏览、分叉
+     * 和对比，关掉页签就回到正文。
+     */
+    async openWorldlineMapDocument(): Promise<void> {
+      const saved = await this.saveDirtyActiveFileIfNeeded();
+      if (!saved) {
+        return;
+      }
+      this.syncActiveDocument();
+      this.clearTransientPreviews();
+
+      const mapId = ".storydex/worldlines/map";
+      const nowIso = new Date().toISOString();
+      const document: CachedWorkspaceDocument = {
+        relativePath: mapId,
+        content: "",
+        savedContent: "",
+        dirty: false,
+        size: 0,
+        updatedAt: nowIso,
+        extension: "",
+        kind: "worldline-map",
+        title: "平行时空线",
+        displayPath: "平行时空线 · 全部世界线",
+        readOnly: true,
+        transient: true,
+      };
+
+      this.documents[mapId] = document;
+      this.activeFile = mapId;
+      this.activeFileContent = "";
+      this.editorContent = "";
+      this.activeFileUpdatedAt = document.updatedAt;
+      this.activeFileExtension = document.extension;
+      this.activeFileSize = 0;
+      this.activeFileKind = document.kind;
+      this.activeFileMedia = {};
+      this.isDirty = false;
+      this.editorMode = "preview";
+      this.ensureOpenTab(mapId, document.extension, false, document.title);
+      this.workspaceError = "";
+    },
+
+    clearTransientPreviews(): void {      const transientPaths = Object.entries(this.documents)
         .filter(([, document]) => Boolean(document?.transient))
         .map(([relativePath]) => relativePath);
 
@@ -1383,6 +1472,7 @@ export const useWorkspaceStore = defineStore("workspace", {
       this.diagnosticsError = "";
       this.gitReviewDiff = null;
       this.gitReviewFocusPath = "";
+      this.gitReviewCommitId = "";
       this.gitReviewError = "";
       this.isStorySettingsLoading = false;
       this.isDiagnosticsLoading = false;
@@ -1532,7 +1622,7 @@ export const useWorkspaceStore = defineStore("workspace", {
     },
 
     syncActiveGitReviewDocument(): void {
-      const reviewId = buildGitReviewId(this.gitReviewTraceId);
+      const reviewId = buildGitReviewId(this.gitReviewTraceId, this.gitReviewCommitId);
       const document = this.documents[reviewId];
       if (!document || document.kind !== "git-review") {
         return;
@@ -1546,9 +1636,11 @@ export const useWorkspaceStore = defineStore("workspace", {
         size: estimateUtf8Size(content),
         updatedAt: new Date().toISOString(),
         boundRelativePath: this.gitReviewFocusPath,
-        displayPath: this.gitReviewTraceId
-          ? (this.gitReviewFocusPath ? `本轮修改 · ${this.gitReviewFocusPath}` : "本轮修改")
-          : (this.gitReviewFocusPath ? `本地变更 · ${this.gitReviewFocusPath}` : "本地变更"),
+        displayPath: this.gitReviewCommitId
+          ? String(document.displayPath || `节点改动 · ${this.gitReviewCommitId.slice(0, 8)}`)
+          : this.gitReviewTraceId
+            ? (this.gitReviewFocusPath ? `本轮修改 · ${this.gitReviewFocusPath}` : "本轮修改")
+            : (this.gitReviewFocusPath ? `本地变更 · ${this.gitReviewFocusPath}` : "本地变更"),
         media: {
           ...(document.media || {}),
           gitDiff: this.gitReviewDiff,
@@ -2563,7 +2655,11 @@ function buildAgentPreviewId(relativePath: string): string {
   return `.storydex/preview/${normalized.replace(/\//g, "__")}`;
 }
 
-function buildGitReviewId(traceId = ""): string {
+function buildGitReviewId(traceId = "", commitId = ""): string {
+  const normalizedCommitId = String(commitId || "").trim();
+  if (normalizedCommitId) {
+    return `commit-diff:${normalizedCommitId}`;
+  }
   const normalizedTraceId = String(traceId || "").trim();
   return normalizedTraceId ? `agent-run-diff:${normalizedTraceId}` : "workspace-git-diff";
 }

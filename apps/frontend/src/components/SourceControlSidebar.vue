@@ -2,7 +2,7 @@
   <aside class="scm-panel">
     <header class="scm-header">
       <div class="scm-header-copy">
-        <h2 class="scm-title">时空线</h2>
+        <h2 class="scm-title">平行时空线</h2>
         <p class="scm-project" :title="projectLabel">{{ projectLabel }}</p>
       </div>
 
@@ -10,7 +10,7 @@
         class="scm-icon-btn"
         type="button"
         :title="refreshTitle"
-        aria-label="刷新时空线状态"
+        aria-label="刷新平行时空线"
         :disabled="workspaceStore.launchScreenVisible"
         @click="refreshSummary"
       >
@@ -23,14 +23,14 @@
         <div class="scm-empty-state">
           <span class="material-symbols-rounded scm-empty-icon">folder_open</span>
           <p class="scm-empty-title">尚未打开项目</p>
-          <p class="scm-empty-hint">先打开一个 Storydex 项目，这里会显示它的改动与时空线。</p>
+          <p class="scm-empty-hint">先打开一个 Storydex 项目，这里会显示它的改动与平行时空线。</p>
         </div>
       </template>
 
       <template v-else-if="summary && !summary.gitInstalled">
         <div class="scm-empty-state is-warning">
           <span class="material-symbols-rounded scm-empty-icon">warning</span>
-          <p class="scm-empty-title">时空线不可用</p>
+          <p class="scm-empty-title">平行时空线不可用</p>
           <p class="scm-empty-hint">{{ summary.message || "当前环境未安装 Git。" }}</p>
         </div>
       </template>
@@ -40,7 +40,7 @@
           <span class="material-symbols-rounded scm-empty-icon">account_tree</span>
           <p class="scm-empty-title">还没有启用版本记录</p>
           <p class="scm-empty-hint">
-            初始化后，每次改动都可以留下一个可回退的本地版本，不会上传到任何远端。
+            启用后，每次提交都会在时空线上留下一个可回溯的节点，全部保存在本地，不会上传到任何远端。
           </p>
           <button
             class="scm-primary-btn"
@@ -51,68 +51,101 @@
             <span class="material-symbols-rounded">play_arrow</span>
             <span>{{ gitStore.isInitializing ? "初始化中…" : "启用版本记录" }}</span>
           </button>
-          <form class="scm-empty-branch-form" @submit.prevent="handleCreateBranch">
-            <input v-model.trim="newBranchName" placeholder="无提交也可以先创建分支" :disabled="gitStore.isBranchBusy" />
-            <button class="scm-primary-btn" type="submit" :disabled="gitStore.isBranchBusy || !newBranchName">创建分支</button>
-          </form>
         </div>
         <div v-if="gitStore.error" class="scm-feedback is-error">{{ gitStore.error }}</div>
       </template>
 
       <template v-else>
-        <!-- 当前状态卡：直接回答“我刚才提交成功了吗” -->
-        <section class="scm-state-card">
-          <div class="scm-state-row">
-            <span class="scm-state-label">分支</span>
-            <span class="scm-branch-pill" :title="`当前分支：${branchName}`">
-              <span class="material-symbols-rounded">fork_right</span>
-              <span class="scm-branch-name">{{ branchName }}</span>
-            </span>
-          </div>
-          <div class="scm-state-row">
-            <span class="scm-state-label">最新版本</span>
-            <span class="scm-state-value" :title="headTitle">
-              <template v-if="headCommit">
-                <span class="scm-state-subject">{{ headCommit.subject }}</span>
-                <code class="scm-hash">{{ headCommit.shortId }}</code>
-              </template>
-              <span v-else class="scm-state-muted">暂无提交</span>
-            </span>
-          </div>
-          <div class="scm-state-row">
-            <span class="scm-state-label">工作区</span>
-            <span class="scm-state-value">
-              <span class="scm-dot" :class="hasChanges ? 'is-dirty' : 'is-clean'"></span>
-              <span>{{ changedCountLabel }}</span>
-            </span>
-          </div>
+        <!-- 我现在在哪条世界线上 -->
+        <section class="scm-here">
+          <span
+            class="scm-here-pill"
+            :class="{ 'is-observing': isObserving }"
+            :title="hereTitle"
+          >
+            <span class="material-symbols-rounded">{{ isObserving ? "visibility" : "fork_right" }}</span>
+            <span class="scm-here-name">{{ hereLabel }}</span>
+          </span>
+          <span class="scm-here-state" :title="headTitle">
+            <span class="scm-dot" :class="hasChanges ? 'is-dirty' : 'is-clean'"></span>
+            <span>{{ changedCountLabel }}</span>
+          </span>
         </section>
 
-        <section class="scm-branch-manager">
-          <div class="scm-branch-manager-row">
-            <label for="scm-branch-select">当前分支</label>
-            <select
-              id="scm-branch-select"
-              :value="branchName"
-              :disabled="gitStore.isBranchBusy || hasChanges"
-              title="有未提交修改时不能切换分支"
-              @change="handleBranchSelect"
+        <!-- 平行时空线树状图：这个面板的主角 -->
+        <section class="scm-graph">
+          <TimelineGraph
+            :timeline="gitStore.timeline"
+            :loading="gitStore.isTimelineLoading"
+            :detached-override="gitStore.isDetached"
+            :dirty="hasChanges"
+            :busy="actions.busy.value"
+            density="compact"
+            @jump="actions.requestJump"
+            @fork="actions.requestFork"
+            @inspect="actions.requestInspect"
+            @rename-worldline="actions.requestRename"
+            @delete-worldline="actions.requestDelete"
+            @expand="openWorldlineMap"
+          />
+        </section>
+
+        <div v-if="gitStore.error" class="scm-feedback is-error">
+          <span class="material-symbols-rounded">error</span>
+          <span>{{ gitStore.error }}</span>
+        </div>
+        <div v-else-if="gitStore.successMessage" class="scm-feedback is-success">
+          <span class="material-symbols-rounded">check_circle</span>
+          <span>{{ gitStore.successMessage }}</span>
+        </div>
+
+        <!-- 未提交的更改 -->
+        <section class="scm-pane" :class="{ collapsed: !changesExpanded }">
+          <header
+            class="scm-pane-header"
+            role="button"
+            tabindex="0"
+            :aria-expanded="changesExpanded"
+            @click="toggleChanges"
+            @keydown.enter.prevent="toggleChanges"
+            @keydown.space.prevent="toggleChanges"
+          >
+            <span class="scm-pane-caret material-symbols-rounded">
+              {{ changesExpanded ? "expand_more" : "chevron_right" }}
+            </span>
+            <span class="scm-pane-title">还没进版本的改动</span>
+            <span class="scm-pane-count" :class="{ 'is-active': changedFiles.length > 0 }">
+              {{ changedFiles.length }}
+            </span>
+          </header>
+
+          <div v-if="changesExpanded" class="scm-pane-body">
+            <p v-if="changedFiles.length === 0" class="scm-inline-empty">
+              工作区是干净的，所有改动都已经在时空线上了。
+            </p>
+
+            <button
+              v-for="item in changedFiles"
+              :key="`${item.status}-${item.relativePath}`"
+              class="scm-change-row"
+              type="button"
+              :title="`查看差异：${item.relativePath}`"
+              @click="openChangedFile(item.relativePath)"
             >
-              <option v-for="branch in gitStore.branches" :key="branch.name" :value="branch.name">{{ branch.name }}</option>
-            </select>
-          </div>
-          <form class="scm-new-branch" @submit.prevent="handleCreateBranch">
-            <input v-model.trim="newBranchName" placeholder="新分支名称，例如 draft/chapter-3" :disabled="gitStore.isBranchBusy" />
-            <button class="scm-icon-btn" type="submit" title="新建并切换分支" :disabled="gitStore.isBranchBusy || !newBranchName">
-              <span class="material-symbols-rounded">add</span>
+              <span class="scm-row-icon material-symbols-rounded">{{ fileIconName(item.relativePath) }}</span>
+              <span class="scm-row-line">
+                <span class="scm-row-name">{{ fileBaseName(item.relativePath) }}</span>
+                <span class="scm-row-dir">{{ fileDirectory(item.relativePath) }}</span>
+              </span>
+              <span class="scm-status-chip" :class="statusClassName(item.status)" :title="statusTitle(item.status)">
+                {{ statusTitle(item.status) }}
+              </span>
             </button>
-          </form>
-          <p v-if="hasChanges" class="scm-compose-hint">提交当前修改后即可切换分支。</p>
+          </div>
         </section>
 
-        <!-- 提交区 -->
+        <!-- 提交：在当前世界线上留下一个新节点 -->
         <section class="scm-compose">
-          <label class="scm-compose-label" for="scm-commit-message">本次改动说明</label>
           <textarea
             id="scm-commit-message"
             ref="commitInputRef"
@@ -130,95 +163,13 @@
             :title="commitButtonTitle"
             @click="commitAllChanges"
           >
-            <span class="material-symbols-rounded">check</span>
+            <span class="material-symbols-rounded">add_circle</span>
             <span>{{ commitButtonLabel }}</span>
           </button>
-          <p class="scm-compose-hint">留空也可以提交，系统会自动生成带时间的说明。</p>
+          <p v-if="isObserving" class="scm-compose-hint is-observing">
+            你正处于观测态。这次提交会自动开辟一条新的世界线，原线不受影响。
+          </p>
         </section>
-
-        <div v-if="gitStore.error" class="scm-feedback is-error">
-          <span class="material-symbols-rounded">error</span>
-          <span>{{ gitStore.error }}</span>
-        </div>
-        <div v-else-if="gitStore.successMessage" class="scm-feedback is-success">
-          <span class="material-symbols-rounded">check_circle</span>
-          <span>{{ gitStore.successMessage }}</span>
-        </div>
-
-        <div class="scm-split-view">
-          <!-- 未提交的更改 -->
-          <section class="scm-pane" :class="{ collapsed: !changesExpanded }">
-            <header
-              class="scm-pane-header"
-              role="button"
-              tabindex="0"
-              :aria-expanded="changesExpanded"
-              @click="toggleChanges"
-              @keydown.enter.prevent="toggleChanges"
-              @keydown.space.prevent="toggleChanges"
-            >
-              <span class="scm-pane-caret material-symbols-rounded">
-                {{ changesExpanded ? "expand_more" : "chevron_right" }}
-              </span>
-              <span class="scm-pane-title">未提交的更改</span>
-              <span class="scm-pane-count" :class="{ 'is-active': changedFiles.length > 0 }">
-                {{ changedFiles.length }}
-              </span>
-            </header>
-
-            <div v-if="changesExpanded" class="scm-pane-body">
-              <p v-if="changedFiles.length === 0" class="scm-inline-empty">
-                所有改动都已提交，工作区是干净的。
-              </p>
-
-              <button
-                v-for="item in changedFiles"
-                :key="`${item.status}-${item.relativePath}`"
-                class="scm-change-row"
-                type="button"
-                :title="`查看差异：${item.relativePath}`"
-                @click="openChangedFile(item.relativePath)"
-              >
-                <span class="scm-row-icon material-symbols-rounded">{{ fileIconName(item.relativePath) }}</span>
-                <span class="scm-row-line">
-                  <span class="scm-row-name">{{ fileBaseName(item.relativePath) }}</span>
-                  <span class="scm-row-dir">{{ fileDirectory(item.relativePath) }}</span>
-                </span>
-                <span class="scm-status-chip" :class="statusClassName(item.status)" :title="statusTitle(item.status)">
-                  {{ statusTitle(item.status) }}
-                </span>
-              </button>
-            </div>
-          </section>
-
-          <!-- 平行时空线 -->
-          <section class="scm-pane" :class="{ collapsed: !historyExpanded }">
-            <header
-              class="scm-pane-header"
-              role="button"
-              tabindex="0"
-              :aria-expanded="historyExpanded"
-              @click="toggleHistory"
-              @keydown.enter.prevent="toggleHistory"
-              @keydown.space.prevent="toggleHistory"
-            >
-              <span class="scm-pane-caret material-symbols-rounded">
-                {{ historyExpanded ? "expand_more" : "chevron_right" }}
-              </span>
-              <span class="scm-pane-title">平行时空线</span>
-              <span class="scm-pane-count">{{ gitStore.timelineNodes.length }}</span>
-            </header>
-
-            <div v-if="historyExpanded" class="scm-pane-body scm-pane-body-timeline">
-              <TimelineGraph
-                :timeline="gitStore.timeline"
-                :loading="gitStore.isTimelineLoading"
-                :detached-override="gitStore.isDetached"
-                @jump="handleTimelineJump"
-              />
-            </div>
-          </section>
-        </div>
 
         <footer class="scm-footer" :title="refreshTitle">
           <span class="material-symbols-rounded">{{ gitStore.isLoading ? "sync" : "schedule" }}</span>
@@ -226,6 +177,14 @@
         </footer>
       </template>
     </div>
+
+    <WorldlineDialog
+      :state="actions.dialog.value"
+      :submitting="actions.isSubmitting.value"
+      @confirm="actions.confirm"
+      @cancel="actions.close"
+      @update:input="onDialogInput"
+    />
   </aside>
 </template>
 
@@ -233,16 +192,16 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useGitStore } from "@/stores/git";
 import { useWorkspaceStore } from "@/stores/workspace";
-import type { WorkspaceGitCommitEntry } from "@/types/workspace";
+import { useWorldlineActions } from "@/composables/useWorldlineActions";
 import TimelineGraph from "@/components/TimelineGraph.vue";
+import WorldlineDialog from "@/components/WorldlineDialog.vue";
 
 const gitStore = useGitStore();
 const workspaceStore = useWorkspaceStore();
+const actions = useWorldlineActions();
 
 const commitMessage = ref("");
-const newBranchName = ref("");
 const changesExpanded = ref(true);
-const historyExpanded = ref(true);
 const commitInputRef = ref<HTMLTextAreaElement | null>(null);
 /** Ticks once a second so the "last synced" label stays truthful without a store write. */
 const nowTick = ref(Date.now());
@@ -255,38 +214,57 @@ const nowTick = ref(Date.now());
  * invisible until the project was reopened.
  */
 const AUTO_REFRESH_INTERVAL_MS = 3000;
+/**
+ * 树比工作区状态重（要跑 git log --all），所以刷得慢一些；但它必须参与轮询：
+ * Agent 的自动提交会凭空长出新节点，只在窗口聚焦时刷新的话，用户盯着面板也
+ * 看不到 Agent 刚写进去的版本。
+ */
+const TIMELINE_REFRESH_INTERVAL_MS = 9000;
 let autoRefreshTimer: number | null = null;
 let clockTimer: number | null = null;
+let timelineTimer: number | null = null;
 
 const summary = computed(() => gitStore.summary);
 const projectLabel = computed(() => workspaceStore.projectLabel || "未打开项目");
-const branchName = computed(() => summary.value?.branch || summary.value?.defaultBranch || "develop");
 const changedFiles = computed(() => summary.value?.changedFiles || []);
-const recentCommits = computed(() => gitStore.recentCommits);
-const branchCommits = computed(() => gitStore.branchCommits);
-const backupCommits = computed(() => gitStore.backupCommits);
 const headCommit = computed(() => summary.value?.head || null);
-const headSubject = computed(() => headCommit.value?.subject || "暂无提交");
 const hasChanges = computed(() => changedFiles.value.length > 0);
+const isObserving = computed(() => gitStore.isDetached);
+/** 观测态下没有世界线可言，不能退回到某个默认分支名假装用户在某条线上。 */
+const worldlineName = computed(() => gitStore.currentWorldline);
+const hereLabel = computed(() => (isObserving.value ? "观测态（不在任何世界线上）" : worldlineName.value || "尚未确定世界线"));
+const hereTitle = computed(() =>
+  isObserving.value
+    ? "你正停在一条世界线的历史节点上。在这里提交会自动开辟一条新的世界线。"
+    : `当前世界线：${worldlineName.value}`
+);
 const changedCountLabel = computed(() =>
-  gitStore.changedCount > 0 ? `${gitStore.changedCount} 个文件待提交` : "干净，无待提交改动"
+  gitStore.changedCount > 0 ? `${gitStore.changedCount} 个文件还没进版本` : "干净，全部已进版本"
 );
 const commitPlaceholder = computed(() =>
-  hasChanges.value ? `例如：修改第三章结尾（Ctrl+Enter 提交到 ${branchName.value}）` : "没有待提交的改动"
+  hasChanges.value ? "这次改了什么？（Ctrl+Enter 提交）" : "没有待提交的改动"
 );
 const commitButtonLabel = computed(() => {
   if (gitStore.isCommitting) {
     return "提交中…";
   }
-  return hasChanges.value ? `提交 ${changedFiles.value.length} 个文件` : "没有待提交的改动";
+  if (!hasChanges.value) {
+    return "没有待提交的改动";
+  }
+  return isObserving.value
+    ? `开辟新世界线并提交 ${changedFiles.value.length} 个文件`
+    : `留下新节点（${changedFiles.value.length} 个文件）`;
 });
-const commitButtonTitle = computed(() =>
-  hasChanges.value ? `提交全部改动到 ${branchName.value}` : "当前没有待提交的更改"
-);
+const commitButtonTitle = computed(() => {
+  if (!hasChanges.value) return "当前没有待提交的更改";
+  return isObserving.value
+    ? "在观测态提交会自动开辟一条新的世界线"
+    : `在世界线 ${worldlineName.value} 上留下一个新节点`;
+});
 const headTitle = computed(() =>
   headCommit.value
-    ? `${headCommit.value.subject}\n${headCommit.value.shortId} · ${headCommit.value.authorName} · ${formatTimestamp(headCommit.value.authoredAt)}`
-    : "暂无提交"
+    ? `最新节点：${headCommit.value.subject}\n${headCommit.value.shortId} · ${headCommit.value.authorName} · ${formatTimestamp(headCommit.value.authoredAt)}`
+    : "还没有任何节点"
 );
 const syncLabel = computed(() => {
   if (gitStore.isLoading) {
@@ -310,6 +288,7 @@ onMounted(() => {
     void gitStore.refreshTimeline();
   }
   autoRefreshTimer = window.setInterval(handleAutoRefresh, AUTO_REFRESH_INTERVAL_MS);
+  timelineTimer = window.setInterval(handleTimelineRefresh, TIMELINE_REFRESH_INTERVAL_MS);
   clockTimer = window.setInterval(() => {
     nowTick.value = Date.now();
   }, 1000);
@@ -318,14 +297,14 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
-  if (autoRefreshTimer !== null) {
-    window.clearInterval(autoRefreshTimer);
-    autoRefreshTimer = null;
+  for (const timer of [autoRefreshTimer, timelineTimer, clockTimer]) {
+    if (timer !== null) {
+      window.clearInterval(timer);
+    }
   }
-  if (clockTimer !== null) {
-    window.clearInterval(clockTimer);
-    clockTimer = null;
-  }
+  autoRefreshTimer = null;
+  timelineTimer = null;
+  clockTimer = null;
   window.removeEventListener("focus", handleWindowFocus);
   document.removeEventListener("visibilitychange", handleWindowFocus);
 });
@@ -335,21 +314,33 @@ watch(
   () => {
     if (!workspaceStore.launchScreenVisible) {
       void gitStore.refreshSummary({ silent: true });
+      void gitStore.refreshBranches();
       void gitStore.refreshTimeline();
     }
   }
 );
 
-function handleAutoRefresh(): void {
+function isRefreshBlocked(): boolean {
   if (workspaceStore.launchScreenVisible || document.hidden) {
-    return;
+    return true;
   }
-  // 只在正在提交/恢复时跳过（这些操作会改变仓库状态），不在 isLoading
-  // 时跳过——否则服务器慢时每次轮询都被跳过，状态永远不刷新。
-  if (gitStore.isCommitting || gitStore.isRestoring || gitStore.isInitializing) {
+  // 只在写操作进行中时跳过（这些操作本身会改变仓库状态并自行刷新），不在
+  // isLoading 时跳过——否则服务器慢时每次轮询都被跳过，状态永远不刷新。
+  return gitStore.isCommitting || gitStore.isRestoring || gitStore.isInitializing || gitStore.isWorldlineBusy;
+}
+
+function handleAutoRefresh(): void {
+  if (isRefreshBlocked()) {
     return;
   }
   void gitStore.refreshSummary({ silent: true });
+}
+
+function handleTimelineRefresh(): void {
+  if (isRefreshBlocked() || gitStore.isJumping) {
+    return;
+  }
+  void gitStore.refreshTimeline();
 }
 
 function handleWindowFocus(): void {
@@ -365,34 +356,16 @@ function handleWindowFocus(): void {
 function refreshSummary(): void {
   void gitStore.refreshSummary({ force: true });
   void gitStore.refreshBranches();
-  void gitStore.refreshTimeline();
+  void gitStore.refreshTimeline({ force: true });
 }
 
-/**
- * 平行时空线节点跳转：进入 detached HEAD 查看该历史节点。工作区文件会恢复
- * 到该提交的状态。用户在此基础上提交时，后端会自动创建新世界线分支。
- */
-async function handleTimelineJump(commitId: string): Promise<void> {
-  if (!commitId || gitStore.isJumping) return;
-  const confirmed = window.confirm(
-    "确认跳转到这个历史节点吗？\n\n工作区文件会恢复到该节点的状态。如果你在此基础上做了改动并提交，系统会自动创建一条新的平行时空线分支，不会影响原分支。"
-  );
-  if (!confirmed) return;
-  await gitStore.jumpToCommit(commitId);
-  await workspaceStore.reloadProjectContext();
+/** 侧栏太窄时把树搬到主编辑区，用全宽画布浏览。 */
+function openWorldlineMap(): void {
+  void workspaceStore.openWorldlineMapDocument();
 }
 
-function handleBranchSelect(event: Event): void {
-  const name = (event.target as HTMLSelectElement).value;
-  if (name && name !== branchName.value) void gitStore.switchBranch(name);
-}
-
-function handleCreateBranch(): void {
-  const name = newBranchName.value.trim();
-  if (!name) return;
-  void gitStore.createBranch(name).then((created) => {
-    if (created) newBranchName.value = "";
-  });
+function onDialogInput(value: string): void {
+  actions.dialog.value = { ...actions.dialog.value, input: value, error: "" };
 }
 
 function initializeRepository(): void {
@@ -401,10 +374,6 @@ function initializeRepository(): void {
 
 function toggleChanges(): void {
   changesExpanded.value = !changesExpanded.value;
-}
-
-function toggleHistory(): void {
-  historyExpanded.value = !historyExpanded.value;
 }
 
 function handleCommitKeydown(event: KeyboardEvent): void {
@@ -423,6 +392,7 @@ function commitAllChanges(): void {
     // Re-read after the write so history reflects the new commit even if the
     // commit response raced with an in-flight poll.
     void gitStore.refreshSummary({ silent: true, force: true });
+    void gitStore.refreshTimeline();
   });
 }
 
@@ -431,25 +401,6 @@ function openChangedFile(relativePath: string): void {
     return;
   }
   void workspaceStore.openGitReview({ focusPath: relativePath });
-}
-
-async function restoreCommit(commitId: string, subject: string): Promise<void> {
-  const confirmed = window.confirm(
-    `确认回退到这个版本吗？\n\n${subject}\n\n系统会先自动保留当前状态的本地备份分支，然后恢复到所选提交。`
-  );
-  if (!confirmed) {
-    return;
-  }
-
-  await gitStore.restoreToCommit(commitId, true);
-  if (gitStore.error) {
-    return;
-  }
-  await workspaceStore.reloadProjectContext();
-}
-
-function isCurrentCommit(commitId: string): boolean {
-  return String(summary.value?.head?.id || "") === String(commitId || "");
 }
 
 function formatStatus(status: string): string {
@@ -524,35 +475,6 @@ function fileIconName(relativePath: string): string {
   return "description";
 }
 
-function historyMetaText(item: WorkspaceGitCommitEntry): string {
-  const when = formatRelative(new Date(item.authoredAt).getTime(), nowTick.value);
-  return `${item.authorName} · ${when}`;
-}
-
-function historyRefLabel(item: WorkspaceGitCommitEntry): string {
-  const refs = String(item.refs || "")
-    .split(",")
-    .map((part) => part.trim())
-    .filter(Boolean);
-  // 当前提交由“当前”徽章标识，这里不再重复分支名
-  if (isCurrentCommit(item.id)) {
-    return "";
-  }
-  const directRef = refs.find((part) => !part.startsWith("HEAD ->"));
-  if (directRef) {
-    return directRef.replace(/^origin\//, "");
-  }
-  const headRef = refs.find((part) => part.startsWith("HEAD ->"));
-  if (headRef) {
-    return headRef.replace(/^HEAD ->\s*/u, "");
-  }
-  return item.shortId;
-}
-
-function historyRowTitle(item: WorkspaceGitCommitEntry): string {
-  return `${item.subject}\n${item.shortId} · ${item.authorName} · ${formatTimestamp(item.authoredAt)}`;
-}
-
 function formatTimestamp(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
@@ -593,12 +515,12 @@ function formatRelative(value: number, reference: number): string {
 
 defineExpose({
   __testUtils: import.meta.env.MODE === "test" ? {
-    commitMessage, changesExpanded, historyExpanded, summary, changedFiles, recentCommits,
-    branchCommits, backupCommits, headCommit, headSubject, hasChanges, syncLabel,
-    refreshSummary, initializeRepository, toggleChanges, toggleHistory, handleCommitKeydown,
-    commitAllChanges, openChangedFile, restoreCommit, isCurrentCommit, formatStatus, statusClassName, statusTitle,
-    fileBaseName, fileDirectory, fileIconName, historyMetaText, historyRefLabel, historyRowTitle, formatTimestamp,
-    formatRelative, handleAutoRefresh, handleWindowFocus
+    commitMessage, changesExpanded, summary, changedFiles, headCommit, hasChanges, syncLabel,
+    isObserving, worldlineName, hereLabel, hereTitle, commitButtonLabel, commitButtonTitle,
+    refreshSummary, initializeRepository, toggleChanges, handleCommitKeydown, openWorldlineMap,
+    onDialogInput, commitAllChanges, openChangedFile, formatStatus, statusClassName, statusTitle,
+    fileBaseName, fileDirectory, fileIconName, formatTimestamp, formatRelative,
+    isRefreshBlocked, handleAutoRefresh, handleTimelineRefresh, handleWindowFocus
   } : null
 });
 </script>
@@ -732,110 +654,61 @@ defineExpose({
   line-height: 1.7;
 }
 
-/* ---------- current state card ---------- */
+/* ---------- 我在哪 ---------- */
 
-.scm-state-card {
+.scm-here {
   flex: 0 0 auto;
   display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin: 12px 14px 0;
-  padding: 10px 12px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md, 6px);
-  background: var(--bg-card);
-}
-
-.scm-branch-manager {
-  padding: 10px 12px;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px;
   border-bottom: 1px solid var(--border-ghost);
-  display: grid;
-  gap: 8px;
-  margin: 10px 14px 0;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md, 6px);
-  background: var(--bg-card);
-}
-
-.scm-branch-manager-row,
-.scm-new-branch {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.scm-branch-manager-row label {
-  color: var(--text-muted);
-  font-size: 12px;
-  flex: 0 0 auto;
-}
-
-.scm-branch-manager select,
-.scm-new-branch input,
-.scm-empty-branch-form input {
-  min-width: 0;
-  flex: 1 1 auto;
-  height: 30px;
-  border: 1px solid var(--border-subtle);
-  background: var(--bg-editor);
-  color: var(--text-main);
-  padding: 0 8px;
-  font: inherit;
-}
-
-.scm-empty-branch-form { display: flex; gap: 8px; width: 100%; margin-top: 10px; }
-.scm-empty-branch-form input { min-width: 0; flex: 1; height: 32px; border: 1px solid var(--border-subtle); border-radius: 5px; padding: 0 8px; background: var(--bg-editor); color: var(--text-main); font: inherit; font-size: 11px; }
-.scm-empty-branch-form input:focus { outline: none; border-color: var(--accent); }
-.scm-new-branch input::placeholder, .scm-empty-branch-form input::placeholder { font-size: 10px; }
-
-.scm-branch-manager select:focus,
-.scm-new-branch input:focus {
-  border-color: var(--accent);
-  outline: none;
-}
-
-.scm-state-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-  font-size: 12px;
-}
-
-.scm-state-label {
-  flex: 0 0 52px;
-  color: var(--text-muted);
   font-size: 11px;
 }
 
-.scm-state-value {
+.scm-here-pill {
   min-width: 0;
-  flex: 1 1 auto;
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 6px;
-  overflow: hidden;
+  gap: 4px;
+  max-width: 60%;
+  height: 21px;
+  padding: 0 8px 0 5px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 11px;
+  background: var(--bg-hover);
+  color: var(--accent-strong);
+  font-weight: 700;
 }
 
-.scm-state-subject {
+.scm-here-pill.is-observing {
+  border-color: color-mix(in srgb, var(--warning) 45%, transparent);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  color: var(--warning);
+}
+
+.scm-here-pill .material-symbols-rounded {
+  flex: 0 0 auto;
+  font-size: 14px;
+}
+
+.scm-here-name {
   min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.scm-state-muted {
-  color: var(--text-faint);
-}
-
-.scm-hash {
-  flex: 0 0 auto;
-  padding: 0 4px;
-  border-radius: 3px;
-  background: var(--bg-hover);
+.scm-here-state {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
   color: var(--text-muted);
-  font-family: var(--font-mono);
-  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
 }
 
 .scm-dot {
@@ -853,32 +726,14 @@ defineExpose({
   background: var(--warning, #b7791f);
 }
 
-.scm-branch-pill {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  max-width: 150px;
-  height: 20px;
-  padding: 0 7px 0 4px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 3px;
-  background: var(--bg-hover);
-  color: var(--accent-strong);
-  font-size: 11px;
-  font-weight: 700;
-}
+/* ---------- 树状图（面板主角） ---------- */
 
-.scm-branch-pill .material-symbols-rounded {
+.scm-graph {
   flex: 0 0 auto;
-  font-size: 13px;
-}
-
-.scm-branch-name {
-  min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-bottom: 1px solid var(--border-ghost);
 }
 
 /* ---------- compose ---------- */
@@ -888,18 +743,13 @@ defineExpose({
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 12px 14px;
-}
-
-.scm-compose-label {
-  color: var(--text-muted);
-  font-size: 11px;
-  font-weight: 600;
+  padding: 10px 14px 12px;
+  border-top: 1px solid var(--border-ghost);
 }
 
 .scm-compose-input {
   width: 100%;
-  min-height: 48px;
+  min-height: 44px;
   max-height: 90px;
   padding: 7px 8px;
   border: 1px solid var(--border-subtle);
@@ -933,7 +783,9 @@ defineExpose({
   line-height: 1.5;
 }
 
-.scm-branch-manager .scm-compose-hint { font-size: 10px; }
+.scm-compose-hint.is-observing {
+  color: var(--warning);
+}
 
 .scm-primary-btn {
   height: 28px;
@@ -965,8 +817,7 @@ defineExpose({
 }
 
 .scm-primary-btn:disabled,
-.scm-icon-btn:disabled,
-.scm-restore-btn:disabled {
+.scm-icon-btn:disabled {
   cursor: not-allowed;
   opacity: 0.55;
 }
@@ -978,7 +829,7 @@ defineExpose({
   display: flex;
   align-items: flex-start;
   gap: 6px;
-  margin: 0 14px 10px;
+  margin: 8px 14px 0;
   padding: 7px 9px;
   border-radius: var(--radius-sm, 4px);
   font-size: 12px;
@@ -1002,22 +853,12 @@ defineExpose({
 
 /* ---------- panes ---------- */
 
-.scm-split-view {
+.scm-pane {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border-top: 1px solid var(--border-ghost);
-}
-
-.scm-pane {
-  flex: 1 1 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  border-bottom: 1px solid var(--border-ghost);
 }
 
 .scm-pane.collapsed {
@@ -1084,16 +925,6 @@ defineExpose({
   padding: 2px 8px 8px;
 }
 
-/* 平行时空线：TimelineGraph 自带高度和滚动，外层去掉 padding/overflow 避免冲突 */
-.scm-pane-body-timeline {
-  padding: 0;
-  overflow: visible;
-  flex: 1 1 auto;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
 .scm-inline-empty {
   margin: 0;
   padding: 10px 6px;
@@ -1104,8 +935,7 @@ defineExpose({
 
 /* ---------- rows ---------- */
 
-.scm-change-row,
-.scm-history-row {
+.scm-change-row {
   width: 100%;
   max-width: 100%;
   display: grid;
@@ -1140,14 +970,7 @@ defineExpose({
   overflow: hidden;
 }
 
-.scm-row-line-history {
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 1px;
-}
-
-.scm-row-name,
-.scm-history-subject {
+.scm-row-name {
   min-width: 0;
   max-width: 100%;
   color: var(--text-main);
@@ -1157,19 +980,15 @@ defineExpose({
   text-overflow: ellipsis;
 }
 
-.scm-row-dir,
-.scm-history-meta {
+.scm-row-dir {
   min-width: 0;
   max-width: 100%;
+  flex: 1 1 auto;
   color: var(--text-muted);
   font-size: 11px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.scm-row-dir {
-  flex: 1 1 auto;
 }
 
 /* 状态改为中文短标签，写作者不需要记 Git 字母 */
@@ -1203,135 +1022,6 @@ defineExpose({
 .scm-status-chip.is-renamed {
   background: color-mix(in srgb, var(--info, #2f6feb) 12%, transparent);
   color: var(--info, #2f6feb);
-}
-
-/* ---------- history ---------- */
-
-.scm-history-row {
-  cursor: default;
-}
-
-.scm-history-row:hover {
-  background: var(--bg-hover);
-}
-
-.scm-history-row.current {
-  background: color-mix(in srgb, var(--accent-soft) 16%, transparent);
-}
-
-.scm-history-row.is-backup .scm-history-subject {
-  color: var(--text-muted);
-}
-
-.scm-history-ref {
-  max-width: 100%;
-  color: var(--text-faint);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.scm-subgroup-header {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  margin: 8px 0 2px;
-  padding: 5px 6px;
-  border-top: 1px dashed var(--border-subtle);
-  color: var(--text-faint);
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.scm-subgroup-header .material-symbols-rounded {
-  font-size: 14px;
-}
-
-.scm-restore-btn {
-  flex: 0 0 auto;
-  width: 24px;
-  height: 24px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 0;
-  border-radius: 3px;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.12s ease;
-}
-
-.scm-history-row:hover .scm-restore-btn,
-.scm-restore-btn:focus-visible {
-  opacity: 1;
-}
-
-.scm-restore-btn:hover:not(:disabled) {
-  background: var(--bg-hover);
-  color: var(--text-main);
-}
-
-.scm-restore-btn .material-symbols-rounded {
-  font-size: 16px;
-}
-
-.scm-current-badge {
-  flex: 0 0 auto;
-  height: 18px;
-  padding: 0 6px;
-  display: inline-flex;
-  align-items: center;
-  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border-subtle));
-  border-radius: 3px;
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  color: var(--accent-strong);
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.scm-graph-lane {
-  position: relative;
-  width: 18px;
-  align-self: stretch;
-  min-height: 22px;
-}
-
-.scm-graph-lane::before {
-  content: "";
-  position: absolute;
-  left: 8px;
-  top: 0;
-  bottom: 0;
-  width: 1px;
-  background: color-mix(in srgb, var(--text-muted) 28%, transparent);
-}
-
-.scm-graph-lane.tail::before {
-  bottom: 50%;
-}
-
-.scm-graph-node {
-  position: absolute;
-  left: 4px;
-  top: 50%;
-  width: 9px;
-  height: 9px;
-  margin-top: -4.5px;
-  border-radius: 999px;
-  border: 2px solid color-mix(in srgb, var(--accent-strong) 86%, transparent);
-  background: var(--bg-card);
-}
-
-.scm-history-row.current .scm-graph-node {
-  background: color-mix(in srgb, var(--accent-strong) 86%, transparent);
-}
-
-.scm-graph-lane.is-backup .scm-graph-node {
-  border-color: color-mix(in srgb, var(--text-muted) 55%, transparent);
 }
 
 /* ---------- footer ---------- */

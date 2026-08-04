@@ -524,9 +524,11 @@ def test_read_timeline_returns_all_branches_and_layout(git_service: GitService, 
     assert len(current_nodes) == 1
     assert current_nodes[0]["id"] == timeline["currentHead"]["id"]
 
-    # column=0 是最新提交
-    newest = min(timeline["nodes"], key=lambda n: n["column"])
-    assert newest["column"] == 0
+    # column=0 是最旧的提交（树从左向右生长），并且当前 HEAD 一定在最右端。
+    columns = {n["subject"]: n["column"] for n in timeline["nodes"]}
+    assert columns["c1"] == 0
+    assert columns["c2"] == 1
+    assert max(columns.values()) == columns["c2"]
 
 
 def test_jump_to_commit_enters_detached_head(git_service: GitService, tmp_path: Path):
@@ -700,3 +702,257 @@ def test_timeline_includes_worldline_branch_after_fork(git_service: GitService, 
     # 新分支 head 节点的 headBranches 包含新分支名
     head_node = next(n for n in timeline["nodes"] if n["id"] == current_nodes[0]["id"])
     assert new_branch in head_node["headBranches"]
+
+
+# -----------------------------------------------------------------------------
+# 拓扑深度布局 / 智能跳转 / 世界线管理
+# -----------------------------------------------------------------------------
+
+
+def _seed_forked_worldlines(git_service: GitService, workspace: Path) -> dict[str, str]:
+    """建一棵有分叉的树，返回 subject -> commit id。
+
+    develop:      c1 - c2 - c3
+                   \\
+    alt/dark:       a1 - a2
+    """
+    (workspace / "chapters").mkdir()
+    git_service.initialize_repository(workspace)
+    ids: dict[str, str] = {}
+    for name in ("c1", "c2", "c3"):
+        (workspace / "chapters" / "main.md").write_text(f"main {name}\n", encoding="utf-8")
+        ids[name] = git_service.commit_all(workspace, message=name)["commit"]["id"]
+
+    git_service.create_worldline(workspace, from_commit=ids["c1"], name="alt/dark")
+    for name in ("a1", "a2"):
+        (workspace / "chapters" / "alt.md").write_text(f"alt {name}\n", encoding="utf-8")
+        ids[name] = git_service.commit_all(workspace, message=name)["commit"]["id"]
+    return ids
+
+
+def test_timeline_column_is_topological_depth_not_commit_index(
+    git_service: GitService, tmp_path: Path
+):
+    """横轴列号必须是拓扑深度，不是全局时间序索引。
+
+    这是重构的核心不变量：总列数取决于最长世界线的长度，而不是提交总数；
+    分叉出去的第一个节点与母线上的同代节点必须落在同一列（垂直对齐）。
+    """
+    workspace = tmp_path / "topology"
+    workspace.mkdir()
+    ids = _seed_forked_worldlines(git_service, workspace)
+
+    timeline = git_service.read_timeline(workspace)
+    column = {n["subject"]: n["column"] for n in timeline["nodes"]}
+
+    # 5 个提交，但最长的世界线只有 3 代，所以只需要 3 列。
+    assert len(timeline["nodes"]) == 5
+    assert max(column.values()) == 2
+
+    # 同一条线上连续提交的列号连续递增。
+    assert column["c1"] == 0
+    assert column["c2"] == 1
+    assert column["c3"] == 2
+
+    # a1 是 c1 的子节点，必须和 c2 同列——这就是"分叉点垂直对齐"。
+    assert column["a1"] == column["c2"] == 1
+    assert column["a2"] == 2
+
+    # 每个节点的列号 = 父节点列号 + 1
+    by_id = {n["id"]: n for n in timeline["nodes"]}
+    for node in timeline["nodes"]:
+        parents = [p for p in node["parents"] if p in by_id]
+        if parents:
+            assert node["column"] == max(by_id[p]["column"] for p in parents) + 1
+
+
+def test_timeline_reports_fork_column_and_exclusive_counts(
+    git_service: GitService, tmp_path: Path
+):
+    """每条世界线要报告它从哪一列分出去、独有多少个版本。"""
+    workspace = tmp_path / "forkmeta"
+    workspace.mkdir()
+    _seed_forked_worldlines(git_service, workspace)
+
+    timeline = git_service.read_timeline(workspace)
+    branches = {b["name"]: b for b in timeline["branches"]}
+
+    # alt/dark 从 c1 之后分出去，它独有的最早节点 a1 在第 1 列。
+    assert branches["alt/dark"]["forkColumn"] == 1
+    assert branches["alt/dark"]["tipColumn"] == 2
+    # a1 + a2 是它独有的；c1 与 develop 共享。
+    assert branches["alt/dark"]["commitCount"] == 2
+    assert branches["alt/dark"]["totalCount"] == 3
+
+    # develop 独有 c2、c3。
+    assert branches[GitService.DEFAULT_BRANCH]["commitCount"] == 2
+    assert branches[GitService.DEFAULT_BRANCH]["totalCount"] == 3
+
+    # 当前世界线固定 lane 0。
+    assert branches["alt/dark"]["isCurrent"] is True
+    assert branches["alt/dark"]["lane"] == 0
+
+
+def test_timeline_nodes_carry_lane_branch(git_service: GitService, tmp_path: Path):
+    """节点要说明自己被画在哪条世界线的轨道上，前端据此做同线高亮。"""
+    workspace = tmp_path / "lanebranch"
+    workspace.mkdir()
+    _seed_forked_worldlines(git_service, workspace)
+
+    timeline = git_service.read_timeline(workspace)
+    lane_branch = {n["subject"]: n["laneBranch"] for n in timeline["nodes"]}
+    rows = {n["subject"]: n["row"] for n in timeline["nodes"]}
+
+    # 当前线是 alt/dark（lane 0），公共前史 c1 画在它上面。
+    assert lane_branch["c1"] == "alt/dark"
+    assert rows["c1"] == rows["a1"] == 0
+    # develop 独有的节点在自己的轨道上。
+    assert lane_branch["c3"] == GitService.DEFAULT_BRANCH
+    assert rows["c3"] != 0
+
+
+def test_jump_to_branch_tip_switches_worldline_instead_of_detaching(
+    git_service: GitService, tmp_path: Path
+):
+    """跳到某条世界线的最新节点 = 切到那条线，而不是掉进观测态。"""
+    workspace = tmp_path / "jump-tip"
+    workspace.mkdir()
+    ids = _seed_forked_worldlines(git_service, workspace)
+
+    # 当前在 alt/dark，跳到 develop 的最新节点 c3。
+    result = git_service.jump_to_commit(workspace, commit_id=ids["c3"])
+    assert result["detached"] is False
+    assert result["branch"] == GitService.DEFAULT_BRANCH
+    assert git_service._read_current_branch(workspace) == GitService.DEFAULT_BRANCH
+
+    timeline = git_service.read_timeline(workspace)
+    assert timeline["detached"] is False
+    assert timeline["currentBranch"] == GitService.DEFAULT_BRANCH
+
+
+def test_jump_to_middle_node_enters_observing_state(git_service: GitService, tmp_path: Path):
+    """跳到线中间的历史节点仍然进入观测态（detached HEAD）。"""
+    workspace = tmp_path / "jump-middle"
+    workspace.mkdir()
+    ids = _seed_forked_worldlines(git_service, workspace)
+
+    result = git_service.jump_to_commit(workspace, commit_id=ids["c2"])
+    assert result["detached"] is True
+    assert result["branch"] == ""
+    assert git_service._read_current_branch(workspace) == ""
+
+
+def test_detached_summary_does_not_report_a_fake_branch_name(
+    git_service: GitService, tmp_path: Path
+):
+    """观测态下 branch 必须是空串。
+
+    Git 的 porcelain 输出是 `## HEAD (no branch)`，旧实现把这行字面量当成分支
+    名存进 summary，面板上就会显示「当前世界线：HEAD (no branch)」。
+    """
+    workspace = tmp_path / "detached-branch"
+    workspace.mkdir()
+    ids = _seed_forked_worldlines(git_service, workspace)
+
+    git_service.jump_to_commit(workspace, commit_id=ids["c2"])
+    summary = git_service.read_summary(workspace)
+    assert summary["branch"] == ""
+    assert "no branch" not in str(summary["branch"])
+
+
+def test_create_worldline_from_any_node(git_service: GitService, tmp_path: Path):
+    """从任意节点开辟命名世界线，并立即切过去。"""
+    workspace = tmp_path / "create-worldline"
+    workspace.mkdir()
+    ids = _seed_forked_worldlines(git_service, workspace)
+
+    result = git_service.create_worldline(workspace, from_commit=ids["c2"], name="alt/redemption")
+    assert result["worldline"] == "alt/redemption"
+    assert result["fromCommit"] == ids["c2"]
+    assert git_service._read_current_branch(workspace) == "alt/redemption"
+
+    # 新线的起点就是 c2，原线不受影响。
+    head = git_service._read_head_commit(workspace)
+    assert head["id"] == ids["c2"]
+    develop_head = git_service._run_git(
+        workspace, ["rev-parse", GitService.DEFAULT_BRANCH]
+    ).strip()
+    assert develop_head == ids["c3"]
+
+
+def test_create_worldline_rejects_duplicates_and_dirty_worktree(
+    git_service: GitService, tmp_path: Path
+):
+    workspace = tmp_path / "create-worldline-guard"
+    workspace.mkdir()
+    ids = _seed_forked_worldlines(git_service, workspace)
+
+    with pytest.raises(GitServiceError) as exc_info:
+        git_service.create_worldline(workspace, from_commit=ids["c1"], name="alt/dark")
+    assert exc_info.value.status_code == 409
+
+    with pytest.raises(GitServiceError) as exc_info:
+        git_service.create_worldline(workspace, from_commit=ids["c1"], name="bad name!")
+    assert exc_info.value.status_code == 400
+
+    (workspace / "chapters" / "dirty.md").write_text("dirty\n", encoding="utf-8")
+    with pytest.raises(GitServiceError) as exc_info:
+        git_service.create_worldline(workspace, from_commit=ids["c1"], name="alt/another")
+    assert exc_info.value.status_code == 409
+
+
+def test_rename_worldline(git_service: GitService, tmp_path: Path):
+    workspace = tmp_path / "rename-worldline"
+    workspace.mkdir()
+    _seed_forked_worldlines(git_service, workspace)
+
+    result = git_service.rename_worldline(workspace, name="alt/dark", new_name="alt/dark-ending")
+    assert result["renamedTo"] == "alt/dark-ending"
+    names = [b["name"] for b in git_service.list_branches(workspace)["branches"]]
+    assert "alt/dark-ending" in names
+    assert "alt/dark" not in names
+
+    with pytest.raises(GitServiceError) as exc_info:
+        git_service.rename_worldline(workspace, name="does/not-exist", new_name="whatever")
+    assert exc_info.value.status_code == 404
+
+    with pytest.raises(GitServiceError) as exc_info:
+        git_service.rename_worldline(
+            workspace, name="alt/dark-ending", new_name=GitService.DEFAULT_BRANCH
+        )
+    assert exc_info.value.status_code == 409
+
+
+def test_delete_worldline_reports_lost_versions(git_service: GitService, tmp_path: Path):
+    """删除世界线要报告丢掉了多少个独有版本，并拒绝删当前线。"""
+    workspace = tmp_path / "delete-worldline"
+    workspace.mkdir()
+    _seed_forked_worldlines(git_service, workspace)
+
+    # 当前在 alt/dark 上，不能删自己。
+    with pytest.raises(GitServiceError) as exc_info:
+        git_service.delete_worldline(workspace, name="alt/dark")
+    assert exc_info.value.status_code == 409
+
+    git_service.switch_branch(workspace, name=GitService.DEFAULT_BRANCH)
+    result = git_service.delete_worldline(workspace, name="alt/dark")
+    # a1 + a2 是 alt/dark 独有的两个版本。
+    assert result["exclusiveCommits"] == 2
+    assert result["deleted"] == "alt/dark"
+    names = [b["name"] for b in result["branches"]]
+    assert "alt/dark" not in names
+
+    # 只剩一条线时不允许再删。
+    with pytest.raises(GitServiceError) as exc_info:
+        git_service.delete_worldline(workspace, name=GitService.DEFAULT_BRANCH)
+    assert exc_info.value.status_code == 409
+
+
+def test_delete_worldline_rejects_unknown_name(git_service: GitService, tmp_path: Path):
+    workspace = tmp_path / "delete-unknown"
+    workspace.mkdir()
+    _seed_forked_worldlines(git_service, workspace)
+
+    with pytest.raises(GitServiceError) as exc_info:
+        git_service.delete_worldline(workspace, name="alt/nope")
+    assert exc_info.value.status_code == 404

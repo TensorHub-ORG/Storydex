@@ -329,8 +329,16 @@ export interface WorkspaceGitTimelineBranch {
   name: string;
   head: string;
   isCurrent: boolean;
-  /** Y 轴 lane 索引；当前分支 lane=0。 */
+  /** Y 轴 lane 索引；当前世界线 lane=0。 */
   lane: number;
+  /** 这条世界线从母线分出去的列号，前端据此画分叉连线。 */
+  forkColumn: number;
+  /** 这条世界线最新节点所在的列号。 */
+  tipColumn: number;
+  /** 这条世界线独有的版本数（不含与其它线共享的前史）。 */
+  commitCount: number;
+  /** 从这条世界线可达的全部版本数（含共享前史）。 */
+  totalCount: number;
 }
 
 export interface WorkspaceGitTimelineNode {
@@ -341,16 +349,18 @@ export interface WorkspaceGitTimelineNode {
   subject: string;
   refs: string;
   parents: string[];
-  /** 包含此提交的所有分支名（从该分支 head 可达）。 */
+  /** 包含此提交的所有世界线名（从该线最新节点可达）。 */
   branches: string[];
-  /** 以此提交为 head 的分支名。 */
+  /** 以此提交为最新节点的世界线名。 */
   headBranches: string[];
   isBranchHead: boolean;
   isCurrent: boolean;
-  /** X 轴位置，最旧提交=0（左），最新=最大（右）。 */
+  /** X 轴位置 = 拓扑深度。同一条线的连续节点相邻，分叉点垂直对齐。 */
   column: number;
-  /** Y 轴分支 lane，对应所属分支的 lane。 */
+  /** Y 轴 lane，对应该节点被画在哪条世界线的轨道上。 */
   row: number;
+  /** 该节点所在轨道对应的世界线名，用于同线高亮。 */
+  laneBranch: string;
 }
 
 export interface WorkspaceGitTimelineEdge {
@@ -378,8 +388,26 @@ export interface WorkspaceGitJumpRequest {
 
 export interface WorkspaceGitJumpResponse {
   detached: boolean;
+  /** 落点世界线名。跳到某条线的最新节点时非空；进入观测态时为空串。 */
+  branch?: string;
   commit: WorkspaceGitCommitEntry | null;
   summary: WorkspaceGitSummaryResponse;
+}
+
+/** 世界线增删改的统一响应：都会回带最新的世界线列表与仓库摘要。 */
+export interface WorkspaceWorldlineMutationResponse {
+  current: string;
+  branches: WorkspaceGitBranchEntry[];
+  summary?: WorkspaceGitSummaryResponse;
+  /** 新开辟的世界线名（create）。 */
+  worldline?: string;
+  fromCommit?: string;
+  renamedFrom?: string;
+  renamedTo?: string;
+  /** 被删除的世界线名（delete）。 */
+  deleted?: string;
+  /** 删除时被永久丢弃的独有版本数。 */
+  exclusiveCommits?: number;
 }
 
 export type StorySettingsSource = "api" | "project_file" | "default";

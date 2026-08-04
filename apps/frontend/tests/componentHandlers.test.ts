@@ -231,7 +231,7 @@ describe("high-density component handler matrices", () => {
       const safeNames = component === PresetManagementSidebar
         ? ["closePresetContextMenu", "handlePresetContextKeydown", "repositionPresetContextMenu", "closeEditor", "cancelImport", "collectPresetItems", "walkPresetFiles", "hasSidecarFor", "sidecarPathFor", "isEnabledPreset", "findNode", "isPresetFile", "iconFor", "extensionLabel", "extensionFromName", "normalizePath"]
         : component === SourceControlSidebar
-          ? ["toggleChanges", "toggleHistory", "isCurrentCommit", "formatStatus", "statusClassName", "fileBaseName", "fileDirectory", "fileIconName", "historyMetaText", "historyRefLabel", "historyRowTitle", "formatTimestamp"]
+          ? ["toggleChanges", "formatStatus", "statusClassName", "statusTitle", "fileBaseName", "fileDirectory", "fileIconName", "formatTimestamp", "formatRelative", "isRefreshBlocked", "onDialogInput"]
           : ["shortTrace", "formatDate", "formatStatus", "statusClass", "eventToneClass", "hasEventData", "stringifyData"];
       for (const name of safeNames) {
         const value = utils[name];
