@@ -5,7 +5,7 @@ from time import perf_counter
 from typing import Any, Dict, Literal, Optional, Union
 from uuid import uuid4
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from api.response import ApiEnvelope, ApiTrace, success_response
@@ -282,6 +282,26 @@ class WorkspaceGitBranchRequest(BaseModel):
 
 class WorkspaceGitJumpRequest(BaseModel):
     commit_id: str = Field(alias="commitId")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class WorkspaceWorldlineCreateRequest(BaseModel):
+    from_commit: str = Field(alias="fromCommit")
+    name: str
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class WorkspaceWorldlineRenameRequest(BaseModel):
+    name: str
+    new_name: str = Field(alias="newName")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class WorkspaceWorldlineDeleteRequest(BaseModel):
+    name: str
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -707,10 +727,11 @@ def read_workspace_git_timeline() -> ApiEnvelope:
 
 @router.post("/workspace/git/jump", response_model=ApiEnvelope)
 def jump_workspace_git_commit(payload: WorkspaceGitJumpRequest) -> ApiEnvelope:
-    """跳转到历史提交节点（进入 detached HEAD）查看该时空线。
+    """跳转到某个版本节点，把工作区恢复成该节点的状态。
 
-    后续在 detached HEAD 状态下首次提交时，git_service 会自动创建新分支
-    （延迟分叉），不会污染原分支。
+    目标是某条世界线的最新节点时直接切到那条线；目标是中间的历史节点时进入
+    观测态（detached HEAD），此后的首次提交会由 git_service 自动开辟一条新
+    世界线，原线不受影响。
     """
     started = perf_counter()
     trace_id = str(uuid4())
@@ -723,10 +744,110 @@ def jump_workspace_git_commit(payload: WorkspaceGitJumpRequest) -> ApiEnvelope:
             "action": "jump_workspace_git_commit",
             "commitId": payload.commit_id,
             "detached": bool(result.get("detached")),
+            "branch": str(result.get("branch") or ""),
         }
     ]
     return success_response(
         data=result,
+        trace=_build_trace(started=started, trace_id=trace_id),
+        audit=audit,
+    )
+
+
+@router.get("/workspace/git/commit-diff", response_model=ApiEnvelope)
+def read_workspace_git_commit_diff(
+    commit_id: str = Query(alias="commitId"),
+) -> ApiEnvelope:
+    """读取单个版本节点相对其父节点的改动，供「这个节点改了什么」使用。"""
+    started = perf_counter()
+    trace_id = str(uuid4())
+    data = git_service.read_commit_diff(
+        project_service.workspace_root,
+        commit_id=commit_id,
+    )
+    totals = data.get("totals") if isinstance(data.get("totals"), dict) else {}
+    audit = [
+        {
+            "action": "read_workspace_git_commit_diff",
+            "commitId": commit_id,
+            "fileCount": int(totals.get("files") or 0),
+            "added": int(totals.get("added") or 0),
+            "removed": int(totals.get("removed") or 0),
+        }
+    ]
+    return success_response(
+        data=data,
+        trace=_build_trace(started=started, trace_id=trace_id),
+        audit=audit,
+    )
+
+
+@router.post("/workspace/git/worldlines", response_model=ApiEnvelope)
+def create_workspace_worldline(payload: WorkspaceWorldlineCreateRequest) -> ApiEnvelope:
+    """从任意版本节点开辟一条命名的新世界线并切换过去。"""
+    started = perf_counter()
+    trace_id = str(uuid4())
+    data = git_service.create_worldline(
+        project_service.workspace_root,
+        from_commit=payload.from_commit,
+        name=payload.name,
+    )
+    audit = [
+        {
+            "action": "create_workspace_worldline",
+            "worldline": str(data.get("worldline") or ""),
+            "fromCommit": str(data.get("fromCommit") or ""),
+        }
+    ]
+    return success_response(
+        data=data,
+        trace=_build_trace(started=started, trace_id=trace_id),
+        audit=audit,
+    )
+
+
+@router.post("/workspace/git/worldlines/rename", response_model=ApiEnvelope)
+def rename_workspace_worldline(payload: WorkspaceWorldlineRenameRequest) -> ApiEnvelope:
+    """给世界线改名。"""
+    started = perf_counter()
+    trace_id = str(uuid4())
+    data = git_service.rename_worldline(
+        project_service.workspace_root,
+        name=payload.name,
+        new_name=payload.new_name,
+    )
+    audit = [
+        {
+            "action": "rename_workspace_worldline",
+            "renamedFrom": str(data.get("renamedFrom") or payload.name),
+            "renamedTo": str(data.get("renamedTo") or payload.new_name),
+        }
+    ]
+    return success_response(
+        data=data,
+        trace=_build_trace(started=started, trace_id=trace_id),
+        audit=audit,
+    )
+
+
+@router.post("/workspace/git/worldlines/delete", response_model=ApiEnvelope)
+def delete_workspace_worldline(payload: WorkspaceWorldlineDeleteRequest) -> ApiEnvelope:
+    """删除一条世界线。不可逆：该线独有的版本会被永久丢弃。"""
+    started = perf_counter()
+    trace_id = str(uuid4())
+    data = git_service.delete_worldline(
+        project_service.workspace_root,
+        name=payload.name,
+    )
+    audit = [
+        {
+            "action": "delete_workspace_worldline",
+            "deleted": str(data.get("deleted") or payload.name),
+            "exclusiveCommits": int(data.get("exclusiveCommits") or 0),
+        }
+    ]
+    return success_response(
+        data=data,
         trace=_build_trace(started=started, trace_id=trace_id),
         audit=audit,
     )

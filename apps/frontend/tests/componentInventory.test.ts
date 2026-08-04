@@ -52,6 +52,9 @@ import SettingsWindow from "@/components/SystemSettingsWindow.vue";
 import ToolCallCard from "@/components/ToolCallCard.vue";
 import TopHeader from "@/components/TopHeader.vue";
 import TracePanel from "@/components/TracePanel.vue";
+import TimelineGraph from "@/components/TimelineGraph.vue";
+import WorldlineDialog from "@/components/WorldlineDialog.vue";
+import WorldlineMapPane from "@/components/WorldlineMapPane.vue";
 import UpdateNotification from "@/components/UpdateNotification.vue";
 import WorkspaceStartPage from "@/components/WelcomeStartPage.vue";
 import WorkbenchLayout from "@/layouts/WorkbenchLayout.vue";
@@ -67,7 +70,8 @@ describe("frontend component inventory", () => {
     EditorPane, ExplorerSidebar, FilePreviewPane, MessageBubble, PresetEditor,
     PresetImportPreview, PresetSidebar, PromptRepositorySidebar, SearchToolSidebar, StatusBar,
     StorySettingsPanel, StoryStatePanel, SettingsWindow, ToolCallCard, TopHeader,
-    TracePanel, UpdateNotification, WorkspaceStartPage, WorkbenchLayout, FilePreviewView, WorkbenchView
+    TracePanel, UpdateNotification, WorkspaceStartPage, WorkbenchLayout, FilePreviewView, WorkbenchView,
+    TimelineGraph, WorldlineDialog, WorldlineMapPane
   ];
 
   it.each(components.map((component, index) => [index, component] as const))(

@@ -116,6 +116,53 @@ def test_workspace_git_endpoints_use_local_only_repository(workspace_client):
     (root / "chapters" / "001.md").write_text("second", encoding="utf-8")
     second = ok(client.post("/api/v1/workspace/git/commit", json={"message": "story: second"}))
     assert second["created"] is True
+    second_id = second["commit"]["id"]
+
+    commit_diff = ok(client.get("/api/v1/workspace/git/commit-diff", params={"commitId": second_id}))
+    assert commit_diff["totals"]["files"] == 1
+    assert commit_diff["files"][0]["relativePath"] == "chapters/001.md"
+
+    initial_timeline = ok(client.get("/api/v1/workspace/git/timeline"))
+    assert initial_timeline["currentBranch"] == "develop"
+    assert initial_timeline["detached"] is False
+
+    opened = ok(client.post(
+        "/api/v1/workspace/git/worldlines",
+        json={"fromCommit": first_id, "name": "alt/api"},
+    ))
+    assert opened["worldline"] == "alt/api"
+    assert opened["fromCommit"] == first_id
+    (root / "chapters" / "alternate.md").write_text("alternate", encoding="utf-8")
+    alternate = ok(client.post(
+        "/api/v1/workspace/git/commit",
+        json={"message": "story: alternate"},
+    ))
+    assert alternate["created"] is True
+
+    forked_timeline = ok(client.get("/api/v1/workspace/git/timeline"))
+    forked_branches = {item["name"]: item for item in forked_timeline["branches"]}
+    assert set(forked_branches) == {"develop", "alt/api"}
+    assert forked_branches["alt/api"]["commitCount"] == 1
+    assert forked_branches["alt/api"]["lane"] == 0
+
+    renamed = ok(client.post(
+        "/api/v1/workspace/git/worldlines/rename",
+        json={"name": "alt/api", "newName": "alt/api-ending"},
+    ))
+    assert renamed["renamedTo"] == "alt/api-ending"
+
+    jumped = ok(client.post("/api/v1/workspace/git/jump", json={"commitId": second_id}))
+    assert jumped["detached"] is False
+    assert jumped["branch"] == "develop"
+
+    deleted = ok(client.post(
+        "/api/v1/workspace/git/worldlines/delete",
+        json={"name": "alt/api-ending"},
+    ))
+    assert deleted["deleted"] == "alt/api-ending"
+    assert deleted["exclusiveCommits"] == 1
+    assert [item["name"] for item in deleted["branches"]] == ["develop"]
+
     restored = ok(client.post("/api/v1/workspace/git/restore", json={"commitId": first_id, "createBackup": True}))
     assert restored["restored"] is True
     summary = ok(client.get("/api/v1/workspace/git/summary"))

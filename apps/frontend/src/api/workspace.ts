@@ -21,6 +21,7 @@ import type {
   WorkspaceGitSummaryResponse,
   WorkspaceGitBranchesResponse,
   WorkspaceGitTimelineResponse,
+  WorkspaceWorldlineMutationResponse,
   WorkspaceSearchResponse,
   WorkspaceImportFilesRequest,
   WorkspaceImportFilesResponse,
@@ -369,6 +370,79 @@ export async function jumpWorkspaceGitCommit(
   const response = await apiClient.post<ApiEnvelope<WorkspaceGitJumpResponse>>("/workspace/git/jump", payload);
   try {
     return unwrapEnvelope(response.data, "Workspace Git jump failed.");
+  } catch (error: unknown) {
+    if (error instanceof ApiResponseError) {
+      throw new WorkspaceApiError(error.message, error.code, error.details, error.trace, error.audit);
+    }
+    throw error;
+  }
+}
+
+/** 读取单个版本节点相对其父节点的改动（「这个节点改了什么」）。 */
+export async function fetchWorkspaceGitCommitDiff(
+  commitId: string
+): Promise<ApiResult<WorkspaceGitDiffResponse>> {
+  const response = await apiClient.get<ApiEnvelope<WorkspaceGitDiffResponse>>(
+    "/workspace/git/commit-diff",
+    { params: { commitId } }
+  );
+  try {
+    return unwrapEnvelope(response.data, "Workspace Git commit diff request failed.");
+  } catch (error: unknown) {
+    if (error instanceof ApiResponseError) {
+      throw new WorkspaceApiError(error.message, error.code, error.details, error.trace, error.audit);
+    }
+    throw error;
+  }
+}
+
+/** 从任意版本节点开辟一条命名的新世界线并切换过去。 */
+export async function createWorkspaceWorldline(
+  fromCommit: string,
+  name: string
+): Promise<ApiResult<WorkspaceWorldlineMutationResponse>> {
+  const response = await apiClient.post<ApiEnvelope<WorkspaceWorldlineMutationResponse>>(
+    "/workspace/git/worldlines",
+    { fromCommit, name }
+  );
+  try {
+    return unwrapEnvelope(response.data, "Opening a new worldline failed.");
+  } catch (error: unknown) {
+    if (error instanceof ApiResponseError) {
+      throw new WorkspaceApiError(error.message, error.code, error.details, error.trace, error.audit);
+    }
+    throw error;
+  }
+}
+
+export async function renameWorkspaceWorldline(
+  name: string,
+  newName: string
+): Promise<ApiResult<WorkspaceWorldlineMutationResponse>> {
+  const response = await apiClient.post<ApiEnvelope<WorkspaceWorldlineMutationResponse>>(
+    "/workspace/git/worldlines/rename",
+    { name, newName }
+  );
+  try {
+    return unwrapEnvelope(response.data, "Renaming the worldline failed.");
+  } catch (error: unknown) {
+    if (error instanceof ApiResponseError) {
+      throw new WorkspaceApiError(error.message, error.code, error.details, error.trace, error.audit);
+    }
+    throw error;
+  }
+}
+
+/** 删除世界线。不可逆：该线独有的版本会被永久丢弃。 */
+export async function deleteWorkspaceWorldline(
+  name: string
+): Promise<ApiResult<WorkspaceWorldlineMutationResponse>> {
+  const response = await apiClient.post<ApiEnvelope<WorkspaceWorldlineMutationResponse>>(
+    "/workspace/git/worldlines/delete",
+    { name }
+  );
+  try {
+    return unwrapEnvelope(response.data, "Deleting the worldline failed.");
   } catch (error: unknown) {
     if (error instanceof ApiResponseError) {
       throw new WorkspaceApiError(error.message, error.code, error.details, error.trace, error.audit);

@@ -4,7 +4,7 @@ import { createPinia, setActivePinia } from "pinia";
 const api = vi.hoisted(() => ({
   fetchAgentRunDiff: vi.fn(), fetchHelpGuide: vi.fn(), fetchSystemBootstrap: vi.fn(), fetchSystemHealth: vi.fn(),
   copyWorkspacePath: vi.fn(), createWorkspaceDirectory: vi.fn(), createWorkspaceFile: vi.fn(), deleteWorkspacePath: vi.fn(),
-  createWorkspaceProject: vi.fn(), fetchStoryProjectSettings: vi.fn(), fetchCurrentProject: vi.fn(), fetchWorkspaceGitDiff: vi.fn(),
+  createWorkspaceProject: vi.fn(), fetchStoryProjectSettings: vi.fn(), fetchCurrentProject: vi.fn(), fetchWorkspaceGitDiff: vi.fn(), fetchWorkspaceGitCommitDiff: vi.fn(),
   fetchWorkspaceDiagnostics: vi.fn(), fetchWorkspaceTree: vi.fn(), importWorkspaceFiles: vi.fn(), initializeWorkspaceProject: vi.fn(),
   moveWorkspacePath: vi.fn(), openWorkspaceProject: vi.fn(), readWorkspaceFile: vi.fn(), readWorkspaceFileWindow: vi.fn(), applyWorkspaceDiagnosticFix: vi.fn(), renameWorkspacePath: vi.fn(),
   updateStoryChapterCompletion: vi.fn(), updateStoryProjectSettings: vi.fn(), writeWorkspaceFile: vi.fn()
@@ -55,7 +55,7 @@ beforeEach(() => {
   api.deleteWorkspacePath.mockResolvedValue(result({ relativePath: "chapters/b.md", kind: "file" }));
   api.copyWorkspacePath.mockResolvedValue(result({ relativePath: "chapters/c.md", kind: "file" }));
   api.moveWorkspacePath.mockResolvedValue(result({ relativePath: "chapters/d.md", kind: "file" }));
-  api.fetchWorkspaceGitDiff.mockResolvedValue(result(diff)); api.fetchAgentRunDiff.mockResolvedValue(result(diff));
+  api.fetchWorkspaceGitDiff.mockResolvedValue(result(diff)); api.fetchWorkspaceGitCommitDiff.mockResolvedValue(result(diff)); api.fetchAgentRunDiff.mockResolvedValue(result(diff));
   api.fetchHelpGuide.mockResolvedValue(result({ content: "# Guide", root: "docs", items: [{ updatedAt: "now" }] }));
   agent.loadSessions.mockResolvedValue(undefined); agent.loadHistory.mockResolvedValue(undefined); git.refreshSummary.mockResolvedValue(undefined);
 });
@@ -196,6 +196,11 @@ describe("workspace store full action lifecycle", () => {
     expect(store.activeFileKind).toBe("agent-preview");
     await store.refreshGitReviewDiff({ focusPath: "chapters/a.md" }); expect(store.gitReviewDiff).toBeTruthy();
     await store.openGitReview({ focusPath: "chapters/a.md" }); expect(store.activeFileKind).toBe("git-review");
+    await store.openCommitDiff({ commitId: "abc12345", label: "节点 abc12345" });
+    expect(api.fetchWorkspaceGitCommitDiff).toHaveBeenCalledWith("abc12345");
+    expect(store.activeFile).toBe("commit-diff:abc12345");
+    expect(store.activeFileMedia.commitId).toBe("abc12345");
+    await store.openWorldlineMapDocument(); expect(store.activeFileKind).toBe("worldline-map");
     await store.openAgentRunDiff({ traceId: "trace", sessionId: "session", changedFiles: ["chapters/a.md"] });
     await store.openAgentRunDiff({ traceId: "" }); expect(store.gitReviewError).toBeTruthy();
     await store.openHelpGuideDocument(); expect(store.activeFileKind).toBe("help-guide");
