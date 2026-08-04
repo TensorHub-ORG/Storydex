@@ -25,6 +25,7 @@ jobs:
     with:
       enforce_coverage: true
       full: true
+      run_packaged_checks: false
 
   release-windows:
     name: Build and publish Windows release
@@ -191,6 +192,18 @@ jobs:
             throw "app-update.yml does not contain publisherName; downloaded installer signatures would not be verified."
           }
 
+      - name: Run packaged Electron E2E on release artifact
+        working-directory: apps/desktop
+        run: npm run test:e2e
+
+      - name: Upload release E2E diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-electron-e2e-diagnostics
+          path: apps/desktop/test-results
+          if-no-files-found: warn
+
       - name: Prepare release assets
         id: release
         shell: pwsh
@@ -205,64 +218,11 @@ jobs:
           $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
           $releaseDir = Join-Path (Resolve-Path ".").Path "release-assets"
-          New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
-
-          $unpackedSource = Join-Path (Resolve-Path ".").Path "apps\desktop\release\win-unpacked"
-          $unpackedTarget = Join-Path $releaseDir "Storydex-win-unpacked"
-          if (Test-Path $unpackedTarget) {
-            Remove-Item -LiteralPath $unpackedTarget -Recurse -Force
-          }
-          Copy-Item -LiteralPath $unpackedSource -Destination $unpackedTarget -Recurse -Force
-
-          $desktopReleaseDir = Join-Path (Resolve-Path ".").Path "apps\desktop\release"
-          $setupSource = Join-Path $desktopReleaseDir $env:STORYDEX_SETUP_NAME
-          $blockmapSource = Join-Path $desktopReleaseDir $env:STORYDEX_BLOCKMAP_NAME
-          $latestSource = Join-Path $desktopReleaseDir "latest.yml"
-          if (-not (Test-Path $setupSource)) {
-            Get-ChildItem -LiteralPath $desktopReleaseDir | Format-Table -AutoSize | Out-String | Write-Host
-            throw "Expected installer was not produced: $setupSource"
-          }
-          if (-not (Test-Path $blockmapSource)) {
-            Get-ChildItem -LiteralPath $desktopReleaseDir | Format-Table -AutoSize | Out-String | Write-Host
-            throw "Expected blockmap was not produced: $blockmapSource"
-          }
-          if (-not (Test-Path $latestSource)) {
-            Get-ChildItem -LiteralPath $desktopReleaseDir | Format-Table -AutoSize | Out-String | Write-Host
-            throw "Expected auto-update metadata was not produced: $latestSource"
-          }
-
-          Copy-Item -LiteralPath $setupSource -Destination (Join-Path $releaseDir $env:STORYDEX_SETUP_NAME) -Force
-          Copy-Item -LiteralPath $blockmapSource -Destination (Join-Path $releaseDir $env:STORYDEX_BLOCKMAP_NAME) -Force
-          Copy-Item -LiteralPath $latestSource -Destination (Join-Path $releaseDir "latest.yml") -Force
-
-          Compress-Archive -LiteralPath $unpackedTarget -DestinationPath (Join-Path $releaseDir $env:STORYDEX_UNPACKED_ZIP_NAME) -CompressionLevel Optimal -Force
-
-          $names = @(
-            $env:STORYDEX_SETUP_NAME,
-            $env:STORYDEX_UNPACKED_ZIP_NAME,
-            $env:STORYDEX_BLOCKMAP_NAME,
-            "latest.yml"
-          )
-          $hashLines = foreach ($name in $names) {
-            $file = Join-Path $releaseDir $name
-            $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $file
-            "$($hash.Hash)  $name"
-          }
-          Set-Content -LiteralPath (Join-Path $releaseDir "SHA256SUMS.txt") -Value $hashLines -Encoding ASCII
-
-          $notesTarget = Join-Path $releaseDir "RELEASE_NOTES.md"
-          $versionedNotes = Join-Path (Resolve-Path ".").Path "apps\desktop\build\release-notes-v$($env:STORYDEX_VERSION).md"
-          if (Test-Path $versionedNotes) {
-            Copy-Item -LiteralPath $versionedNotes -Destination $notesTarget -Force
-          } else {
-            @(
-              "# Storydex v$($env:STORYDEX_VERSION) Windows Release",
-              "",
-              "- Installer: ``$($env:STORYDEX_SETUP_NAME)``",
-              "- Portable unpacked bundle: ``$($env:STORYDEX_UNPACKED_ZIP_NAME)``",
-              "- Checksums: ``SHA256SUMS.txt``"
-            ) | Set-Content -LiteralPath $notesTarget -Encoding utf8
-          }
+          & ./scripts/prepare_release_bundle.ps1 `
+            -Version $env:STORYDEX_VERSION `
+            -SourceDirectory "apps/desktop/release" `
+            -DestinationDirectory $releaseDir `
+            -TestSummary "Reusable quality gate passed"
 
           $outputs = @{
             notes_path = "release-assets/RELEASE_NOTES.md"
@@ -276,16 +236,6 @@ jobs:
           foreach ($entry in $outputs.GetEnumerator()) {
             "$($entry.Key)=$($entry.Value)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           }
-
-      - name: Generate build manifest and dependency inventory
-        shell: pwsh
-        run: |
-          node scripts/generate_release_metadata.cjs --release-dir=release-assets --version=${{ steps.metadata.outputs.version }} --test-summary="Reusable quality gate passed"
-          $lines = Get-ChildItem -LiteralPath release-assets -File | Where-Object Name -ne "SHA256SUMS.txt" | Sort-Object Name | ForEach-Object {
-            $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName
-            "$($hash.Hash)  $($_.Name)"
-          }
-          Set-Content -LiteralPath release-assets/SHA256SUMS.txt -Value $lines -Encoding ASCII
 
       - name: Publish GitHub Release
         if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)

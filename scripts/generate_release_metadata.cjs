@@ -21,13 +21,14 @@ function command(file, args) {
 function digest(filePath, algorithm, encoding = "hex") {
   return crypto.createHash(algorithm).update(fs.readFileSync(filePath)).digest(encoding);
 }
+function artifactRecord(name) {
+  const target = path.join(releaseDir, name);
+  return { name, size: fs.statSync(target).size, sha256: digest(target, "sha256") };
+}
 function listArtifacts() {
   return fs.readdirSync(releaseDir, { withFileTypes: true })
     .filter((entry) => entry.isFile() && !["BUILD_MANIFEST.json", "SHA256SUMS.txt"].includes(entry.name))
-    .map((entry) => {
-      const target = path.join(releaseDir, entry.name);
-      return { name: entry.name, size: fs.statSync(target).size, sha256: digest(target, "sha256") };
-    })
+    .map((entry) => artifactRecord(entry.name))
     .sort((left, right) => left.name.localeCompare(right.name));
 }
 function dependencyInventory() {
@@ -60,6 +61,7 @@ if (declaredSize !== fs.statSync(setupPath).size) throw new Error("latest.yml si
 if (declaredSha512 !== digest(setupPath, "sha512", "base64")) throw new Error("latest.yml sha512 mismatch");
 
 fs.writeFileSync(path.join(releaseDir, "DEPENDENCIES.json"), JSON.stringify(dependencyInventory(), null, 2) + "\n");
+const artifacts = listArtifacts();
 const manifest = {
   version,
   gitCommit: command("git", ["rev-parse", "HEAD"]),
@@ -70,7 +72,14 @@ const manifest = {
   electronVersion: desktop.devDependencies?.electron || "unknown",
   operatingSystem: `${os.type()} ${os.release()} ${os.arch()}`,
   testSummary,
-  artifacts: listArtifacts()
+  artifacts
 };
-fs.writeFileSync(path.join(releaseDir, "BUILD_MANIFEST.json"), JSON.stringify(manifest, null, 2) + "\n");
-console.log(`Release metadata generated in ${releaseDir}`);
+const manifestName = "BUILD_MANIFEST.json";
+fs.writeFileSync(path.join(releaseDir, manifestName), JSON.stringify(manifest, null, 2) + "\n");
+const checksumRecords = [...artifacts, artifactRecord(manifestName)]
+  .sort((left, right) => left.name.localeCompare(right.name));
+const checksumLines = checksumRecords
+  .map((artifact) => `${artifact.sha256.toUpperCase()}  ${artifact.name}`)
+  .join("\n");
+fs.writeFileSync(path.join(releaseDir, "SHA256SUMS.txt"), `${checksumLines}\n`, "ascii");
+console.log(`Release metadata and checksums generated in ${releaseDir}`);
