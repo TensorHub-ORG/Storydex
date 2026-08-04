@@ -438,6 +438,13 @@ pub enum AgentEvent {
         result: ToolResult,
     },
     TurnCompleted(TokenUsage),
+    /// A provider stream was retried because it stalled or was truncated.
+    /// Carries the 1-based retry attempt and the total attempt budget so UIs
+    /// can show e.g. "retrying (1/3)".
+    ProviderRetry {
+        attempt: usize,
+        max_attempts: usize,
+    },
 }
 
 pub trait AgentObserver: Send + Sync {
@@ -484,6 +491,11 @@ pub trait ModelProvider: Send + Sync {
 pub trait ModelStreamObserver: Send + Sync {
     fn on_text_delta(&self, delta: &str);
     fn on_reasoning_delta(&self, delta: &str);
+
+    /// Notifies that a provider stream was retried (slow first byte, truncated
+    /// stream, or read interruption). Defaults to a no-op so existing observers
+    /// keep compiling; UIs may surface this as a connection-retry notice.
+    fn on_provider_retry(&self, _attempt: usize, _max_attempts: usize) {}
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

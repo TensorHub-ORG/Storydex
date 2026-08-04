@@ -33,6 +33,21 @@ const PROVIDER_RETRY_DELAYS: [Duration; 2] =
 const PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const PROVIDER_READ_TIMEOUT: Duration = Duration::from_secs(180);
 const PROVIDER_COMPLETION_GRACE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Liveness budget for the first byte of a streaming response. Gateways that
+/// stall before emitting anything are retried instead of making the user wait
+/// for `PROVIDER_READ_TIMEOUT`.
+const PROVIDER_FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(45);
+/// Liveness budget between consecutive body chunks after the first byte. A
+/// stream that stalls mid-body for this long is treated as dead and (if no
+/// output was produced yet) retried, instead of waiting out the 180s
+/// `PROVIDER_READ_TIMEOUT`.
+const PROVIDER_STREAM_STALL_TIMEOUT: Duration = Duration::from_secs(60);
+/// Total attempts for the response-body streaming phase. The HTTP request
+/// itself already retries via `send_with_retry`; this covers truncated/stalled
+/// streams that fail *after* the response headers arrive.
+const PROVIDER_STREAM_ATTEMPTS: usize = 3;
+const PROVIDER_STREAM_RETRY_DELAYS: [Duration; 2] =
+    [Duration::from_millis(500), Duration::from_millis(1500)];
 
 pub struct HttpModelProvider {
     config: ProviderConfig,
@@ -218,18 +233,31 @@ impl HttpModelProvider {
         if let Some(limit) = request.max_output_tokens {
             body["max_tokens"] = Value::from(limit);
         }
-        let response = self
-            .send_openai_chat(&endpoint, &body, required_tool.as_deref())
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
-            return checked_json(response)
-                .await
-                .map(|_| ModelResponse::default());
+        for attempt in 0..PROVIDER_STREAM_ATTEMPTS {
+            let response = self
+                .send_openai_chat(&endpoint, &body, required_tool.as_deref())
+                .await?;
+            let status = response.status();
+            if !status.is_success() {
+                return checked_json(response)
+                    .await
+                    .map(|_| ModelResponse::default());
+            }
+            let mut state = ChatStreamState::default();
+            match read_sse(response, |value| state.consume(&value, observer)).await {
+                Ok(()) => return state.finish(),
+                Err(error)
+                    if is_retryable_stream_error(&error)
+                        && !state.pushed_any
+                        && attempt + 1 < PROVIDER_STREAM_ATTEMPTS =>
+                {
+                    observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS);
+                    tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
+                }
+                Err(error) => return Err(error),
+            }
         }
-        let mut state = ChatStreamState::default();
-        read_sse(response, |value| state.consume(&value, observer)).await?;
-        state.finish()
+        unreachable!("provider stream retry loop always returns")
     }
 
     async fn openai_remote_compaction(
@@ -316,23 +344,36 @@ impl HttpModelProvider {
             self.config.capabilities.supports_web_search,
             self.config.capabilities.supports_parallel_tool_calls,
         )?;
-        let response = self
-            .authenticated(self.client.post(endpoint))
-            .json(&body)
-            .send()
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
-            return checked_json(response)
-                .await
-                .and_then(|_| anyhow::bail!("remote compaction returned no stream"));
+        for attempt in 0..PROVIDER_STREAM_ATTEMPTS {
+            let response = self
+                .authenticated(self.client.post(&endpoint))
+                .json(&body)
+                .send()
+                .await?;
+            let status = response.status();
+            if !status.is_success() {
+                return checked_json(response)
+                    .await
+                    .and_then(|_| anyhow::bail!("remote compaction returned no stream"));
+            }
+            let mut state = CompactionStreamState::default();
+            match read_sse(response, |value| state.consume(&value)).await {
+                Ok(()) => {
+                    let (item, usage) = state.finish()?;
+                    let mut messages = retained_user_history(&request.messages);
+                    messages.push(ChatMessage::provider_item(item));
+                    return Ok(CompactionResponse { messages, usage });
+                }
+                Err(error)
+                    if is_retryable_stream_error(&error)
+                        && attempt + 1 < PROVIDER_STREAM_ATTEMPTS =>
+                {
+                    tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
+                }
+                Err(error) => return Err(error),
+            }
         }
-        let mut state = CompactionStreamState::default();
-        read_sse(response, |value| state.consume(&value)).await?;
-        let (item, usage) = state.finish()?;
-        let mut messages = retained_user_history(&request.messages);
-        messages.push(ChatMessage::provider_item(item));
-        Ok(CompactionResponse { messages, usage })
+        unreachable!("remote compaction stream retry loop always returns")
     }
 
     async fn openai_responses(&self, request: ModelRequest) -> Result<ModelResponse> {
@@ -415,20 +456,33 @@ impl HttpModelProvider {
         if let Some(limit) = request.max_output_tokens {
             body["max_output_tokens"] = Value::from(limit);
         }
-        let response = self
-            .authenticated(self.client.post(endpoint))
-            .json(&body)
-            .send()
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
-            return checked_json(response)
-                .await
-                .map(|_| ModelResponse::default());
+        for attempt in 0..PROVIDER_STREAM_ATTEMPTS {
+            let response = self
+                .authenticated(self.client.post(&endpoint))
+                .json(&body)
+                .send()
+                .await?;
+            let status = response.status();
+            if !status.is_success() {
+                return checked_json(response)
+                    .await
+                    .map(|_| ModelResponse::default());
+            }
+            let mut state = ResponsesStreamState::default();
+            match read_sse(response, |value| state.consume(&value, observer)).await {
+                Ok(()) => return state.finish(),
+                Err(error)
+                    if is_retryable_stream_error(&error)
+                        && !state.pushed_any
+                        && attempt + 1 < PROVIDER_STREAM_ATTEMPTS =>
+                {
+                    observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS);
+                    tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
+                }
+                Err(error) => return Err(error),
+            }
         }
-        let mut state = ResponsesStreamState::default();
-        read_sse(response, |value| state.consume(&value, observer)).await?;
-        state.finish()
+        unreachable!("provider stream retry loop always returns")
     }
 
     async fn anthropic_messages(&self, request: ModelRequest) -> Result<ModelResponse> {
@@ -699,20 +753,46 @@ async fn read_sse(response: Response, mut consume: impl FnMut(Value) -> Result<(
     let mut stream = response.bytes_stream();
     let mut buffer = Vec::new();
     let mut saw_completion_event = false;
+    let mut first_byte_received = false;
     loop {
         let next_chunk = if saw_completion_event {
             match tokio::time::timeout(PROVIDER_COMPLETION_GRACE_TIMEOUT, stream.next()).await {
                 Ok(chunk) => chunk,
                 Err(_) => return Ok(()),
             }
+        } else if !first_byte_received {
+            // Gateways that accept a streaming request but never send any body
+            // byte (stalled upstream, overloaded proxy) must fail fast so the
+            // caller can retry instead of making the user wait ~3 minutes.
+            match tokio::time::timeout(PROVIDER_FIRST_BYTE_TIMEOUT, stream.next()).await {
+                Ok(chunk) => chunk,
+                Err(_) => anyhow::bail!(
+                    "provider stream failed: no first byte within {}s",
+                    PROVIDER_FIRST_BYTE_TIMEOUT.as_secs()
+                ),
+            }
         } else {
-            stream.next().await
+            // Mid-stream liveness: a long gap between chunks means the gateway
+            // wedged. Fail fast so the caller can retry before the user waits
+            // out the whole read timeout.
+            match tokio::time::timeout(PROVIDER_STREAM_STALL_TIMEOUT, stream.next()).await {
+                Ok(chunk) => chunk,
+                Err(_) => anyhow::bail!(
+                    "provider stream failed: stream stalled for {}s",
+                    PROVIDER_STREAM_STALL_TIMEOUT.as_secs()
+                ),
+            }
         };
         let Some(chunk) = next_chunk else {
             break;
         };
         match chunk {
-            Ok(chunk) => buffer.extend_from_slice(&chunk),
+            Ok(chunk) => {
+                if !chunk.is_empty() {
+                    first_byte_received = true;
+                }
+                buffer.extend_from_slice(&chunk)
+            }
             Err(_) if saw_completion_event => return Ok(()),
             Err(error) => return Err(error).context("provider stream failed"),
         }
@@ -784,6 +864,27 @@ fn provider_sse_value_completed(value: &Value) -> bool {
         || value
             .pointer("/choices/0/finish_reason")
             .is_some_and(|reason| !reason.is_null())
+}
+
+/// Classifies streaming-phase failures that are worth retrying. Only
+/// transport-level conditions are retryable (stalled first byte, truncated
+/// stream, read timeout, connection reset). Content or protocol errors
+/// (invalid JSON, 4xx bodies) are not — retrying them would just waste tokens.
+/// The "provider stream failed" prefix requirement keeps observer/parser
+/// errors (which lack it) out of the retry path.
+fn is_retryable_stream_error(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}").to_ascii_lowercase();
+    if !text.contains("provider stream failed") {
+        return false;
+    }
+    text.contains("stream ended before")
+        || text.contains("no first byte")
+        || text.contains("stream stalled")
+        || text.contains("timed out")
+        || text.contains("connection reset")
+        || text.contains("broken pipe")
+        || text.contains("unexpected eof")
+        || text.contains("connection closed")
 }
 
 #[derive(Default)]
@@ -860,6 +961,10 @@ struct ChatStreamState {
     tools: BTreeMap<usize, PartialToolCall>,
     implicit_tools: BTreeMap<usize, usize>,
     usage: TokenUsage,
+    /// True once any content/reasoning/tool delta has been pushed to the
+    /// observer. A retry must never re-stream already-displayed deltas, so
+    /// streams that produced output are not retried.
+    pushed_any: bool,
 }
 
 impl ChatStreamState {
@@ -874,10 +979,17 @@ impl ChatStreamState {
             .get("reasoning_content")
             .or_else(|| delta.get("reasoning"))
             .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
         {
+            self.pushed_any = true;
             observer.on_reasoning_delta(reasoning);
         }
-        if let Some(content) = delta.get("content").and_then(Value::as_str) {
+        if let Some(content) = delta
+            .get("content")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            self.pushed_any = true;
             self.content.push_str(content);
             observer.on_text_delta(content);
         }
@@ -920,6 +1032,7 @@ impl ChatStreamState {
                     })
             });
             self.implicit_tools.insert(position, index);
+            self.pushed_any = true;
             let target = self.tools.entry(index).or_default();
             if !item_id.is_empty() {
                 merge_streamed_identifier(&mut target.id, item_id);
@@ -1019,6 +1132,10 @@ struct ResponsesStreamState {
     tools: BTreeMap<String, PartialToolCall>,
     tool_aliases: BTreeMap<String, String>,
     usage: TokenUsage,
+    /// True once any content/reasoning/tool delta has been pushed to the
+    /// observer. Streams that produced output are never retried (a retry would
+    /// re-display already-streamed deltas).
+    pushed_any: bool,
 }
 
 impl ResponsesStreamState {
@@ -1075,13 +1192,23 @@ impl ResponsesStreamState {
     fn consume(&mut self, value: &Value, observer: &dyn ModelStreamObserver) -> Result<()> {
         match value.get("type").and_then(Value::as_str) {
             Some("response.output_text.delta") => {
-                if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                if let Some(delta) = value
+                    .get("delta")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                {
+                    self.pushed_any = true;
                     self.content.push_str(delta);
                     observer.on_text_delta(delta);
                 }
             }
             Some("response.reasoning_summary_text.delta" | "response.reasoning_text.delta") => {
-                if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                if let Some(delta) = value
+                    .get("delta")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                {
+                    self.pushed_any = true;
                     observer.on_reasoning_delta(delta);
                 }
             }
@@ -1089,6 +1216,7 @@ impl ResponsesStreamState {
                 if let Some(item) = value.get("item")
                     && item.get("type").and_then(Value::as_str) == Some("function_call")
                 {
+                    self.pushed_any = true;
                     let key = self.resolve_tool_key(value, Some(item));
                     let id = item
                         .get("call_id")
@@ -1112,6 +1240,7 @@ impl ResponsesStreamState {
             Some("response.function_call_arguments.delta") => {
                 let key = self.resolve_tool_key(value, None);
                 if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                    self.pushed_any = true;
                     let target = self.tools.entry(key).or_default();
                     if target.id.is_empty()
                         && let Some(call_id) = value.get("call_id").and_then(Value::as_str)
@@ -1986,6 +2115,162 @@ mod tests {
         assert_eq!(response.content, "ok");
     }
 
+    #[derive(Default)]
+    struct CountingRetryObserver {
+        retries: std::sync::Arc<std::sync::Mutex<usize>>,
+    }
+
+    impl ModelStreamObserver for CountingRetryObserver {
+        fn on_text_delta(&self, _delta: &str) {}
+
+        fn on_reasoning_delta(&self, _delta: &str) {}
+
+        fn on_provider_retry(&self, _attempt: usize, _max_attempts: usize) {
+            *self.retries.lock().expect("retry counter lock") += 1;
+        }
+    }
+
+    fn spawn_retry_then_success() -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind retry test server");
+        let address = listener.local_addr().expect("read retry test address");
+        let handle = std::thread::spawn(move || {
+            // First connection: clean EOF with no terminal marker and no
+            // output — the exact "stream ended before [DONE]..." failure a
+            // stalled gateway produces before emitting anything.
+            {
+                let (mut socket, _) = listener.accept().expect("accept first request");
+                let mut request = [0_u8; 2048];
+                let _ = socket.read(&mut request).expect("read first request");
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .expect("write first headers");
+            }
+            // Second connection: a well-formed stream with finish_reason + [DONE].
+            {
+                let (mut socket, _) = listener.accept().expect("accept second request");
+                let mut request = [0_u8; 2048];
+                let _ = socket.read(&mut request).expect("read second request");
+                let body = concat!(
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                    "data: [DONE]\n\n",
+                );
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .expect("write second headers");
+                socket.write_all(body.as_bytes()).expect("write second body");
+            }
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    #[tokio::test]
+    async fn retries_truncated_stream_and_surfaces_retry_notice() {
+        let (base_url, server) = spawn_retry_then_success();
+        let provider = HttpModelProvider::new(ProviderConfig {
+            id: "retry".into(),
+            kind: ProviderKind::OpenAiCompatible,
+            display: "Retry".into(),
+            api_key: "test-key".into(),
+            base_url,
+            model: "test-model".into(),
+            fast_model: None,
+            capabilities: ModelCapabilities::default(),
+            remote_compaction_mode: RemoteCompactionMode::default(),
+        })
+        .expect("retry provider");
+        let observer = CountingRetryObserver::default();
+        let response = provider
+            .openai_compatible_stream(
+                ModelRequest {
+                    model: "test-model".into(),
+                    messages: vec![ChatMessage::user("hi")],
+                    tools: Vec::new(),
+                    max_output_tokens: None,
+                    required_tool: None,
+                },
+                &observer,
+            )
+            .await
+            .expect("truncated stream should be retried and succeed");
+        server.join().expect("join retry test server");
+        assert_eq!(response.content, "ok");
+        assert_eq!(
+            *observer.retries.lock().expect("retry counter lock"),
+            1,
+            "observer must be notified exactly once for the retry"
+        );
+    }
+
+    fn spawn_content_then_truncate() -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind no-retry test server");
+        let address = listener.local_addr().expect("read no-retry test address");
+        let handle = std::thread::spawn(move || {
+            // Single connection: emits a real content delta, then a clean EOF
+            // with no terminal marker. Mirrors a gateway that dies after
+            // streaming some output. The thread exits right after, so the
+            // listener is dropped: if the provider wrongly retries, its second
+            // request gets an immediate reset instead of hanging the test.
+            let (mut socket, _) = listener.accept().expect("accept first request");
+            let mut request = [0_u8; 2048];
+            let _ = socket.read(&mut request).expect("read first request");
+            let body = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial-answer\"},\"finish_reason\":null}]}\n\n";
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .expect("write first headers");
+            socket.write_all(body).expect("write first body");
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_stream_that_already_produced_output() {
+        let (base_url, server) = spawn_content_then_truncate();
+        let provider = HttpModelProvider::new(ProviderConfig {
+            id: "no-retry".into(),
+            kind: ProviderKind::OpenAiCompatible,
+            display: "NoRetry".into(),
+            api_key: "test-key".into(),
+            base_url,
+            model: "test-model".into(),
+            fast_model: None,
+            capabilities: ModelCapabilities::default(),
+            remote_compaction_mode: RemoteCompactionMode::default(),
+        })
+        .expect("no-retry provider");
+        let observer = CountingRetryObserver::default();
+        let result = provider
+            .openai_compatible_stream(
+                ModelRequest {
+                    model: "test-model".into(),
+                    messages: vec![ChatMessage::user("hi")],
+                    tools: Vec::new(),
+                    max_output_tokens: None,
+                    required_tool: None,
+                },
+                &observer,
+            )
+            .await;
+        server.join().expect("join no-retry test server");
+        assert!(
+            result.is_err(),
+            "a stream that already pushed output must fail, not retry (no duplicate text)"
+        );
+        assert_eq!(
+            *observer.retries.lock().expect("retry counter lock"),
+            0,
+            "observer must not be notified when output was already streamed"
+        );
+    }
+
     #[test]
     fn rejects_non_object_tool_arguments() {
         assert!(parse_arguments(&Value::String("[]".into())).is_err());
@@ -2315,5 +2600,43 @@ mod tests {
         assert_eq!(input.last(), Some(&json!({"type": "compaction_trigger"})));
         assert_eq!(body["parallel_tool_calls"], true);
         assert_eq!(body["tools"][0]["name"], "read_file");
+    }
+
+    #[test]
+    fn retryable_stream_error_matches_transport_failures_only() {
+        let retryable = [
+            "provider stream failed: stream ended before [DONE], finish_reason, or response.completed",
+            "provider stream failed: no first byte within 45s",
+            "provider stream failed: operation timed out",
+            "provider stream failed: connection reset by peer",
+            "provider stream failed: broken pipe",
+        ];
+        for message in retryable {
+            assert!(
+                is_retryable_stream_error(&anyhow::anyhow!("{message}")),
+                "expected retryable: {message}"
+            );
+        }
+        let not_retryable = [
+            "invalid provider SSE JSON",
+            "provider returned HTTP 400: bad request",
+            "streamed tool call has no name",
+            "provider response has no choices[0].message",
+            "failed to build provider HTTP client",
+        ];
+        for message in not_retryable {
+            assert!(
+                !is_retryable_stream_error(&anyhow::anyhow!("{message}")),
+                "expected non-retryable: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn retryable_stream_error_matches_context_chains() {
+        let error = anyhow::anyhow!("connection reset")
+            .context("provider stream failed")
+            .context("provider request failed");
+        assert!(is_retryable_stream_error(&error));
     }
 }

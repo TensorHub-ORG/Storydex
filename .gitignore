@@ -40,6 +40,8 @@ venv/
 .coomi/
 .claude/
 .codex/
+.reasonix/
+reasonix.toml
 .claude/settings.local.json
 .storydex/config/llm-profiles.local.json
 reference_code/

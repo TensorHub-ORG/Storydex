@@ -308,6 +308,52 @@ async def test_stream_events_preserves_storydex_event_contract(monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
+async def test_stream_forwards_provider_retry_as_connection_retry(monkeypatch, tmp_path) -> None:
+    class Bridge:
+        async def events(self):
+            yield {"type": "session_bound", "data": {"runtimeSessionId": "runtime-1"}}
+            yield {
+                "type": "provider_retry",
+                "data": {"attempt": 1, "maxAttempts": 3},
+            }
+            yield {"type": "text_delta", "data": {"text": "ok"}}
+            yield {"type": "completed", "data": {"usage": {"input_tokens": 1, "output_tokens": 1}}}
+
+        async def close(self):
+            return None
+
+        async def cancel(self, *, steer=False):
+            return None
+
+    async def start(payload):
+        return Bridge()
+
+    monkeypatch.setattr(coomi.LiveBridgeProcess, "start", start)
+    monkeypatch.setattr(
+        coomi.StorydexCoomiAgentService,
+        "get_status",
+        lambda self, **_kwargs: {"model": "model", "providerId": "provider"},
+    )
+    events = [
+        event
+        async for event in coomi.StorydexCoomiAgentService().stream_events(
+            prompt="hello",
+            trace_id="trace",
+            session_id="story-session",
+            workspace_root=tmp_path,
+            turn_contract={"executionPolicy": {"directFileWrites": False}},
+        )
+    ]
+    names = [name for name, _payload in events]
+    assert names == ["AgentStarted", "ConnectionRetry", "TextChunk", "AgentCompleted"]
+    retry = events[1][1]
+    assert retry["_type"] == "ConnectionRetry"
+    assert retry["attempt"] == 1
+    assert retry["maxAttempts"] == 3
+    assert "当前上游提供商服务不稳定" in retry["message"]
+
+
+@pytest.mark.asyncio
 async def test_stream_rejects_agent_attempt_to_enter_plan_mode(monkeypatch, tmp_path) -> None:
     class Bridge:
         async def events(self):

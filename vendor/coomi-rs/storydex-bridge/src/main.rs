@@ -184,6 +184,13 @@ impl AgentObserver for StorydexObserver {
                 }),
             ),
             AgentEvent::TurnCompleted(usage) => ("turn_completed", json!({"usage": usage})),
+            AgentEvent::ProviderRetry {
+                attempt,
+                max_attempts,
+            } => (
+                "provider_retry",
+                json!({"attempt": attempt, "maxAttempts": max_attempts}),
+            ),
         };
         self.emitter.event(kind, data);
     }
