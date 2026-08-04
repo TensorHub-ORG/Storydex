@@ -61,7 +61,6 @@
           </div>
 
           <section v-for="(hunk, index) in file.hunks" :key="`${file.relativePath}-${index}`" class="git-review-hunk">
-            <div class="git-review-hunk-head">{{ hunk.header }}</div>
             <div
               v-for="(line, lineIndex) in hunk.lines"
               :key="`${file.relativePath}-${index}-${lineIndex}`"
@@ -108,10 +107,20 @@ const summaryLabel = computed(() => {
 });
 
 watch(
-  () => [props.focusPath || "", files.value.map((file) => file.relativePath).join("\u0000")],
-  () => {
-    const focusPath = normalizePath(props.focusPath || "");
-    expandedPaths.value = focusPath ? new Set([focusPath]) : new Set();
+  [
+    () => normalizePath(props.focusPath || ""),
+    () => files.value.map((file) => normalizePath(file.relativePath)).join("\u0000")
+  ],
+  ([focusPath], [previousFocusPath]) => {
+    if (focusPath !== previousFocusPath) {
+      expandedPaths.value = focusPath ? new Set([focusPath]) : new Set();
+      return;
+    }
+
+    const availablePaths = new Set(files.value.map((file) => normalizePath(file.relativePath)));
+    expandedPaths.value = new Set(
+      [...expandedPaths.value].filter((relativePath) => availablePaths.has(relativePath))
+    );
   },
   { immediate: true }
 );
@@ -372,15 +381,6 @@ function normalizePath(value: string): string {
 
 .git-review-hunk {
   border-top: 1px solid var(--border-ghost);
-}
-
-.git-review-hunk-head {
-  padding: 7px 18px 7px 56px;
-  color: var(--accent-strong);
-  background: color-mix(in srgb, var(--accent-soft) 12%, transparent);
-  font-family: var(--font-editor, "Cascadia Mono", "Consolas", monospace);
-  font-size: 12px;
-  line-height: 1.5;
 }
 
 .git-review-line {
