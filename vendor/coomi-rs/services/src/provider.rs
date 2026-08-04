@@ -32,6 +32,7 @@ const PROVIDER_RETRY_DELAYS: [Duration; 2] =
     [Duration::from_millis(250), Duration::from_millis(750)];
 const PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const PROVIDER_READ_TIMEOUT: Duration = Duration::from_secs(180);
+const PROVIDER_COMPLETION_GRACE_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct HttpModelProvider {
     config: ProviderConfig,
@@ -86,18 +87,48 @@ impl HttpModelProvider {
         body: &Value,
         required_tool: Option<&str>,
     ) -> Result<Response> {
-        let response = self
+        let mut request_body = body.clone();
+        let mut response = self
             .send_with_retry(self.authenticated(self.client.post(endpoint)).json(body))
             .await?;
-        if required_tool.is_none() || !required_tool_choice_unsupported(response.status()) {
+        if required_tool.is_some() && required_tool_choice_unsupported(response.status()) {
+            // Several OpenAI-compatible gateways support tools but reject named or
+            // `required` tool_choice values. Retrying with `auto` preserves tool use
+            // instead of failing the entire Storydex structured-output turn.
+            request_body["tool_choice"] = Value::String("auto".into());
+            response = self
+                .send_with_retry(
+                    self.authenticated(self.client.post(endpoint))
+                        .json(&request_body),
+                )
+                .await?;
+        }
+
+        self.retry_missing_openai_message_id(endpoint, &request_body, response)
+            .await
+    }
+
+    async fn retry_missing_openai_message_id(
+        &self,
+        endpoint: &str,
+        body: &Value,
+        response: Response,
+    ) -> Result<Response> {
+        if response.status() != StatusCode::BAD_REQUEST {
             return Ok(response);
         }
 
-        // Several OpenAI-compatible gateways support tools but reject named or
-        // `required` tool_choice values. Retrying with `auto` preserves tool use
-        // instead of failing the entire Storydex structured-output turn.
-        let mut fallback = body.clone();
-        fallback["tool_choice"] = Value::String("auto".into());
+        let status = response.status();
+        let response_body = response
+            .text()
+            .await
+            .context("failed to read provider response")?;
+        if !has_missing_openai_message_id_error(&response_body) {
+            return Err(provider_http_error(status, &response_body));
+        }
+        let fallback = openai_message_id_fallback(body)
+            .context("provider requested message IDs but request has no compatible messages")?;
+
         self.send_with_retry(
             self.authenticated(self.client.post(endpoint))
                 .json(&fallback),
@@ -667,33 +698,92 @@ impl ModelProvider for HttpModelProvider {
 async fn read_sse(response: Response, mut consume: impl FnMut(Value) -> Result<()>) -> Result<()> {
     let mut stream = response.bytes_stream();
     let mut buffer = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        buffer.extend_from_slice(&chunk.context("provider stream failed")?);
+    let mut saw_completion_event = false;
+    loop {
+        let next_chunk = if saw_completion_event {
+            match tokio::time::timeout(PROVIDER_COMPLETION_GRACE_TIMEOUT, stream.next()).await {
+                Ok(chunk) => chunk,
+                Err(_) => return Ok(()),
+            }
+        } else {
+            stream.next().await
+        };
+        let Some(chunk) = next_chunk else {
+            break;
+        };
+        match chunk {
+            Ok(chunk) => buffer.extend_from_slice(&chunk),
+            Err(_) if saw_completion_event => return Ok(()),
+            Err(error) => return Err(error).context("provider stream failed"),
+        }
         while let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
             let mut line = buffer.drain(..=newline).collect::<Vec<_>>();
             while matches!(line.last(), Some(b'\n' | b'\r')) {
                 line.pop();
             }
-            let line = String::from_utf8(line).context("provider stream was not UTF-8")?;
-            let Some(data) = line.strip_prefix("data:") else {
-                continue;
-            };
-            let data = data.trim();
-            if data.is_empty() {
-                continue;
-            }
-            if data == "[DONE]" {
-                return Ok(());
-            }
-            let value = serde_json::from_str::<Value>(data).context("invalid provider SSE JSON")?;
-            let completed = value.get("type").and_then(Value::as_str) == Some("response.completed");
-            consume(value)?;
-            if completed {
-                return Ok(());
+            match parse_provider_sse_line(&line)? {
+                ProviderSseLine::Ignore => {}
+                ProviderSseLine::Done => return Ok(()),
+                ProviderSseLine::Value(value) => {
+                    let completed = provider_sse_value_completed(&value);
+                    consume(value)?;
+                    if completed {
+                        saw_completion_event = true;
+                    }
+                }
             }
         }
     }
+
+    while matches!(buffer.last(), Some(b'\n' | b'\r')) {
+        buffer.pop();
+    }
+    if !buffer.is_empty() {
+        match parse_provider_sse_line(&buffer)? {
+            ProviderSseLine::Ignore => {}
+            ProviderSseLine::Done => return Ok(()),
+            ProviderSseLine::Value(value) => {
+                let completed = provider_sse_value_completed(&value);
+                consume(value)?;
+                saw_completion_event |= completed;
+            }
+        }
+    }
+
+    anyhow::ensure!(
+        saw_completion_event,
+        "provider stream failed: stream ended before [DONE], finish_reason, or response.completed"
+    );
     Ok(())
+}
+
+enum ProviderSseLine {
+    Ignore,
+    Done,
+    Value(Value),
+}
+
+fn parse_provider_sse_line(line: &[u8]) -> Result<ProviderSseLine> {
+    let line = std::str::from_utf8(line).context("provider stream was not UTF-8")?;
+    let Some(data) = line.strip_prefix("data:") else {
+        return Ok(ProviderSseLine::Ignore);
+    };
+    let data = data.trim();
+    if data.is_empty() {
+        return Ok(ProviderSseLine::Ignore);
+    }
+    if data == "[DONE]" {
+        return Ok(ProviderSseLine::Done);
+    }
+    let value = serde_json::from_str::<Value>(data).context("invalid provider SSE JSON")?;
+    Ok(ProviderSseLine::Value(value))
+}
+
+fn provider_sse_value_completed(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("response.completed")
+        || value
+            .pointer("/choices/0/finish_reason")
+            .is_some_and(|reason| !reason.is_null())
 }
 
 #[derive(Default)]
@@ -1110,10 +1200,134 @@ async fn checked_json(response: Response) -> Result<Value> {
         .await
         .context("failed to read provider response")?;
     if !status.is_success() {
-        let detail = body.chars().take(800).collect::<String>();
-        anyhow::bail!("provider returned HTTP {status}: {detail}")
+        return Err(provider_http_error(status, &body));
     }
     serde_json::from_str(&body).context("provider returned invalid JSON")
+}
+
+fn provider_http_error(status: StatusCode, body: &str) -> anyhow::Error {
+    let detail = body.chars().take(800).collect::<String>();
+    anyhow::anyhow!("provider returned HTTP {status}: {detail}")
+}
+
+fn has_missing_openai_message_id_error(body: &str) -> bool {
+    let parsed = serde_json::from_str::<Value>(body).ok();
+    if parsed
+        .as_ref()
+        .is_some_and(has_structured_missing_message_id)
+    {
+        return true;
+    }
+    parsed
+        .as_ref()
+        .and_then(|value| value.pointer("/error/message"))
+        .and_then(Value::as_str)
+        .map_or_else(
+            || text_mentions_missing_message_id(body),
+            text_mentions_missing_message_id,
+        )
+}
+
+fn has_structured_missing_message_id(value: &Value) -> bool {
+    match value {
+        Value::Array(items) => items.iter().any(has_structured_missing_message_id),
+        Value::Object(object) => {
+            let location_matches =
+                object
+                    .get("loc")
+                    .and_then(Value::as_array)
+                    .is_some_and(|location| {
+                        let message_position = location
+                            .iter()
+                            .position(|part| part.as_str() == Some("messages"));
+                        message_position.is_some_and(|position| {
+                            location.get(position + 1).and_then(Value::as_u64).is_some()
+                                && location.get(position + 2).and_then(Value::as_str) == Some("id")
+                                && position + 3 == location.len()
+                        })
+                    });
+            let required = object
+                .get("msg")
+                .or_else(|| object.get("message"))
+                .and_then(Value::as_str)
+                .is_some_and(text_describes_missing_field);
+            (location_matches && required)
+                || ["error", "errors", "detail", "details"]
+                    .iter()
+                    .filter_map(|key| object.get(*key))
+                    .any(has_structured_missing_message_id)
+        }
+        Value::String(text) => text_mentions_missing_message_id(text),
+        _ => false,
+    }
+}
+
+fn text_describes_missing_field(text: &str) -> bool {
+    let normalized = text.to_ascii_lowercase();
+    normalized.contains("missing") || normalized.contains("required")
+}
+
+fn text_mentions_missing_message_id(text: &str) -> bool {
+    let normalized = text.to_ascii_lowercase();
+    for prefix in ["messages[", "messages."] {
+        let mut remaining = normalized.as_str();
+        while let Some(start) = remaining.find(prefix) {
+            let after_prefix = &remaining[start + prefix.len()..];
+            let digit_count = after_prefix
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .count();
+            if digit_count == 0 {
+                break;
+            }
+            let after_index = &after_prefix[digit_count..];
+            let after_path = if prefix.ends_with('[') {
+                after_index.strip_prefix(']').unwrap_or(after_index)
+            } else {
+                after_index
+            };
+            let clause = after_path
+                .split(';')
+                .next()
+                .unwrap_or(after_path)
+                .trim_start();
+            let direct_id_path = clause
+                .strip_prefix(".id")
+                .is_some_and(text_describes_missing_field);
+            let cleaned = clause
+                .chars()
+                .filter(|character| !matches!(character, '`' | '\'' | '"'))
+                .collect::<String>();
+            let missing_named_id = cleaned.starts_with(':') && cleaned.contains("missing field id");
+            if direct_id_path || missing_named_id {
+                return true;
+            }
+            remaining = after_prefix;
+        }
+    }
+    false
+}
+
+fn openai_message_id_fallback(body: &Value) -> Option<Value> {
+    let mut fallback = body.clone();
+    let messages = fallback.get_mut("messages")?.as_array_mut()?;
+    let mut changed = false;
+
+    for (index, value) in messages.iter_mut().enumerate() {
+        let Some(message) = value.as_object_mut() else {
+            continue;
+        };
+        if message.get("id").is_some_and(|value| !value.is_null()) {
+            continue;
+        }
+        message.insert(
+            "id".into(),
+            Value::String(format!("storydex-message-{index}")),
+        );
+        changed = true;
+    }
+
+    changed.then_some(fallback)
 }
 
 fn openai_messages(messages: &[ChatMessage]) -> Result<Vec<Value>> {
@@ -1477,6 +1691,7 @@ mod tests {
     use std::io::Read;
     use std::io::Write;
     use std::net::TcpListener;
+    use std::net::TcpStream;
     use std::thread::JoinHandle;
 
     struct TestStreamObserver;
@@ -1502,6 +1717,99 @@ mod tests {
             )
             .expect("write SSE test headers");
             socket.write_all(&body).expect("write SSE test body");
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    fn spawn_clean_sse(body: &str) -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind SSE test server");
+        let address = listener.local_addr().expect("read SSE test address");
+        let body = body.as_bytes().to_vec();
+        let handle = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept SSE test request");
+            let mut request = [0_u8; 2048];
+            let _ = socket.read(&mut request).expect("read SSE test request");
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .expect("write SSE test headers");
+            socket.write_all(&body).expect("write SSE test body");
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    fn read_http_json(socket: &mut TcpStream) -> Value {
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set request read timeout");
+        let mut received = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        let (header_end, content_length) = loop {
+            let read = socket.read(&mut buffer).expect("read HTTP request");
+            assert!(read > 0, "HTTP request ended before its body arrived");
+            received.extend_from_slice(&buffer[..read]);
+            let Some(header_end) = received.windows(4).position(|part| part == b"\r\n\r\n") else {
+                continue;
+            };
+            let headers = std::str::from_utf8(&received[..header_end]).expect("UTF-8 headers");
+            let content_length = headers
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                .expect("request Content-Length");
+            break (header_end + 4, content_length);
+        };
+        while received.len() < header_end + content_length {
+            let read = socket.read(&mut buffer).expect("read HTTP request body");
+            assert!(read > 0, "HTTP request body was truncated");
+            received.extend_from_slice(&buffer[..read]);
+        }
+        serde_json::from_slice(&received[header_end..header_end + content_length])
+            .expect("request JSON")
+    }
+
+    fn write_json_response(socket: &mut TcpStream, status: &str, body: &str) {
+        write!(
+            socket,
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("write HTTP response");
+    }
+
+    fn spawn_missing_message_id_server() -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind compatibility server");
+        let address = listener.local_addr().expect("read compatibility address");
+        let handle = std::thread::spawn(move || {
+            let (mut first, _) = listener.accept().expect("accept initial request");
+            let initial = read_http_json(&mut first);
+            assert!(initial.pointer("/messages/2/id").is_none());
+            let error = json!({
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "Upstream request failed: messages[2]: missing field `id` at line 1 column 99"
+                }
+            })
+            .to_string();
+            write_json_response(&mut first, "400 Bad Request", &error);
+
+            let (mut retry, _) = listener.accept().expect("accept compatibility retry");
+            let fallback = read_http_json(&mut retry);
+            for index in 0..4 {
+                assert_eq!(
+                    fallback.pointer(&format!("/messages/{index}/id")),
+                    Some(&json!(format!("storydex-message-{index}")))
+                );
+            }
+            let success = json!({
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 1}
+            })
+            .to_string();
+            write_json_response(&mut retry, "200 OK", &success);
         });
         (format!("http://{address}"), handle)
     }
@@ -1575,6 +1883,107 @@ mod tests {
         let detail = format!("{error:#}");
         assert!(detail.starts_with("provider stream failed: "));
         assert!(detail.split(": ").count() >= 3);
+    }
+
+    #[test]
+    fn message_id_compatibility_matches_known_error_shapes_only() {
+        let body = json!({
+            "error": {
+                "message": "messages[2]: missing field `id`; messages[4].tool_calls[0]: missing field `id`"
+            }
+        })
+        .to_string();
+        assert!(has_missing_openai_message_id_error(&body));
+        assert!(has_missing_openai_message_id_error(
+            &json!({
+                "detail": [{
+                    "loc": ["body", "messages", 2, "id"],
+                    "msg": "Field required",
+                    "type": "missing"
+                }]
+            })
+            .to_string()
+        ));
+        assert!(has_missing_openai_message_id_error(
+            "validation failed at messages.2.id: Field required"
+        ));
+        assert!(!has_missing_openai_message_id_error(
+            "messages[4].tool_calls[0]: missing field `id`"
+        ));
+        assert!(!has_missing_openai_message_id_error(
+            "unrelated bad request"
+        ));
+    }
+
+    #[tokio::test]
+    async fn clean_stream_requires_a_semantic_completion_event() {
+        let (url, server) =
+            spawn_clean_sse("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n");
+        let response = Client::new()
+            .get(url)
+            .send()
+            .await
+            .expect("request SSE stream");
+        let error = read_sse(response, |_| Ok(()))
+            .await
+            .expect_err("clean EOF without a completion event must fail");
+        server.join().expect("join SSE test server");
+        assert!(format!("{error:#}").contains("stream ended before"));
+    }
+
+    #[tokio::test]
+    async fn finish_reason_allows_gateways_that_omit_done_marker() {
+        let (url, server) = spawn_clean_sse(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+        );
+        let response = Client::new()
+            .get(url)
+            .send()
+            .await
+            .expect("request SSE stream");
+        let mut values = Vec::new();
+        read_sse(response, |value| {
+            values.push(value);
+            Ok(())
+        })
+        .await
+        .expect("finish_reason is a semantic completion event");
+        server.join().expect("join SSE test server");
+        assert_eq!(values.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn retries_an_explicit_missing_openai_message_id_once() {
+        let (base_url, server) = spawn_missing_message_id_server();
+        let provider = HttpModelProvider::new(ProviderConfig {
+            id: "compat".into(),
+            kind: ProviderKind::OpenAiCompatible,
+            display: "Compat".into(),
+            api_key: "test-key".into(),
+            base_url,
+            model: "test-model".into(),
+            fast_model: None,
+            capabilities: ModelCapabilities::default(),
+            remote_compaction_mode: RemoteCompactionMode::default(),
+        })
+        .expect("compatibility provider");
+        let response = provider
+            .openai_compatible(ModelRequest {
+                model: "test-model".into(),
+                messages: vec![
+                    ChatMessage::system("system"),
+                    ChatMessage::user("question"),
+                    ChatMessage::assistant("prior answer", Vec::new()),
+                    ChatMessage::user("follow-up"),
+                ],
+                tools: Vec::new(),
+                max_output_tokens: None,
+                required_tool: None,
+            })
+            .await
+            .expect("message ID compatibility retry");
+        server.join().expect("join compatibility server");
+        assert_eq!(response.content, "ok");
     }
 
     #[test]

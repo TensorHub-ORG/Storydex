@@ -1401,7 +1401,7 @@ export const useAgentStore = defineStore("agent", {
       const event = streamPacketToTraceEvent(visiblePacket, current.events.length + 1);
       const nextRun: AgentExecutionRun = {
         ...current,
-        events: [...current.events, event],
+        events: mergeStreamingTraceEvent(current.events, event),
         updatedAt: new Date().toISOString()
       };
 
@@ -1706,6 +1706,27 @@ function streamPacketToTraceEvent(packet: AgentStreamPacket, index: number): Age
     timestamp: new Date().toISOString(),
     data: packet as unknown as Record<string, unknown>
   };
+}
+
+function mergeStreamingTraceEvent(events: AgentTraceEvent[], event: AgentTraceEvent): AgentTraceEvent[] {
+  const previous = events[events.length - 1];
+  if (event.event !== "TextChunk" || previous?.event !== "TextChunk") {
+    return [...events, event];
+  }
+  const content = `${String(previous.data?.content || "")}${String(event.data?.content || "")}`;
+  return [
+    ...events.slice(0, -1),
+    {
+      ...event,
+      index: previous.index,
+      detail: content,
+      data: {
+        ...(previous.data || {}),
+        ...(event.data || {}),
+        content
+      }
+    }
+  ];
 }
 
 function streamPacketToWaterfallItem(
@@ -3619,6 +3640,7 @@ function chapterLengthTierLabel(value: ChapterLengthTier): string {
 // tested directly without changing the production component API.
 export const __agentStoreTestUtils = import.meta.env.MODE === "test" ? {
   streamPacketToTraceEvent,
+  mergeStreamingTraceEvent,
   streamPacketToWaterfallItem,
   segmentItemId,
   createWaterfallItem,
