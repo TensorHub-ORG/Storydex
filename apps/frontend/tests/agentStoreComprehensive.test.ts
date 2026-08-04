@@ -29,7 +29,7 @@ vi.mock("@/stores/workspace", () => ({ useWorkspaceStore: () => workspace }));
 vi.mock("@/api/client", () => ({ describeTransportError: (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback }));
 
 import { AgentApiError } from "@/api/agent";
-import { useAgentStore } from "@/stores/agent";
+import { __agentStoreTestUtils, useAgentStore } from "@/stores/agent";
 
 const envelope = (data: unknown) => ({ data, trace: null, audit: [] });
 const now = () => new Date().toISOString();
@@ -164,6 +164,24 @@ describe("agent store lifecycle and normalization", () => {
 });
 
 describe("agent packet state machine", () => {
+  it("merges text events when optional payload data is absent", () => {
+    const merge = __agentStoreTestUtils?.mergeStreamingTraceEvent;
+    expect(merge).toBeTypeOf("function");
+
+    const events = merge!(
+      [{ index: 7, event: "TextChunk", detail: "", data: undefined } as never],
+      { index: 8, event: "TextChunk", detail: "", data: undefined } as never
+    );
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      index: 7,
+      event: "TextChunk",
+      detail: "",
+      data: { content: "" }
+    });
+  });
+
   it("keeps high-volume text streaming in one bounded trace event", () => {
     const store = useAgentStore();
     store.executionHistory = [run()];
