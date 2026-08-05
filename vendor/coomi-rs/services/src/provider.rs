@@ -33,6 +33,12 @@ const PROVIDER_RETRY_DELAYS: [Duration; 2] =
 const PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const PROVIDER_READ_TIMEOUT: Duration = Duration::from_secs(180);
 const PROVIDER_COMPLETION_GRACE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Liveness budget for the HTTP response head. Gateways that accept a request
+/// but never send response headers (stalled upstream, overloaded proxy) would
+/// otherwise make the user wait out the whole 180s read timeout with no
+/// feedback. Failing here routes into the existing stream-retry path (with
+/// the ProviderRetry notice) instead.
+const PROVIDER_RESPONSE_HEAD_TIMEOUT: Duration = Duration::from_secs(45);
 /// Liveness budget for the first byte of a streaming response. Gateways that
 /// stall before emitting anything are retried instead of making the user wait
 /// for `PROVIDER_READ_TIMEOUT`.
@@ -234,9 +240,17 @@ impl HttpModelProvider {
             body["max_tokens"] = Value::from(limit);
         }
         for attempt in 0..PROVIDER_STREAM_ATTEMPTS {
-            let response = self
-                .send_openai_chat(&endpoint, &body, required_tool.as_deref())
-                .await?;
+            let response = tokio::time::timeout(
+                PROVIDER_RESPONSE_HEAD_TIMEOUT,
+                self.send_openai_chat(&endpoint, &body, required_tool.as_deref()),
+            )
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "provider stream failed: no response head within {}s",
+                    PROVIDER_RESPONSE_HEAD_TIMEOUT.as_secs()
+                )
+            })??;
             let status = response.status();
             if !status.is_success() {
                 return checked_json(response)
@@ -364,11 +378,19 @@ impl HttpModelProvider {
             self.config.capabilities.supports_parallel_tool_calls,
         )?;
         for attempt in 0..PROVIDER_STREAM_ATTEMPTS {
-            let response = self
-                .authenticated(self.client.post(&endpoint))
-                .json(&body)
-                .send()
-                .await?;
+            let response = tokio::time::timeout(
+                PROVIDER_RESPONSE_HEAD_TIMEOUT,
+                self.authenticated(self.client.post(&endpoint))
+                    .json(&body)
+                    .send(),
+            )
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "provider stream failed: no response head within {}s",
+                    PROVIDER_RESPONSE_HEAD_TIMEOUT.as_secs()
+                )
+            })??;
             let status = response.status();
             if !status.is_success() {
                 return checked_json(response)
@@ -476,11 +498,19 @@ impl HttpModelProvider {
             body["max_output_tokens"] = Value::from(limit);
         }
         for attempt in 0..PROVIDER_STREAM_ATTEMPTS {
-            let response = self
-                .authenticated(self.client.post(&endpoint))
-                .json(&body)
-                .send()
-                .await?;
+            let response = tokio::time::timeout(
+                PROVIDER_RESPONSE_HEAD_TIMEOUT,
+                self.authenticated(self.client.post(&endpoint))
+                    .json(&body)
+                    .send(),
+            )
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "provider stream failed: no response head within {}s",
+                    PROVIDER_RESPONSE_HEAD_TIMEOUT.as_secs()
+                )
+            })??;
             let status = response.status();
             if !status.is_success() {
                 return checked_json(response)
@@ -917,6 +947,7 @@ fn is_retryable_stream_error(error: &anyhow::Error) -> bool {
     }
     text.contains("stream ended before")
         || text.contains("no first byte")
+        || text.contains("no response head")
         || text.contains("stream stalled")
         || text.contains("timed out")
         || text.contains("connection reset")
@@ -2963,6 +2994,7 @@ mod tests {
         let retryable = [
             "provider stream failed: stream ended before [DONE], finish_reason, or response.completed",
             "provider stream failed: no first byte within 45s",
+            "provider stream failed: no response head within 45s",
             "provider stream failed: operation timed out",
             "provider stream failed: connection reset by peer",
             "provider stream failed: broken pipe",
