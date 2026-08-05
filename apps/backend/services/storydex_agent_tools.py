@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import re
 from pathlib import Path
 from typing import Any, Dict
 
@@ -9,6 +12,62 @@ from services.help_guide_service import get_help_guide_service
 from services.story_project_service import get_story_project_service
 from services.storydex_tool_types import BaseTool, ToolAccess, ToolConcurrency, ToolResult
 from services.story_word_count_service import STORY_WORD_COUNT_RULE
+
+
+STORY_FRAGMENT_CHUNK_MAX_CHARS = 1800
+STORY_FRAGMENT_CHUNK_MAX_COUNT = 64
+_STORY_FRAGMENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+_STORY_FRAGMENT_STAGE_DIRECTORY = Path(".storydex/.agent/runtime/story-fragment-staging")
+
+
+def _stage_path(workspace_root: Path, fragment_id: str) -> Path:
+    digest = hashlib.sha256(fragment_id.encode("utf-8")).hexdigest()
+    return workspace_root / _STORY_FRAGMENT_STAGE_DIRECTORY / f"{digest}.json"
+
+
+def _atomic_write_json(path: Path, value: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(f"{path.suffix}.tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _normalized_chapter_path(workspace_root: Path, raw_path: Any) -> str:
+    service = get_story_project_service()
+    relative_path = service._normalize_relative_path(str(raw_path or ""))  # noqa: SLF001
+    candidate = (workspace_root / relative_path).resolve() if relative_path else workspace_root
+    try:
+        candidate.relative_to(workspace_root)
+    except ValueError as exc:
+        raise ValueError("staged story fragment path escapes the workspace") from exc
+    if not relative_path.startswith("chapters/"):
+        raise ValueError("staged story fragments must target chapters/")
+    return relative_path
+
+
+def _read_complete_staged_fragment(workspace_root: Path, fragment_id: str) -> tuple[str, str]:
+    if not _STORY_FRAGMENT_ID.fullmatch(fragment_id):
+        raise ValueError("stagedFragmentId is invalid")
+    path = _stage_path(workspace_root, fragment_id)
+    if not path.is_file():
+        raise ValueError(f"staged story fragment {fragment_id!r} was not found")
+    value = json.loads(path.read_text(encoding="utf-8"))
+    chunk_count = int(value.get("chunkCount") or 0)
+    chunks = value.get("chunks") if isinstance(value.get("chunks"), dict) else {}
+    missing = [index for index in range(chunk_count) if str(index) not in chunks]
+    if chunk_count <= 0 or missing:
+        raise ValueError(
+            f"staged story fragment {fragment_id!r} is incomplete; missing chunks: {missing}"
+        )
+    text = "".join(str(chunks[str(index)]) for index in range(chunk_count))
+    return str(value.get("path") or ""), text
+
+
+def _delete_staged_fragment(workspace_root: Path, fragment_id: str) -> None:
+    try:
+        _stage_path(workspace_root, fragment_id).unlink()
+    except FileNotFoundError:
+        pass
 
 
 class _StorydexWorkspaceToolMixin:
@@ -496,6 +555,117 @@ class StorydexWordCountTool(_StorydexWorkspaceToolMixin, BaseTool):
         return ToolResult(success=True, output=json.dumps(result, ensure_ascii=False, indent=2), error=None)
 
 
+class StorydexStageStoryFragmentTool(_StorydexWorkspaceToolMixin, BaseTool):
+    name = "StorydexStageStoryFragment"
+    description = (
+        "Stage one bounded chunk of a long chapter fragment before final application. Use one call per "
+        f"chunk, keep text at or below {STORY_FRAGMENT_CHUNK_MAX_CHARS} characters, and reuse the same "
+        "fragmentId/path/chunkCount for every chunk. After all chunks succeed, call "
+        "StorydexApplyStoryIncrement with stagedFragmentId instead of repeating the full text."
+    )
+    access = ToolAccess.WRITE
+    concurrency = ToolConcurrency.BLOCKING
+    requires_confirmation = False
+
+    def get_parameters_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "required": ["fragmentId", "path", "chunkIndex", "chunkCount", "text"],
+            "properties": {
+                "fragmentId": {
+                    "type": "string",
+                    "pattern": r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$",
+                    "description": "Stable ID reused for every chunk of this fragment.",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Workspace-relative chapters/ target path.",
+                },
+                "chunkIndex": {"type": "integer", "minimum": 0, "maximum": 63},
+                "chunkCount": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": STORY_FRAGMENT_CHUNK_MAX_COUNT,
+                },
+                "text": {
+                    "type": "string",
+                    "maxLength": STORY_FRAGMENT_CHUNK_MAX_CHARS,
+                    "description": "One consecutive UTF-8 text chunk; do not repeat adjacent content.",
+                },
+            },
+            "additionalProperties": False,
+        }
+
+    def run(self, arguments: Dict[str, Any]) -> ToolResult:
+        payload = dict(arguments or {})
+        fragment_id = str(payload.get("fragmentId") or "").strip()
+        if not _STORY_FRAGMENT_ID.fullmatch(fragment_id):
+            return ToolResult(success=False, output="", error="fragmentId is invalid")
+        try:
+            relative_path = _normalized_chapter_path(self.workspace_root, payload.get("path"))
+            chunk_index = int(payload.get("chunkIndex"))
+            chunk_count = int(payload.get("chunkCount"))
+        except (TypeError, ValueError) as exc:
+            return ToolResult(success=False, output="", error=str(exc))
+        text = str(payload.get("text") or "")
+        if not 1 <= chunk_count <= STORY_FRAGMENT_CHUNK_MAX_COUNT:
+            return ToolResult(success=False, output="", error="chunkCount is out of range")
+        if not 0 <= chunk_index < chunk_count:
+            return ToolResult(success=False, output="", error="chunkIndex is out of range")
+        if len(text) > STORY_FRAGMENT_CHUNK_MAX_CHARS:
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"story fragment chunk exceeds {STORY_FRAGMENT_CHUNK_MAX_CHARS} characters",
+            )
+        stage_path = _stage_path(self.workspace_root, fragment_id)
+        try:
+            existing = (
+                json.loads(stage_path.read_text(encoding="utf-8"))
+                if stage_path.is_file()
+                else {
+                    "version": 1,
+                    "fragmentId": fragment_id,
+                    "path": relative_path,
+                    "chunkCount": chunk_count,
+                    "chunks": {},
+                }
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            return ToolResult(success=False, output="", error=f"failed to read staged fragment: {exc}")
+        if str(existing.get("fragmentId") or "") != fragment_id:
+            return ToolResult(success=False, output="", error="staged fragment identity mismatch")
+        if str(existing.get("path") or "") != relative_path:
+            return ToolResult(success=False, output="", error="staged fragment path changed between chunks")
+        if int(existing.get("chunkCount") or 0) != chunk_count:
+            return ToolResult(success=False, output="", error="staged fragment chunkCount changed")
+        chunks = existing.get("chunks") if isinstance(existing.get("chunks"), dict) else {}
+        previous = chunks.get(str(chunk_index))
+        if previous is not None and str(previous) != text:
+            return ToolResult(success=False, output="", error="staged fragment chunk content changed")
+        chunks[str(chunk_index)] = text
+        existing["chunks"] = chunks
+        try:
+            _atomic_write_json(stage_path, existing)
+        except OSError as exc:
+            return ToolResult(success=False, output="", error=f"failed to stage story fragment: {exc}")
+        missing = [index for index in range(chunk_count) if str(index) not in chunks]
+        result = {
+            "ok": True,
+            "fragmentId": fragment_id,
+            "path": relative_path,
+            "received": len(chunks),
+            "chunkCount": chunk_count,
+            "complete": not missing,
+            "missingChunks": missing,
+        }
+        return ToolResult(
+            success=True,
+            output=json.dumps(result, ensure_ascii=False, separators=(",", ":")),
+            error=None,
+        )
+
+
 class StorydexApplyStoryIncrementTool(_StorydexWorkspaceToolMixin, BaseTool):
     name = "StorydexApplyStoryIncrement"
     description = (
@@ -555,7 +725,15 @@ class StorydexApplyStoryIncrementTool(_StorydexWorkspaceToolMixin, BaseTool):
                         "type": "object",
                         "properties": {
                             "path": {"type": "string"},
-                            "text": {"type": "string"},
+                            "text": {
+                                "type": "string",
+                                "maxLength": STORY_FRAGMENT_CHUNK_MAX_CHARS,
+                                "description": "Inline text for a short fragment only.",
+                            },
+                            "stagedFragmentId": {
+                                "type": "string",
+                                "description": "Completed StorydexStageStoryFragment ID for long text.",
+                            },
                             "variableThoughts": {
                                 "type": "string",
                                 "description": "Readable Markdown variable thinking for this fragment.",
@@ -592,7 +770,15 @@ class StorydexApplyStoryIncrementTool(_StorydexWorkspaceToolMixin, BaseTool):
                     "description": "Generated story fragments and optional per-fragment increment payloads.",
                 },
                 "segmentPath": {"type": "string"},
-                "segmentText": {"type": "string"},
+                "segmentText": {
+                    "type": "string",
+                    "maxLength": STORY_FRAGMENT_CHUNK_MAX_CHARS,
+                    "description": "Inline text for a short fragment only.",
+                },
+                "segmentStagedFragmentId": {
+                    "type": "string",
+                    "description": "Completed StorydexStageStoryFragment ID for long segment text.",
+                },
                 "variableThoughts": {
                     "type": "string",
                     "description": "Readable Markdown variable thinking. Prefer this over fixed JSON path/value entries.",
@@ -631,11 +817,57 @@ class StorydexApplyStoryIncrementTool(_StorydexWorkspaceToolMixin, BaseTool):
     def run(self, arguments: Dict[str, Any]) -> ToolResult:
         payload = dict(arguments or {})
         workspace_root = self._resolve_workspace_root(payload.get("workspaceRoot"))
-        result = get_story_project_service().apply_story_generation_increment(
-            workspace_root,
-            payload,
-            generation_contract=self.turn_contract,
-        )
+        staged_ids: list[str] = []
+        try:
+            fragments = payload.get("fragments") if isinstance(payload.get("fragments"), list) else []
+            resolved_fragments = []
+            for raw_fragment in fragments:
+                fragment = dict(raw_fragment) if isinstance(raw_fragment, dict) else {}
+                staged_id = str(fragment.get("stagedFragmentId") or "").strip()
+                if staged_id:
+                    staged_path, staged_text = _read_complete_staged_fragment(workspace_root, staged_id)
+                    supplied_path = str(fragment.get("path") or "").strip()
+                    if supplied_path and _normalized_chapter_path(workspace_root, supplied_path) != staged_path:
+                        raise ValueError(f"staged fragment {staged_id!r} path does not match apply path")
+                    fragment["path"] = staged_path
+                    fragment["text"] = staged_text
+                    fragment.pop("stagedFragmentId", None)
+                    staged_ids.append(staged_id)
+                elif len(str(fragment.get("text") or "")) > STORY_FRAGMENT_CHUNK_MAX_CHARS:
+                    raise ValueError(
+                        "long story fragment must be staged with StorydexStageStoryFragment before apply"
+                    )
+                resolved_fragments.append(fragment)
+            if isinstance(payload.get("fragments"), list):
+                payload["fragments"] = resolved_fragments
+            segment_staged_id = str(payload.get("segmentStagedFragmentId") or "").strip()
+            if segment_staged_id:
+                staged_path, staged_text = _read_complete_staged_fragment(
+                    workspace_root, segment_staged_id
+                )
+                supplied_path = str(payload.get("segmentPath") or "").strip()
+                if supplied_path and _normalized_chapter_path(workspace_root, supplied_path) != staged_path:
+                    raise ValueError(
+                        f"staged fragment {segment_staged_id!r} path does not match segmentPath"
+                    )
+                payload["segmentPath"] = staged_path
+                payload["segmentText"] = staged_text
+                payload.pop("segmentStagedFragmentId", None)
+                staged_ids.append(segment_staged_id)
+            elif len(str(payload.get("segmentText") or "")) > STORY_FRAGMENT_CHUNK_MAX_CHARS:
+                raise ValueError(
+                    "long segmentText must be staged with StorydexStageStoryFragment before apply"
+                )
+            result = get_story_project_service().apply_story_generation_increment(
+                workspace_root,
+                payload,
+                generation_contract=self.turn_contract,
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            return ToolResult(success=False, output="", error=str(exc))
+        if bool(result.get("ok", True)):
+            for staged_id in set(staged_ids):
+                _delete_staged_fragment(workspace_root, staged_id)
         knowledge_review = result.get("knowledgeReview") if isinstance(result.get("knowledgeReview"), dict) else None
         if knowledge_review is not None:
             result = {

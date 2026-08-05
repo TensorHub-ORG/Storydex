@@ -47,10 +47,36 @@
         </div>
 
         <div v-if="feedback" class="prompt-feedback" role="status">{{ feedback }}</div>
+        <div v-if="errorMessage" class="prompt-feedback is-error" role="alert">{{ errorMessage }}</div>
 
         <div class="prompt-section-label">指令正文</div>
-        <pre class="prompt-content">{{ selectedItem.promptText }}</pre>
-        <div class="prompt-source-path">来源：docs/prompts/{{ selectedItem.relativePath }}</div>
+        <template v-if="selectedItem.isCustom">
+          <textarea
+            v-model="editingPromptText"
+            class="prompt-content prompt-content-editor"
+            maxlength="12000"
+            aria-label="编辑自定义指令正文"
+            :disabled="saving"
+            @keydown.ctrl.enter.prevent="saveCustomPrompt"
+            @keydown.meta.enter.prevent="saveCustomPrompt"
+          ></textarea>
+          <div class="prompt-edit-footer">
+            <span>{{ editingPromptText.length }} / 12000</span>
+            <button
+              class="prompt-primary-action"
+              type="button"
+              :disabled="saving || !customBodyDirty || !editingPromptText.trim()"
+              @click="saveCustomPrompt"
+            >
+              <span class="material-symbols-rounded">save</span>
+              {{ saving ? "保存中…" : customBodyDirty ? "保存正文" : "已保存" }}
+            </button>
+          </div>
+        </template>
+        <pre v-else class="prompt-content">{{ selectedItem.promptText }}</pre>
+        <div class="prompt-source-path">
+          {{ selectedItem.isCustom ? "保存在 Storydex 用户配置中；名称固定，正文可随时修改。" : `来源：docs/prompts/${selectedItem.relativePath}` }}
+        </div>
       </div>
     </template>
 
@@ -79,20 +105,62 @@
         </button>
       </div>
 
-      <div v-if="loading" class="prompt-empty-state">
+      <div v-if="selectedCategory === CUSTOM_CATEGORY" class="prompt-custom-toolbar">
+        <button type="button" @click="openCustomCreator">
+          <span class="material-symbols-rounded">add</span>
+          新建自定义指令
+        </button>
+      </div>
+
+      <form v-if="creatingCustom" class="prompt-custom-create" @submit.prevent="submitCustomPrompt">
+        <header>
+          <strong>新建自定义指令</strong>
+          <button type="button" title="取消" aria-label="取消新建自定义指令" @click="cancelCustomCreator">
+            <span class="material-symbols-rounded">close</span>
+          </button>
+        </header>
+        <label>
+          <span>名称</span>
+          <input
+            ref="customTitleInputRef"
+            v-model="customTitle"
+            maxlength="120"
+            placeholder="例如：检查章节节奏"
+            :disabled="saving"
+          />
+        </label>
+        <label>
+          <span>指令正文</span>
+          <textarea
+            v-model="customPromptText"
+            maxlength="12000"
+            placeholder="输入需要反复使用的完整提示词指令"
+            :disabled="saving"
+          ></textarea>
+        </label>
+        <p v-if="errorMessage" class="prompt-custom-create-error" role="alert">{{ errorMessage }}</p>
+        <div class="prompt-custom-create-actions">
+          <button type="button" @click="cancelCustomCreator">取消</button>
+          <button type="submit" :disabled="saving || !customTitle.trim() || !customPromptText.trim()">
+            {{ saving ? "创建中…" : "创建" }}
+          </button>
+        </div>
+      </form>
+
+      <div v-if="loading && !creatingCustom" class="prompt-empty-state">
         <span class="material-symbols-rounded prompt-state-icon is-loading">progress_activity</span>
         <p>正在读取 docs/prompts…</p>
       </div>
-      <div v-else-if="errorMessage" class="prompt-empty-state is-error">
+      <div v-else-if="errorMessage && !creatingCustom" class="prompt-empty-state is-error">
         <span class="material-symbols-rounded prompt-state-icon">error</span>
         <p>{{ errorMessage }}</p>
         <button type="button" @click="loadRepository">重新加载</button>
       </div>
-      <div v-else-if="!filteredItems.length" class="prompt-empty-state">
+      <div v-else-if="!creatingCustom && !filteredItems.length" class="prompt-empty-state">
         <span class="material-symbols-rounded prompt-state-icon">inventory_2</span>
         <p>没有匹配的指令模板。</p>
       </div>
-      <div v-else class="prompt-list">
+      <div v-else-if="!creatingCustom" class="prompt-list">
         <button
           v-for="item in filteredItems"
           :key="item.id"
@@ -114,9 +182,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { describeTransportError } from "@/api/client";
-import { fetchPromptRepository } from "@/api/help";
+import { createCustomPrompt, fetchPromptRepository, updateCustomPrompt } from "@/api/help";
 import type { PromptRepositoryCategory, PromptRepositoryItem } from "@/api/help";
 import { useAgentStore } from "@/stores/agent";
 import { useUiStore } from "@/stores/ui";
@@ -134,9 +202,19 @@ const searchQuery = ref("");
 const selectedCategory = ref("");
 const selectedId = ref("");
 const feedback = ref("");
+const creatingCustom = ref(false);
+const saving = ref(false);
+const customTitle = ref("");
+const customPromptText = ref("");
+const editingPromptText = ref("");
+const customTitleInputRef = ref<HTMLInputElement | null>(null);
 let feedbackTimer: number | null = null;
+const CUSTOM_CATEGORY = "自定义";
 
 const selectedItem = computed(() => items.value.find((item) => item.id === selectedId.value) || null);
+const customBodyDirty = computed(() => Boolean(
+  selectedItem.value?.isCustom && editingPromptText.value !== selectedItem.value.promptText
+));
 
 const filteredItems = computed(() => {
   const query = searchQuery.value.trim().toLowerCase();
@@ -156,6 +234,10 @@ const filteredItems = computed(() => {
 
 onMounted(() => {
   void loadRepository();
+});
+
+watch(selectedItem, (item) => {
+  editingPromptText.value = item?.isCustom ? item.promptText : "";
 });
 
 onBeforeUnmount(() => {
@@ -178,6 +260,69 @@ async function loadRepository(): Promise<void> {
     errorMessage.value = describeTransportError(error, "无法读取指令仓库。");
   } finally {
     loading.value = false;
+  }
+}
+
+function openCustomCreator(): void {
+  creatingCustom.value = true;
+  errorMessage.value = "";
+  customTitle.value = "";
+  customPromptText.value = "";
+  void nextTick(() => customTitleInputRef.value?.focus());
+}
+
+function cancelCustomCreator(): void {
+  if (saving.value) return;
+  creatingCustom.value = false;
+  customTitle.value = "";
+  customPromptText.value = "";
+}
+
+async function submitCustomPrompt(): Promise<void> {
+  const title = customTitle.value.trim();
+  const promptText = customPromptText.value.trim();
+  if (!title || !promptText || saving.value) return;
+  saving.value = true;
+  errorMessage.value = "";
+  try {
+    const result = await createCustomPrompt({ title, promptText });
+    await loadRepository();
+    if (!items.value.some((item) => item.id === result.data.item.id)) {
+      items.value = [...items.value, result.data.item];
+      const customCategory = categories.value.find((category) => category.id === CUSTOM_CATEGORY);
+      if (customCategory) {
+        customCategory.count = Math.max(customCategory.count, items.value.filter((item) => item.isCustom).length);
+      } else {
+        categories.value = [...categories.value, { id: CUSTOM_CATEGORY, label: CUSTOM_CATEGORY, count: 1 }];
+      }
+    }
+    creatingCustom.value = false;
+    selectedId.value = result.data.item.id;
+    editingPromptText.value = result.data.item.promptText;
+    showFeedback("自定义指令已创建。名称固定，正文可随时修改。");
+  } catch (error: unknown) {
+    errorMessage.value = describeTransportError(error, "无法创建自定义指令。");
+  } finally {
+    saving.value = false;
+  }
+}
+
+async function saveCustomPrompt(): Promise<void> {
+  const item = selectedItem.value;
+  const promptText = editingPromptText.value.trim();
+  if (!item?.isCustom || !promptText || !customBodyDirty.value || saving.value) return;
+  saving.value = true;
+  errorMessage.value = "";
+  try {
+    const result = await updateCustomPrompt(item.id, promptText);
+    const index = items.value.findIndex((entry) => entry.id === item.id);
+    if (index >= 0) items.value[index] = result.data.item;
+    editingPromptText.value = result.data.item.promptText;
+    showFeedback("自定义指令正文已保存。");
+  } catch (error: unknown) {
+    errorMessage.value = describeTransportError(error, "无法保存自定义指令正文。");
+  } finally {
+    saving.value = false;
   }
 }
 
@@ -359,6 +504,147 @@ function showFeedback(message: string): void {
   margin-left: 2px;
   font-size: 10px;
   opacity: 0.8;
+}
+
+.prompt-custom-toolbar {
+  flex: 0 0 auto;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-ghost);
+}
+
+.prompt-custom-toolbar button {
+  width: 100%;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  background: var(--bg-card);
+  color: var(--text-main);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.prompt-custom-toolbar button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.prompt-custom-toolbar .material-symbols-rounded {
+  font-size: 16px;
+}
+
+.prompt-custom-create {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  padding: 12px 10px;
+  overflow-y: auto;
+}
+
+.prompt-custom-create header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+}
+
+.prompt-custom-create header button {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.prompt-custom-create header button:hover {
+  background: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.prompt-custom-create header .material-symbols-rounded {
+  font-size: 17px;
+}
+
+.prompt-custom-create label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.prompt-custom-create input,
+.prompt-custom-create textarea {
+  width: 100%;
+  padding: 7px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  background: var(--bg-input);
+  color: var(--text-main);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.prompt-custom-create input:focus,
+.prompt-custom-create textarea:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.prompt-custom-create textarea {
+  min-height: 180px;
+  resize: vertical;
+  line-height: 1.6;
+}
+
+.prompt-custom-create-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.prompt-custom-create-error {
+  margin: 0;
+  color: var(--danger, #dc2626);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.prompt-custom-create-actions button {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  background: var(--bg-card);
+  color: var(--text-main);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.prompt-custom-create-actions button[type="submit"] {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.prompt-custom-create-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .prompt-list {
@@ -601,6 +887,42 @@ function showFeedback(message: string): void {
   font-family: var(--font-mono, monospace);
   font-size: 11px;
   line-height: 1.65;
+}
+
+.prompt-feedback.is-error {
+  color: var(--danger, #dc2626);
+  background: color-mix(in srgb, var(--danger, #dc2626) 10%, transparent);
+}
+
+.prompt-content-editor {
+  width: 100%;
+  min-height: 220px;
+  resize: vertical;
+}
+
+.prompt-content-editor:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.prompt-edit-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 7px;
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.prompt-edit-footer .prompt-primary-action {
+  min-height: 28px;
+  padding: 0 10px;
+}
+
+.prompt-edit-footer .prompt-primary-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .prompt-source-path {

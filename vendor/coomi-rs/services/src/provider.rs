@@ -58,7 +58,8 @@ const PROVIDER_STREAM_RETRY_DELAYS: [Duration; 2] =
 /// Gateways use their own (often smaller) default when max_tokens is omitted,
 /// which truncates long tool-argument streams (e.g. a 3000-character chapter
 /// write) mid-JSON. 8192 matches the anthropic path and engine defaults.
-const PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS: u64 = 8_192;
+const PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS: u64 = 16_384;
+const PROVIDER_MAX_RETRY_OUTPUT_TOKENS: u64 = 65_536;
 
 pub struct HttpModelProvider {
     config: ProviderConfig,
@@ -260,13 +261,13 @@ impl HttpModelProvider {
                     if attempt + 1 < PROVIDER_STREAM_ATTEMPTS
                         && is_retryable_send_error(&error) =>
                 {
-                    observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS);
+                    observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS, 0);
                     tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
                     continue;
                 }
                 Ok(Err(error)) => return Err(error),
                 Err(_) if attempt + 1 < PROVIDER_STREAM_ATTEMPTS => {
-                    observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS);
+                    observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS, 0);
                     tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
                     continue;
                 }
@@ -285,29 +286,57 @@ impl HttpModelProvider {
             }
             let mut state = ChatStreamState::default();
             match read_sse(response, |value| state.consume(&value, observer)).await {
-                Ok(()) if is_truncated_tool_call_stream(&state)
-                    && attempt + 1 < PROVIDER_STREAM_ATTEMPTS =>
-                {
-                    observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS);
-                    tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
-                }
-                Ok(()) => match state.finish() {
-                    Ok(response) => return Ok(response),
-                    Err(error)
-                        if is_retryable_finish_error(&error)
-                            && attempt + 1 < PROVIDER_STREAM_ATTEMPTS =>
-                    {
-                        observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS);
-                        tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
-                    }
-                    Err(error) => return Err(error),
-                },
-                Err(error)
-                    if is_retryable_stream_error(&error)
-                        && !state.pushed_any
+                Ok(())
+                    if is_truncated_tool_call_stream(&state)
                         && attempt + 1 < PROVIDER_STREAM_ATTEMPTS =>
                 {
-                    observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS);
+                    observer.on_provider_retry(
+                        attempt + 1,
+                        PROVIDER_STREAM_ATTEMPTS,
+                        state.emitted_text_characters(),
+                    );
+                    tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
+                }
+                Ok(())
+                    if is_empty_truncated_response(&state)
+                        && attempt + 1 < PROVIDER_STREAM_ATTEMPTS =>
+                {
+                    observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS, 0);
+                    grow_output_token_budget(&mut body, "max_tokens");
+                    tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
+                }
+                Ok(()) if is_empty_truncated_response(&state) => {
+                    anyhow::bail!(
+                        "provider output was truncated after exhausting the output-token budget without text or tool calls"
+                    );
+                }
+                Ok(()) => {
+                    let reset_text_characters = state.emitted_text_characters();
+                    match state.finish() {
+                        Ok(response) => return Ok(response),
+                        Err(error)
+                            if is_retryable_finish_error(&error)
+                                && attempt + 1 < PROVIDER_STREAM_ATTEMPTS =>
+                        {
+                            observer.on_provider_retry(
+                                attempt + 1,
+                                PROVIDER_STREAM_ATTEMPTS,
+                                reset_text_characters,
+                            );
+                            tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                Err(error)
+                    if is_retryable_stream_error(&error)
+                        && attempt + 1 < PROVIDER_STREAM_ATTEMPTS =>
+                {
+                    observer.on_provider_retry(
+                        attempt + 1,
+                        PROVIDER_STREAM_ATTEMPTS,
+                        state.emitted_text_characters(),
+                    );
                     tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
                 }
                 Err(error) => return Err(error),
@@ -553,13 +582,13 @@ impl HttpModelProvider {
                     if attempt + 1 < PROVIDER_STREAM_ATTEMPTS
                         && is_retryable_send_error(&error) =>
                 {
-                    observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS);
+                    observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS, 0);
                     tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
                     continue;
                 }
                 Ok(Err(error)) => return Err(error.into()),
                 Err(_) if attempt + 1 < PROVIDER_STREAM_ATTEMPTS => {
-                    observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS);
+                    observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS, 0);
                     tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
                     continue;
                 }
@@ -578,29 +607,57 @@ impl HttpModelProvider {
             }
             let mut state = ResponsesStreamState::default();
             match read_sse(response, |value| state.consume(&value, observer)).await {
-                Ok(()) if is_truncated_tool_call_stream(&state)
-                    && attempt + 1 < PROVIDER_STREAM_ATTEMPTS =>
-                {
-                    observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS);
-                    tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
-                }
-                Ok(()) => match state.finish() {
-                    Ok(response) => return Ok(response),
-                    Err(error)
-                        if is_retryable_finish_error(&error)
-                            && attempt + 1 < PROVIDER_STREAM_ATTEMPTS =>
-                    {
-                        observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS);
-                        tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
-                    }
-                    Err(error) => return Err(error),
-                },
-                Err(error)
-                    if is_retryable_stream_error(&error)
-                        && !state.pushed_any
+                Ok(())
+                    if is_truncated_tool_call_stream(&state)
                         && attempt + 1 < PROVIDER_STREAM_ATTEMPTS =>
                 {
-                    observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS);
+                    observer.on_provider_retry(
+                        attempt + 1,
+                        PROVIDER_STREAM_ATTEMPTS,
+                        state.emitted_text_characters(),
+                    );
+                    tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
+                }
+                Ok(())
+                    if is_empty_truncated_response(&state)
+                        && attempt + 1 < PROVIDER_STREAM_ATTEMPTS =>
+                {
+                    observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS, 0);
+                    grow_output_token_budget(&mut body, "max_output_tokens");
+                    tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
+                }
+                Ok(()) if is_empty_truncated_response(&state) => {
+                    anyhow::bail!(
+                        "provider output was truncated after exhausting the output-token budget without text or tool calls"
+                    );
+                }
+                Ok(()) => {
+                    let reset_text_characters = state.emitted_text_characters();
+                    match state.finish() {
+                        Ok(response) => return Ok(response),
+                        Err(error)
+                            if is_retryable_finish_error(&error)
+                                && attempt + 1 < PROVIDER_STREAM_ATTEMPTS =>
+                        {
+                            observer.on_provider_retry(
+                                attempt + 1,
+                                PROVIDER_STREAM_ATTEMPTS,
+                                reset_text_characters,
+                            );
+                            tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                Err(error)
+                    if is_retryable_stream_error(&error)
+                        && attempt + 1 < PROVIDER_STREAM_ATTEMPTS =>
+                {
+                    observer.on_provider_retry(
+                        attempt + 1,
+                        PROVIDER_STREAM_ATTEMPTS,
+                        state.emitted_text_characters(),
+                    );
                     tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
                 }
                 Err(error) => return Err(error),
@@ -1037,6 +1094,7 @@ trait StreamRetryState {
     fn saw_tool_calls(&self) -> bool;
     fn pushed_any(&self) -> bool;
     fn truncated(&self) -> bool;
+    fn emitted_text_characters(&self) -> usize;
 }
 
 impl StreamRetryState for ChatStreamState {
@@ -1050,6 +1108,10 @@ impl StreamRetryState for ChatStreamState {
 
     fn truncated(&self) -> bool {
         self.finish_reason.as_deref() == Some("length")
+    }
+
+    fn emitted_text_characters(&self) -> usize {
+        self.content.chars().count()
     }
 }
 
@@ -1065,6 +1127,10 @@ impl StreamRetryState for ResponsesStreamState {
     fn truncated(&self) -> bool {
         self.truncated
     }
+
+    fn emitted_text_characters(&self) -> usize {
+        self.content.chars().count()
+    }
 }
 
 /// A stream that ended truncated (finish_reason=length / response incomplete)
@@ -1076,6 +1142,23 @@ impl StreamRetryState for ResponsesStreamState {
 /// in finish() with "tool arguments are not valid JSON".
 fn is_truncated_tool_call_stream(state: &impl StreamRetryState) -> bool {
     state.truncated() && state.saw_tool_calls() && !state.pushed_any()
+}
+
+fn is_empty_truncated_response(state: &impl StreamRetryState) -> bool {
+    state.truncated() && !state.saw_tool_calls() && state.emitted_text_characters() == 0
+}
+
+fn grow_output_token_budget(body: &mut Value, key: &str) {
+    let current = body
+        .get(key)
+        .and_then(Value::as_u64)
+        .unwrap_or(PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS);
+    body[key] = Value::from(
+        current
+            .max(PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS)
+            .saturating_mul(2)
+            .min(PROVIDER_MAX_RETRY_OUTPUT_TOKENS),
+    );
 }
 
 /// Tool arguments that fail to parse are retryable. The tool never ran (the
@@ -1091,6 +1174,7 @@ fn is_retryable_finish_error(error: &anyhow::Error) -> bool {
 struct PartialToolCall {
     id: String,
     name: String,
+    argument_fragments: Vec<String>,
     arguments: String,
 }
 
@@ -1112,6 +1196,26 @@ fn merge_streamed_arguments(target: &mut String, fragment: &str) {
     }
 }
 
+fn record_streamed_arguments(target: &mut PartialToolCall, fragment: &str) {
+    target.argument_fragments.push(fragment.to_owned());
+    merge_streamed_arguments(&mut target.arguments, fragment);
+}
+
+fn parse_streamed_arguments(call: &PartialToolCall) -> Result<Value> {
+    let incremental = call.argument_fragments.concat();
+    match parse_arguments(&Value::String(incremental.clone())) {
+        Ok(arguments) => Ok(arguments),
+        Err(incremental_error) if incremental != call.arguments => {
+            parse_arguments(&Value::String(call.arguments.clone())).with_context(|| {
+                format!(
+                    "streamed tool arguments failed both incremental and cumulative decoding; incremental error: {incremental_error:#}"
+                )
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn merge_partial_tool_call(target: &mut PartialToolCall, source: PartialToolCall) {
     if target.id.is_empty() {
         target.id = source.id;
@@ -1119,6 +1223,7 @@ fn merge_partial_tool_call(target: &mut PartialToolCall, source: PartialToolCall
     if target.name.is_empty() {
         target.name = source.name;
     }
+    target.argument_fragments.extend(source.argument_fragments);
     if target.arguments.is_empty() || source.arguments.starts_with(&target.arguments) {
         target.arguments = source.arguments;
     } else if !source.arguments.is_empty()
@@ -1255,7 +1360,7 @@ impl ChatStreamState {
                     merge_streamed_identifier(&mut target.name, name);
                 }
                 if let Some(arguments) = function.get("arguments").and_then(Value::as_str) {
-                    merge_streamed_arguments(&mut target.arguments, arguments);
+                    record_streamed_arguments(target, arguments);
                 }
             }
         }
@@ -1269,6 +1374,12 @@ impl ChatStreamState {
             .enumerate()
             .map(|(index, call)| {
                 anyhow::ensure!(!call.name.is_empty(), "streamed tool call has no name");
+                let arguments = parse_streamed_arguments(&call).with_context(|| {
+                    format!(
+                        "streamed tool call {} ({}) has invalid arguments",
+                        index, call.name
+                    )
+                })?;
                 Ok(ToolCall {
                     id: if call.id.is_empty() {
                         format!("call-{index}")
@@ -1276,7 +1387,7 @@ impl ChatStreamState {
                         call.id
                     },
                     name: call.name,
-                    arguments: parse_arguments(&Value::String(call.arguments))?,
+                    arguments,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -2340,6 +2451,7 @@ mod tests {
     #[derive(Default)]
     struct CountingRetryObserver {
         retries: std::sync::Arc<std::sync::Mutex<usize>>,
+        reset_text_characters: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
     }
 
     impl ModelStreamObserver for CountingRetryObserver {
@@ -2347,8 +2459,17 @@ mod tests {
 
         fn on_reasoning_delta(&self, _delta: &str) {}
 
-        fn on_provider_retry(&self, _attempt: usize, _max_attempts: usize) {
+        fn on_provider_retry(
+            &self,
+            _attempt: usize,
+            _max_attempts: usize,
+            reset_text_characters: usize,
+        ) {
             *self.retries.lock().expect("retry counter lock") += 1;
+            self.reset_text_characters
+                .lock()
+                .expect("reset character lock")
+                .push(reset_text_characters);
         }
     }
 
@@ -2385,7 +2506,9 @@ mod tests {
                     body.len()
                 )
                 .expect("write second headers");
-                socket.write_all(body.as_bytes()).expect("write second body");
+                socket
+                    .write_all(body.as_bytes())
+                    .expect("write second body");
             }
         });
         (format!("http://{address}"), handle)
@@ -2429,33 +2552,51 @@ mod tests {
         );
     }
 
-    fn spawn_content_then_truncate() -> (String, JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind no-retry test server");
-        let address = listener.local_addr().expect("read no-retry test address");
+    fn spawn_content_then_truncate_then_success() -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind reset-retry test server");
+        let address = listener
+            .local_addr()
+            .expect("read reset-retry test address");
         let handle = std::thread::spawn(move || {
-            // Single connection: emits a real content delta, then a clean EOF
-            // with no terminal marker. Mirrors a gateway that dies after
-            // streaming some output. The thread exits right after, so the
-            // listener is dropped: if the provider wrongly retries, its second
-            // request gets an immediate reset instead of hanging the test.
-            let (mut socket, _) = listener.accept().expect("accept first request");
-            let mut request = [0_u8; 2048];
-            let _ = socket.read(&mut request).expect("read first request");
-            let body = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial-answer\"},\"finish_reason\":null}]}\n\n";
-            write!(
-                socket,
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            )
-            .expect("write first headers");
-            socket.write_all(body).expect("write first body");
+            {
+                let (mut socket, _) = listener.accept().expect("accept first request");
+                let mut request = [0_u8; 2048];
+                let _ = socket.read(&mut request).expect("read first request");
+                let body = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial-answer\"},\"finish_reason\":null}]}\n\n";
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .expect("write first headers");
+                socket.write_all(body).expect("write first body");
+            }
+            {
+                let (mut socket, _) = listener.accept().expect("accept replacement request");
+                let mut request = [0_u8; 2048];
+                let _ = socket.read(&mut request).expect("read replacement request");
+                let body = concat!(
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"replacement\"},\"finish_reason\":null}]}\n\n",
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                    "data: [DONE]\n\n",
+                );
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .expect("write replacement headers");
+                socket
+                    .write_all(body.as_bytes())
+                    .expect("write replacement body");
+            }
         });
         (format!("http://{address}"), handle)
     }
 
     #[tokio::test]
-    async fn does_not_retry_stream_that_already_produced_output() {
-        let (base_url, server) = spawn_content_then_truncate();
+    async fn retries_and_resets_stream_that_already_produced_output() {
+        let (base_url, server) = spawn_content_then_truncate_then_success();
         let provider = HttpModelProvider::new(ProviderConfig {
             id: "no-retry".into(),
             kind: ProviderKind::OpenAiCompatible,
@@ -2469,7 +2610,7 @@ mod tests {
         })
         .expect("no-retry provider");
         let observer = CountingRetryObserver::default();
-        let result = provider
+        let response = provider
             .openai_compatible_stream(
                 ModelRequest {
                     model: "test-model".into(),
@@ -2480,16 +2621,21 @@ mod tests {
                 },
                 &observer,
             )
-            .await;
-        server.join().expect("join no-retry test server");
-        assert!(
-            result.is_err(),
-            "a stream that already pushed output must fail, not retry (no duplicate text)"
-        );
+            .await
+            .expect("partial output should be reset before the replacement attempt");
+        server.join().expect("join reset-retry test server");
+        assert_eq!(response.content, "replacement");
         assert_eq!(
             *observer.retries.lock().expect("retry counter lock"),
-            0,
-            "observer must not be notified when output was already streamed"
+            1,
+            "observer must be notified when partial output is replaced"
+        );
+        assert_eq!(
+            *observer
+                .reset_text_characters
+                .lock()
+                .expect("reset character lock"),
+            vec!["partial-answer".chars().count()]
         );
     }
 
@@ -2500,7 +2646,9 @@ mod tests {
 
     fn spawn_invalid_args_then_success() -> (String, JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind invalid-args test server");
-        let address = listener.local_addr().expect("read invalid-args test address");
+        let address = listener
+            .local_addr()
+            .expect("read invalid-args test address");
         let handle = std::thread::spawn(move || {
             // First connection: completes normally ([DONE]) but the tool
             // arguments are truncated mid-JSON — exactly what a gateway that
@@ -2539,7 +2687,9 @@ mod tests {
                     body.len()
                 )
                 .expect("write second headers");
-                socket.write_all(body.as_bytes()).expect("write second body");
+                socket
+                    .write_all(body.as_bytes())
+                    .expect("write second body");
             }
         });
         (format!("http://{address}"), handle)
@@ -2590,7 +2740,9 @@ mod tests {
 
     fn spawn_length_truncated_then_success() -> (String, JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind length-truncate test server");
-        let address = listener.local_addr().expect("read length-truncate test address");
+        let address = listener
+            .local_addr()
+            .expect("read length-truncate test address");
         let handle = std::thread::spawn(move || {
             // First connection: ends with finish_reason=length after a tool-call
             // delta and no text — the gateway-side truncation of a long
@@ -2628,7 +2780,9 @@ mod tests {
                     body.len()
                 )
                 .expect("write second headers");
-                socket.write_all(body.as_bytes()).expect("write second body");
+                socket
+                    .write_all(body.as_bytes())
+                    .expect("write second body");
             }
         });
         (format!("http://{address}"), handle)
@@ -2672,9 +2826,105 @@ mod tests {
         );
     }
 
+    fn spawn_reasoning_truncated_then_success() -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind reasoning-truncate server");
+        let address = listener
+            .local_addr()
+            .expect("read reasoning-truncate address");
+        let handle = std::thread::spawn(move || {
+            {
+                let (mut socket, _) = listener
+                    .accept()
+                    .expect("accept truncated reasoning request");
+                let mut request = [0_u8; 4096];
+                let _ = socket
+                    .read(&mut request)
+                    .expect("read truncated reasoning request");
+                let body = concat!(
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"private reasoning only\"},\"finish_reason\":null}]}\n\n",
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+                );
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .expect("write truncated reasoning headers");
+                socket
+                    .write_all(body.as_bytes())
+                    .expect("write truncated reasoning body");
+            }
+            {
+                let (mut socket, _) = listener.accept().expect("accept replacement request");
+                let mut request = [0_u8; 4096];
+                let bytes = socket.read(&mut request).expect("read replacement request");
+                let request_text = String::from_utf8_lossy(&request[..bytes]);
+                assert!(request_text.contains("\"max_tokens\":32768"));
+                let body = concat!(
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"visible answer\"},\"finish_reason\":null}]}\n\n",
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                    "data: [DONE]\n\n",
+                );
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .expect("write replacement headers");
+                socket
+                    .write_all(body.as_bytes())
+                    .expect("write replacement body");
+            }
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    #[tokio::test]
+    async fn retries_empty_reasoning_truncation_with_a_larger_budget() {
+        let (base_url, server) = spawn_reasoning_truncated_then_success();
+        let provider = HttpModelProvider::new(ProviderConfig {
+            id: "reasoning-truncate".into(),
+            kind: ProviderKind::OpenAiCompatible,
+            display: "ReasoningTruncate".into(),
+            api_key: "test-key".into(),
+            base_url,
+            model: "test-model".into(),
+            fast_model: None,
+            capabilities: ModelCapabilities::default(),
+            remote_compaction_mode: RemoteCompactionMode::default(),
+        })
+        .expect("reasoning-truncate provider");
+        let observer = CountingRetryObserver::default();
+        let response = provider
+            .openai_compatible_stream(
+                ModelRequest {
+                    model: "test-model".into(),
+                    messages: vec![ChatMessage::user("continue")],
+                    tools: Vec::new(),
+                    max_output_tokens: None,
+                    required_tool: None,
+                },
+                &observer,
+            )
+            .await
+            .expect("empty truncated reasoning should retry and return visible output");
+        server.join().expect("join reasoning-truncate server");
+        assert_eq!(response.content, "visible answer");
+        assert_eq!(*observer.retries.lock().expect("retry counter lock"), 1);
+        assert_eq!(
+            *observer
+                .reset_text_characters
+                .lock()
+                .expect("reset character lock"),
+            vec![0]
+        );
+    }
+
     fn spawn_text_then_invalid_args_then_success() -> (String, JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind text-then-invalid server");
-        let address = listener.local_addr().expect("read text-then-invalid address");
+        let address = listener
+            .local_addr()
+            .expect("read text-then-invalid address");
         let handle = std::thread::spawn(move || {
             // First connection: streams visible text, then a tool call whose
             // arguments are invalid JSON. Even though text was streamed, the
@@ -2713,7 +2963,9 @@ mod tests {
                     body.len()
                 )
                 .expect("write second headers");
-                socket.write_all(body.as_bytes()).expect("write second body");
+                socket
+                    .write_all(body.as_bytes())
+                    .expect("write second body");
             }
         });
         (format!("http://{address}"), handle)
@@ -2860,6 +3112,57 @@ mod tests {
         assert_eq!(
             response.tool_calls[0].arguments,
             json!({"path": "README.md"})
+        );
+    }
+
+    #[test]
+    fn chat_stream_preserves_increment_that_matches_the_json_prefix() {
+        let mut state = ChatStreamState::default();
+        for value in [
+            json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call-1",
+                            "function": {
+                                "name": "write_file",
+                                "arguments": "{\"content\":\"before "
+                            }
+                        }]
+                    }
+                }]
+            }),
+            json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {"arguments": "{"}
+                        }]
+                    }
+                }]
+            }),
+            json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {"arguments": " after\",\"path\":\"chapter.md\"}"}
+                        }]
+                    }
+                }]
+            }),
+        ] {
+            state
+                .consume(&value, &TestStreamObserver)
+                .expect("consume chat stream fragment");
+        }
+
+        let response = state.finish().expect("finish incremental chat stream");
+        assert_eq!(
+            response.tool_calls[0].arguments,
+            json!({"content": "before { after", "path": "chapter.md"})
         );
     }
 

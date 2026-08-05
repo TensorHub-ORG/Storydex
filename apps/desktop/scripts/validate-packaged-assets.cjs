@@ -113,12 +113,27 @@ requireDirectory("backend source", path.join(appRoot, "backend"));
 requireFile("runtime requirements", path.join(appRoot, "backend", "requirements-runtime.txt"));
 requireFile("runtime requirements lock", path.join(appRoot, "backend", "requirements-runtime.lock"));
 const bridgeBinary = path.join(appRoot, "backend", "runtime", "storydex-coomi-bridge.exe");
+const bridgeBuildMetadata = path.join(appRoot, "backend", "runtime", "storydex-coomi-build.json");
 requireFile("Storydex Coomi Rust bridge", bridgeBinary);
+requireFile("Storydex Coomi build identity", bridgeBuildMetadata);
 if (fs.existsSync(bridgeBinary)) {
   const bridgeVersion = spawnSync(bridgeBinary, ["--version"], { cwd: repoRoot, encoding: "utf8", windowsHide: true });
   const output = `${bridgeVersion.stdout || ""}${bridgeVersion.stderr || ""}`;
   if (bridgeVersion.status !== 0 || !/storydex-coomi-bridge\s+\S+/i.test(output)) {
     failures.push(`Storydex Coomi Rust bridge --version failed: ${output.trim() || bridgeVersion.error?.message || "no output"}`);
+  }
+  if (!/\bgit=[0-9a-f]+\b/i.test(output) || !/\bsource=[0-9a-f]+\b/i.test(output)) {
+    failures.push(`Storydex Coomi Rust bridge build identity missing from --version: ${output.trim()}`);
+  }
+  if (fs.existsSync(bridgeBuildMetadata)) {
+    try {
+      const metadata = JSON.parse(fs.readFileSync(bridgeBuildMetadata, "utf8"));
+      if (!output.includes(`git=${metadata.gitSha}`) || !output.includes(`source=${metadata.sourceFingerprint}`)) {
+        failures.push("Storydex Coomi bridge binary does not match packaged build identity");
+      }
+    } catch (error) {
+      failures.push(`Storydex Coomi build identity is invalid JSON: ${error.message}`);
+    }
   }
 }
 requireDirectory("embedded Python", path.join(appRoot, "python-env"));

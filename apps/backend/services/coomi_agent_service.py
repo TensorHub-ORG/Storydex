@@ -585,6 +585,7 @@ class StorydexCoomiAgentService:
         )
         resolution_tasks: set[asyncio.Task[Any]] = set()
         terminal_seen = False
+        attempt_text_characters = 0
         try:
             async for packet in bridge.events():
                 if _is_cancelled(cancellation_token):
@@ -613,12 +614,17 @@ class StorydexCoomiAgentService:
                         "_version": 1,
                         "attempt": attempt,
                         "maxAttempts": max_attempts,
+                        "resetTextCharacters": attempt_text_characters,
+                        "providerResetTextCharacters": int(
+                            data.get("resetTextCharacters") or 0
+                        ),
                         "message": (
                             "当前上游提供商服务不稳定，正在自动重试"
                             f"（第 {attempt}/{max_attempts} 次）。"
                         ),
                         "details": {"runtime": "storydex-coomi-rs", "source": "agent"},
                     }
+                    attempt_text_characters = 0
                     continue
                 if packet_type in {"approval_request", "user_input_request"}:
                     events, task = self._prepare_interaction(
@@ -661,8 +667,12 @@ class StorydexCoomiAgentService:
                         workspace_root=workspace,
                         active=False,
                     )
+                if packet_type == "model_started":
+                    attempt_text_characters = 0
                 translated = translator.translate(packet)
                 if translated is not None:
+                    if translated[0] == "TextChunk":
+                        attempt_text_characters += len(str(translated[1].get("content") or ""))
                     if translated[0] in {"AgentCompleted", "AgentCancelled", "AgentError"}:
                         terminal_seen = True
                     yield translated
@@ -1498,6 +1508,7 @@ def _create_storydex_tool_registry(
         StorydexHelpGuideSearchTool,
         StorydexProjectSearchTool,
         StorydexRuntimePresetStatusTool,
+        StorydexStageStoryFragmentTool,
         StorydexSyncWikiTool,
         StorydexVersionStatusTool,
         StorydexWikiQueryTool,
@@ -1519,6 +1530,7 @@ def _create_storydex_tool_registry(
     tools.extend(
         [
             StorydexSyncWikiTool(workspace_root=root),
+            StorydexStageStoryFragmentTool(workspace_root=root),
             StorydexApplyStoryIncrementTool(workspace_root=root, turn_contract=turn_contract),
         ]
     )
@@ -1530,7 +1542,7 @@ def _create_storydex_tool_registry(
             intent = _dict_value(turn_contract.get("intentFrame"))
             allowed = set()
             if str(intent.get("primary") or "").lower() == "story_generation" and str(intent.get("operationType") or "").lower() == "create_new":
-                allowed.add("StorydexApplyStoryIncrement")
+                allowed.update({"StorydexStageStoryFragment", "StorydexApplyStoryIncrement"})
             if str(intent.get("primary") or "").lower() == "wiki_work":
                 allowed.add("StorydexSyncWiki")
             tools = [
@@ -1554,6 +1566,8 @@ async def _build_coomi_system_prompt(
     turn_contract: Dict[str, Any] | None = None,
     plan_mode: bool = False,
 ) -> str:
+    from services.storydex_agent_tools import STORY_FRAGMENT_CHUNK_MAX_CHARS
+
     del prompt
     policy = context_policy_from_turn_contract(turn_contract)
     tools = _create_storydex_tool_registry(
@@ -1573,7 +1587,11 @@ async def _build_coomi_system_prompt(
         f"Storydex domain tools available this turn: {names}.",
         "For Storydex usage questions, call StorydexHelpGuideSearch before answering.",
         "For continuity facts not present in assembled context, use StorydexProjectSearch or StorydexWikiQuery when available.",
-        "For story creation, apply final fragments and grounded memory changes with StorydexApplyStoryIncrement; do not write chapters with generic file tools.",
+        (
+            "For story creation, never write chapters with generic file tools. For any fragment longer than "
+            f"{STORY_FRAGMENT_CHUNK_MAX_CHARS} characters, call StorydexStageStoryFragment once per consecutive "
+            "chunk, then call StorydexApplyStoryIncrement with stagedFragmentId. Inline only shorter fragments."
+        ),
         "Treat .storydex/memory as durable story state only, never as chat or execution-log storage.",
         (
             "Plan mode is active. This session is read-only until exit_plan_mode succeeds."

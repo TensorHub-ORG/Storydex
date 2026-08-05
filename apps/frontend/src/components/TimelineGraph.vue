@@ -25,7 +25,7 @@
         v-if="density === 'compact'"
         class="wl-tool-btn"
         type="button"
-        title="在主区放大查看平行时空线"
+        title="在主区放大查看时空线"
         @click="emit('expand')"
       >
         <span class="material-symbols-rounded">open_in_full</span>
@@ -53,7 +53,7 @@
       @wheel.prevent="onWheel"
       @contextmenu.prevent
     >
-      <svg class="wl-svg" role="img" aria-label="平行时空线树状图">
+      <svg class="wl-svg" role="img" aria-label="时空线分支图">
         <g :transform="`translate(${panX}, ${panY}) scale(${zoom})`">
           <!-- 轨道底线：从该世界线的分叉点一直画到它的最新节点 -->
           <line
@@ -263,7 +263,7 @@
       class="wl-resize"
       role="separator"
       aria-orientation="horizontal"
-      aria-label="拖动调整平行时空线高度"
+      aria-label="拖动调整时空线高度"
       tabindex="0"
       @pointerdown.prevent="startResize"
       @keydown="onResizeKeydown"
@@ -368,7 +368,7 @@ const hasNodes = computed(() => rawNodes.value.length > 0);
 const busy = computed(() => Boolean(props.busy));
 
 const emptyHint = computed(() => {
-  if (props.loading) return "正在读取平行时空线…";
+  if (props.loading) return "正在读取时空线…";
   if (!props.timeline?.initialized) return "还没有启用版本记录。启用后，每次提交都会在这里留下一个节点。";
   return "还没有任何版本节点。先提交一次，为这条世界线留下起点。";
 });
@@ -626,22 +626,13 @@ function onPanUp(): void {
   window.removeEventListener("pointerup", onPanUp);
 }
 
-/** Ctrl/Cmd + 滚轮缩放（以指针为锚点），普通滚轮平移。 */
+/** 滚轮始终以指针为锚点缩放；拖拽画布负责平移。 */
 function onWheel(event: WheelEvent): void {
-  if (event.ctrlKey || event.metaKey) {
-    const canvas = canvasRef.value;
-    const rect = canvas?.getBoundingClientRect();
-    const originX = rect ? event.clientX - rect.left : 0;
-    const originY = rect ? event.clientY - rect.top : 0;
-    zoomAt(event.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP, originX, originY);
-    return;
-  }
-  if (event.shiftKey) {
-    panX.value -= event.deltaY;
-    return;
-  }
-  panX.value -= event.deltaX;
-  panY.value -= event.deltaY;
+  const canvas = canvasRef.value;
+  const rect = canvas?.getBoundingClientRect();
+  const originX = rect ? event.clientX - rect.left : 0;
+  const originY = rect ? event.clientY - rect.top : 0;
+  zoomAt(event.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP, originX, originY);
 }
 
 function zoomAt(delta: number, originX: number, originY: number): void {
@@ -780,7 +771,7 @@ defineExpose({
     laidOutNodes, laneTracks, edgePaths, ghost, popoverTags, contentSize,
     laneColor, laneChipTitle, deleteLaneTitle, jumpActionLabel, nodeAriaLabel,
     isDimmed, onNodeClick, openLaneMenu, act, closeOverlays,
-    zoomBy, zoomAt, centerOnCurrent, fitToView, clamp, formatTimestamp
+    onWheel, zoomBy, zoomAt, centerOnCurrent, fitToView, clamp, formatTimestamp
   } : null
 });
 </script>

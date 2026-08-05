@@ -17,7 +17,13 @@ from services.coomi_agent_service import (
 )
 from services.retrieval_service import RetrievalService, reset_retrieval_cache
 from services.story_project_service import get_story_project_service
-from services.storydex_agent_tools import StorydexProjectSearchTool, StorydexWikiQueryTool
+from services.storydex_agent_tools import (
+    STORY_FRAGMENT_CHUNK_MAX_CHARS,
+    StorydexApplyStoryIncrementTool,
+    StorydexProjectSearchTool,
+    StorydexStageStoryFragmentTool,
+    StorydexWikiQueryTool,
+)
 from services.storydex_context_assembler_service import StorydexContextAssemblerService
 from services.trace_history_service import TraceHistoryService
 
@@ -82,6 +88,54 @@ def test_storydex_registry_contains_domain_retrieval_tools(tmp_path) -> None:
     by_name = {tool.name: tool for tool in registry.list_tools()}
     assert isinstance(by_name["StorydexProjectSearch"], StorydexProjectSearchTool)
     assert isinstance(by_name["StorydexWikiQuery"], StorydexWikiQueryTool)
+    assert isinstance(by_name["StorydexStageStoryFragment"], StorydexStageStoryFragmentTool)
+
+
+def test_long_story_fragment_is_staged_in_bounded_chunks_then_applied(tmp_path) -> None:
+    stage = StorydexStageStoryFragmentTool(workspace_root=tmp_path)
+    fragment_id = "chapter-001-opening"
+    first = "甲" * STORY_FRAGMENT_CHUNK_MAX_CHARS
+    second = "乙" * 900
+    for index, text in enumerate((first, second)):
+        result = stage.run(
+            {
+                "fragmentId": fragment_id,
+                "path": "chapters/001.md",
+                "chunkIndex": index,
+                "chunkCount": 2,
+                "text": text,
+            }
+        )
+        assert result.success is True
+    apply = StorydexApplyStoryIncrementTool(workspace_root=tmp_path)
+    result = apply.run(
+        {
+            "fragments": [
+                {"path": "chapters/001.md", "stagedFragmentId": fragment_id}
+            ]
+        }
+    )
+    assert result.success is True
+    assert (tmp_path / "chapters" / "001.md").read_text(encoding="utf-8") == first + second + "\n"
+    staging = tmp_path / ".storydex/.agent/runtime/story-fragment-staging"
+    assert list(staging.glob("*.json")) == []
+
+
+def test_long_inline_story_fragment_must_use_staging(tmp_path) -> None:
+    apply = StorydexApplyStoryIncrementTool(workspace_root=tmp_path)
+    result = apply.run(
+        {
+            "fragments": [
+                {
+                    "path": "chapters/001.md",
+                    "text": "长" * (STORY_FRAGMENT_CHUNK_MAX_CHARS + 1),
+                }
+            ]
+        }
+    )
+    assert result.success is False
+    assert "must be staged" in str(result.error)
+    assert not (tmp_path / "chapters" / "001.md").exists()
 
 
 def test_project_search_tool_returns_ranked_workspace_hits(tmp_path) -> None:

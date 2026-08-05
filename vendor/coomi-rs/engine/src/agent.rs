@@ -509,9 +509,12 @@ impl ModelStreamObserver for ObserverStream<'_> {
             .on_event(&AgentEvent::ReasoningDelta(delta.to_owned()));
     }
 
-    fn on_provider_retry(&self, attempt: usize, max_attempts: usize) {
-        self.observer
-            .on_event(&AgentEvent::ProviderRetry { attempt, max_attempts });
+    fn on_provider_retry(&self, attempt: usize, max_attempts: usize, reset_text_characters: usize) {
+        self.observer.on_event(&AgentEvent::ProviderRetry {
+            attempt,
+            max_attempts,
+            reset_text_characters,
+        });
     }
 }
 

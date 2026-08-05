@@ -11,7 +11,7 @@ from typing import Any, AsyncIterator, Dict, Iterable
 
 
 BRIDGE_PROTOCOL_VERSION = 1
-STORYDEX_COOMI_RUNTIME_VERSION = "2.0.0-storydex.1"
+STORYDEX_COOMI_RUNTIME_VERSION = "2.0.0-storydex.2"
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 VENDORED_RUNTIME_ROOT = REPOSITORY_ROOT / "vendor" / "coomi-rs"
 STORYDEX_COOMI_HOME = Path.home() / ".storydex" / ".coomi"

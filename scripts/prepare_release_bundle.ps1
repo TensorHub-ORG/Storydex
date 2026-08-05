@@ -94,7 +94,7 @@ Invoke-BundleStep "Verify portable ZIP index" {
     $actualEntries = @{}
     foreach ($entry in $archive.Entries) {
       if ([string]::IsNullOrEmpty($entry.Name)) { continue }
-      $entryName = $entry.FullName.TrimStart([char[]]"/")
+      $entryName = $entry.FullName.TrimStart([char[]]"/\").Replace("\", "/")
       if ($actualEntries.ContainsKey($entryName)) { throw "Portable ZIP contains duplicate entry: $entryName" }
       $actualEntries[$entryName] = $entry.Length
     }

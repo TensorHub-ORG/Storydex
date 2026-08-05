@@ -314,7 +314,12 @@ if (!exists(bridgeExecutable)) {
 } else {
   const bridgeVersion = spawnSync(bridgeExecutable, ["--version"], { cwd: repoRoot, encoding: "utf8", windowsHide: true });
   const bridgeOutput = `${bridgeVersion.stdout || ""}${bridgeVersion.stderr || ""}`;
-  if (bridgeVersion.status !== 0 || !/storydex-coomi-bridge\s+\S+/i.test(bridgeOutput)) {
+  if (
+    bridgeVersion.status !== 0 ||
+    !/storydex-coomi-bridge\s+\S+/i.test(bridgeOutput) ||
+    !/\bgit=[0-9a-f]+\b/i.test(bridgeOutput) ||
+    !/\bsource=[0-9a-f]+\b/i.test(bridgeOutput)
+  ) {
     fail(`Storydex Coomi Rust bridge preflight failed: ${bridgeOutput.trim() || bridgeVersion.error?.message || "no output"}`);
   }
 }

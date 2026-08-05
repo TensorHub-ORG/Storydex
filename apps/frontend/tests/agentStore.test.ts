@@ -133,6 +133,39 @@ describe("agent store streaming", () => {
     expect(assistant?.content).toBe("第一段输出");
   });
 
+  it("rolls back an incomplete provider attempt before rendering retry output", async () => {
+    api.streamAgentPrompt.mockImplementation(async (_request: unknown, onPacket: (packet: unknown) => void) => {
+      onPacket({ _type: "TurnPhase", phase: "model", status: "running", label: "模型" });
+      onPacket({ _type: "TextChunk", content: "未完成输出" });
+      onPacket({
+        _type: "ConnectionRetry",
+        attempt: 1,
+        maxAttempts: 3,
+        resetTextCharacters: 5,
+        message: "上游流中断，正在重试"
+      });
+      onPacket({ _type: "TextChunk", content: "完整替代输出" });
+      onPacket({ _type: "AgentCompleted", status: "success" });
+    });
+    const store = useAgentStore();
+    store.currentSessionId = "session-retry-reset";
+    store.promptInput = "生成正文";
+
+    await store.runPrompt();
+
+    expect(store.lastReply).toBe("完整替代输出");
+    expect(store.executionHistory[0].reply).toBe("完整替代输出");
+    expect(store.executionHistory[0].events.some((event) => event.event === "ConnectionRetry")).toBe(true);
+    expect(store.executionHistory[0].events.some(
+      (event) => event.event === "TextChunk" && event.detail.includes("未完成")
+    )).toBe(false);
+    const assistantText = store.executionHistory[0].items
+      .filter((item) => item.type === "assistant")
+      .map((item) => item.content)
+      .join("");
+    expect(assistantText).toBe("完整替代输出");
+  });
+
   it("records cancellation and failures without leaving the run locked", async () => {
     api.streamAgentPrompt.mockRejectedValueOnce(Object.assign(new Error("cancelled"), { code: "request_aborted" }));
     const store = useAgentStore();

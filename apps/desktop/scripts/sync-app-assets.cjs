@@ -40,6 +40,20 @@ const coomiBridgeSource = path.join(
   process.platform === "win32" ? "storydex-coomi-bridge.exe" : "storydex-coomi-bridge"
 );
 const coomiBridgeTarget = path.join(appRoot, "backend", "runtime", path.basename(coomiBridgeSource));
+const coomiBuildMetadataSource = path.join(
+  repoRoot,
+  "vendor",
+  "coomi-rs",
+  "target",
+  "release",
+  "storydex-coomi-build.json"
+);
+const coomiBuildMetadataTarget = path.join(
+  appRoot,
+  "backend",
+  "runtime",
+  "storydex-coomi-build.json"
+);
 
 function ensureSource(pathValue, label) {
   if (!fs.existsSync(pathValue)) {
@@ -118,8 +132,10 @@ function copyRuntimeDependencyManifests() {
 
 function copyCoomiBridge() {
   ensureSource(coomiBridgeSource, "Storydex Coomi Rust bridge");
+  ensureSource(coomiBuildMetadataSource, "Storydex Coomi build identity");
   fs.mkdirSync(path.dirname(coomiBridgeTarget), { recursive: true });
   fs.copyFileSync(coomiBridgeSource, coomiBridgeTarget);
+  fs.copyFileSync(coomiBuildMetadataSource, coomiBuildMetadataTarget);
 }
 
 function copyHelpGuide() {

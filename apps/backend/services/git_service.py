@@ -1070,7 +1070,13 @@ class GitService:
             self._ensure_branch_before_commit(root) if not is_first_commit else None
         )
 
-        self._run_git(root, ["add", "-A", "--", *normalized_paths])
+        commit_paths = self._stage_paths_tolerating_stale_entries(root, normalized_paths)
+        if not commit_paths or not self._paths_have_changes(root, commit_paths):
+            return {
+                "created": False,
+                "commit": None,
+                "summary": self.read_summary(root),
+            }
         final_message = self._normalize_commit_message(
             message,
             fallback_prefix="story: local snapshot",
@@ -1079,7 +1085,7 @@ class GitService:
             self._run_git(root, ["add", "-A"])
             self._run_git(root, ["commit", "--no-gpg-sign", "-m", final_message])
         else:
-            self._run_git(root, ["commit", "--no-gpg-sign", "--only", "-m", final_message, "--", *normalized_paths])
+            self._run_git(root, ["commit", "--no-gpg-sign", "--only", "-m", final_message, "--", *commit_paths])
         result = {
             "created": True,
             "commit": self._read_head_commit(root),
@@ -1355,6 +1361,45 @@ class GitService:
             check=False,
         )
         return bool(status.strip())
+
+    def _stage_paths_tolerating_stale_entries(self, workspace_root: Path, paths: List[str]) -> List[str]:
+        """Stage a scoped change set while tolerating paths removed by a race.
+
+        Agent commit confirmation can spend several seconds generating a commit
+        message. During that window a finalizer or a user rename may remove a
+        previously reported untracked path. One stale path makes a batched
+        ``git add -A -- <paths>`` fail with exit code 128, even though every
+        other path is valid. Retry individually only for that specific Git
+        error, retaining tracked deletions and skipping entries that no longer
+        match either the index or working tree.
+        """
+        normalized_paths = self._normalize_paths(paths)
+        if not normalized_paths:
+            return []
+        root = self._resolve_workspace_root(workspace_root)
+        batch_args = ["add", "-A", "--", *normalized_paths]
+        batch = self._run_git_process_result(root, batch_args)
+        if batch.returncode == 0:
+            return normalized_paths
+        if not self._is_unmatched_pathspec_result(batch):
+            raise self._git_process_error(batch_args, batch)
+
+        staged: List[str] = []
+        for path in normalized_paths:
+            args = ["add", "-A", "--", path]
+            result = self._run_git_process_result(root, args)
+            if result.returncode == 0:
+                staged.append(path)
+                continue
+            if self._is_unmatched_pathspec_result(result):
+                continue
+            raise self._git_process_error(args, result)
+        return staged
+
+    @staticmethod
+    def _is_unmatched_pathspec_result(result: subprocess.CompletedProcess[str]) -> bool:
+        stderr = str(result.stderr or "").lower()
+        return result.returncode != 0 and "pathspec" in stderr and "did not match any files" in stderr
 
     @staticmethod
     def _normalize_paths(paths: Iterable[str]) -> List[str]:
@@ -1693,23 +1738,31 @@ class GitService:
     def _run_git_process(cls, workspace_root: Path, args: List[str], *, check: bool = True) -> str:
         result = cls._run_git_process_result(workspace_root, args)
         if check and result.returncode != 0:
-            stderr = result.stderr.strip()
-            # 将 stderr 的首行并入 message，让前端直接显示真正的 git 错误原因
-            # （如 "error: Your local changes would be overwritten by checkout"），
-            # 而不是笼统的 "Local Git command failed."
-            first_line = stderr.splitlines()[0] if stderr else ""
-            message = f"Local Git command failed: {first_line}" if first_line else "Local Git command failed."
-            raise GitServiceError(
-                message,
-                details={
-                    "args": args,
-                    "gitExecutable": cls._resolve_git_executable(),
-                    "returncode": result.returncode,
-                    "stderr": stderr,
-                    "stdout": result.stdout.strip(),
-                },
-            )
+            raise cls._git_process_error(args, result)
         return result.stdout.strip()
+
+    @classmethod
+    def _git_process_error(
+        cls,
+        args: List[str],
+        result: subprocess.CompletedProcess[str],
+    ) -> GitServiceError:
+        stderr = result.stderr.strip()
+        # 将 stderr 的首行并入 message，让前端直接显示真正的 git 错误原因
+        # （如 "error: Your local changes would be overwritten by checkout"），
+        # 而不是笼统的 "Local Git command failed."
+        first_line = stderr.splitlines()[0] if stderr else ""
+        message = f"Local Git command failed: {first_line}" if first_line else "Local Git command failed."
+        return GitServiceError(
+            message,
+            details={
+                "args": args,
+                "gitExecutable": cls._resolve_git_executable(),
+                "returncode": result.returncode,
+                "stderr": stderr,
+                "stdout": result.stdout.strip(),
+            },
+        )
 
     @classmethod
     def _repository_top_level(cls, workspace_root: Path) -> Path | None:

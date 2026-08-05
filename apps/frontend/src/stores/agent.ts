@@ -1404,6 +1404,15 @@ export const useAgentStore = defineStore("agent", {
         events: mergeStreamingTraceEvent(current.events, event),
         updatedAt: new Date().toISOString()
       };
+      if (eventName === "ConnectionRetry") {
+        const resetTextCharacters = Math.max(0, Number(visiblePacket.resetTextCharacters || 0));
+        if (resetTextCharacters > 0) {
+          nextRun.reply = dropTrailingCodePoints(nextRun.reply, resetTextCharacters);
+          nextRun.events = rollbackTraceTextEvents(nextRun.events, resetTextCharacters);
+          nextRun.items = rollbackAssistantItems(nextRun.items, resetTextCharacters);
+          this.lastReply = nextRun.reply;
+        }
+      }
 
       if (typeof visiblePacket.noRestorePoint === "boolean") {
         nextRun.noRestorePoint = visiblePacket.noRestorePoint;
@@ -1729,6 +1738,54 @@ function mergeStreamingTraceEvent(events: AgentTraceEvent[], event: AgentTraceEv
   ];
 }
 
+function dropTrailingCodePoints(value: string, characterCount: number): string {
+  const characters = Array.from(String(value || ""));
+  const count = Math.max(0, Math.floor(Number(characterCount || 0)));
+  return count >= characters.length ? "" : characters.slice(0, characters.length - count).join("");
+}
+
+function rollbackTraceTextEvents(events: AgentTraceEvent[], characterCount: number): AgentTraceEvent[] {
+  const output = [...events];
+  let remaining = Math.max(0, Math.floor(Number(characterCount || 0)));
+  for (let index = output.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const event = output[index];
+    if (event.event !== "TextChunk") continue;
+    const content = String(event.data?.content || "");
+    const length = Array.from(content).length;
+    if (length <= remaining) {
+      remaining -= length;
+      output.splice(index, 1);
+      continue;
+    }
+    const kept = dropTrailingCodePoints(content, remaining);
+    output[index] = {
+      ...event,
+      detail: kept,
+      data: { ...(event.data || {}), content: kept }
+    };
+    remaining = 0;
+  }
+  return output.map((event, index) => ({ ...event, index: index + 1 }));
+}
+
+function rollbackAssistantItems(items: CoomiWaterfallItem[], characterCount: number): CoomiWaterfallItem[] {
+  const output = [...items];
+  let remaining = Math.max(0, Math.floor(Number(characterCount || 0)));
+  for (let index = output.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const item = output[index];
+    if (item.type !== "assistant") continue;
+    const length = Array.from(item.content).length;
+    if (length <= remaining) {
+      remaining -= length;
+      output.splice(index, 1);
+      continue;
+    }
+    output[index] = { ...item, content: dropTrailingCodePoints(item.content, remaining) };
+    remaining = 0;
+  }
+  return output;
+}
+
 function streamPacketToWaterfallItem(
   traceId: string,
   packet: AgentStreamPacket,
@@ -1779,13 +1836,14 @@ function streamPacketToWaterfallItem(
   if (eventName === "ConnectionRetry") {
     const attempt = Math.max(1, Number(packet.attempt || 1));
     const maxAttempts = Math.max(attempt, Number(packet.maxAttempts || packet.max_attempts || attempt));
+    const resetTextCharacters = Math.max(0, Number(packet.resetTextCharacters || 0));
     const message = String(packet.message || "模型连接中断，正在自动重试。");
     return createWaterfallItem({
       id: `${traceId}-connection-retry`,
       type: "system",
       status: "warning",
       title: "模型连接重试",
-      content: `${message}（${attempt}/${maxAttempts}）`,
+      content: `${message}（${attempt}/${maxAttempts}）${resetTextCharacters > 0 ? `，已撤回本次未完成输出 ${resetTextCharacters} 字符` : ""}`,
       raw
     });
   }

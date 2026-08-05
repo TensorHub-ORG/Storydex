@@ -23,6 +23,14 @@ const directoryNode: WorkspaceTreeNode = {
   children: []
 };
 
+const secondFileNode: WorkspaceTreeNode = {
+  kind: "file",
+  name: "two.md",
+  relativePath: "two.md",
+  extension: ".md",
+  children: []
+};
+
 function mountExplorer() {
   const workspace = useWorkspaceStore();
   workspace.launchScreenVisible = false;
@@ -136,6 +144,57 @@ describe("ExplorerSidebar creation and selection invariants", () => {
     await nextTick();
     expect(utils.selectionAnchor.value).toBe("");
 
+    wrapper.unmount();
+  });
+
+  it("supports Ctrl+C and Ctrl+V for multiple selected files", async () => {
+    const { wrapper, workspace, utils } = mountExplorer();
+    workspace.tree = [fileNode, secondFileNode, directoryNode];
+    const copyPath = vi.spyOn(workspace, "copyPath").mockResolvedValue({} as never);
+    await nextTick();
+
+    utils.selectedPaths.value = new Set(["one.md", "two.md"]);
+    wrapper.findAll("button.tree-row")[0].element.focus();
+    const copyEvent = new KeyboardEvent("keydown", { key: "c", ctrlKey: true, bubbles: true, cancelable: true });
+    document.activeElement!.dispatchEvent(copyEvent);
+    expect(copyEvent.defaultPrevented).toBe(true);
+    expect(utils.clipboardState.value.nodes.map((node: WorkspaceTreeNode) => node.relativePath)).toEqual(["one.md", "two.md"]);
+
+    utils.selectOnly("chapters");
+    wrapper.findAll("button.tree-row")[2].element.focus();
+    const pasteEvent = new KeyboardEvent("keydown", { key: "v", ctrlKey: true, bubbles: true, cancelable: true });
+    document.activeElement!.dispatchEvent(pasteEvent);
+    await flushPromises();
+
+    expect(copyPath).toHaveBeenNthCalledWith(1, "one.md", "chapters/one.md");
+    expect(copyPath).toHaveBeenNthCalledWith(2, "two.md", "chapters/two.md");
+    wrapper.unmount();
+  });
+
+  it("does not intercept editor clipboard shortcuts and removes nested duplicate selections", () => {
+    const { wrapper, utils } = mountExplorer();
+    const input = document.createElement("textarea");
+    document.body.appendChild(input);
+    const event = new KeyboardEvent("keydown", { key: "c", ctrlKey: true, bubbles: true, cancelable: true });
+    input.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(utils.clipboardState.value).toBeNull();
+    expect(utils.topLevelPaths(["chapters", "chapters/one.md", "two.md"])).toEqual(["chapters", "two.md"]);
+    wrapper.unmount();
+  });
+
+  it("moves all selected top-level paths by internal drag", async () => {
+    const { wrapper, workspace, utils } = mountExplorer();
+    workspace.tree = [fileNode, secondFileNode, directoryNode];
+    const movePath = vi.spyOn(workspace, "movePath").mockResolvedValue({} as never);
+    utils.selectedPaths.value = new Set(["one.md", "two.md"]);
+    const transfer = { setData: vi.fn(), effectAllowed: "", dropEffect: "" };
+
+    utils.handleInternalDragStart({ dataTransfer: transfer } as unknown as DragEvent, fileNode);
+    await utils.handleNodeDrop({ dataTransfer: transfer } as unknown as DragEvent, directoryNode);
+
+    expect(movePath).toHaveBeenNthCalledWith(1, "one.md", "chapters/one.md");
+    expect(movePath).toHaveBeenNthCalledWith(2, "two.md", "chapters/two.md");
     wrapper.unmount();
   });
 });
