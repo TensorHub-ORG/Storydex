@@ -25,7 +25,7 @@ const appUpdatePath = path.join(resourcesDir, "app-update.yml");
 const appUpdateYaml = [
   "provider: generic",
   `url: ${updateUrl}`,
-  "updaterCacheDirName: storydex-updater",
+  "updaterCacheDirName: storydex-desktop-updater",
   ""
 ].join("\n");
 

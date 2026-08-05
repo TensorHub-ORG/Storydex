@@ -86,7 +86,8 @@ function launchUpdateHelper(options) {
     spawnProcess = spawn,
     fsModule = fs,
     readyTimeoutMs = DEFAULT_READY_TIMEOUT_MS,
-    pollIntervalMs = DEFAULT_POLL_INTERVAL_MS
+    pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
+    testMode = false
   } = options || {};
 
   for (const [name, value] of Object.entries({ helperScript, installerPath, appPath, lockPath, parentPid, logPath })) {
@@ -100,16 +101,18 @@ function launchUpdateHelper(options) {
 
   let child;
   try {
+    const helperArguments = [
+      "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", helperScript,
+      "-InstallerPath", installerPath,
+      "-AppPath", appPath,
+      "-LockPath", lockPath,
+      "-ParentPid", String(parentPid),
+      "-LogPath", logPath
+    ];
+    if (testMode) helperArguments.push("-TestMode");
     child = spawnProcess(
       powershellPath,
-      [
-        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", helperScript,
-        "-InstallerPath", installerPath,
-        "-AppPath", appPath,
-        "-LockPath", lockPath,
-        "-ParentPid", String(parentPid),
-        "-LogPath", logPath
-      ],
+      helperArguments,
       { detached: true, stdio: "ignore", windowsHide: false }
     );
   } catch (error) {
@@ -155,8 +158,19 @@ function launchUpdateHelper(options) {
       else cleanExitedHelperLock();
     });
     child.once("exit", (code, signal) => {
-      if (!ready) rejectLaunch(helperExitError(code, signal));
-      else cleanExitedHelperLock();
+      if (!ready) {
+        // A small/test installer can finish before the polling timer observes
+        // waiting-for-app-exit. Exit code 0 is the helper's completion contract.
+        if (code === 0 && !signal) {
+          settled = true;
+          clearTimers();
+          resolve(child);
+          return;
+        }
+        rejectLaunch(helperExitError(code, signal));
+      } else {
+        cleanExitedHelperLock();
+      }
     });
 
     const pollReadyState = () => {

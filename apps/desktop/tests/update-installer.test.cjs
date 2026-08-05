@@ -100,3 +100,23 @@ test("helper exit before installation clears waiting locks but preserves install
     }
   }
 });
+
+test("successful helper exit before polling is accepted", async () => {
+  const fixture = createFixture();
+  const child = fakeChild();
+  try {
+    const launched = launchUpdateHelper({
+      ...fixture,
+      parentPid: process.pid,
+      readyTimeoutMs: 250,
+      pollIntervalMs: 50,
+      spawnProcess: () => {
+        queueMicrotask(() => child.emit("exit", 0, null));
+        return child;
+      }
+    });
+    assert.equal(await launched, child);
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});

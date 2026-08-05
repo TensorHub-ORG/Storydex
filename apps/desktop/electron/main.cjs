@@ -877,7 +877,7 @@ function resolveAutoUpdater() {
 
 function updaterRuntimeRoot() {
   const base = String(process.env.LOCALAPPDATA || app.getPath("temp") || "").trim();
-  return path.join(base, "storydex-updater");
+  return path.join(base, "storydex-desktop-updater");
 }
 
 function updaterInstallLockPath() {
