@@ -245,7 +245,26 @@ impl HttpModelProvider {
             }
             let mut state = ChatStreamState::default();
             match read_sse(response, |value| state.consume(&value, observer)).await {
-                Ok(()) => return state.finish(),
+                Ok(()) if is_truncated_tool_call_stream(&state)
+                    && attempt + 1 < PROVIDER_STREAM_ATTEMPTS =>
+                {
+                    observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS);
+                    tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
+                }
+                Ok(()) => {
+                    let pushed_any = state.pushed_any;
+                    match state.finish() {
+                        Ok(response) => return Ok(response),
+                        Err(error)
+                            if is_retryable_finish_error(&error, pushed_any)
+                                && attempt + 1 < PROVIDER_STREAM_ATTEMPTS =>
+                        {
+                            observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS);
+                            tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
                 Err(error)
                     if is_retryable_stream_error(&error)
                         && !state.pushed_any
@@ -470,7 +489,26 @@ impl HttpModelProvider {
             }
             let mut state = ResponsesStreamState::default();
             match read_sse(response, |value| state.consume(&value, observer)).await {
-                Ok(()) => return state.finish(),
+                Ok(()) if is_truncated_tool_call_stream(&state)
+                    && attempt + 1 < PROVIDER_STREAM_ATTEMPTS =>
+                {
+                    observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS);
+                    tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
+                }
+                Ok(()) => {
+                    let pushed_any = state.pushed_any;
+                    match state.finish() {
+                        Ok(response) => return Ok(response),
+                        Err(error)
+                            if is_retryable_finish_error(&error, pushed_any)
+                                && attempt + 1 < PROVIDER_STREAM_ATTEMPTS =>
+                        {
+                            observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS);
+                            tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
                 Err(error)
                     if is_retryable_stream_error(&error)
                         && !state.pushed_any
@@ -887,6 +925,59 @@ fn is_retryable_stream_error(error: &anyhow::Error) -> bool {
         || text.contains("connection closed")
 }
 
+/// Minimal retry-state surface shared by the chat and responses stream states.
+trait StreamRetryState {
+    fn saw_tool_calls(&self) -> bool;
+    fn pushed_any(&self) -> bool;
+    fn truncated(&self) -> bool;
+}
+
+impl StreamRetryState for ChatStreamState {
+    fn saw_tool_calls(&self) -> bool {
+        self.saw_tool_calls
+    }
+
+    fn pushed_any(&self) -> bool {
+        self.pushed_any
+    }
+
+    fn truncated(&self) -> bool {
+        self.finish_reason.as_deref() == Some("length")
+    }
+}
+
+impl StreamRetryState for ResponsesStreamState {
+    fn saw_tool_calls(&self) -> bool {
+        self.saw_tool_calls
+    }
+
+    fn pushed_any(&self) -> bool {
+        self.pushed_any
+    }
+
+    fn truncated(&self) -> bool {
+        self.truncated
+    }
+}
+
+/// A stream that ended truncated (finish_reason=length / response incomplete)
+/// after emitting tool-call deltas but no user-visible text is retryable: the
+/// tool was never delivered to the engine, so no side effects were produced.
+/// Some gateways truncate a long tool-argument stream this way (e.g. the
+/// opencode-go gateway ending deepseek-v4-flash output with finish_reason
+/// = length), leaving an incomplete arguments JSON that would otherwise fail
+/// in finish() with "tool arguments are not valid JSON".
+fn is_truncated_tool_call_stream(state: &impl StreamRetryState) -> bool {
+    state.truncated() && state.saw_tool_calls() && !state.pushed_any()
+}
+
+/// Tool arguments that fail to parse are retryable only while nothing
+/// user-visible was streamed — the tool never ran, so a retry cannot produce
+/// duplicate text or duplicate tool execution.
+fn is_retryable_finish_error(error: &anyhow::Error, pushed_any: bool) -> bool {
+    !pushed_any && format!("{error:#}").contains("tool arguments are not valid JSON")
+}
+
 #[derive(Default)]
 struct PartialToolCall {
     id: String,
@@ -961,16 +1052,29 @@ struct ChatStreamState {
     tools: BTreeMap<usize, PartialToolCall>,
     implicit_tools: BTreeMap<usize, usize>,
     usage: TokenUsage,
-    /// True once any content/reasoning/tool delta has been pushed to the
+    /// True once user-visible text/reasoning deltas have been pushed to the
     /// observer. A retry must never re-stream already-displayed deltas, so
-    /// streams that produced output are not retried.
+    /// streams that produced visible output are not retried. Tool-call deltas
+    /// do not count: a tool that was never delivered to the engine has no
+    /// side effects, so its stream may safely be retried.
     pushed_any: bool,
+    /// True once any tool-call delta has been received. Used to decide whether
+    /// a truncated stream (finish_reason=length) may be retried.
+    saw_tool_calls: bool,
+    /// finish_reason reported by the stream, if any ("stop", "length", ...).
+    finish_reason: Option<String>,
 }
 
 impl ChatStreamState {
     fn consume(&mut self, value: &Value, observer: &dyn ModelStreamObserver) -> Result<()> {
         if value.get("usage").is_some_and(|usage| !usage.is_null()) {
             self.usage = openai_usage(value.get("usage"));
+        }
+        if let Some(reason) = value
+            .pointer("/choices/0/finish_reason")
+            .and_then(Value::as_str)
+        {
+            self.finish_reason = Some(reason.to_owned());
         }
         let Some(delta) = value.pointer("/choices/0/delta") else {
             return Ok(());
@@ -1032,7 +1136,7 @@ impl ChatStreamState {
                     })
             });
             self.implicit_tools.insert(position, index);
-            self.pushed_any = true;
+            self.saw_tool_calls = true;
             let target = self.tools.entry(index).or_default();
             if !item_id.is_empty() {
                 merge_streamed_identifier(&mut target.id, item_id);
@@ -1132,10 +1236,16 @@ struct ResponsesStreamState {
     tools: BTreeMap<String, PartialToolCall>,
     tool_aliases: BTreeMap<String, String>,
     usage: TokenUsage,
-    /// True once any content/reasoning/tool delta has been pushed to the
-    /// observer. Streams that produced output are never retried (a retry would
-    /// re-display already-streamed deltas).
+    /// True once user-visible text/reasoning deltas have been pushed to the
+    /// observer. Streams that produced visible output are never retried (a
+    /// retry would re-display already-streamed deltas). Function-call deltas
+    /// do not count: an undelivered tool call has no side effects.
     pushed_any: bool,
+    /// True once any function-call delta has been received.
+    saw_tool_calls: bool,
+    /// True when the stream ended with response.status == "incomplete" — the
+    /// responses-API equivalent of finish_reason=length (truncated output).
+    truncated: bool,
 }
 
 impl ResponsesStreamState {
@@ -1216,7 +1326,7 @@ impl ResponsesStreamState {
                 if let Some(item) = value.get("item")
                     && item.get("type").and_then(Value::as_str) == Some("function_call")
                 {
-                    self.pushed_any = true;
+                    self.saw_tool_calls = true;
                     let key = self.resolve_tool_key(value, Some(item));
                     let id = item
                         .get("call_id")
@@ -1240,7 +1350,7 @@ impl ResponsesStreamState {
             Some("response.function_call_arguments.delta") => {
                 let key = self.resolve_tool_key(value, None);
                 if let Some(delta) = value.get("delta").and_then(Value::as_str) {
-                    self.pushed_any = true;
+                    self.saw_tool_calls = true;
                     let target = self.tools.entry(key).or_default();
                     if target.id.is_empty()
                         && let Some(call_id) = value.get("call_id").and_then(Value::as_str)
@@ -1252,6 +1362,9 @@ impl ResponsesStreamState {
             }
             Some("response.completed") => {
                 self.usage = responses_usage(value.pointer("/response/usage"));
+                if value.pointer("/response/status").and_then(Value::as_str) == Some("incomplete") {
+                    self.truncated = true;
+                }
             }
             Some("error" | "response.failed") => {
                 anyhow::bail!(
@@ -2274,6 +2387,249 @@ mod tests {
     #[test]
     fn rejects_non_object_tool_arguments() {
         assert!(parse_arguments(&Value::String("[]".into())).is_err());
+    }
+
+    fn spawn_invalid_args_then_success() -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind invalid-args test server");
+        let address = listener.local_addr().expect("read invalid-args test address");
+        let handle = std::thread::spawn(move || {
+            // First connection: completes normally ([DONE]) but the tool
+            // arguments are truncated mid-JSON — exactly what a gateway that
+            // cuts a long argument stream but still emits a terminal marker
+            // leaves behind ("tool arguments are not valid JSON").
+            {
+                let (mut socket, _) = listener.accept().expect("accept first request");
+                let mut request = [0_u8; 2048];
+                let _ = socket.read(&mut request).expect("read first request");
+                let body = concat!(
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"write_file\",\"arguments\":\"{\\\"path\\\":\\\"x\\\"\"}}]},\"finish_reason\":null}]}\n\n",
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                    "data: [DONE]\n\n",
+                );
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .expect("write first headers");
+                socket.write_all(body.as_bytes()).expect("write first body");
+            }
+            // Second connection: valid JSON arguments.
+            {
+                let (mut socket, _) = listener.accept().expect("accept second request");
+                let mut request = [0_u8; 2048];
+                let _ = socket.read(&mut request).expect("read second request");
+                let body = concat!(
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"write_file\",\"arguments\":\"{\\\"path\\\":\\\"x\\\",\\\"content\\\":\\\"ok\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                    "data: [DONE]\n\n",
+                );
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .expect("write second headers");
+                socket.write_all(body.as_bytes()).expect("write second body");
+            }
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    #[tokio::test]
+    async fn retries_invalid_tool_arguments_when_no_text_streamed() {
+        let (base_url, server) = spawn_invalid_args_then_success();
+        let provider = HttpModelProvider::new(ProviderConfig {
+            id: "invalid-args".into(),
+            kind: ProviderKind::OpenAiCompatible,
+            display: "InvalidArgs".into(),
+            api_key: "test-key".into(),
+            base_url,
+            model: "test-model".into(),
+            fast_model: None,
+            capabilities: ModelCapabilities::default(),
+            remote_compaction_mode: RemoteCompactionMode::default(),
+        })
+        .expect("invalid-args provider");
+        let observer = CountingRetryObserver::default();
+        let response = provider
+            .openai_compatible_stream(
+                ModelRequest {
+                    model: "test-model".into(),
+                    messages: vec![ChatMessage::user("write a file")],
+                    tools: Vec::new(),
+                    max_output_tokens: None,
+                    required_tool: None,
+                },
+                &observer,
+            )
+            .await
+            .expect("invalid tool arguments should be retried and succeed");
+        server.join().expect("join invalid-args test server");
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].name, "write_file");
+        assert_eq!(
+            response.tool_calls[0].arguments,
+            json!({"path": "x", "content": "ok"})
+        );
+        assert_eq!(
+            *observer.retries.lock().expect("retry counter lock"),
+            1,
+            "observer must be notified exactly once for the retry"
+        );
+    }
+
+    fn spawn_length_truncated_then_success() -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind length-truncate test server");
+        let address = listener.local_addr().expect("read length-truncate test address");
+        let handle = std::thread::spawn(move || {
+            // First connection: ends with finish_reason=length after a tool-call
+            // delta and no text — the gateway-side truncation of a long
+            // argument stream. The arguments happen to parse, but the stream
+            // was cut short, so it must still be retried.
+            {
+                let (mut socket, _) = listener.accept().expect("accept first request");
+                let mut request = [0_u8; 2048];
+                let _ = socket.read(&mut request).expect("read first request");
+                let body = concat!(
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"write_file\",\"arguments\":\"{\\\"path\\\":\\\"x\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+                );
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .expect("write first headers");
+                socket.write_all(body.as_bytes()).expect("write first body");
+            }
+            // Second connection: normal completion.
+            {
+                let (mut socket, _) = listener.accept().expect("accept second request");
+                let mut request = [0_u8; 2048];
+                let _ = socket.read(&mut request).expect("read second request");
+                let body = concat!(
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                    "data: [DONE]\n\n",
+                );
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .expect("write second headers");
+                socket.write_all(body.as_bytes()).expect("write second body");
+            }
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    #[tokio::test]
+    async fn retries_truncated_tool_call_stream_on_length_finish() {
+        let (base_url, server) = spawn_length_truncated_then_success();
+        let provider = HttpModelProvider::new(ProviderConfig {
+            id: "length-truncate".into(),
+            kind: ProviderKind::OpenAiCompatible,
+            display: "LengthTruncate".into(),
+            api_key: "test-key".into(),
+            base_url,
+            model: "test-model".into(),
+            fast_model: None,
+            capabilities: ModelCapabilities::default(),
+            remote_compaction_mode: RemoteCompactionMode::default(),
+        })
+        .expect("length-truncate provider");
+        let observer = CountingRetryObserver::default();
+        let response = provider
+            .openai_compatible_stream(
+                ModelRequest {
+                    model: "test-model".into(),
+                    messages: vec![ChatMessage::user("write a file")],
+                    tools: Vec::new(),
+                    max_output_tokens: None,
+                    required_tool: None,
+                },
+                &observer,
+            )
+            .await
+            .expect("truncated tool-call stream should be retried and succeed");
+        server.join().expect("join length-truncate test server");
+        assert_eq!(response.content, "ok");
+        assert_eq!(
+            *observer.retries.lock().expect("retry counter lock"),
+            1,
+            "finish_reason=length tool-call stream must notify the observer once"
+        );
+    }
+
+    fn spawn_text_then_invalid_args() -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind text-then-invalid server");
+        let address = listener.local_addr().expect("read text-then-invalid address");
+        let handle = std::thread::spawn(move || {
+            // Single connection: streams visible text, then a tool call whose
+            // arguments are invalid JSON. The listener is dropped afterwards,
+            // so a wrongly-triggered retry fails fast with a connection reset
+            // instead of hanging the test.
+            let (mut socket, _) = listener.accept().expect("accept only request");
+            let mut request = [0_u8; 2048];
+            let _ = socket.read(&mut request).expect("read only request");
+            let body = concat!(
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"write_file\",\"arguments\":\"{\\\"path\\\":\\\"x\\\"\"}}]},\"finish_reason\":null}]}\n\n",
+                "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            );
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .expect("write only headers");
+            socket.write_all(body.as_bytes()).expect("write only body");
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_invalid_tool_arguments_after_text_was_streamed() {
+        let (base_url, server) = spawn_text_then_invalid_args();
+        let provider = HttpModelProvider::new(ProviderConfig {
+            id: "text-then-invalid".into(),
+            kind: ProviderKind::OpenAiCompatible,
+            display: "TextThenInvalid".into(),
+            api_key: "test-key".into(),
+            base_url,
+            model: "test-model".into(),
+            fast_model: None,
+            capabilities: ModelCapabilities::default(),
+            remote_compaction_mode: RemoteCompactionMode::default(),
+        })
+        .expect("text-then-invalid provider");
+        let observer = CountingRetryObserver::default();
+        let result = provider
+            .openai_compatible_stream(
+                ModelRequest {
+                    model: "test-model".into(),
+                    messages: vec![ChatMessage::user("write a file")],
+                    tools: Vec::new(),
+                    max_output_tokens: None,
+                    required_tool: None,
+                },
+                &observer,
+            )
+            .await;
+        server.join().expect("join text-then-invalid test server");
+        let error = result.expect_err("invalid arguments after visible text must fail, not retry");
+        assert!(
+            format!("{error:#}").contains("tool arguments are not valid JSON"),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(
+            *observer.retries.lock().expect("retry counter lock"),
+            0,
+            "observer must not be notified when visible text was already streamed"
+        );
     }
 
     #[test]
