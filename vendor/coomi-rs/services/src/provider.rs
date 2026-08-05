@@ -54,6 +54,11 @@ const PROVIDER_STREAM_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 const PROVIDER_STREAM_ATTEMPTS: usize = 3;
 const PROVIDER_STREAM_RETRY_DELAYS: [Duration; 2] =
     [Duration::from_millis(500), Duration::from_millis(1500)];
+/// Default output-token budget sent when the caller does not specify one.
+/// Gateways use their own (often smaller) default when max_tokens is omitted,
+/// which truncates long tool-argument streams (e.g. a 3000-character chapter
+/// write) mid-JSON. 8192 matches the anthropic path and engine defaults.
+const PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS: u64 = 8_192;
 
 pub struct HttpModelProvider {
     config: ProviderConfig,
@@ -184,9 +189,11 @@ impl HttpModelProvider {
             );
             body["tool_choice"] = openai_chat_tool_choice(request.required_tool.as_deref());
         }
-        if let Some(limit) = request.max_output_tokens {
-            body["max_tokens"] = Value::from(limit);
-        }
+        body["max_tokens"] = Value::from(
+            request
+                .max_output_tokens
+                .unwrap_or(PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS),
+        );
         let response = self
             .send_openai_chat(&endpoint, &body, required_tool.as_deref())
             .await?;
@@ -236,9 +243,11 @@ impl HttpModelProvider {
             );
             body["tool_choice"] = openai_chat_tool_choice(request.required_tool.as_deref());
         }
-        if let Some(limit) = request.max_output_tokens {
-            body["max_tokens"] = Value::from(limit);
-        }
+        body["max_tokens"] = Value::from(
+            request
+                .max_output_tokens
+                .unwrap_or(PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS),
+        );
         for attempt in 0..PROVIDER_STREAM_ATTEMPTS {
             let response = match tokio::time::timeout(
                 PROVIDER_RESPONSE_HEAD_TIMEOUT,
@@ -282,20 +291,17 @@ impl HttpModelProvider {
                     observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS);
                     tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
                 }
-                Ok(()) => {
-                    let pushed_any = state.pushed_any;
-                    match state.finish() {
-                        Ok(response) => return Ok(response),
-                        Err(error)
-                            if is_retryable_finish_error(&error, pushed_any)
-                                && attempt + 1 < PROVIDER_STREAM_ATTEMPTS =>
-                        {
-                            observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS);
-                            tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
-                        }
-                        Err(error) => return Err(error),
+                Ok(()) => match state.finish() {
+                    Ok(response) => return Ok(response),
+                    Err(error)
+                        if is_retryable_finish_error(&error)
+                            && attempt + 1 < PROVIDER_STREAM_ATTEMPTS =>
+                    {
+                        observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS);
+                        tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
                     }
-                }
+                    Err(error) => return Err(error),
+                },
                 Err(error)
                     if is_retryable_stream_error(&error)
                         && !state.pushed_any
@@ -462,9 +468,11 @@ impl HttpModelProvider {
             body["tools"] = Value::Array(provider_tools);
             body["tool_choice"] = openai_responses_tool_choice(request.required_tool.as_deref());
         }
-        if let Some(limit) = request.max_output_tokens {
-            body["max_output_tokens"] = Value::from(limit);
-        }
+        body["max_output_tokens"] = Value::from(
+            request
+                .max_output_tokens
+                .unwrap_or(PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS),
+        );
         let response = self
             .authenticated(self.client.post(endpoint))
             .json(&body)
@@ -526,9 +534,11 @@ impl HttpModelProvider {
             body["tools"] = Value::Array(provider_tools);
             body["tool_choice"] = openai_responses_tool_choice(request.required_tool.as_deref());
         }
-        if let Some(limit) = request.max_output_tokens {
-            body["max_output_tokens"] = Value::from(limit);
-        }
+        body["max_output_tokens"] = Value::from(
+            request
+                .max_output_tokens
+                .unwrap_or(PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS),
+        );
         for attempt in 0..PROVIDER_STREAM_ATTEMPTS {
             let response = match tokio::time::timeout(
                 PROVIDER_RESPONSE_HEAD_TIMEOUT,
@@ -574,20 +584,17 @@ impl HttpModelProvider {
                     observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS);
                     tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
                 }
-                Ok(()) => {
-                    let pushed_any = state.pushed_any;
-                    match state.finish() {
-                        Ok(response) => return Ok(response),
-                        Err(error)
-                            if is_retryable_finish_error(&error, pushed_any)
-                                && attempt + 1 < PROVIDER_STREAM_ATTEMPTS =>
-                        {
-                            observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS);
-                            tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
-                        }
-                        Err(error) => return Err(error),
+                Ok(()) => match state.finish() {
+                    Ok(response) => return Ok(response),
+                    Err(error)
+                        if is_retryable_finish_error(&error)
+                            && attempt + 1 < PROVIDER_STREAM_ATTEMPTS =>
+                    {
+                        observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS);
+                        tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
                     }
-                }
+                    Err(error) => return Err(error),
+                },
                 Err(error)
                     if is_retryable_stream_error(&error)
                         && !state.pushed_any
@@ -728,9 +735,11 @@ impl HttpModelProvider {
                 });
             }
         }
-        if let Some(limit) = request.max_output_tokens {
-            body["generationConfig"] = json!({"maxOutputTokens": limit});
-        }
+        body["generationConfig"] = json!({
+            "maxOutputTokens": request
+                .max_output_tokens
+                .unwrap_or(PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS)
+        });
         let mut builder = self
             .client
             .post(endpoint)
@@ -1069,11 +1078,13 @@ fn is_truncated_tool_call_stream(state: &impl StreamRetryState) -> bool {
     state.truncated() && state.saw_tool_calls() && !state.pushed_any()
 }
 
-/// Tool arguments that fail to parse are retryable only while nothing
-/// user-visible was streamed — the tool never ran, so a retry cannot produce
-/// duplicate text or duplicate tool execution.
-fn is_retryable_finish_error(error: &anyhow::Error, pushed_any: bool) -> bool {
-    !pushed_any && format!("{error:#}").contains("tool arguments are not valid JSON")
+/// Tool arguments that fail to parse are retryable. The tool never ran (the
+/// parse happens before delivery to the engine), so a retry cannot duplicate
+/// tool execution; the only cost is re-streaming the short lead-in text the
+/// model already emitted, which is preferable to failing the whole turn after
+/// a multi-minute wait.
+fn is_retryable_finish_error(error: &anyhow::Error) -> bool {
+    format!("{error:#}").contains("tool arguments are not valid JSON")
 }
 
 #[derive(Default)]
@@ -2661,37 +2672,56 @@ mod tests {
         );
     }
 
-    fn spawn_text_then_invalid_args() -> (String, JoinHandle<()>) {
+    fn spawn_text_then_invalid_args_then_success() -> (String, JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind text-then-invalid server");
         let address = listener.local_addr().expect("read text-then-invalid address");
         let handle = std::thread::spawn(move || {
-            // Single connection: streams visible text, then a tool call whose
-            // arguments are invalid JSON. The listener is dropped afterwards,
-            // so a wrongly-triggered retry fails fast with a connection reset
-            // instead of hanging the test.
-            let (mut socket, _) = listener.accept().expect("accept only request");
-            let mut request = [0_u8; 2048];
-            let _ = socket.read(&mut request).expect("read only request");
-            let body = concat!(
-                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
-                "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"write_file\",\"arguments\":\"{\\\"path\\\":\\\"x\\\"\"}}]},\"finish_reason\":null}]}\n\n",
-                "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
-                "data: [DONE]\n\n",
-            );
-            write!(
-                socket,
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            )
-            .expect("write only headers");
-            socket.write_all(body.as_bytes()).expect("write only body");
+            // First connection: streams visible text, then a tool call whose
+            // arguments are invalid JSON. Even though text was streamed, the
+            // arguments parse failure is retryable — the tool never ran.
+            {
+                let (mut socket, _) = listener.accept().expect("accept first request");
+                let mut request = [0_u8; 2048];
+                let _ = socket.read(&mut request).expect("read first request");
+                let body = concat!(
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"write_file\",\"arguments\":\"{\\\"path\\\":\\\"x\\\"\"}}]},\"finish_reason\":null}]}\n\n",
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                    "data: [DONE]\n\n",
+                );
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .expect("write first headers");
+                socket.write_all(body.as_bytes()).expect("write first body");
+            }
+            // Second connection: valid JSON arguments.
+            {
+                let (mut socket, _) = listener.accept().expect("accept second request");
+                let mut request = [0_u8; 2048];
+                let _ = socket.read(&mut request).expect("read second request");
+                let body = concat!(
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"write_file\",\"arguments\":\"{\\\"path\\\":\\\"x\\\",\\\"content\\\":\\\"ok\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                    "data: [DONE]\n\n",
+                );
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .expect("write second headers");
+                socket.write_all(body.as_bytes()).expect("write second body");
+            }
         });
         (format!("http://{address}"), handle)
     }
 
     #[tokio::test]
-    async fn does_not_retry_invalid_tool_arguments_after_text_was_streamed() {
-        let (base_url, server) = spawn_text_then_invalid_args();
+    async fn retries_invalid_tool_arguments_even_after_text_was_streamed() {
+        let (base_url, server) = spawn_text_then_invalid_args_then_success();
         let provider = HttpModelProvider::new(ProviderConfig {
             id: "text-then-invalid".into(),
             kind: ProviderKind::OpenAiCompatible,
@@ -2705,7 +2735,7 @@ mod tests {
         })
         .expect("text-then-invalid provider");
         let observer = CountingRetryObserver::default();
-        let result = provider
+        let response = provider
             .openai_compatible_stream(
                 ModelRequest {
                     model: "test-model".into(),
@@ -2716,17 +2746,18 @@ mod tests {
                 },
                 &observer,
             )
-            .await;
+            .await
+            .expect("invalid arguments after visible text should be retried and succeed");
         server.join().expect("join text-then-invalid test server");
-        let error = result.expect_err("invalid arguments after visible text must fail, not retry");
-        assert!(
-            format!("{error:#}").contains("tool arguments are not valid JSON"),
-            "unexpected error: {error:#}"
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(
+            response.tool_calls[0].arguments,
+            json!({"path": "x", "content": "ok"})
         );
         assert_eq!(
             *observer.retries.lock().expect("retry counter lock"),
-            0,
-            "observer must not be notified when visible text was already streamed"
+            1,
+            "observer must be notified exactly once for the retry"
         );
     }
 
