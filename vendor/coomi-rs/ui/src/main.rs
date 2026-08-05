@@ -549,6 +549,7 @@ impl AgentObserver for TerminalObserver {
             AgentEvent::ProviderRetry {
                 attempt,
                 max_attempts,
+                reset_text_characters: _,
             } => eprintln!("[provider stream stalled, retrying {attempt}/{max_attempts}]"),
         }
     }

@@ -238,7 +238,7 @@ export const useWorkspaceStore = defineStore("workspace", {
       return Boolean(activeDocument?.transient && activeDocument?.kind === "help-guide");
     },
 
-    /** 主区是否正在显示放大版的平行时空线。 */
+    /** 主区是否正在显示放大版的时空线。 */
     isWorldlineMapActive(state): boolean {
       const activeDocument = state.activeFile ? state.documents[state.activeFile] : null;
       return Boolean(activeDocument?.transient && activeDocument?.kind === "worldline-map");
@@ -1004,7 +1004,10 @@ export const useWorkspaceStore = defineStore("workspace", {
         const result = await renameWorkspacePath({ fromRelativePath, toRelativePath });
         this.workspaceError = "";
         this.remapPathState(fromRelativePath, toRelativePath);
-        await this.refreshTree();
+        await Promise.all([
+          this.refreshTree(),
+          useGitStore().refreshSummary({ silent: true, force: true })
+        ]);
         return result.data;
       } catch (error: unknown) {
         this.workspaceError = normalizeWorkspaceError(error);
@@ -1017,7 +1020,10 @@ export const useWorkspaceStore = defineStore("workspace", {
         const result = await deleteWorkspacePath({ relativePath });
         this.workspaceError = "";
         this.removePathState(relativePath);
-        await this.refreshTree();
+        await Promise.all([
+          this.refreshTree(),
+          useGitStore().refreshSummary({ silent: true, force: true })
+        ]);
         return result.data;
       } catch (error: unknown) {
         this.workspaceError = normalizeWorkspaceError(error);
@@ -1029,7 +1035,10 @@ export const useWorkspaceStore = defineStore("workspace", {
       try {
         const result = await copyWorkspacePath({ fromRelativePath, toRelativePath });
         this.workspaceError = "";
-        await this.refreshTree();
+        await Promise.all([
+          this.refreshTree(),
+          useGitStore().refreshSummary({ silent: true, force: true })
+        ]);
         if (result.data.kind === "file") {
           await this.openFile(toRelativePath);
         }
@@ -1045,7 +1054,10 @@ export const useWorkspaceStore = defineStore("workspace", {
         const result = await moveWorkspacePath({ fromRelativePath, toRelativePath });
         this.workspaceError = "";
         this.remapPathState(fromRelativePath, toRelativePath);
-        await this.refreshTree();
+        await Promise.all([
+          this.refreshTree(),
+          useGitStore().refreshSummary({ silent: true, force: true })
+        ]);
         return result.data;
       } catch (error: unknown) {
         this.workspaceError = normalizeWorkspaceError(error);
@@ -1352,7 +1364,7 @@ export const useWorkspaceStore = defineStore("workspace", {
     },
 
     /**
-     * 在主编辑区打开放大版的平行时空线。
+     * 在主编辑区打开放大版的时空线。
      *
      * 侧栏最宽只有 520px，一旦世界线多起来就画不开；这里复用 git-review 那套
      * 临时文档机制，把树当成一个只读页签打开，用户可以在全宽画布上浏览、分叉
@@ -1377,8 +1389,8 @@ export const useWorkspaceStore = defineStore("workspace", {
         updatedAt: nowIso,
         extension: "",
         kind: "worldline-map",
-        title: "平行时空线",
-        displayPath: "平行时空线 · 全部世界线",
+        title: "时空线",
+        displayPath: "时空线 · 全部世界线",
         readOnly: true,
         transient: true,
       };

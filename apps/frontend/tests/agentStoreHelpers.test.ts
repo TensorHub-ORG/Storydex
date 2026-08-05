@@ -84,7 +84,7 @@ describe("agent store deterministic helpers", () => {
       details: {
         stage: "bridge_start",
         runtime: "storydex-coomi-rs",
-        runtimeVersion: "2.0.0-storydex.1",
+        runtimeVersion: "2.0.0-storydex.2",
         providerId: "opencode-go",
         model: "deepseek-v4-pro",
         traceId: "trace-1",

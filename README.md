@@ -26,7 +26,7 @@
 </table>
 
 <p align="center">
-  <img alt="release" src="https://img.shields.io/badge/release-v2.0.0-2563eb?style=flat-square" />
+  <img alt="release" src="https://img.shields.io/badge/release-v2.0.1-2563eb?style=flat-square" />
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0%20%2B%20Commons%20Clause-0f766e?style=flat-square" />
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-f97316?style=flat-square" />
   <img alt="desktop" src="https://img.shields.io/badge/desktop-Electron%2040-47848f?style=flat-square&logo=electron&logoColor=white" />
@@ -115,6 +115,14 @@ Storydex/
 ## 作者与版权
 
 Copyright 2026 Septemc and Flowby.
+
+## v2.0.1
+
+v2.0.1 是面向 Windows 安装体验和发行流程的维护版本。
+
+- 修复 NSIS 安装器在普通用户安装流程中重复显示许可协议的问题。
+- 关闭安装器自动提权，移除安装按钮上的管理员盾牌图标，避免按钮图标错位。
+- 按 Windows 发行要求同步版本元数据、发布说明和封装产物校验。
 
 ## v2.0.0
 

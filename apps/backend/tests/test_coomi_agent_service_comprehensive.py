@@ -312,9 +312,10 @@ async def test_stream_forwards_provider_retry_as_connection_retry(monkeypatch, t
     class Bridge:
         async def events(self):
             yield {"type": "session_bound", "data": {"runtimeSessionId": "runtime-1"}}
+            yield {"type": "text_delta", "data": {"text": "partial"}}
             yield {
                 "type": "provider_retry",
-                "data": {"attempt": 1, "maxAttempts": 3},
+                "data": {"attempt": 1, "maxAttempts": 3, "resetTextCharacters": 7},
             }
             yield {"type": "text_delta", "data": {"text": "ok"}}
             yield {"type": "completed", "data": {"usage": {"input_tokens": 1, "output_tokens": 1}}}
@@ -345,11 +346,13 @@ async def test_stream_forwards_provider_retry_as_connection_retry(monkeypatch, t
         )
     ]
     names = [name for name, _payload in events]
-    assert names == ["AgentStarted", "ConnectionRetry", "TextChunk", "AgentCompleted"]
-    retry = events[1][1]
+    assert names == ["AgentStarted", "TextChunk", "ConnectionRetry", "TextChunk", "AgentCompleted"]
+    retry = events[2][1]
     assert retry["_type"] == "ConnectionRetry"
     assert retry["attempt"] == 1
     assert retry["maxAttempts"] == 3
+    assert retry["resetTextCharacters"] == 7
+    assert retry["providerResetTextCharacters"] == 7
     assert "当前上游提供商服务不稳定" in retry["message"]
 
 

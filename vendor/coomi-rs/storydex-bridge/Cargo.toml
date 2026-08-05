@@ -3,6 +3,7 @@ name = "storydex-coomi-bridge"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+build = "build.rs"
 
 [[bin]]
 name = "storydex-coomi-bridge"

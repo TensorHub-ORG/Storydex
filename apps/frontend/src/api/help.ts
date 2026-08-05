@@ -31,6 +31,7 @@ export interface PromptRepositoryItem {
   promptText: string;
   placeholders: string[];
   updatedAt: string;
+  isCustom: boolean;
 }
 
 export interface PromptRepositoryResponse {
@@ -39,6 +40,10 @@ export interface PromptRepositoryResponse {
   category: string;
   categories: PromptRepositoryCategory[];
   items: PromptRepositoryItem[];
+}
+
+export interface CustomPromptResponse {
+  item: PromptRepositoryItem;
 }
 
 export class HelpApiError extends ApiResponseError {}
@@ -70,4 +75,18 @@ export async function fetchPromptRepository(params: { q?: string; category?: str
     }
     throw error;
   }
+}
+
+export async function createCustomPrompt(payload: { title: string; promptText: string }): Promise<ApiResult<CustomPromptResponse>> {
+  const response = await apiClient.post<ApiEnvelope<CustomPromptResponse>>("/help/prompts/custom", payload);
+  return unwrapEnvelope(response.data, "Custom prompt creation failed.");
+}
+
+export async function updateCustomPrompt(id: string, promptText: string): Promise<ApiResult<CustomPromptResponse>> {
+  const promptId = String(id || "").replace(/^custom\//, "");
+  const response = await apiClient.put<ApiEnvelope<CustomPromptResponse>>(
+    `/help/prompts/custom/${encodeURIComponent(promptId)}`,
+    { promptText }
+  );
+  return unwrapEnvelope(response.data, "Custom prompt update failed.");
 }

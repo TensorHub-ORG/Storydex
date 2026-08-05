@@ -218,6 +218,8 @@ export interface AgentStreamPacket {
   content?: string;
   reason?: string;
   preserve_visible?: boolean;
+  resetTextCharacters?: number;
+  providerResetTextCharacters?: number;
   phase?: string;
   label?: string;
   status?: string;

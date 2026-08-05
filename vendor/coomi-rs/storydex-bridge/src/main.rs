@@ -20,6 +20,17 @@ use uuid::Uuid;
 
 const PROTOCOL_VERSION: u32 = 1;
 const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
+const RUNTIME_GIT_SHA: &str = env!("STORYDEX_COOMI_GIT_SHA");
+const RUNTIME_SOURCE_FINGERPRINT: &str = env!("STORYDEX_COOMI_SOURCE_FINGERPRINT");
+
+fn build_info() -> Value {
+    json!({
+        "runtime": "storydex-coomi-rs",
+        "version": RUNTIME_VERSION,
+        "gitSha": RUNTIME_GIT_SHA,
+        "sourceFingerprint": RUNTIME_SOURCE_FINGERPRINT,
+    })
+}
 
 #[derive(Clone)]
 struct Emitter {
@@ -187,9 +198,14 @@ impl AgentObserver for StorydexObserver {
             AgentEvent::ProviderRetry {
                 attempt,
                 max_attempts,
+                reset_text_characters,
             } => (
                 "provider_retry",
-                json!({"attempt": attempt, "maxAttempts": max_attempts}),
+                json!({
+                    "attempt": attempt,
+                    "maxAttempts": max_attempts,
+                    "resetTextCharacters": reset_text_characters,
+                }),
             ),
         };
         self.emitter.event(kind, data);
@@ -372,9 +388,7 @@ impl StorydexTools {
                 | "spawn_agent"
         );
         if mutating && !self.writes_allowed {
-            return Some(
-                "Storydex turn contract blocks state-changing tools".into(),
-            );
+            return Some("Storydex turn contract blocks state-changing tools".into());
         }
         if self.allowed_write_roots.is_empty() || !mutating {
             return None;
@@ -771,6 +785,8 @@ fn status(request: &BridgeRequest, emitter: &Emitter) -> Result<()> {
         json!({
             "runtime": "storydex-coomi-rs",
             "version": RUNTIME_VERSION,
+            "gitSha": RUNTIME_GIT_SHA,
+            "sourceFingerprint": RUNTIME_SOURCE_FINGERPRINT,
             "protocolVersion": PROTOCOL_VERSION,
             "activeProvider": active.id,
             "activeModel": active.model,
@@ -802,11 +818,15 @@ fn read_request() -> Result<BridgeRequest> {
 
 #[tokio::main]
 async fn main() {
-    if std::env::args()
-        .skip(1)
-        .any(|argument| argument == "--version")
-    {
-        println!("storydex-coomi-bridge {RUNTIME_VERSION}");
+    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if arguments.iter().any(|argument| argument == "--build-info") {
+        println!("{}", build_info());
+        return;
+    }
+    if arguments.iter().any(|argument| argument == "--version") {
+        println!(
+            "storydex-coomi-bridge {RUNTIME_VERSION} git={RUNTIME_GIT_SHA} source={RUNTIME_SOURCE_FINGERPRINT}"
+        );
         return;
     }
     let emitter = Emitter::new();

@@ -19,11 +19,32 @@ def test_prompt_repository_reads_categories_prompt_blocks_and_placeholders(monke
 
     service = PromptRepositoryService()
     repository = service.read_repository()
-    assert repository["categories"] == [{"id": "世界观", "label": "世界观", "count": 1}]
+    assert {item["id"]: item["count"] for item in repository["categories"]} == {"世界观": 1, "自定义": 0}
     assert repository["items"][0]["promptText"].startswith("请制定")
     assert repository["items"][0]["placeholders"] == ["[主题]", "[世界规模]"]
     assert service.read_repository(query="主题")["items"]
     assert service.read_repository(category="角色创作")["items"] == []
+
+
+def test_custom_prompts_persist_and_only_update_the_body(tmp_path):
+    custom_path = tmp_path / "global" / "prompts" / "custom.json"
+    service = PromptRepositoryService(custom_repository_path=custom_path)
+
+    created = service.create_custom_prompt(title="检查章节节奏", prompt_text="检查[章节]的节奏。")
+    assert created["category"] == "自定义"
+    assert created["isCustom"] is True
+    assert created["placeholders"] == ["[章节]"]
+    assert custom_path.exists()
+
+    prompt_id = created["id"].removeprefix("custom/")
+    updated = service.update_custom_prompt(prompt_id, prompt_text="检查节奏、冲突和章尾钩子。")
+    assert updated["title"] == "检查章节节奏"
+    assert updated["promptText"] == "检查节奏、冲突和章尾钩子。"
+
+    reloaded = PromptRepositoryService(custom_repository_path=custom_path).read_repository(category="自定义")
+    custom_category = next(item for item in reloaded["categories"] if item["id"] == "自定义")
+    assert custom_category == {"id": "自定义", "label": "自定义", "count": 1}
+    assert reloaded["items"] == [updated]
 
 
 def test_default_agent_skill_templates_are_detailed_universal_and_migrate_legacy(tmp_path):

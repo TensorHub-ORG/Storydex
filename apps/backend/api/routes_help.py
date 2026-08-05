@@ -3,13 +3,23 @@ from __future__ import annotations
 from time import perf_counter
 from uuid import uuid4
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from api.response import ApiEnvelope, ApiTrace, success_response
 from services.help_guide_service import get_help_guide_service
 from services.prompt_repository_service import get_prompt_repository_service
 
 router = APIRouter(tags=["help"])
+
+
+class CustomPromptCreateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    prompt_text: str = Field(alias="promptText", min_length=1, max_length=12000)
+
+
+class CustomPromptUpdateRequest(BaseModel):
+    prompt_text: str = Field(alias="promptText", min_length=1, max_length=12000)
 
 
 def _trace(started: float, trace_id: str) -> ApiTrace:
@@ -62,4 +72,42 @@ def read_prompt_repository(
                 "count": len(data.get("items") or []),
             }
         ],
+    )
+
+
+@router.post("/help/prompts/custom", response_model=ApiEnvelope)
+def create_custom_prompt(payload: CustomPromptCreateRequest) -> ApiEnvelope:
+    started = perf_counter()
+    trace_id = str(uuid4())
+    try:
+        item = get_prompt_repository_service().create_custom_prompt(
+            title=payload.title,
+            prompt_text=payload.prompt_text,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return success_response(
+        data={"item": item},
+        trace=_trace(started, trace_id),
+        audit=[{"action": "create_custom_prompt", "promptId": item.get("id")}],
+    )
+
+
+@router.put("/help/prompts/custom/{prompt_id}", response_model=ApiEnvelope)
+def update_custom_prompt(prompt_id: str, payload: CustomPromptUpdateRequest) -> ApiEnvelope:
+    started = perf_counter()
+    trace_id = str(uuid4())
+    try:
+        item = get_prompt_repository_service().update_custom_prompt(
+            prompt_id,
+            prompt_text=payload.prompt_text,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return success_response(
+        data={"item": item},
+        trace=_trace(started, trace_id),
+        audit=[{"action": "update_custom_prompt", "promptId": item.get("id")}],
     )

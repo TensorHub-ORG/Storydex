@@ -203,6 +203,19 @@ describe("平行时空线树状图", () => {
     wrapper.unmount();
   });
 
+  it("普通滚轮围绕指针缩放，不再把画布上下平移", () => {
+    const wrapper = mountGraph();
+    const onWheel = fn<(event: WheelEvent) => void>(wrapper, "onWheel");
+    const initialZoom = peek<number>(wrapper, "zoom");
+    const initialPanY = peek<number>(wrapper, "panY");
+
+    onWheel({ deltaY: -100, clientX: 0, clientY: 0 } as WheelEvent);
+
+    expect(peek<number>(wrapper, "zoom")).toBeGreaterThan(initialZoom);
+    expect(peek<number>(wrapper, "panY")).toBe(initialPanY);
+    wrapper.unmount();
+  });
+
   it("空时空线显示对应的引导文案", () => {
     const empty = mount(TimelineGraph, {
       props: { timeline: { ...buildTimeline(), nodes: [], branches: [] } }

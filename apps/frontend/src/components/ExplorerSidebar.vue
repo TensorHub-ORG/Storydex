@@ -1,5 +1,5 @@
 <template>
-  <aside class="explorer-panel" @click="closeContextMenu">
+  <aside ref="panelRef" class="explorer-panel" @click="closeContextMenu">
     <template v-if="workspaceStore.launchScreenVisible">
       <div class="explorer-header explorer-header-launch">
         <div class="explorer-header-main">
@@ -107,6 +107,8 @@
       <div
         class="tree-view"
         :class="{ 'is-import-drop-target': dragTargetPath === ROOT_PARENT_PATH }"
+        tabindex="0"
+        aria-label="项目目录结构树"
         @contextmenu.prevent="handleRootContextMenu"
         @dragenter.prevent="handleRootDragEnter"
         @dragover.prevent="handleRootDragOver"
@@ -298,6 +300,8 @@
         <button class="context-menu-item" type="button" @click="handleRefresh">刷新</button>
         <button class="context-menu-item" type="button" :disabled="saveDisabled" @click="handleSave">保存</button>
         <div class="context-menu-separator"></div>
+        <button class="context-menu-item" type="button" :disabled="!clipboardState" @click="handlePaste(null)">粘贴</button>
+        <div class="context-menu-separator"></div>
         <button class="context-menu-item" type="button" @click="handleRevealRoot">在资源管理器中显示</button>
       </template>
 
@@ -353,7 +357,6 @@ import { useProjectLauncher } from "@/composables/useProjectLauncher";
 import { useAgentStore } from "@/stores/agent";
 import { useGitStore } from "@/stores/git";
 import { useWorkspaceStore } from "@/stores/workspace";
-import { moveWorkspacePath } from "@/api/workspace";
 import type { WorkspaceDiagnosticItem, WorkspaceGitChangedFile, WorkspaceTreeNode } from "@/types/workspace";
 
 interface TreeRow {
@@ -372,7 +375,7 @@ interface ContextMenuState {
 
 interface ClipboardState {
   mode: "copy" | "cut";
-  node: WorkspaceTreeNode;
+  nodes: WorkspaceTreeNode[];
 }
 
 interface EditableFocusSnapshot {
@@ -426,6 +429,7 @@ const pendingCreateSubmitting = ref(false);
 const pendingRename = ref<PendingRenameState | null>(null);
 const pendingRenameInputRef = ref<HTMLInputElement | null>(null);
 const contextMenuRef = ref<HTMLDivElement | null>(null);
+const panelRef = ref<HTMLElement | null>(null);
 const dragTargetPath = ref<string | null>(null);
 const dragDepth = ref(0);
 const selectedPaths = ref<Set<string>>(new Set());
@@ -777,6 +781,7 @@ onMounted(() => {
   window.addEventListener("pointerdown", handleWindowPointerDown, true);
   window.addEventListener("click", closeContextMenu);
   window.addEventListener("blur", closeContextMenu);
+  window.addEventListener("keydown", handleExplorerKeydown);
   autoRefreshTimer = window.setInterval(handleAutoRefresh, AUTO_REFRESH_INTERVAL_MS);
   if (!workspaceStore.launchScreenVisible) {
     lastGitRefreshAt = Date.now();
@@ -788,6 +793,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("pointerdown", handleWindowPointerDown, true);
   window.removeEventListener("click", closeContextMenu);
   window.removeEventListener("blur", closeContextMenu);
+  window.removeEventListener("keydown", handleExplorerKeydown);
   if (autoRefreshTimer !== null) {
     window.clearInterval(autoRefreshTimer);
     autoRefreshTimer = null;
@@ -874,6 +880,34 @@ function handleRowClick(node: WorkspaceTreeNode, event?: MouseEvent): void {
   cancelPendingCreate();
   if (node.relativePath) {
     void workspaceStore.openFile(node.relativePath);
+  }
+}
+
+function isEditableShortcutTarget(target: EventTarget | null): boolean {
+  const element = target instanceof Element ? target : null;
+  return Boolean(element?.closest("input, textarea, select, [contenteditable='true']"));
+}
+
+function handleExplorerKeydown(event: KeyboardEvent): void {
+  const target = event.target instanceof Node ? event.target : document.activeElement;
+  if (
+    !(event.ctrlKey || event.metaKey)
+    || event.altKey
+    || isEditableShortcutTarget(event.target)
+    || !target
+    || !panelRef.value?.contains(target)
+  ) return;
+  const key = event.key.toLowerCase();
+  if (key === "c" || key === "x") {
+    const nodes = selectedNodes();
+    if (!nodes.length) return;
+    event.preventDefault();
+    clipboardState.value = { mode: key === "x" ? "cut" : "copy", nodes };
+    return;
+  }
+  if (key === "v" && clipboardState.value) {
+    event.preventDefault();
+    void pasteClipboardTo(shortcutPasteTarget());
   }
 }
 
@@ -970,6 +1004,10 @@ function isDirectoryDropTarget(node: WorkspaceTreeNode): boolean {
 }
 
 function handleRootDragEnter(event: DragEvent): void {
+  if (internalDragPaths.value.length) {
+    dragTargetPath.value = ROOT_PARENT_PATH;
+    return;
+  }
   if (!hasExternalFiles(event)) {
     return;
   }
@@ -978,6 +1016,11 @@ function handleRootDragEnter(event: DragEvent): void {
 }
 
 function handleRootDragOver(event: DragEvent): void {
+  if (internalDragPaths.value.length) {
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    dragTargetPath.value = ROOT_PARENT_PATH;
+    return;
+  }
   if (!hasExternalFiles(event)) {
     return;
   }
@@ -1009,7 +1052,7 @@ async function handleRootDrop(event: DragEvent): Promise<void> {
 }
 
 function handleNodeDragEnter(event: DragEvent, node: WorkspaceTreeNode): void {
-  if (node.kind !== "directory" || !hasExternalFiles(event)) {
+  if (node.kind !== "directory" || (!internalDragPaths.value.length && !hasExternalFiles(event))) {
     return;
   }
   dragTargetPath.value = getDirectoryPath(node);
@@ -1020,10 +1063,10 @@ function handleNodeDragEnter(event: DragEvent, node: WorkspaceTreeNode): void {
 }
 
 function handleNodeDragOver(event: DragEvent, node: WorkspaceTreeNode): void {
-  if (node.kind !== "directory" || !hasExternalFiles(event)) {
+  if (node.kind !== "directory" || (!internalDragPaths.value.length && !hasExternalFiles(event))) {
     return;
   }
-  event.dataTransfer!.dropEffect = "copy";
+  event.dataTransfer!.dropEffect = internalDragPaths.value.length ? "move" : "copy";
   dragTargetPath.value = getDirectoryPath(node);
 }
 
@@ -1058,7 +1101,7 @@ function handleInternalDragStart(event: DragEvent, node: WorkspaceTreeNode): voi
   const path = nodePath(node);
   if (!path) return;
   if (!selectedPaths.value.has(path)) selectedPaths.value = new Set([path]);
-  internalDragPaths.value = [...selectedPaths.value];
+  internalDragPaths.value = topLevelPaths([...selectedPaths.value]);
   event.dataTransfer?.setData("application/x-storydex-paths", JSON.stringify(internalDragPaths.value));
   if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
 }
@@ -1066,17 +1109,16 @@ function handleInternalDragStart(event: DragEvent, node: WorkspaceTreeNode): voi
 function handleInternalDragEnd(): void { internalDragPaths.value = []; dragTargetPath.value = null; }
 
 async function moveSelectedPaths(targetDirectory: string): Promise<void> {
-  const paths = [...internalDragPaths.value];
+  const paths = topLevelPaths(internalDragPaths.value);
   handleInternalDragEnd();
   for (const source of paths) {
-    if (!source || source === targetDirectory || targetDirectory.startsWith(`${source}/`)) continue;
+    if (!source || getParentPath(source) === targetDirectory || source === targetDirectory || targetDirectory.startsWith(`${source}/`)) continue;
     const name = source.split("/").pop() || source;
     const target = joinRelativePath(targetDirectory, name);
-    try { await moveWorkspacePath({ fromRelativePath: source, toRelativePath: target }); }
+    try { await workspaceStore.movePath(source, target); }
     catch (error) { workspaceStore.workspaceError = error instanceof Error ? error.message : "文件移动失败"; break; }
   }
-  selectedPaths.value = new Set();
-  await workspaceStore.refreshTree({ silent: true });
+  clearSelection();
 }
 
 function repositionContextMenu(anchorX: number, anchorY: number): void {
@@ -1345,44 +1387,65 @@ function handleAddToChat(node: WorkspaceTreeNode): void {
 }
 
 function handleCut(node: WorkspaceTreeNode): void {
-  clipboardState.value = { mode: "cut", node };
+  clipboardState.value = { mode: "cut", nodes: selectedNodes(node) };
   closeContextMenu();
 }
 
 function handleCopy(node: WorkspaceTreeNode): void {
-  clipboardState.value = { mode: "copy", node };
+  clipboardState.value = { mode: "copy", nodes: selectedNodes(node) };
   closeContextMenu();
 }
 
-async function handlePaste(targetNode: WorkspaceTreeNode): Promise<void> {
+async function handlePaste(targetNode: WorkspaceTreeNode | null): Promise<void> {
   closeContextMenu();
+  await pasteClipboardTo(targetNode ? getDirectoryPath(targetNode) : ROOT_PARENT_PATH);
+}
+
+async function pasteClipboardTo(targetDirectory: string): Promise<void> {
   const clipboard = clipboardState.value;
-  if (!clipboard || !clipboard.node.relativePath) {
-    return;
-  }
-  const targetDirectory = getDirectoryPath(targetNode);
-  const proposedTarget = buildPastedRelativePath(
-    clipboard.node,
-    targetDirectory,
-    workspaceStore.tree,
-    clipboard.mode
-  );
-  if (!proposedTarget) {
-    if (clipboard.mode === "cut") {
-      clipboardState.value = null;
+  if (!clipboard?.nodes.length) return;
+  const completed: string[] = [];
+  for (const node of clipboard.nodes) {
+    const sourcePath = nodePath(node);
+    if (!sourcePath || targetDirectory === sourcePath || targetDirectory.startsWith(`${sourcePath}/`)) continue;
+    const proposedTarget = buildPastedRelativePath(node, targetDirectory, workspaceStore.tree, clipboard.mode);
+    if (!proposedTarget) continue;
+    try {
+      if (clipboard.mode === "cut") {
+        await workspaceStore.movePath(sourcePath, proposedTarget);
+      } else {
+        await workspaceStore.copyPath(sourcePath, proposedTarget);
+      }
+      completed.push(sourcePath);
+    } catch {
+      break;
     }
-    return;
   }
-  try {
-    if (clipboard.mode === "cut") {
-      await workspaceStore.movePath(clipboard.node.relativePath, proposedTarget);
-      clipboardState.value = null;
-    } else {
-      await workspaceStore.copyPath(clipboard.node.relativePath, proposedTarget);
-    }
-  } catch {
-    // handled by store
+  if (clipboard.mode === "cut") {
+    const remaining = clipboard.nodes.filter((node) => !completed.includes(nodePath(node)));
+    clipboardState.value = remaining.length ? { mode: "cut", nodes: remaining } : null;
   }
+}
+
+function selectedNodes(fallback?: WorkspaceTreeNode): WorkspaceTreeNode[] {
+  const paths = new Set(selectedPaths.value);
+  if (!paths.size && fallback) paths.add(nodePath(fallback));
+  const nodes = topLevelPaths([...paths])
+    .map((path) => findNodeByPath(workspaceStore.tree, path))
+    .filter((node): node is WorkspaceTreeNode => Boolean(node));
+  return nodes.length || !fallback ? nodes : [fallback];
+}
+
+function topLevelPaths(paths: string[]): string[] {
+  const normalized = [...new Set(paths.map(normalizeNodePath).filter(Boolean))];
+  return normalized.filter((path) => !normalized.some((candidate) => candidate !== path && path.startsWith(`${candidate}/`)));
+}
+
+function shortcutPasteTarget(): string {
+  if (selectedPaths.value.size !== 1) return ROOT_PARENT_PATH;
+  const path = [...selectedPaths.value][0];
+  const node = findNodeByPath(workspaceStore.tree, path);
+  return node ? getDirectoryPath(node) : ROOT_PARENT_PATH;
 }
 
 async function handleRename(node: WorkspaceTreeNode): Promise<void> {
@@ -1661,14 +1724,16 @@ defineExpose({
     hasDirectDiagnostics, diagnosticSeverity, diagnosticHint, shouldShowRowActions, showDiagnosticDot, chapterCompletionLabel,
     isStorySegmentNode, storyDiagnosticCount, storyDiagnosticHint, shouldShowStoryRowActions, chapterStateTitle,
     isRenamingNode, selectOnly, clearSelection, pruneSelection, handleRefresh, handleAutoRefresh, handleWindowPointerDown,
-    handleSave, handleRowClick,
+    handleSave, handleRowClick, handleExplorerKeydown, isEditableShortcutTarget,
     handleChapterCompletionToggle, openNodeContextMenu, handleRootContextMenu, openContextMenuAt, closeContextMenu,
     isDirectoryDropTarget, handleRootDragEnter, handleRootDragOver, handleRootDragLeave, handleRootDrop,
-    handleNodeDragEnter, handleNodeDragOver, handleNodeDragLeave, handleNodeDrop, repositionContextMenu,
+    handleNodeDragEnter, handleNodeDragOver, handleNodeDragLeave, handleNodeDrop,
+    handleInternalDragStart, handleInternalDragEnd, moveSelectedPaths, repositionContextMenu,
     toggleDirectory, isExpanded, iconFor, getNodeKey, flattenTree, shouldRenderCreateRowAfter, startRootCreate,
     startCreate, cancelPendingCreate, cancelPendingRename, startRename, submitPendingRename, submitPendingCreate,
     handleOpenToSide, handleOpenWith, handleReveal, handleRevealRoot, handleAddToChat, handleCut, handleCopy,
-    handlePaste, handleRename, handleDelete, handleRenameNode, handleDeleteNode, handleCopyPath,
+    handlePaste, pasteClipboardTo, selectedNodes, topLevelPaths, shortcutPasteTarget,
+    handleRename, handleDelete, handleRenameNode, handleDeleteNode, handleCopyPath,
     handleCopyRelativePath, hasExternalFiles, importDroppedFiles, fileToBase64, getDirectoryPath, getParentPath,
     joinRelativePath, sanitizeLeafName, normalizePath, absolutePathFor, buildPastedRelativePath, splitCopyName,
     treeContainsPath, writeClipboard

@@ -44,6 +44,13 @@ test("release configuration is offline-capable and updater-aware", () => {
   assert.match(pkg.build.extraMetadata.storydexUpdateFeedUrl, /^https:\/\//);
 });
 
+test("assisted per-user installer does not relaunch elevated and duplicate the license page", () => {
+  assert.equal(pkg.build.nsis.oneClick, false);
+  assert.equal(pkg.build.nsis.perMachine, false);
+  assert.equal(pkg.build.nsis.allowElevation, false);
+  assert.equal(pkg.build.nsis.license, "build/installer-license.zh-CN.txt");
+});
+
 test("packaged Electron E2E runs serially to avoid competing desktop instances", () => {
   assert.match(pkg.scripts["test:smoke"], /--test-concurrency=1/);
   assert.match(pkg.scripts["test:smoke"], /--test-name-pattern/);

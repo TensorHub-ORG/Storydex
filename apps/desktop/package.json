@@ -1,7 +1,7 @@
 {
   "name": "storydex-desktop",
   "private": true,
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Storydex desktop app",
   "main": "electron/main.cjs",
   "scripts": {
@@ -62,7 +62,7 @@
       "output": "release"
     },
     "extraMetadata": {
-      "version": "2.0.0",
+      "version": "2.0.1",
       "storydexUpdateFeedUrl": "https://updates.septemc.com/storydex/windows/"
     },
     "files": [
@@ -97,7 +97,7 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "perMachine": false,
-      "allowElevation": true,
+      "allowElevation": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "Storydex"

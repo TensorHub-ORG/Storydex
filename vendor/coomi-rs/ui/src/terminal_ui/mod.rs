@@ -1653,6 +1653,7 @@ fn handle_runtime_event(app: &mut TuiState, runtime_event: RuntimeEvent) {
                 AgentEvent::ProviderRetry {
                     attempt,
                     max_attempts,
+                    reset_text_characters: _,
                 } => app.push_notice(
                     NoticeKind::Warning,
                     format!("Provider stream stalled, retrying ({attempt}/{max_attempts})"),

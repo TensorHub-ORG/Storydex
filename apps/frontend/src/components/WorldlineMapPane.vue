@@ -2,7 +2,7 @@
   <section class="wlm">
     <header class="wlm-header">
       <div class="wlm-heading">
-        <h2 class="wlm-title">平行时空线</h2>
+        <h2 class="wlm-title">时空线</h2>
         <p class="wlm-sub">
           分支只分不合：每条世界线都是一个独立的平行时空，从某个节点分出去之后就再也不会汇合。
         </p>
@@ -14,9 +14,9 @@
         </span>
         <span class="wlm-chip" :class="hasChanges ? 'is-dirty' : 'is-clean'">
           <span class="material-symbols-rounded">{{ hasChanges ? "edit_note" : "check_circle" }}</span>
-          <span>{{ hasChanges ? `${gitStore.changedCount} 个文件还没进版本` : "所有改动都已进版本" }}</span>
+          <span>{{ hasChanges ? `${gitStore.changedCount} 个文件有更改` : "没有未提交更改" }}</span>
         </span>
-        <button class="wlm-refresh" type="button" title="刷新平行时空线" @click="refresh">
+        <button class="wlm-refresh" type="button" title="刷新时空线" @click="refresh">
           <span class="material-symbols-rounded" :class="{ spinning: gitStore.isTimelineLoading }">refresh</span>
         </button>
       </div>

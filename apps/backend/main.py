@@ -65,14 +65,16 @@ def bootstrap_workspace() -> None:
             app_logger.warning("Marked %s interrupted execution(s) as unfinished", len(reconciled))
     except Exception as exc:
         app_logger.error("Execution reconciliation failed: %s", exc)
-    try:
-        coomi_status = check_coomi_version()
-        if coomi_status["ok"]:
-            app_logger.info("Coomi version check passed: %s", coomi_status["expected"])
-        else:
-            app_logger.error("Coomi version check failed: %s", "; ".join(coomi_status["warnings"]))
-    except Exception as exc:
-        app_logger.error("Coomi version check failed with exception: %s", exc)
+    coomi_status = check_coomi_version()
+    if not coomi_status["ok"]:
+        detail = "; ".join(coomi_status["warnings"])
+        app_logger.critical("Coomi runtime identity check failed: %s", detail)
+        raise RuntimeError(f"Coomi runtime identity check failed: {detail}")
+    app_logger.info(
+        "Coomi runtime identity check passed: %s source=%s",
+        coomi_status["expected"],
+        coomi_status["expectedFingerprint"],
+    )
 
 
 def _resolve_trace_id(request: Request) -> str:

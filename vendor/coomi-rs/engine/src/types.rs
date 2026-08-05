@@ -444,6 +444,10 @@ pub enum AgentEvent {
     ProviderRetry {
         attempt: usize,
         max_attempts: usize,
+        /// Number of Unicode scalar values emitted as visible text by the
+        /// failed attempt. Consumers must remove this suffix before rendering
+        /// the replacement attempt.
+        reset_text_characters: usize,
     },
 }
 
@@ -495,7 +499,13 @@ pub trait ModelStreamObserver: Send + Sync {
     /// Notifies that a provider stream was retried (slow first byte, truncated
     /// stream, or read interruption). Defaults to a no-op so existing observers
     /// keep compiling; UIs may surface this as a connection-retry notice.
-    fn on_provider_retry(&self, _attempt: usize, _max_attempts: usize) {}
+    fn on_provider_retry(
+        &self,
+        _attempt: usize,
+        _max_attempts: usize,
+        _reset_text_characters: usize,
+    ) {
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

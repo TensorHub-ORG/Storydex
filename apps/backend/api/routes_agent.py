@@ -1351,6 +1351,42 @@ def _event_to_trace_event(event_name: str, payload: Dict[str, Any], index: int) 
     }
 
 
+def _rollback_reply_chunks(reply_chunks: List[str], character_count: int) -> None:
+    remaining = max(0, int(character_count or 0))
+    if remaining <= 0:
+        return
+    text = "".join(reply_chunks)
+    reply_chunks.clear()
+    if remaining < len(text):
+        reply_chunks.append(text[:-remaining])
+
+
+def _rollback_trace_text_events(events: List[Dict[str, Any]], character_count: int) -> None:
+    remaining = max(0, int(character_count or 0))
+    if remaining <= 0:
+        return
+    for index in range(len(events) - 1, -1, -1):
+        event = events[index]
+        if str(event.get("event") or "") != "TextChunk":
+            continue
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        content = str(data.get("content") or "")
+        if len(content) <= remaining:
+            remaining -= len(content)
+            events.pop(index)
+            if remaining <= 0:
+                break
+            continue
+        kept = content[:-remaining]
+        data["content"] = kept
+        event["data"] = data
+        event["detail"] = kept[:240]
+        remaining = 0
+        break
+    for index, event in enumerate(events, start=1):
+        event["index"] = index
+
+
 def _extract_trace_metrics(
     events: List[Dict[str, Any]],
     trace_id: str,
@@ -3160,6 +3196,7 @@ async def _collect_coomi_run(
 ) -> tuple[str, List[Dict[str, Any]], bool, str]:
     reply_chunks: List[str] = []
     events: List[Dict[str, Any]] = []
+    model_attempt_reply_baseline = 0
     completed = False
     error_message = ""
     async for event_name, payload in get_storydex_coomi_agent_service().stream_events(
@@ -3183,6 +3220,15 @@ async def _collect_coomi_run(
             packet["content"] = _strip_visible_tool_text(str(packet.get("content") or ""))
             if not packet["content"]:
                 continue
+        if event_name == "TurnPhase" and str(packet.get("phase") or "") == "model":
+            model_attempt_reply_baseline = len("".join(reply_chunks))
+        if event_name == "ConnectionRetry":
+            reset_characters = max(
+                0, len("".join(reply_chunks)) - model_attempt_reply_baseline
+            )
+            packet["resetTextCharacters"] = reset_characters
+            _rollback_reply_chunks(reply_chunks, reset_characters)
+            _rollback_trace_text_events(events, reset_characters)
         events.append(_event_to_trace_event(event_name, packet, len(events) + 1))
         if event_name == "TextChunk":
             reply_chunks.append(str(packet.get("content") or ""))
@@ -4054,6 +4100,7 @@ async def _stream_coomi_sse_worker(
                     ),
                 )
                 model_output_started = False
+                model_attempt_reply_baseline = len("".join(reply_chunks))
                 segment_prompt = prompt
                 segment_index = 0
                 story_correction_attempts = 0
@@ -4065,6 +4112,8 @@ async def _stream_coomi_sse_worker(
                     pending_steer: Dict[str, Any] | None = None
                     segment_completed = False
                     segment_cancelled = False
+                    segment_visible_text_characters = 0
+                    segment_tool_result_seen = False
                     runtime_events = get_storydex_coomi_agent_service().stream_events(
                         prompt=segment_prompt,
                         trace_id=trace_id,
@@ -4207,9 +4256,60 @@ async def _stream_coomi_sse_worker(
                                 packet["content"] = _strip_visible_tool_text(str(packet.get("content") or ""))
                                 if not packet["content"]:
                                     continue
+                            if (
+                                event_name == "TurnPhase"
+                                and str(packet.get("phase") or "") == "model"
+                            ):
+                                model_attempt_reply_baseline = len("".join(reply_chunks))
+                            if event_name == "ConnectionRetry":
+                                reset_characters = max(
+                                    0,
+                                    len("".join(reply_chunks))
+                                    - model_attempt_reply_baseline,
+                                )
+                                packet["resetTextCharacters"] = reset_characters
+                                _rollback_reply_chunks(reply_chunks, reset_characters)
+                                _rollback_trace_text_events(events, reset_characters)
                             if event_name == "TextChunk":
-                                reply_chunks.append(str(packet.get("content") or ""))
+                                visible_content = str(packet.get("content") or "")
+                                reply_chunks.append(visible_content)
+                                segment_visible_text_characters += len(visible_content)
+                            elif event_name == "ToolDone":
+                                segment_tool_result_seen = True
                             elif event_name == "AgentCompleted":
+                                if (
+                                    segment_visible_text_characters == 0
+                                    and not segment_tool_result_seen
+                                ):
+                                    error_message = (
+                                        "Model completed without visible text or tool results; "
+                                        "the provider likely exhausted its output-token budget during reasoning."
+                                    )
+                                    segment_completed = False
+                                    terminal_event = None
+                                    followup_mailbox_service.pause(
+                                        workspace_root=workspace_root,
+                                        session_id=session_id,
+                                        reason="empty_model_result",
+                                    )
+                                    error_packet = {
+                                        "_type": "AgentError",
+                                        "_version": 1,
+                                        "error_type": "EmptyModelResult",
+                                        "message": error_message,
+                                        "details": {
+                                            "runtime": "storydex-coomi-rs",
+                                            "traceId": trace_id,
+                                            "sessionId": session_id,
+                                        },
+                                    }
+                                    events.append(
+                                        _event_to_trace_event(
+                                            "AgentError", error_packet, len(events) + 1
+                                        )
+                                    )
+                                    yield _encode_sse("AgentError", error_packet)
+                                    continue
                                 segment_completed = True
                                 terminal_event = (event_name, packet)
                                 continue

@@ -125,6 +125,16 @@ def test_phase_status_detail_and_text_sanitization_helpers():
     for event, payload, expected in detail_cases:
         assert routes._detail_for_event(event, payload) == expected
 
+    reply_chunks = ["stable", "partial"]
+    trace_events = [
+        routes._event_to_trace_event("TextChunk", {"content": "stable"}, 1),
+        routes._event_to_trace_event("TextChunk", {"content": "partial"}, 2),
+    ]
+    routes._rollback_reply_chunks(reply_chunks, len("partial"))
+    routes._rollback_trace_text_events(trace_events, len("partial"))
+    assert "".join(reply_chunks) == "stable"
+    assert [event["data"]["content"] for event in trace_events] == ["stable"]
+
     packet = routes._turn_phase_packet(
         trace_id="t", session_id="s", phase="intent", label="working", status="running", phase_started=0.0, heartbeat=True
     )
@@ -644,6 +654,7 @@ def test_stream_disconnect_finishes_cancelled_execution_in_background(monkeypatc
 
         async def stream_events(self, **kwargs):
             model_calls.append(kwargs)
+            yield "TextChunk", {"content": "done"}
             yield "AgentCompleted", {"total_tokens": 0}
 
     monkeypatch.setattr(routes, "get_storydex_coomi_agent_service", lambda: Coomi())
@@ -919,6 +930,7 @@ def test_snapshot_failure_requires_confirmation_before_execution(monkeypatch, tm
 
         async def stream_events(self, **kwargs):
             model_calls.append(kwargs)
+            yield "TextChunk", {"content": "done"}
             yield "AgentCompleted", {"total_tokens": 0}
 
     monkeypatch.setattr(routes, "get_storydex_coomi_agent_service", lambda: Coomi())

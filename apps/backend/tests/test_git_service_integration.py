@@ -111,6 +111,57 @@ def test_first_commit_paths_empty_paths_and_validation(git_service: GitService, 
         git_service.read_commit_diff(workspace, commit_id="")
 
 
+def test_commit_paths_skips_stale_missing_pathspec_during_directory_rename(
+    git_service: GitService,
+    tmp_path: Path,
+):
+    workspace = tmp_path / "renamed-chapter"
+    old_directory = workspace / "chapters" / "第1章 未命名"
+    old_directory.mkdir(parents=True)
+    (old_directory / "001.md").write_text("旧正文\n", encoding="utf-8")
+    (workspace / "unrelated.md").write_text("baseline\n", encoding="utf-8")
+    git_service.initialize_repository(workspace)
+    git_service.commit_all(workspace, message="baseline")
+
+    new_directory = workspace / "chapters" / "第1章 新标题"
+    old_directory.rename(new_directory)
+    (workspace / "unrelated.md").write_text("do not commit me\n", encoding="utf-8")
+
+    result = git_service.commit_paths(
+        workspace,
+        paths=[
+            "chapters/第1章 未命名/001.md",
+            "chapters/第1章 新标题/001.md",
+            ".storydex/temp/already-removed.md",
+        ],
+        message="agent: record renamed chapter",
+    )
+
+    assert result["created"] is True
+    committed = git_service.read_commit_diff(workspace, commit_id=result["commit"]["id"])
+    committed_paths = {item["relativePath"] for item in committed["files"]}
+    assert "chapters/第1章 新标题/001.md" in committed_paths
+    assert "unrelated.md" not in committed_paths
+    remaining = {item["relativePath"] for item in git_service.read_summary(workspace)["changedFiles"]}
+    assert remaining == {"unrelated.md"}
+
+
+def test_commit_paths_with_only_stale_missing_paths_is_a_noop(git_service: GitService, tmp_path: Path):
+    workspace = tmp_path / "stale-only"
+    workspace.mkdir()
+    (workspace / "chapter.md").write_text("baseline\n", encoding="utf-8")
+    git_service.initialize_repository(workspace)
+    git_service.commit_all(workspace, message="baseline")
+
+    result = git_service.commit_paths(
+        workspace,
+        paths=[".storydex/temp/already-removed.md"],
+        message="must not fail",
+    )
+
+    assert result["created"] is False
+
+
 def test_tracked_cache_file_does_not_break_commit_paths(git_service: GitService, tmp_path: Path):
     """Regression: a .storydex/.cache/ file tracked by an older Storydex build
     must not make commit_paths fail with "The following paths are ignored".
