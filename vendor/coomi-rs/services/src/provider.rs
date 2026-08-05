@@ -240,17 +240,34 @@ impl HttpModelProvider {
             body["max_tokens"] = Value::from(limit);
         }
         for attempt in 0..PROVIDER_STREAM_ATTEMPTS {
-            let response = tokio::time::timeout(
+            let response = match tokio::time::timeout(
                 PROVIDER_RESPONSE_HEAD_TIMEOUT,
                 self.send_openai_chat(&endpoint, &body, required_tool.as_deref()),
             )
             .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "provider stream failed: no response head within {}s",
-                    PROVIDER_RESPONSE_HEAD_TIMEOUT.as_secs()
-                )
-            })??;
+            {
+                Ok(Ok(response)) => response,
+                Ok(Err(error))
+                    if attempt + 1 < PROVIDER_STREAM_ATTEMPTS
+                        && is_retryable_send_error(&error) =>
+                {
+                    observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS);
+                    tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
+                    continue;
+                }
+                Ok(Err(error)) => return Err(error),
+                Err(_) if attempt + 1 < PROVIDER_STREAM_ATTEMPTS => {
+                    observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS);
+                    tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
+                    continue;
+                }
+                Err(_) => {
+                    anyhow::bail!(
+                        "provider stream failed: no response head within {}s",
+                        PROVIDER_RESPONSE_HEAD_TIMEOUT.as_secs()
+                    );
+                }
+            };
             let status = response.status();
             if !status.is_success() {
                 return checked_json(response)
@@ -378,19 +395,34 @@ impl HttpModelProvider {
             self.config.capabilities.supports_parallel_tool_calls,
         )?;
         for attempt in 0..PROVIDER_STREAM_ATTEMPTS {
-            let response = tokio::time::timeout(
+            let response = match tokio::time::timeout(
                 PROVIDER_RESPONSE_HEAD_TIMEOUT,
                 self.authenticated(self.client.post(&endpoint))
                     .json(&body)
                     .send(),
             )
             .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "provider stream failed: no response head within {}s",
-                    PROVIDER_RESPONSE_HEAD_TIMEOUT.as_secs()
-                )
-            })??;
+            {
+                Ok(Ok(response)) => response,
+                Ok(Err(error))
+                    if attempt + 1 < PROVIDER_STREAM_ATTEMPTS
+                        && is_retryable_send_error(&error) =>
+                {
+                    tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
+                    continue;
+                }
+                Ok(Err(error)) => return Err(error.into()),
+                Err(_) if attempt + 1 < PROVIDER_STREAM_ATTEMPTS => {
+                    tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
+                    continue;
+                }
+                Err(_) => {
+                    anyhow::bail!(
+                        "provider stream failed: no response head within {}s",
+                        PROVIDER_RESPONSE_HEAD_TIMEOUT.as_secs()
+                    );
+                }
+            };
             let status = response.status();
             if !status.is_success() {
                 return checked_json(response)
@@ -498,19 +530,36 @@ impl HttpModelProvider {
             body["max_output_tokens"] = Value::from(limit);
         }
         for attempt in 0..PROVIDER_STREAM_ATTEMPTS {
-            let response = tokio::time::timeout(
+            let response = match tokio::time::timeout(
                 PROVIDER_RESPONSE_HEAD_TIMEOUT,
                 self.authenticated(self.client.post(&endpoint))
                     .json(&body)
                     .send(),
             )
             .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "provider stream failed: no response head within {}s",
-                    PROVIDER_RESPONSE_HEAD_TIMEOUT.as_secs()
-                )
-            })??;
+            {
+                Ok(Ok(response)) => response,
+                Ok(Err(error))
+                    if attempt + 1 < PROVIDER_STREAM_ATTEMPTS
+                        && is_retryable_send_error(&error) =>
+                {
+                    observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS);
+                    tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
+                    continue;
+                }
+                Ok(Err(error)) => return Err(error.into()),
+                Err(_) if attempt + 1 < PROVIDER_STREAM_ATTEMPTS => {
+                    observer.on_provider_retry(attempt + 1, PROVIDER_STREAM_ATTEMPTS);
+                    tokio::time::sleep(PROVIDER_STREAM_RETRY_DELAYS[attempt]).await;
+                    continue;
+                }
+                Err(_) => {
+                    anyhow::bail!(
+                        "provider stream failed: no response head within {}s",
+                        PROVIDER_RESPONSE_HEAD_TIMEOUT.as_secs()
+                    );
+                }
+            };
             let status = response.status();
             if !status.is_success() {
                 return checked_json(response)
@@ -954,6 +1003,24 @@ fn is_retryable_stream_error(error: &anyhow::Error) -> bool {
         || text.contains("broken pipe")
         || text.contains("unexpected eof")
         || text.contains("connection closed")
+}
+
+/// Classifies send()-phase failures (before any response headers) that a
+/// retry may recover from: connection refused/reset, TLS, DNS, timeouts.
+/// Content errors surface as responses (HTTP status), not as send errors, so
+/// a send error here is overwhelmingly transport-level. Accepts either the
+/// anyhow error from send_openai_chat or the raw reqwest error from send().
+fn is_retryable_send_error(error: &impl std::fmt::Display) -> bool {
+    let text = format!("{error:#}").to_ascii_lowercase();
+    text.contains("connect")
+        || text.contains("timed out")
+        || text.contains("timeout")
+        || text.contains("connection reset")
+        || text.contains("broken pipe")
+        || text.contains("tls")
+        || text.contains("dns")
+        || text.contains("lookup")
+        || text.contains("no response head")
 }
 
 /// Minimal retry-state surface shared by the chat and responses stream states.
@@ -3016,6 +3083,35 @@ mod tests {
             assert!(
                 !is_retryable_stream_error(&anyhow::anyhow!("{message}")),
                 "expected non-retryable: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn retryable_send_error_matches_transport_failures_only() {
+        let retryable = [
+            "error sending request for url (http://127.0.0.1/v1/chat/completions): connection refused",
+            "operation timed out",
+            "connection reset by peer",
+            "broken pipe",
+            "error sending request: tls handshake eof",
+            "failed to lookup address information: name or service not known",
+        ];
+        for message in retryable {
+            assert!(
+                is_retryable_send_error(&anyhow::anyhow!("{message}")),
+                "expected retryable send error: {message}"
+            );
+        }
+        let not_retryable = [
+            "invalid provider SSE JSON",
+            "provider returned HTTP 400: bad request",
+            "streamed tool call has no name",
+        ];
+        for message in not_retryable {
+            assert!(
+                !is_retryable_send_error(&anyhow::anyhow!("{message}")),
+                "expected non-retryable send error: {message}"
             );
         }
     }
