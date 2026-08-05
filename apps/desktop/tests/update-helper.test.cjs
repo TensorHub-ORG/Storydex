@@ -35,6 +35,7 @@ function runHelper(exitCode, { invalidLogPath = false, parentPid = 999999 } = {}
 test("persistent update helper completes installation and clears the install lock", { skip: process.platform !== "win32" }, () => {
   const { result, output, lockExists } = runHelper(0);
   assert.equal(result.status, 0, output);
+  assert.match(output, /Helper process started/i);
   assert.match(output, /completed successfully/i);
   assert.equal(lockExists, false);
 });

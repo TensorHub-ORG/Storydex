@@ -174,10 +174,19 @@ test("local release scripts derive version from package.json, not hardcoded stri
 
 test("desktop updater retries transient module replacement and delegates installation to a persistent helper", () => {
   const source = fs.readFileSync(path.join(root, "electron", "main.cjs"), "utf8");
+  const helperSource = fs.readFileSync(path.join(root, "electron", "update-helper.ps1"), "utf8");
+  const updateConfigSource = fs.readFileSync(path.join(root, "scripts", "write-app-update-config.cjs"), "utf8");
   assert.match(source, /UPDATER_RETRY_DELAYS_MS\s*=\s*\[[^\]]+\]/);
   assert.match(source, /scheduleAutoUpdaterRetry\(\)/);
   assert.match(source, /update-helper\.ps1/);
   assert.match(source, /installing\.json/);
+  assert.match(source, /storydex-desktop-updater/);
+  assert.match(updateConfigSource, /updaterCacheDirName:\s*storydex-desktop-updater/);
+  assert.ok(
+    helperSource.indexOf('Set-InstallLock "waiting-for-app-exit"') <
+      helperSource.indexOf("New-Object Windows.Forms.Form"),
+    "update helper must publish readiness before creating its UI"
+  );
   assert.match(source, /showUpdateInstallInProgress/);
   assert.match(source, /autoInstallOnAppQuit\s*=\s*false/);
   assert.doesNotMatch(source, /quitAndInstall\(true,\s*true\)/);

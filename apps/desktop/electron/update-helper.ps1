@@ -13,6 +13,8 @@ $script:Form = $null
 $script:FailureHandled = $false
 
 function Write-UpdateLog([string]$Message) {
+  $logDirectory = Split-Path -Parent $LogPath
+  if ($logDirectory) { New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null }
   $line = "$(Get-Date -Format o) $Message"
   Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8
 }
@@ -24,7 +26,13 @@ function Set-InstallLock([string]$State) {
   try {
     [IO.File]::WriteAllText($temporaryPath, $payload, [Text.UTF8Encoding]::new($false))
     if ([IO.File]::Exists($LockPath)) {
-      [IO.File]::Replace($temporaryPath, $LockPath, $backupPath)
+      try {
+        [IO.File]::Replace($temporaryPath, $LockPath, $backupPath)
+      } catch {
+        # File.Replace is not available on every Windows filesystem/provider.
+        Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue
+        [IO.File]::Move($temporaryPath, $LockPath)
+      }
     } else {
       [IO.File]::Move($temporaryPath, $LockPath)
     }
@@ -61,6 +69,12 @@ try {
   Add-Type -AssemblyName System.Windows.Forms
   Add-Type -AssemblyName System.Drawing
 
+  # Publish the readiness handshake before creating the UI/message loop. The
+  # parent process must be able to observe this even if the installer exits
+  # quickly or the window subsystem starts slowly.
+  Set-InstallLock "waiting-for-app-exit"
+  Write-UpdateLog "Helper process started. parent=$ParentPid installer=$InstallerPath"
+
   $form = New-Object Windows.Forms.Form
   $script:Form = $form
   $form.Text = "Storydex Update"
@@ -91,8 +105,6 @@ try {
 
   $form.Add_Shown({
     try {
-      Set-InstallLock "waiting-for-app-exit"
-      Write-UpdateLog "Helper started. parent=$ParentPid installer=$InstallerPath"
       $deadline = if ($TestMode) { (Get-Date).AddSeconds(1) } else { (Get-Date).AddMinutes(2) }
       while ((Get-Process -Id $ParentPid -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {
         [Windows.Forms.Application]::DoEvents()
