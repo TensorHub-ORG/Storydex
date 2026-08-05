@@ -28,7 +28,11 @@ from services.story_word_count_service import (
     count_story_text_words,
     strip_non_story_wrappers,
 )
-from services.storydex_agent_tools import StorydexApplyStoryIncrementTool
+from services.storydex_agent_tools import (
+    STORY_FRAGMENT_CHUNK_MAX_CHARS,
+    StorydexApplyStoryIncrementTool,
+    StorydexStageStoryFragmentTool,
+)
 from services.storydex_orchestration_service import get_storydex_orchestration_service
 from storage.workspace_io import WorkspaceIO
 
@@ -212,9 +216,30 @@ def test_apply_story_increment_writes_only_the_counted_prose(tmp_path: Path) -> 
     )
     contract = _story_contract(tmp_path, chapter_word_count_target=3000)
     target_path = contract["turnPlan"]["fragmentTargets"][0]["path"]
+    fragment_id = "wrapped-prose"
+    chunks = [
+        wrapped[offset : offset + STORY_FRAGMENT_CHUNK_MAX_CHARS]
+        for offset in range(0, len(wrapped), STORY_FRAGMENT_CHUNK_MAX_CHARS)
+    ]
+    stage_tool = StorydexStageStoryFragmentTool(workspace_root=tmp_path)
+    for chunk_index, chunk in enumerate(chunks):
+        stage_result = stage_tool.run(
+            {
+                "fragmentId": fragment_id,
+                "path": target_path,
+                "chunkIndex": chunk_index,
+                "chunkCount": len(chunks),
+                "text": chunk,
+            }
+        )
+        assert stage_result.success, stage_result.error
     tool = StorydexApplyStoryIncrementTool(workspace_root=tmp_path, turn_contract=contract)
 
-    result = json.loads(tool.run({"fragments": [{"text": wrapped}]}).output)
+    apply_result = tool.run(
+        {"fragments": [{"path": target_path, "stagedFragmentId": fragment_id}]}
+    )
+    assert apply_result.success, apply_result.error
+    result = json.loads(apply_result.output)
     written = (tmp_path / target_path).read_text(encoding="utf-8")
 
     assert result["ok"] is True
