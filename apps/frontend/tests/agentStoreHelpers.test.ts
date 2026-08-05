@@ -74,6 +74,42 @@ describe("agent store deterministic helpers", () => {
     expect(u.mergeWaterfallItem(existing, u.createWaterfallItem({ id: "new", type: "system", status: "info", title: "N", content: "n" }))).toHaveLength(2);
     expect(u.segmentItemId([...existing, u.createWaterfallItem({ id: "sys", type: "system", status: "info", title: "S", content: "" })], "t", "assistant")).toBe("t-assistant-1");
     expect(u.segmentItemId([], "t", "reasoning")).toBe("t-reasoning-1");
+    expect(u.streamPacketToWaterfallItem("t", packet({
+      _type: "ConnectionRetry",
+      attempt: 2,
+      maxAttempts: 3,
+      resetTextCharacters: 4,
+      message: "retry"
+    }), existing)?.content).toContain("4");
+  });
+
+  it("rolls back partial and multi-item provider output by Unicode code point", () => {
+    expect(u.dropTrailingCodePoints("ab😀cd", 2)).toBe("ab😀");
+    expect(u.dropTrailingCodePoints("ab", 20)).toBe("");
+    expect(u.dropTrailingCodePoints("ab", 0)).toBe("ab");
+    expect(u.dropTrailingCodePoints("", 1)).toBe("");
+    expect(u.rollbackTraceTextEvents([], 0)).toEqual([]);
+    expect(u.rollbackAssistantItems([], 0)).toEqual([]);
+
+    const traceEvents = [
+      { index: 1, event: "TextChunk", phase: "model", status: "running", detail: "abc", data: { content: "abc" }, timestamp: "1" },
+      { index: 2, event: "TurnPhase", phase: "model", status: "running", detail: "phase", data: {}, timestamp: "2" },
+      { index: 3, event: "TextChunk", phase: "model", status: "running", detail: "defgh", data: { content: "defgh" }, timestamp: "3" }
+    ] as never;
+    const rolledEvents = u.rollbackTraceTextEvents(traceEvents, 7);
+    expect(rolledEvents.map((event: { event: string }) => event.event)).toEqual(["TextChunk", "TurnPhase"]);
+    expect(rolledEvents[0].detail).toBe("a");
+    expect(rolledEvents[0].data.content).toBe("a");
+    expect(rolledEvents.map((event: { index: number }) => event.index)).toEqual([1, 2]);
+
+    const assistantItems = [
+      u.createWaterfallItem({ id: "a1", type: "assistant", status: "running", title: "A", content: "abc" }),
+      u.createWaterfallItem({ id: "s1", type: "system", status: "info", title: "S", content: "keep" }),
+      u.createWaterfallItem({ id: "a2", type: "assistant", status: "running", title: "A", content: "defgh" })
+    ];
+    const rolledItems = u.rollbackAssistantItems(assistantItems, 7);
+    expect(rolledItems.map((item: { id: string }) => item.id)).toEqual(["a1", "s1"]);
+    expect(rolledItems[0].content).toBe("a");
   });
 
   it("formats structured Coomi diagnostics for the Agent and Trace panels", () => {

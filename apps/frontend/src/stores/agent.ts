@@ -3699,6 +3699,9 @@ function chapterLengthTierLabel(value: ChapterLengthTier): string {
 export const __agentStoreTestUtils = import.meta.env.MODE === "test" ? {
   streamPacketToTraceEvent,
   mergeStreamingTraceEvent,
+  dropTrailingCodePoints,
+  rollbackTraceTextEvents,
+  rollbackAssistantItems,
   streamPacketToWaterfallItem,
   segmentItemId,
   createWaterfallItem,
