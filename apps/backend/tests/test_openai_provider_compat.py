@@ -66,7 +66,7 @@ async def test_bridge_provider_maps_completion_tool_calls_and_usage(monkeypatch)
         }
 
     monkeypatch.setattr(bridge, "request_once", fake_request)
-    provider = bridge.BridgeProvider()
+    provider = bridge.BridgeProvider(reasoning_effort="max")
     response = await provider.chat(
         [{"role": "user", "content": "inspect"}],
         tools=[{"function": {"name": "Read", "parameters": {"type": "object"}}}],
@@ -84,6 +84,13 @@ async def test_bridge_provider_maps_completion_tool_calls_and_usage(monkeypatch)
     }
     assert captured["requiredTool"] == "Read"
     assert captured["maxOutputTokens"] == 256
+    assert captured["reasoningEffort"] == "max"
+
+
+def test_reasoning_effort_normalization_accepts_max_and_rejects_unknown_values() -> None:
+    assert bridge._normalize_reasoning_effort(" MAX ") == "max"
+    with pytest.raises(bridge.CoomiBridgeError, match="Unsupported reasoning effort"):
+        bridge._normalize_reasoning_effort("ultra")
 
 
 @pytest.mark.asyncio

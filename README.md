@@ -26,7 +26,7 @@
 </table>
 
 <p align="center">
-  <img alt="release" src="https://img.shields.io/badge/release-v2.0.1-2563eb?style=flat-square" />
+  <img alt="release" src="https://img.shields.io/badge/release-v2.0.2-2563eb?style=flat-square" />
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0%20%2B%20Commons%20Clause-0f766e?style=flat-square" />
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-f97316?style=flat-square" />
   <img alt="desktop" src="https://img.shields.io/badge/desktop-Electron%2040-47848f?style=flat-square&logo=electron&logoColor=white" />
@@ -105,6 +105,7 @@ Storydex/
 - [指令仓库模板](docs/prompts/README.md)
 - [内置技能模板](docs/skills/README.md)
 - [项目架构说明](docs/项目架构说明.md)
+- [Rust 后端与 Tauri 桌面重构计划](docs/rust-tauri-migration.md)
 
 ## 许可证
 

@@ -171,11 +171,11 @@
               :key="option.value"
               type="button"
               class="coomi-choice-card"
-              :class="{ active: selectedReasoningMode === option.value }"
+              :class="{ active: selectedReasoningMode === option.value, disabled: isReasoningOptionDisabled(option.value) }"
+              :disabled="isReasoningOptionDisabled(option.value)"
               @mousedown.prevent="selectReasoningOption(option.value)"
             >
               <span>{{ option.label }}</span>
-              <small>{{ option.description }}</small>
             </button>
           </div>
         </div>
@@ -609,6 +609,8 @@ import type {
   AgentExecutionRun,
   AgentFollowupMessage,
   AgentPendingApproval,
+  AgentReasoningCapability,
+  AgentReasoningEffort,
   CoomiWaterfallItem,
   CoomiWaterfallItemStatus,
   CoomiWaterfallItemType
@@ -640,7 +642,7 @@ type PendingWriteLike = {
 };
 type PermissionChoice = "ask_approval" | "approve_for_me" | "full_access";
 type PermissionTone = PermissionChoice | "plan_mode";
-type ReasoningChoice = "auto" | "low" | "medium" | "high";
+type ReasoningChoice = AgentReasoningEffort;
 type ApprovalDraft = { value: string; text: string };
 
 const chapterLengthTierOptions: Array<{ value: ChapterLengthTier; label: string }> = [
@@ -673,7 +675,12 @@ const selectedCommandIndex = ref(0);
 const foldState = ref<Record<string, boolean>>({});
 const toolChunkState = ref<Record<string, boolean>>({});
 const toolRowState = ref<Record<string, boolean>>({});
-const selectedReasoningMode = ref<ReasoningChoice>("auto");
+const selectedReasoningMode = computed<ReasoningChoice>({
+  get: () => agentStore.reasoningEffort,
+  set: (value) => {
+    agentStore.reasoningEffort = value;
+  }
+});
 const approvalCursor = ref(0);
 const approvalDrafts = ref<Record<string, ApprovalDraft>>({});
 const commitPromptMode = ref<"auto" | "manual" | "skip" | "">("");
@@ -762,11 +769,13 @@ const permissionOptions: Array<{ value: PermissionChoice; label: string; descrip
   { value: "approve_for_me", label: "自动批准", description: "常规操作自动通过。" },
   { value: "full_access", label: "完全访问", description: "允许 Coomi 直接执行任务。" }
 ];
-const reasoningOptions: Array<{ value: ReasoningChoice; label: string; shortLabel: string; description: string }> = [
-  { value: "auto", label: "自动", shortLabel: "自动", description: "由 Coomi 根据任务自动判断。" },
-  { value: "low", label: "低", shortLabel: "低", description: "偏向快速响应。" },
-  { value: "medium", label: "中", shortLabel: "中", description: "平衡速度和推理深度。" },
-  { value: "high", label: "高", shortLabel: "高", description: "偏向更充分的推理。" }
+const reasoningOptionCatalog: Array<{ value: ReasoningChoice; label: string; shortLabel: string }> = [
+  { value: "auto", label: "自动", shortLabel: "自动" },
+  { value: "low", label: "低", shortLabel: "低" },
+  { value: "medium", label: "中", shortLabel: "中" },
+  { value: "high", label: "高", shortLabel: "高" },
+  { value: "xhigh", label: "超高", shortLabel: "超高" },
+  { value: "max", label: "最大", shortLabel: "最大" }
 ];
 const markdown = createMarkdownRenderer({}, { linkifyWorkspaceMarkdownFiles: true });
 
@@ -841,10 +850,42 @@ const activePermissionTone = computed<PermissionTone>(() => {
   }
   return "full_access";
 });
-const selectedReasoningOption = computed(
-  () => reasoningOptions.find((option) => option.value === selectedReasoningMode.value) || reasoningOptions[0]
+const reasoningCapability = computed<AgentReasoningCapability>(() =>
+  agentStore.coomiStatus?.reasoningCapability || {
+    support: "unknown",
+    levels: [],
+    source: "unknown",
+    promptFallback: false,
+    routeSensitive: false
+  }
 );
-const reasoningLabel = computed(() => `推理：${selectedReasoningOption.value.shortLabel}`);
+const reasoningOptions = computed(() => {
+  const hasCapabilityObject = agentStore.coomiStatus?.reasoningCapability !== undefined;
+  const declared = reasoningCapability.value.levels
+    .map((level) => level.effort)
+    .filter((effort, index, values) => values.indexOf(effort) === index)
+    .sort((left, right) => {
+      const order: AgentReasoningEffort[] = ["low", "medium", "high", "xhigh", "max"];
+      return order.indexOf(left) - order.indexOf(right);
+    });
+  const values: ReasoningChoice[] = declared.length > 0
+    ? ["auto", ...declared]
+    : hasCapabilityObject
+      ? ["auto"]
+      : reasoningOptionCatalog.map((option) => option.value);
+  return values.map((value) =>
+    reasoningOptionCatalog.find((option) => option.value === value)
+      || { value, label: value, shortLabel: value }
+  );
+});
+const selectedReasoningOption = computed(
+  () => reasoningOptions.value.find((option) => option.value === selectedReasoningMode.value)
+    || reasoningOptions.value[0]
+    || reasoningOptionCatalog[0]
+);
+const reasoningLabel = computed(() => {
+  return `推理：${selectedReasoningOption.value?.shortLabel || selectedReasoningMode.value}`;
+});
 const storyLengthTierEnabled = computed(
   () => workspaceStore.storySettings.storyLengthTierEnabled === true
 );
@@ -1356,8 +1397,23 @@ async function selectPermissionOption(value: PermissionChoice): Promise<void> {
 }
 
 function selectReasoningOption(value: ReasoningChoice): void {
+  if (isReasoningOptionDisabled(value)) {
+    return;
+  }
   selectedReasoningMode.value = value;
   reasoningMenuOpen.value = false;
+}
+
+function reasoningLevel(value: ReasoningChoice) {
+  return reasoningCapability.value.levels.find((level) => level.effort === value);
+}
+
+function isReasoningOptionDisabled(value: ReasoningChoice): boolean {
+  if (value === "auto") {
+    return false;
+  }
+  const level = reasoningLevel(value);
+  return !level || level.control === "auto";
 }
 
 async function runCoomiCommand(command: string): Promise<void> {
@@ -2109,6 +2165,7 @@ defineExpose({
     activePermissionTone,
     selectedReasoningOption,
     reasoningLabel,
+    isReasoningOptionDisabled,
     storyOptionsLabel,
     selectedChapterTemplate,
     isSingleFileChapterTemplate,
@@ -3375,6 +3432,18 @@ defineExpose({
 .coomi-choice-card.active {
   border-color: color-mix(in srgb, var(--accent) 42%, var(--border-subtle));
   background: color-mix(in srgb, var(--accent) 12%, var(--bg-input));
+}
+
+.coomi-choice-card:disabled,
+.coomi-choice-card.disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.coomi-choice-card:disabled:hover,
+.coomi-choice-card.disabled:hover {
+  border-color: var(--border-subtle);
+  background: var(--bg-input);
 }
 
 .coomi-choice-card span {

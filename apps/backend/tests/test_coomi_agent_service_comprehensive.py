@@ -82,6 +82,104 @@ def test_translator_reports_turn_usage_instead_of_runtime_cumulative_usage() -> 
     assert completed_event[1]["completion_tokens"] == 249
 
 
+def test_translator_preserves_reasoning_plan_and_model_response_evidence() -> None:
+    translator = coomi._CoomiEventTranslator(session_id="evidence-session")
+    plan_event = translator.translate(
+        {
+            "type": "reasoning_plan",
+            "data": {
+                "provider": "relay",
+                "model": "ordinary-model",
+                "plan": {
+                    "requested": "high",
+                    "control": "prompt",
+                    "sent": False,
+                    "promptApplied": True,
+                    "wireFields": [],
+                    "support": "unknown",
+                },
+            },
+        }
+    )
+    completed = translator.translate(
+        {
+            "type": "model_completed",
+            "data": {
+                "round": 2,
+                "metadata": {
+                    "responseModel": "ordinary-model-via-route",
+                    "finishReason": "stop",
+                    "responseStatus": "completed",
+                    "nativeReasoning": False,
+                },
+                "usage": {
+                    "input_tokens": 21,
+                    "output_tokens": 34,
+                    "reasoning_tokens": 13,
+                },
+            },
+        }
+    )
+
+    assert plan_event is not None
+    assert plan_event[1]["plan"]["control"] == "prompt"
+    assert completed is not None
+    assert completed[0] == "ModelCompleted"
+    payload = completed[1]
+    assert payload["upstreamResponded"] is True
+    assert payload["responseModel"] == "ordinary-model-via-route"
+    assert payload["nativeReasoning"] is False
+    assert payload["reasoning_tokens"] == 13
+    assert payload["usage"]["total_tokens"] == 55
+    assert payload["reasoningRequestPlan"]["promptApplied"] is True
+
+
+def test_bridge_status_cache_reloads_when_provider_or_runtime_changes(monkeypatch, tmp_path) -> None:
+    config = tmp_path / "providers.json"
+    config.write_text("{}\n", encoding="utf-8")
+    runtime = tmp_path / "storydex-coomi-bridge.exe"
+    runtime.write_bytes(b"bridge-v1")
+    monkeypatch.setattr(coomi, "STORYDEX_COOMI_CONFIG", config)
+    monkeypatch.setattr(coomi, "_BRIDGE_STATUS_CACHE", None)
+    monkeypatch.setattr(coomi, "bridge_command", lambda: [str(runtime)])
+    calls = []
+
+    def fake_status():
+        calls.append(True)
+        return {"type": "status", "data": {"activeProvider": "relay"}}
+
+    monkeypatch.setattr(coomi, "request_status_sync", fake_status)
+    assert coomi._bridge_status_snapshot()["activeProvider"] == "relay"
+    assert coomi._bridge_status_snapshot()["activeProvider"] == "relay"
+    assert len(calls) == 1
+
+    config.write_text('{"providers": {"relay": {}}}\n', encoding="utf-8")
+    assert coomi._bridge_status_snapshot(probe=False) == {}
+    assert len(calls) == 1
+    assert coomi._bridge_status_snapshot()["activeProvider"] == "relay"
+    assert len(calls) == 2
+
+    runtime.write_bytes(b"bridge-v2-with-new-capabilities")
+    assert coomi._bridge_status_snapshot()["activeProvider"] == "relay"
+    assert len(calls) == 3
+
+
+def test_execution_status_never_starts_a_diagnostic_bridge(monkeypatch, tmp_path) -> None:
+    service = coomi.StorydexCoomiAgentService()
+    monkeypatch.setattr(coomi, "_read_providers_config_payload", lambda: {"active": "relay", "providers": {}})
+    probes = []
+
+    def fake_snapshot(*, probe: bool = True):
+        probes.append(probe)
+        return {}
+
+    monkeypatch.setattr(coomi, "_bridge_status_snapshot", fake_snapshot)
+    status = service.get_status_for_execution(workspace_root=tmp_path)
+
+    assert status["providerId"] == "relay"
+    assert probes == [False]
+
+
 def test_session_snapshot_restore_and_rollback(monkeypatch, tmp_path) -> None:
     sessions = tmp_path / "sessions"
     sessions.mkdir()
@@ -292,7 +390,10 @@ async def test_stream_events_preserves_storydex_event_contract(monkeypatch, tmp_
             trace_id="trace",
             session_id="story-session",
             workspace_root=tmp_path,
-            turn_contract={"executionPolicy": {"directFileWrites": False}},
+            turn_contract={
+                "executionPolicy": {"directFileWrites": False},
+                "reasoningEffort": "medium",
+            },
         )
     ]
     assert [name for name, _payload in events] == ["AgentStarted", "TextChunk", "AgentCompleted"]
@@ -302,6 +403,7 @@ async def test_stream_events_preserves_storydex_event_contract(monkeypatch, tmp_
     )
     assert binding["runtimeSessionId"] == "runtime-1"
     assert started_payload["permissionMode"] == "full_access"
+    assert started_payload["reasoningEffort"] == "medium"
     assert started_payload["writesAllowed"] is True
     assert any(tool["name"] == "StorydexSyncWiki" for tool in started_payload["toolSpecs"])
     assert "This turn is read-only" not in started_payload["systemPrompt"]

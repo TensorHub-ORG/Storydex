@@ -1,10 +1,58 @@
 import type { ApiAuditRecord, ApiTrace } from "@/types/api";
 import type { ChapterLengthTier } from "@/types/workspace";
 
+export type AgentReasoningEffort = "auto" | "low" | "medium" | "high" | "xhigh" | "max";
+export type AgentReasoningSupport = "supported" | "unsupported" | "unknown";
+export type AgentReasoningControlMode = "auto" | "native" | "prompt";
+export type AgentReasoningCapabilitySource = "model_config" | "provider_config" | "model_rule" | "unknown";
+
+export interface AgentReasoningWireField {
+  path: string;
+  value: unknown;
+}
+
+export interface AgentReasoningLevelCapability {
+  effort: AgentReasoningEffort;
+  control: AgentReasoningControlMode;
+  wireFields: AgentReasoningWireField[];
+  routeSensitive: boolean;
+}
+
+export interface AgentReasoningCapability {
+  support: AgentReasoningSupport;
+  levels: AgentReasoningLevelCapability[];
+  source: AgentReasoningCapabilitySource;
+  promptFallback: boolean;
+  routeSensitive: boolean;
+  fallbackReason?: string;
+}
+
+export interface AgentReasoningRequestPlan {
+  requested: AgentReasoningEffort;
+  control: AgentReasoningControlMode;
+  sent: boolean;
+  promptApplied: boolean;
+  wireFields: AgentReasoningWireField[];
+  support: AgentReasoningSupport;
+  source: AgentReasoningCapabilitySource;
+  routeSensitive: boolean;
+  fallbackReason?: string;
+}
+
+export interface AgentCoomiModelChoice {
+  selector: string;
+  providerId: string;
+  providerDisplay: string;
+  model: string;
+  isFast: boolean;
+  reasoningCapability: AgentReasoningCapability;
+}
+
 export interface AgentChatRequest {
   prompt: string;
   activeFile?: string;
   workspaceRoot?: string;
+  reasoningEffort?: AgentReasoningEffort;
   storyGeneration?: AgentStoryGenerationOptions;
   confirmNoSnapshot?: boolean;
   replaceLatestTraceId?: string;
@@ -130,6 +178,10 @@ export interface AgentCoomiStatusResponse {
   compactThreshold?: number;
   warningThreshold?: number;
   compressionStatus?: string;
+  reasoningCapability?: AgentReasoningCapability;
+  reasoningRequestPlan?: AgentReasoningRequestPlan;
+  models?: AgentCoomiModelChoice[];
+  providerCapabilities?: Record<string, unknown>;
 }
 
 export interface AgentCoomiConfigResponse {
@@ -169,6 +221,8 @@ export type AgentStreamPacketType =
   | "ToolDone"
   | "ToolCacheHit"
   | "UsageUpdate"
+  | "ReasoningPlan"
+  | "ModelCompleted"
   | "CompressionEvent"
   | "PlanModeChanged"
   | "PermissionRequest"
@@ -239,6 +293,19 @@ export interface AgentStreamPacket {
   duration_ms?: number;
   metrics?: Record<string, unknown>;
   usage?: Record<string, number>;
+  reasoning_tokens?: number;
+  reasoningTokens?: number;
+  reasoningRequestPlan?: AgentReasoningRequestPlan;
+  plan?: AgentReasoningRequestPlan;
+  round?: number;
+  upstreamResponded?: boolean;
+  responseModel?: string;
+  finishReason?: string;
+  responseStatus?: string;
+  nativeReasoning?: boolean;
+  metadata?: Record<string, unknown>;
+  provider?: string;
+  model?: string;
   context_window?: number;
   contextWindow?: number;
   used_tokens?: number;

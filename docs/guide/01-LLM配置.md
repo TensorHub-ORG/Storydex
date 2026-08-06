@@ -153,6 +153,106 @@ Agent 面板中常见状态包括：
 | `章节篇幅（实验）` | 默认关闭；仅项目显式启用篇幅档位实验开关时显示。 |
 | `章节模板` | 新故事或需要新章节结构时使用的章节目录模板。 |
 
+### 推理强度如何生效
+
+推理强度默认使用模型接口提供的原生参数。新会话初始选择 `高`；加载当前模型能力后，如果该模型没有声明 `高`，界面会切回 `自动`。切换后，普通执行、重试、重新执行和排队续发都会使用当前档位。选择器只展示 `自动` 和当前模型能力对象声明的档位，并显示用户档位与实际发送的 wire 字段，避免把两者混为一谈。
+
+| 面板档位 | 行为 |
+| --- | --- |
+| `自动` | 不发送任何推理强度参数，使用模型或网关自己的动态默认值。 |
+| `低` | 优先降低延迟和推理 token 消耗。 |
+| `中` | 在响应速度和推理深度之间平衡。 |
+| `高` | 默认值，偏向充分推理。 |
+| `超高` | 使用模型声明的 `xhigh` 档位；它不一定是该模型的最高档。 |
+| `最大` | 使用模型声明的最高用户档位 `max`。 |
+
+Storydex 会在运行时按提供方协议转换：
+
+| 提供方类型 | 请求参数 |
+| --- | --- |
+| `OpenAI Compatible` | 通常使用 `reasoning_effort`。 |
+| `OpenRouter` | 使用 `reasoning.effort`。 |
+| `OpenAI Responses` | `reasoning.effort` |
+| `Anthropic Messages` | 新模型使用 adaptive thinking 和 `output_config.effort`；旧模型使用 `thinking.budget_tokens`，其中 Opus 4.5 同时使用 effort。 |
+| `Gemini Native` | Gemini 3 及以后使用 `thinkingLevel`；Gemini 2.5 使用 `thinkingBudget`。 |
+
+档位会按具体模型和路由转换，不再按“是不是 GPT”做二分判断。当前内置规则包括：
+
+| 模型/路由 | 默认展示档位 |
+| --- | --- |
+| GPT-5 系列（OpenAI Compatible / Responses） | `low / medium / high / xhigh / max` |
+| Claude Opus 4.6、Sonnet 4.6 | `low / medium / high / max` |
+| Claude Opus 4.7+、Opus 5、Sonnet 5、Fable 5 | `low / medium / high / xhigh / max` |
+| DeepSeek V4（官方接口） | `high / max` |
+| DeepSeek V4（OPENCODE，含 `v4flash...` 别名） | `low / high / max`；`max` 标记为路由敏感 |
+| DeepSeek V4（OpenRouter） | `high / xhigh` |
+| Kimi K3（Moonshot 官方或 Anthropic Messages） | `low / high / max` |
+| Kimi K3（OPENCODE） | `max` |
+
+以上是“内置已知能力”，不是对所有同名中转的保证。同一个模型名换到未知 base URL 后，Storydex 会采用更保守的公共子集；中转明确支持其他档位时，应使用模型级 profile 或映射声明。模型没有声明的档位不会显示，也不会在调用时静默降级；异常请求会直接报错，避免界面选择与实际发送不一致。
+
+Storydex 的标准用户档位到 `max` 为止。`ultra` 属于特定 Codex 编排工作流的扩展语义，不进入通用 Provider 能力和请求协议。
+
+`supports_reasoning_effort` 是三态配置：未配置时，Storydex 根据协议和模型名判断是否支持；设为 `true` 时强制发送；设为 `false` 时不发送原生强度字段。这样普通 GPT-4、本地模型或只实现了基础 Chat Completions 的网关不会因为未知字段而报错。部分 Ollama、vLLM、LM Studio 或自建兼容服务不接受推理强度参数，这种情况下可手动在对应提供方配置中加入：
+
+```json
+{
+  "supports_reasoning_effort": false
+}
+```
+
+如果兼容网关支持推理强度但使用不同的档位名称，可添加显式映射。例如把 Storydex 的 `超高` 转成上游的 `max`：
+
+```json
+{
+  "reasoning_effort_map": {
+    "xhigh": "max"
+  }
+}
+```
+
+非空的 `reasoning_effort_map` 也会显式启用原生推理参数，并声明对应的用户档位。例如配置 `"max": "max"` 后，非 GPT 模型也会出现 `最大`；它不依赖模型名称猜测。
+
+同一提供方有多个能力不同的模型时，建议使用模型级 profile，而不是让一个 Provider 级布尔值覆盖所有模型：
+
+```json
+{
+  "reasoning_profiles": {
+    "gpt-5.6-luna": {
+      "supported": true,
+      "levels": ["low", "medium", "high", "xhigh", "max"]
+    },
+    "kimi-k3": {
+      "supported": true,
+      "levels": ["low", "high", "max"],
+      "effort_map": {"max": "max"}
+    },
+    "*": {
+      "supported": false
+    }
+  }
+}
+```
+
+解析优先级是“精确模型 profile -> `*` profile -> Provider 级配置 -> 模型规则 -> unknown”。能力未知或明确不支持时，显式档位默认不可选，`自动` 仍可用且不会发送强度字段。
+
+`ReasoningPlan` 和 `ModelCompleted` 会记录实际请求字段、响应模型及 reasoning token 等诊断信息，但只进入 Trace 和落盘日志，不会作为两条额外消息显示在主对话中。
+
+推理强度采用“严格配置校验、运行时隔离”的双轨策略：配置检查仍会指出不合法的档位或映射；实际模型请求遇到过期能力缓存、未声明档位、非法 token 映射等问题时，会回到 `自动`（或已显式开启的提示词 fallback）继续主请求，并在 `ReasoningPlan.fallbackReason` 中记录原因。单个坏档位也不会让其他 Provider、模型或合法档位从能力列表中消失。
+
+如果上游以 HTTP `400/422` 明确拒绝 reasoning/thinking 字段，Storydex 会仅移除对应推理字段后重试；非推理相关的参数错误不会被静默重试。OpenAI Compatible 网关同时要求补充消息 ID 时，两种兼容回退可以按需组合；流式连接后续若发生传输重试，也会复用已经协商成功的请求体，避免反复发送已被拒绝的推理字段。Anthropic 的 interleaved-thinking beta 头只会在实际发送旧式 `thinking.type=enabled` 且存在工具调用时附加，回退到普通请求后不会保留。
+
+对没有原生强度字段、但希望用提示词做软控制的模型，可以显式开启：
+
+```json
+{
+  "supports_reasoning_effort": false,
+  "reasoning_prompt_fallback": true
+}
+```
+
+提示词 fallback 默认关闭。开启后界面会标记“仅提示词控制，未发送原生字段”；它只能表达本地指导意图，不能证明模型原生支持该档位，也不能证明上游按对应强度执行。`supports_reasoning_effort: false` 本身不会修改提示词或关闭模型固有的推理行为。
+
 ## 注意事项
 
 - Storydex 的 Agent 基座是 Coomi；Coomi 负责通用 Agent 能力，Storydex 负责小说项目编排。

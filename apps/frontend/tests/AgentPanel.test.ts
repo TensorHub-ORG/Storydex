@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { mount, shallowMount } from "@vue/test-utils";
+import { flushPromises, mount, shallowMount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { nextTick, unref } from "vue";
 
@@ -110,6 +110,113 @@ beforeEach(() => {
 });
 
 describe("AgentPanel", () => {
+  it("defaults reasoning to high and disables undeclared explicit levels", async () => {
+    const store = useAgentStore();
+    const wrapper = shallowMount(AgentPanel);
+    const utils = (wrapper.vm as any).__testUtils;
+
+    expect(store.reasoningEffort).toBe("high");
+    expect(wrapper.text()).toContain("推理：高");
+
+    utils.toggleReasoningMenu();
+    await nextTick();
+    expect(wrapper.find(".coomi-reasoning-popover").text()).toContain("超高");
+
+    expect(utils.isReasoningOptionDisabled("xhigh")).toBe(true);
+    utils.selectReasoningOption("xhigh");
+    expect(store.reasoningEffort).toBe("high");
+    expect(unref(utils.reasoningLabel)).toBe("推理：高");
+    wrapper.unmount();
+  });
+
+  it("keeps prompt fallback selectable without secondary description text", async () => {
+    const store = useAgentStore();
+    const wrapper = shallowMount(AgentPanel);
+    const utils = (wrapper.vm as any).__testUtils;
+    store.coomiStatus = {
+      runtime: "coomi",
+      installed: true,
+      model: "ordinary-model",
+      permissionMode: "full_access",
+      reasoningCapability: {
+        support: "unknown",
+        source: "model_config",
+        promptFallback: true,
+        routeSensitive: false,
+        levels: [
+          {
+            effort: "high",
+            control: "prompt",
+            wireFields: [],
+            routeSensitive: false
+          }
+        ]
+      }
+    } as any;
+    await nextTick();
+
+    expect(utils.isReasoningOptionDisabled("high")).toBe(false);
+    utils.toggleReasoningMenu();
+    await nextTick();
+    expect(wrapper.find(".coomi-reasoning-popover small").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("renders only the current model's declared levels, including max", async () => {
+    const store = useAgentStore();
+    const wrapper = shallowMount(AgentPanel);
+    const utils = (wrapper.vm as any).__testUtils;
+    await flushPromises();
+    const nativeLevel = (effort: string) => ({
+      effort,
+      control: "native",
+      wireFields: [{ path: "reasoning.effort", value: effort }],
+      routeSensitive: false
+    });
+    store.coomiStatus = {
+      runtime: "coomi",
+      installed: true,
+      model: "gpt-5.6-luna",
+      permissionMode: "full_access",
+      reasoningCapability: {
+        support: "supported",
+        source: "model_rule",
+        promptFallback: false,
+        routeSensitive: false,
+        levels: ["low", "medium", "high", "xhigh", "max"].map(nativeLevel)
+      }
+    } as any;
+    await nextTick();
+
+    utils.toggleReasoningMenu();
+    await nextTick();
+    expect(wrapper.find(".coomi-reasoning-popover").text()).toContain("最大");
+    utils.selectReasoningOption("max");
+    expect(store.reasoningEffort).toBe("max");
+
+    const nextStatus = {
+      ...store.coomiStatus,
+      model: "three-level-model",
+      reasoningCapability: {
+        support: "supported",
+        source: "model_config",
+        promptFallback: false,
+        routeSensitive: false,
+        levels: ["low", "medium", "high"].map(nativeLevel)
+      }
+    } as any;
+    store.coomiStatus = nextStatus;
+    store.applyCoomiStatusContext(nextStatus);
+    await nextTick();
+    utils.toggleReasoningMenu();
+    await nextTick();
+
+    expect(wrapper.find(".coomi-reasoning-popover").text()).not.toContain("最大");
+    expect(wrapper.find(".coomi-reasoning-popover").text()).not.toContain("超高");
+    expect(store.reasoningEffort).toBe("auto");
+    wrapper.unmount();
+  });
+
   it("switches between settings and history and handles session actions through the UI", async () => {
     const store = useAgentStore();
     api.fetchAgentSessions.mockResolvedValue({ data: { items: [

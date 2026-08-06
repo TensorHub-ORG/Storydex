@@ -2,11 +2,14 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use coomi_engine::{
     Agent, AgentEvent, AgentObserver, ApprovalHandler, ChatMessage, ModelProvider, ModelRequest,
-    Role, Session, SessionStore, ToolCall, ToolResult, ToolRuntime, ToolSpec, UserInputRequest,
-    UserInputResponse,
+    ReasoningEffort, Role, Session, SessionStore, ToolCall, ToolResult, ToolRuntime, ToolSpec,
+    UserInputRequest, UserInputResponse,
 };
 use coomi_security::{AccessMode, HookRunner, SecurityPolicy};
-use coomi_services::{HttpModelProvider, McpRuntime, MemoryManager, ProviderRegistry};
+use coomi_services::{
+    HttpModelProvider, McpRuntime, MemoryManager, ProviderConfig, ProviderRegistry,
+    reasoning_capability_best_effort, reasoning_request_plan_best_effort,
+};
 use coomi_tools::{AgentScheduler, CoreTools};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -134,6 +137,8 @@ struct BridgeRequest {
     required_tool: Option<String>,
     #[serde(default)]
     max_output_tokens: Option<u64>,
+    #[serde(default)]
+    reasoning_effort: ReasoningEffort,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -161,6 +166,14 @@ impl AgentObserver for StorydexObserver {
             } => (
                 "model_started",
                 json!({"provider": provider, "model": model, "round": round}),
+            ),
+            AgentEvent::ModelCompleted {
+                round,
+                metadata,
+                usage,
+            } => (
+                "model_completed",
+                json!({"round": round, "metadata": metadata, "usage": usage}),
             ),
             AgentEvent::Text(value) => ("text", json!({"text": value})),
             AgentEvent::TextDelta(value) => ("text_delta", json!({"text": value})),
@@ -531,16 +544,19 @@ fn resolve_provider(
     selector: Option<&str>,
     use_fast_model: bool,
 ) -> Result<coomi_services::ProviderConfig> {
-    if use_fast_model && selector.is_none() {
-        if let Some(choice) = registry
+    let provider = registry.resolve(selector)?;
+    let selected_provider_directly =
+        selector.is_none_or(|value| value.trim().eq_ignore_ascii_case(&provider.id));
+    if use_fast_model
+        && selected_provider_directly
+        && let Some(choice) = registry
             .choices()
             .into_iter()
-            .find(|choice| choice.provider_id == registry.active_id() && choice.is_fast)
-        {
-            return registry.resolve(Some(&choice.selector));
-        }
+            .find(|choice| choice.provider_id == provider.id && choice.is_fast)
+    {
+        return registry.resolve(Some(&choice.selector));
     }
-    registry.resolve(selector)
+    Ok(provider)
 }
 
 async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
@@ -553,6 +569,13 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
         request.provider.as_deref(),
         request.use_fast_model,
     )?;
+    let reasoning_plan = reasoning_request_plan_best_effort(
+        &provider_config,
+        &provider_config.model,
+        request.reasoning_effort,
+        None,
+    );
+    emit_reasoning_plan(&emitter, &provider_config, &reasoning_plan);
     let store = SessionStore::new(&home);
     let mut session = if let Some(id) = request.runtime_session_id {
         store.load(id).unwrap_or_else(|_| {
@@ -650,7 +673,7 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
         emitter: emitter.clone(),
     };
     let provider = HttpModelProvider::new(provider_config)?;
-    let agent = Agent::new(system_prompt);
+    let agent = Agent::new(system_prompt).with_reasoning_effort(request.reasoning_effort);
     let cancelled = {
         let run = async {
             agent
@@ -700,6 +723,7 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
                 "runtimeSessionId": session.id,
                 "usage": session.usage,
                 "context": session.context.status(&provider.capabilities()),
+                "reasoningRequestPlan": reasoning_plan,
             }),
         );
     }
@@ -734,6 +758,13 @@ async fn complete(request: BridgeRequest, emitter: Emitter) -> Result<()> {
         request.provider.as_deref(),
         request.use_fast_model,
     )?;
+    let reasoning_plan = reasoning_request_plan_best_effort(
+        &provider_config,
+        &provider_config.model,
+        request.reasoning_effort,
+        request.max_output_tokens,
+    );
+    emit_reasoning_plan(&emitter, &provider_config, &reasoning_plan);
     let provider = HttpModelProvider::new(provider_config)?;
     let messages = request
         .messages
@@ -747,6 +778,7 @@ async fn complete(request: BridgeRequest, emitter: Emitter) -> Result<()> {
             tools: request.tools,
             max_output_tokens: request.max_output_tokens,
             required_tool: request.required_tool,
+            reasoning_effort: request.reasoning_effort,
         })
         .await?;
     emitter.event(
@@ -755,31 +787,62 @@ async fn complete(request: BridgeRequest, emitter: Emitter) -> Result<()> {
             "content": response.content,
             "toolCalls": response.tool_calls,
             "usage": response.usage,
+            "metadata": response.metadata,
             "provider": provider.provider_id(),
             "model": provider.model(),
+            "reasoningRequestPlan": reasoning_plan,
         }),
     );
     Ok(())
+}
+
+fn emit_reasoning_plan(
+    emitter: &Emitter,
+    provider: &ProviderConfig,
+    plan: &coomi_services::ReasoningRequestPlan,
+) {
+    emitter.event(
+        "reasoning_plan",
+        json!({
+            "provider": provider.id,
+            "model": provider.model,
+            "plan": plan,
+        }),
+    );
 }
 
 fn status(request: &BridgeRequest, emitter: &Emitter) -> Result<()> {
     std::fs::create_dir_all(&request.home)?;
     let home = canonical_directory(&request.home, "runtime home")?;
     let registry = provider_registry(&home)?;
-    let active = registry.resolve(None)?;
+    let active = resolve_provider(
+        &registry,
+        request.provider.as_deref(),
+        request.use_fast_model,
+    )?;
+    let active_reasoning_capability = reasoning_capability_best_effort(&active, &active.model);
+    let active_reasoning_plan = reasoning_request_plan_best_effort(
+        &active,
+        &active.model,
+        request.reasoning_effort,
+        request.max_output_tokens,
+    );
     let models = registry
         .choices()
         .into_iter()
-        .map(|choice| {
-            json!({
+        .map(|choice| -> Result<Value> {
+            let config = registry.resolve(Some(&choice.selector))?;
+            let capability = reasoning_capability_best_effort(&config, &choice.model);
+            Ok(json!({
                 "selector": choice.selector,
                 "providerId": choice.provider_id,
                 "providerDisplay": choice.provider_display,
                 "model": choice.model,
                 "isFast": choice.is_fast,
-            })
+                "reasoningCapability": capability,
+            }))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     emitter.event(
         "status",
         json!({
@@ -791,6 +854,8 @@ fn status(request: &BridgeRequest, emitter: &Emitter) -> Result<()> {
             "activeProvider": active.id,
             "activeModel": active.model,
             "capabilities": active.capabilities,
+            "reasoningCapability": active_reasoning_capability,
+            "reasoningRequestPlan": active_reasoning_plan,
             "models": models,
         }),
     );
@@ -849,6 +914,57 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bridge_request_accepts_extended_reasoning_efforts() {
+        for (value, expected) in [
+            ("xhigh", ReasoningEffort::XHigh),
+            ("max", ReasoningEffort::Max),
+        ] {
+            let request: BridgeRequest = serde_json::from_value(json!({
+                "action": "complete",
+                "reasoningEffort": value
+            }))
+            .expect("deserialize bridge request");
+            assert_eq!(request.reasoning_effort, expected);
+        }
+    }
+
+    #[test]
+    fn explicit_provider_selector_honors_fast_model_without_overriding_explicit_model() {
+        let directory = std::env::temp_dir().join(format!(
+            "storydex-coomi-bridge-provider-test-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).expect("create provider test directory");
+        let path = directory.join("providers.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "active": "primary",
+                "providers": {
+                    "primary": {
+                        "type": "generic",
+                        "base_url": "https://example.test/v1",
+                        "model": "main-model",
+                        "fast_model": "fast-model"
+                    }
+                }
+            }"#,
+        )
+        .expect("write provider test config");
+        let registry = ProviderRegistry::load(&path).expect("load provider registry");
+
+        let fast = resolve_provider(&registry, Some("primary"), true)
+            .expect("resolve explicit provider fast model");
+        assert_eq!(fast.model, "fast-model");
+
+        let explicit = resolve_provider(&registry, Some("primary:main-model"), true)
+            .expect("resolve explicit main model");
+        assert_eq!(explicit.model, "main-model");
+
+        std::fs::remove_dir_all(&directory).expect("remove provider test directory");
+    }
 
     #[test]
     fn wire_messages_preserve_tool_calls() {

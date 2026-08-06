@@ -11,7 +11,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence
+from typing import Any, AsyncIterator, Callable, Dict, List, Literal, Optional, Sequence
 from uuid import uuid4
 
 from fastapi import APIRouter, Query, Request
@@ -193,6 +193,10 @@ class AgentChatRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=12000)
     active_file: str = Field(default="", alias="activeFile")
     workspace_root: str = Field(default="", alias="workspaceRoot")
+    reasoning_effort: Literal["auto", "low", "medium", "high", "xhigh", "max"] = Field(
+        default="high",
+        alias="reasoningEffort",
+    )
     story_generation: Dict[str, Any] = Field(default_factory=dict, alias="storyGeneration")
     confirm_no_snapshot: bool = Field(default=False, alias="confirmNoSnapshot")
     replace_latest_trace_id: str = Field(default="", alias="replaceLatestTraceId")
@@ -241,6 +245,45 @@ class AgentSessionsData(BaseModel):
     items: List[AgentSessionSummary] = Field(default_factory=list)
 
 
+class AgentReasoningWireFieldData(BaseModel):
+    path: str = ""
+    value: Any = None
+
+
+class AgentReasoningLevelCapabilityData(BaseModel):
+    effort: Literal["auto", "low", "medium", "high", "xhigh", "max"] = "auto"
+    control: Literal["auto", "native", "prompt"] = "auto"
+    wire_fields: List[AgentReasoningWireFieldData] = Field(default_factory=list, alias="wireFields")
+    route_sensitive: bool = Field(default=False, alias="routeSensitive")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AgentReasoningCapabilityData(BaseModel):
+    support: Literal["supported", "unsupported", "unknown"] = "unknown"
+    levels: List[AgentReasoningLevelCapabilityData] = Field(default_factory=list)
+    source: Literal["model_config", "provider_config", "model_rule", "unknown"] = "unknown"
+    prompt_fallback: bool = Field(default=False, alias="promptFallback")
+    route_sensitive: bool = Field(default=False, alias="routeSensitive")
+    fallback_reason: str = Field(default="", alias="fallbackReason")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AgentReasoningRequestPlanData(BaseModel):
+    requested: Literal["auto", "low", "medium", "high", "xhigh", "max"] = "auto"
+    control: Literal["auto", "native", "prompt"] = "auto"
+    sent: bool = False
+    prompt_applied: bool = Field(default=False, alias="promptApplied")
+    wire_fields: List[AgentReasoningWireFieldData] = Field(default_factory=list, alias="wireFields")
+    support: Literal["supported", "unsupported", "unknown"] = "unknown"
+    source: Literal["model_config", "provider_config", "model_rule", "unknown"] = "unknown"
+    route_sensitive: bool = Field(default=False, alias="routeSensitive")
+    fallback_reason: str = Field(default="", alias="fallbackReason")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class AgentCoomiStatusData(BaseModel):
     runtime: str = "coomi"
     installed: bool = False
@@ -262,6 +305,16 @@ class AgentCoomiStatusData(BaseModel):
     compact_threshold: int = Field(default=0, alias="compactThreshold")
     warning_threshold: int = Field(default=0, alias="warningThreshold")
     compression_status: str = Field(default="", alias="compressionStatus")
+    reasoning_capability: AgentReasoningCapabilityData = Field(
+        default_factory=AgentReasoningCapabilityData,
+        alias="reasoningCapability",
+    )
+    reasoning_request_plan: AgentReasoningRequestPlanData = Field(
+        default_factory=AgentReasoningRequestPlanData,
+        alias="reasoningRequestPlan",
+    )
+    models: List[Dict[str, Any]] = Field(default_factory=list)
+    provider_capabilities: Dict[str, Any] = Field(default_factory=dict, alias="providerCapabilities")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -842,7 +895,7 @@ def _build_turn_contract_with_active_model(
     provider = ""
     model = ""
     try:
-        status = get_storydex_coomi_agent_service().get_status(workspace_root=workspace_root)
+        status = _coomi_status_for_execution(workspace_root)
         provider = str(status.get("providerId") or "") if isinstance(status, dict) else ""
         model = str(status.get("model") or "") if isinstance(status, dict) else ""
     except Exception as exc:
@@ -857,6 +910,14 @@ def _build_turn_contract_with_active_model(
         provider=provider,
         model=model,
     )
+
+
+def _coomi_status_for_execution(workspace_root: Path) -> Dict[str, Any]:
+    service = get_storydex_coomi_agent_service()
+    cached_status = getattr(service, "get_status_for_execution", None)
+    if callable(cached_status):
+        return cached_status(workspace_root=workspace_root)
+    return service.get_status(workspace_root=workspace_root)
 
 
 def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
@@ -1126,7 +1187,7 @@ def _now_iso() -> str:
 def _phase_for_event(event_name: str) -> str:
     if event_name.startswith("Tool"):
         return "tool"
-    if event_name in {"TextChunk", "ReasoningChunk", "ConnectionRetry"}:
+    if event_name in {"TextChunk", "ReasoningChunk", "ConnectionRetry", "ModelCompleted"}:
         return "model"
     if event_name in {"GitAutoCommit", "GitCommitPrompt", "GitCommitResult"}:
         return "version_control"
@@ -1138,7 +1199,7 @@ def _phase_for_event(event_name: str) -> str:
         return "orchestration"
     if event_name.startswith("SemanticBudget"):
         return "model"
-    if event_name in {"RunAccepted", "UsageUpdate", "CompressionEvent", "TurnPhase"}:
+    if event_name in {"RunAccepted", "UsageUpdate", "CompressionEvent", "TurnPhase", "ReasoningPlan"}:
         return "runtime"
     if event_name.startswith("Agent"):
         return "agent"
@@ -1182,6 +1243,10 @@ def _status_for_event(event_name: str, payload: Dict[str, Any]) -> str:
         return "success" if bool(payload.get("ok")) else "error"
     if event_name == "RunAccepted":
         return "running"
+    if event_name == "ReasoningPlan":
+        return "info"
+    if event_name == "ModelCompleted":
+        return "success"
     if event_name == "ConnectionRetry":
         return "warning"
     if event_name in {"AgentCompleted", "ToolDone"}:
@@ -1203,6 +1268,20 @@ def _detail_for_event(event_name: str, payload: Dict[str, Any]) -> str:
         max_attempts = int(payload.get("maxAttempts") or payload.get("max_attempts") or attempt)
         message = str(payload.get("message") or "Model connection interrupted; retrying.")
         return f"{message} ({attempt}/{max_attempts})"
+    if event_name == "ReasoningPlan":
+        plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else {}
+        requested = str(plan.get("requested") or "auto")
+        fields = plan.get("wireFields") if isinstance(plan.get("wireFields"), list) else []
+        fallback = str(plan.get("fallbackReason") or plan.get("fallback_reason") or "").strip()
+        detail = f"reasoning={requested}; wireFields={len(fields)}"
+        return f"{detail}; fallback={fallback}" if fallback else detail
+    if event_name == "ModelCompleted":
+        usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+        reasoning = usage.get("reasoning_tokens")
+        model = str(payload.get("responseModel") or "")
+        evidence = "nativeReasoning=true" if payload.get("nativeReasoning") else "nativeReasoning=false"
+        tokens = f"reasoningTokens={int(reasoning or 0)}" if reasoning is not None else ""
+        return "; ".join(value for value in (model, evidence, tokens) if value)
     if event_name in {"GitAutoCommit", "GitCommitPrompt", "GitCommitResult"}:
         commit = payload.get("commit") if isinstance(payload.get("commit"), dict) else {}
         subject = str(commit.get("subject") or "").strip()
@@ -1579,7 +1658,7 @@ def _build_chat_payload(
     status: str = "completed",
     error_message: str = "",
 ) -> Dict[str, Any]:
-    status_data = get_storydex_coomi_agent_service().get_status(workspace_root=workspace_root)
+    status_data = _coomi_status_for_execution(workspace_root)
     duration_ms = int((time.perf_counter() - started) * 1000)
     llm_metrics = get_llm_metrics(trace_id)
     trace = _extract_trace_metrics(events, trace_id, duration_ms, llm_metrics)
@@ -2164,6 +2243,7 @@ async def _execute_semantic_budget_generation(
     )
     adapter = CoomiStoryGenerationAdapter(
         trace_id=trace_id,
+        reasoning_effort=str(turn_contract.get("reasoningEffort") or "auto"),
         maximum_transport_retries=1,
         event_sink=event_sink,
     )
@@ -2585,12 +2665,14 @@ async def _execute_bounded_story_generation(
 
     draft_adapter = CoomiStoryGenerationAdapter(
         trace_id=trace_id,
+        reasoning_effort=str(turn_contract.get("reasoningEffort") or "auto"),
         maximum_transport_retries=0,
         event_sink=event_sink,
         attempt_event_name="StoryProviderAttempt",
     )
     revision_adapter = CoomiStoryGenerationAdapter(
         trace_id=trace_id,
+        reasoning_effort=str(turn_contract.get("reasoningEffort") or "auto"),
         maximum_transport_retries=0,
         event_sink=event_sink,
         attempt_event_name="StoryProviderAttempt",
@@ -3408,9 +3490,7 @@ async def _stream_coomi_sse_worker(
                         phase_started=semantic_started,
                     ),
                 )
-                provider_status = get_storydex_coomi_agent_service().get_status(
-                    workspace_root=workspace_root
-                )
+                provider_status = _coomi_status_for_execution(workspace_root)
                 started_packet = {
                     "_type": "AgentStarted",
                     "_version": 1,
@@ -3648,9 +3728,7 @@ async def _stream_coomi_sse_worker(
                         phase_started=bounded_started,
                     ),
                 )
-                provider_status = get_storydex_coomi_agent_service().get_status(
-                    workspace_root=workspace_root
-                )
+                provider_status = _coomi_status_for_execution(workspace_root)
                 bounded_provider = str(provider_status.get("providerId") or "")
                 bounded_model = str(provider_status.get("model") or "")
                 started_packet = {
@@ -6447,7 +6525,10 @@ async def _stream_agent_chat_request_sse(
                     heartbeat=True,
                 ),
             )
-        turn_contract = await contract_task
+        turn_contract = {
+            **(await contract_task),
+            "reasoningEffort": payload.reasoning_effort,
+        }
         story_generation = _apply_turn_contract_story_generation_defaults(story_generation, turn_contract)
         context_assembly = turn_contract.get("contextAssembly") if isinstance(turn_contract, dict) else {}
         budget = context_assembly.get("budget") if isinstance(context_assembly, dict) else {}
@@ -6783,6 +6864,7 @@ async def _stream_agent_chat_with_followups_sse(
             prompt=str(next_message.get("content") or ""),
             activeFile=current_payload.active_file,
             workspaceRoot=workspace_root.as_posix(),
+            reasoningEffort=current_payload.reasoning_effort,
             storyGeneration=dict(current_payload.story_generation),
         )
         current_trace_id = next_trace_id

@@ -54,6 +54,31 @@ def _tool_response(*, completion_tokens: int | None = None) -> Any:
     return response
 
 
+@pytest.mark.asyncio
+async def test_adapter_passes_reasoning_effort_to_bridge_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services import llm_replay
+
+    captured: Dict[str, Any] = {}
+    raw_provider = object()
+
+    def bridge_provider(provider_id: str | None = None, **kwargs: Any) -> Any:
+        captured.update({"provider_id": provider_id, **kwargs})
+        return raw_provider
+
+    monkeypatch.setattr(coomi_agent_service, "get_bridge_provider", bridge_provider)
+    monkeypatch.setattr(llm_replay, "get_replayable_llm_provider", lambda provider: provider)
+    adapter = CoomiStoryGenerationAdapter(
+        trace_id="reasoning",
+        provider_id="primary",
+        reasoning_effort="xhigh",
+    )
+
+    assert await adapter._resolve_provider() is raw_provider
+    assert captured == {"provider_id": "primary", "reasoning_effort": "xhigh"}
+
+
 def test_length_patch_rejects_an_empty_tool_object_without_logging_arguments(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -43,7 +43,7 @@ vi.mock("@/stores/workspace", () => ({ useWorkspaceStore: () => workspace }));
 vi.mock("@/api/workspace", () => ({ fetchStoryChapterTemplates: vi.fn().mockResolvedValue({ data: { items: [] } }) }));
 vi.mock("@/api/client", () => ({ describeTransportError: (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback }));
 
-import { useAgentStore } from "@/stores/agent";
+import { __agentStoreTestUtils, useAgentStore } from "@/stores/agent";
 import { AgentApiError } from "@/api/agent";
 
 function sessions(items: unknown[] = []) {
@@ -115,6 +115,7 @@ describe("agent store streaming", () => {
 
     expect(api.streamAgentPrompt).toHaveBeenCalledTimes(1);
     const request = api.streamAgentPrompt.mock.calls[0][0];
+    expect(request.reasoningEffort).toBe("auto");
     expect(request.storyGeneration).toEqual({
       fragmentCount: 1,
       chapterLengthTier: "medium",
@@ -183,6 +184,90 @@ describe("agent store streaming", () => {
     store.isRunning = true;
     await store.runPrompt();
     expect(api.streamAgentPrompt).not.toHaveBeenCalled();
+  });
+
+  it("keeps reasoning diagnostics in trace events without rendering conversation items", async () => {
+    api.streamAgentPrompt.mockImplementation(async (_request: unknown, onPacket: (packet: unknown) => void) => {
+      onPacket({
+        _type: "ReasoningPlan",
+        plan: {
+          requested: "max",
+          control: "native",
+          sent: true,
+          promptApplied: false,
+          wireFields: [{ path: "reasoning.effort", value: "max" }],
+          support: "supported",
+          source: "model_rule",
+          routeSensitive: false
+        }
+      });
+      onPacket({
+        _type: "ModelCompleted",
+        round: 1,
+        upstreamResponded: true,
+        responseModel: "routed-model",
+        nativeReasoning: true,
+        reasoningTokens: 321,
+        finishReason: "stop"
+      });
+      onPacket({ _type: "AgentCompleted", status: "success" });
+    });
+    const store = useAgentStore();
+    store.reasoningEffort = "max";
+    store.promptInput = "inspect reasoning diagnostics";
+
+    await store.runPrompt();
+
+    const run = store.executionHistory[0];
+    expect(run.events.map((event) => event.event)).toEqual(expect.arrayContaining([
+      "ReasoningPlan",
+      "ModelCompleted"
+    ]));
+    expect(run.items.some((item) => item.raw?._type === "ReasoningPlan")).toBe(false);
+    expect(run.items.some((item) => item.raw?._type === "ModelCompleted")).toBe(false);
+    expect(__agentStoreTestUtils?.streamPacketToWaterfallItem(
+      "trace-evidence",
+      { _type: "ReasoningPlan" },
+      []
+    )).toBeNull();
+    expect(__agentStoreTestUtils?.streamPacketToWaterfallItem(
+      "trace-evidence",
+      { _type: "ModelCompleted" },
+      []
+    )).toBeNull();
+  });
+
+  it("does not infer native reasoning when capability fields are missing", () => {
+    const status = __agentStoreTestUtils?.normalizeCoomiStatus({
+      runtime: "coomi",
+      installed: true,
+      reasoningCapability: {
+        support: "supported",
+        source: "provider_config",
+        fallbackReason: "high: invalid mapping",
+        levels: [
+          { effort: "low", wireFields: [{ path: "reasoning_effort", value: "low" }] },
+          { effort: "high", control: "native", wireFields: [] }
+        ]
+      },
+      reasoningRequestPlan: {
+        requested: "high",
+        control: "auto",
+        sent: false,
+        fallbackReason: "invalid mapping"
+      }
+    });
+
+    expect(status?.reasoningCapability?.levels).toEqual([
+      {
+        effort: "low",
+        control: "native",
+        wireFields: [{ path: "reasoning_effort", value: "low" }],
+        routeSensitive: false
+      }
+    ]);
+    expect(status?.reasoningCapability?.fallbackReason).toBe("high: invalid mapping");
+    expect(status?.reasoningRequestPlan?.fallbackReason).toBe("invalid mapping");
   });
 
   it("asks before retrying without a restore point and persists the run risk flag", async () => {

@@ -77,11 +77,17 @@ def test_fifo_followups_are_drained_once_with_one_transport_terminal(monkeypatch
         message_id="message-2",
         content="second follow-up",
     )
-    prompts: list[tuple[str, str]] = []
+    prompts: list[tuple[str, str, str]] = []
     releases: list[bool] = []
 
     async def fake_turn(**kwargs: Any):
-        prompts.append((kwargs["trace_id"], kwargs["payload"].prompt))
+        prompts.append(
+            (
+                kwargs["trace_id"],
+                kwargs["payload"].prompt,
+                kwargs["payload"].reasoning_effort,
+            )
+        )
         trace_id = kwargs["trace_id"]
         yield routes._encode_sse("RunAccepted", {"_type": "RunAccepted", "traceId": trace_id})
         yield routes._encode_sse("TurnContract", {"_type": "TurnContract", "traceId": trace_id, "status": "ready"})
@@ -98,7 +104,11 @@ def test_fifo_followups_are_drained_once_with_one_transport_terminal(monkeypatch
         return [
             _decode(chunk)
             async for chunk in routes._stream_agent_chat_with_followups_sse(
-                payload=routes.AgentChatRequest(prompt="initial", workspaceRoot=str(tmp_path)),
+                payload=routes.AgentChatRequest(
+                    prompt="initial",
+                    workspaceRoot=str(tmp_path),
+                    reasoningEffort="low",
+                ),
                 request=_ConnectedRequest(),
                 trace_id="trace-1",
                 session_id="session-1",
@@ -107,8 +117,9 @@ def test_fifo_followups_are_drained_once_with_one_transport_terminal(monkeypatch
         ]
 
     packets = asyncio.run(collect())
-    assert [prompt for _, prompt in prompts] == ["initial", "first follow-up", "second follow-up"]
-    assert len({trace_id for trace_id, _ in prompts}) == 3
+    assert [prompt for _, prompt, _ in prompts] == ["initial", "first follow-up", "second follow-up"]
+    assert {effort for _, _, effort in prompts} == {"low"}
+    assert len({trace_id for trace_id, _, _ in prompts}) == 3
     assert [event for event, _ in packets].count("ContinuationStarted") == 2
     assert [event for event, _ in packets].count("done") == 1
     assert releases == [True]

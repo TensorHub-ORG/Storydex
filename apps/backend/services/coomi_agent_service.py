@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
 import json
 import math
@@ -28,6 +29,7 @@ from services.coomi_bridge_client import (
     LiveBridgeProcess,
     bridge_command,
     get_bridge_provider,
+    request_status_sync,
 )
 from services.context_policy import ContextPolicy, context_policy_from_turn_contract
 from services.story_project_service import DEFAULT_CHAPTER_WORD_COUNT_TARGET
@@ -51,6 +53,9 @@ _SEMANTIC_STORY_PARAGRAPH_MINIMUM = 3
 _SEMANTIC_STORY_PARAGRAPH_MAXIMUM = 14
 _SEMANTIC_STORY_LENGTH_MIN_RATIO = 0.75
 _SEMANTIC_STORY_LENGTH_MAX_RATIO = 1.20
+_BRIDGE_STATUS_CACHE_LOCK = threading.Lock()
+_BRIDGE_STATUS_PROBE_LOCK = threading.Lock()
+_BRIDGE_STATUS_CACHE: tuple[tuple[str, int, int, str, int, int], Dict[str, Any]] | None = None
 
 
 class StorydexCoomiUnavailable(RuntimeError):
@@ -537,6 +542,9 @@ class StorydexCoomiAgentService:
             for tool in registry.list_tools()
             if tool.access != ToolAccess.READ_ONLY
         ]
+        reasoning_effort = str(
+            _dict_value(turn_contract).get("reasoningEffort") or "auto"
+        ).strip().lower()
         try:
             bridge = await LiveBridgeProcess.start(
                 {
@@ -548,6 +556,7 @@ class StorydexCoomiAgentService:
                     "storydexSessionId": normalized_session,
                     "permissionMode": permission_mode,
                     "basePermissionMode": self._permission_mode,
+                    "reasoningEffort": reasoning_effort,
                     "writesAllowed": writes_allowed,
                     "allowedWriteRoots": allowed_roots,
                     "toolSpecs": registry.specs(),
@@ -556,7 +565,7 @@ class StorydexCoomiAgentService:
             )
         except Exception as exc:
             try:
-                failure_status = self.get_status(workspace_root=workspace)
+                failure_status = self.get_status_for_execution(workspace_root=workspace)
             except Exception:
                 failure_status = {}
             yield "AgentError", _agent_error(
@@ -572,7 +581,10 @@ class StorydexCoomiAgentService:
         key = self._register_bridge(
             session_id=normalized_session, workspace_root=workspace, bridge=bridge
         )
-        status = self.get_status(workspace_root=workspace, session_id=normalized_session)
+        status = self.get_status_for_execution(
+            workspace_root=workspace,
+            session_id=normalized_session,
+        )
         yield _agent_started(
             session_id=normalized_session, prompt=prompt, status=status, mode="coomi"
         )
@@ -787,7 +799,11 @@ class StorydexCoomiAgentService:
         bridge_command()
 
     def get_status(
-        self, *, workspace_root: Path, session_id: str = "default"
+        self,
+        *,
+        workspace_root: Path,
+        session_id: str = "default",
+        probe_bridge: bool = True,
     ) -> Dict[str, Any]:
         installed = True
         try:
@@ -796,7 +812,12 @@ class StorydexCoomiAgentService:
             installed = False
         payload = _read_providers_config_payload()
         providers = payload.get("providers") if isinstance(payload.get("providers"), dict) else {}
-        provider_id = str(payload.get("active") or "")
+        bridge_status = _bridge_status_snapshot(probe=probe_bridge)
+        provider_id = str(
+            bridge_status.get("activeProvider")
+            or payload.get("active")
+            or ""
+        )
         provider = providers.get(provider_id) if isinstance(providers.get(provider_id), dict) else {}
         normalized_session = str(session_id or "default").strip() or "default"
         runtime_key = self._runtime_key(
@@ -816,21 +837,35 @@ class StorydexCoomiAgentService:
             self._context_by_session[runtime_key] = context
         plan_mode = self._plan_modes.get(runtime_key, False)
         return {
-            "runtime": "storydex-coomi-rs",
+            "runtime": str(bridge_status.get("runtime") or "storydex-coomi-rs"),
             "installed": installed,
             "home": str(STORYDEX_COOMI_HOME),
             "configPath": str(STORYDEX_COOMI_CONFIG),
             "sessionsPath": str(STORYDEX_COOMI_SESSIONS),
             "providerId": provider_id,
             "providerType": str(provider.get("type") or ""),
-            "model": str(provider.get("model") or ""),
+            "model": str(bridge_status.get("activeModel") or provider.get("model") or ""),
             "display": str(provider.get("display") or provider_id),
+            "reasoningCapability": bridge_status.get("reasoningCapability") or {},
+            "reasoningRequestPlan": bridge_status.get("reasoningRequestPlan") or {},
+            "models": bridge_status.get("models") if isinstance(bridge_status.get("models"), list) else [],
+            "providerCapabilities": bridge_status.get("capabilities") or {},
             "permissionMode": "plan_mode" if plan_mode else self._permission_mode,
             "permissionLabel": "Plan mode" if plan_mode else _permission_label(self._permission_mode),
             "planMode": plan_mode,
             "toolCount": len(_create_storydex_tool_registry(workspace_root).specs()) + 20,
             **context,
         }
+
+    def get_status_for_execution(
+        self, *, workspace_root: Path, session_id: str = "default"
+    ) -> Dict[str, Any]:
+        """Return cached/config status without starting a diagnostic bridge."""
+        return self.get_status(
+            workspace_root=workspace_root,
+            session_id=session_id,
+            probe_bridge=False,
+        )
 
     def read_config(self) -> Dict[str, Any]:
         path = _ensure_storydex_coomi_config()
@@ -848,6 +883,7 @@ class StorydexCoomiAgentService:
         _validate_provider_document(value)
         path = _ensure_storydex_coomi_config()
         _atomic_write(path, (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+        _invalidate_bridge_status_cache()
         return self.read_config()
 
     def list_models(
@@ -1119,6 +1155,7 @@ class CoomiStoryGenerationAdapter:
         *,
         trace_id: str,
         provider_id: str = "",
+        reasoning_effort: str = "auto",
         provider: Any = None,
         maximum_transport_retries: int = 1,
         event_sink: Callable[[str, Dict[str, Any]], None] | None = None,
@@ -1127,6 +1164,7 @@ class CoomiStoryGenerationAdapter:
     ) -> None:
         self.trace_id = str(trace_id or "semantic-budget")
         self.provider_id = str(provider_id or "").strip()
+        self.reasoning_effort = str(reasoning_effort or "auto").strip().lower()
         self.maximum_transport_retries = max(0, min(2, int(maximum_transport_retries)))
         self.event_sink = event_sink
         self.sleep = sleep
@@ -1143,7 +1181,10 @@ class CoomiStoryGenerationAdapter:
         from services.llm_replay import get_replayable_llm_provider
 
         if self._provider is None:
-            raw = self._provider_override or get_bridge_provider(self.provider_id or None)
+            raw = self._provider_override or get_bridge_provider(
+                self.provider_id or None,
+                reasoning_effort=self.reasoning_effort,
+            )
             raw = _adapt_story_generation_provider(raw)
             self._provider = get_replayable_llm_provider(raw)
         return self._provider
@@ -1314,6 +1355,7 @@ class _CoomiEventTranslator:
         self.started_tools: dict[str, float] = {}
         self.usage_baseline = dict(usage_baseline or {})
         self.turn_usage: Dict[str, Any] | None = None
+        self.reasoning_plan: Dict[str, Any] | None = None
 
     def reset_usage_baseline(self) -> None:
         self.usage_baseline = {}
@@ -1326,7 +1368,7 @@ class _CoomiEventTranslator:
         baseline_total = int(baseline.get("total_tokens") or 0)
         if current_total < baseline_total:
             baseline = _usage_aliases({})
-        return _usage_aliases({
+        result = {
             "input_tokens": max(
                 0,
                 int(current.get("prompt_tokens") or 0)
@@ -1342,7 +1384,16 @@ class _CoomiEventTranslator:
                 int(current.get("completion_tokens") or 0)
                 - int(baseline.get("completion_tokens") or 0),
             ),
-        })
+        }
+        current_reasoning = current.get("reasoning_tokens")
+        baseline_reasoning = baseline.get("reasoning_tokens")
+        if current_reasoning is not None:
+            result["reasoning_tokens"] = max(
+                0,
+                int(current_reasoning)
+                - (int(baseline_reasoning) if baseline_reasoning is not None else 0),
+            )
+        return _usage_aliases(result)
 
     def translate(self, event: Any) -> tuple[str, Dict[str, Any]] | None:
         if not isinstance(event, dict):
@@ -1377,6 +1428,38 @@ class _CoomiEventTranslator:
                 "status": "running",
                 "current": int(data.get("round") or 1),
             }
+        if name == "reasoning_plan":
+            plan = data.get("plan") if isinstance(data.get("plan"), dict) else {}
+            self.reasoning_plan = dict(plan)
+            return "ReasoningPlan", {
+                "_type": "ReasoningPlan",
+                "_version": 1,
+                "provider": str(data.get("provider") or ""),
+                "model": str(data.get("model") or ""),
+                "plan": plan,
+            }
+        if name == "model_completed":
+            metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+            raw_usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+            usage = _usage_aliases(raw_usage)
+            packet = {
+                "_type": "ModelCompleted",
+                "_version": 1,
+                "round": max(1, int(data.get("round") or 1)),
+                "upstreamResponded": True,
+                "metadata": dict(metadata),
+                "usage": usage,
+                "responseModel": str(metadata.get("responseModel") or ""),
+                "finishReason": str(metadata.get("finishReason") or ""),
+                "responseStatus": str(metadata.get("responseStatus") or ""),
+                "nativeReasoning": bool(metadata.get("nativeReasoning")),
+            }
+            if usage.get("reasoning_tokens") is not None:
+                packet["reasoning_tokens"] = int(usage.get("reasoning_tokens") or 0)
+                packet["reasoningTokens"] = int(usage.get("reasoning_tokens") or 0)
+            if self.reasoning_plan is not None:
+                packet["reasoningRequestPlan"] = dict(self.reasoning_plan)
+            return "ModelCompleted", packet
         if name == "tool_started":
             call = data.get("call") if isinstance(data.get("call"), dict) else {}
             call_id = str(call.get("id") or f"coomi-{uuid4().hex[:12]}")
@@ -1477,7 +1560,7 @@ class _CoomiEventTranslator:
         if name == "completed":
             cumulative_usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
             usage = self.turn_usage or self._usage_since_baseline(cumulative_usage)
-            return "AgentCompleted", {
+            packet = {
                 "_type": "AgentCompleted",
                 "_version": 1,
                 "session_id": self.session_id,
@@ -1486,6 +1569,9 @@ class _CoomiEventTranslator:
                 "completion_tokens": int(usage.get("completion_tokens") or 0),
                 "total_tokens": int(usage.get("total_tokens") or 0),
             }
+            if usage.get("reasoning_tokens") is not None:
+                packet["reasoning_tokens"] = int(usage.get("reasoning_tokens") or 0)
+            return "AgentCompleted", packet
         if name == "error":
             return "AgentError", {
                 "_type": "AgentError",
@@ -2336,6 +2422,62 @@ def _read_providers_config_payload() -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _invalidate_bridge_status_cache() -> None:
+    global _BRIDGE_STATUS_CACHE
+    with _BRIDGE_STATUS_CACHE_LOCK:
+        _BRIDGE_STATUS_CACHE = None
+
+
+def _bridge_status_snapshot(*, probe: bool = True) -> Dict[str, Any]:
+    """Read capability data once per provider config and bridge build."""
+    global _BRIDGE_STATUS_CACHE
+    path = Path(STORYDEX_COOMI_CONFIG)
+    try:
+        stat = path.stat()
+        command = bridge_command()
+        command_identity = "\0".join(str(part) for part in command)
+        runtime_path = Path(command[0])
+        try:
+            runtime_stat = runtime_path.stat()
+            runtime_mtime_ns = int(runtime_stat.st_mtime_ns)
+            runtime_size = int(runtime_stat.st_size)
+        except OSError:
+            runtime_mtime_ns = 0
+            runtime_size = 0
+        key = (
+            str(path.resolve()),
+            int(stat.st_mtime_ns),
+            int(stat.st_size),
+            command_identity,
+            runtime_mtime_ns,
+            runtime_size,
+        )
+    except (OSError, CoomiBridgeError):
+        return {}
+    with _BRIDGE_STATUS_CACHE_LOCK:
+        if _BRIDGE_STATUS_CACHE is not None and _BRIDGE_STATUS_CACHE[0] == key:
+            return copy.deepcopy(_BRIDGE_STATUS_CACHE[1])
+    if not probe:
+        return {}
+    # Serialize cache misses so simultaneous status endpoints do not spawn
+    # duplicate read-only bridge processes. Execution paths never take this
+    # lock because they call `_bridge_status_snapshot(probe=False)`.
+    with _BRIDGE_STATUS_PROBE_LOCK:
+        with _BRIDGE_STATUS_CACHE_LOCK:
+            if _BRIDGE_STATUS_CACHE is not None and _BRIDGE_STATUS_CACHE[0] == key:
+                return copy.deepcopy(_BRIDGE_STATUS_CACHE[1])
+        try:
+            packet = request_status_sync()
+        except Exception:
+            return {}
+        data = packet.get("data") if isinstance(packet, dict) else None
+        if not isinstance(data, dict) or packet.get("type") != "status":
+            return {}
+        with _BRIDGE_STATUS_CACHE_LOCK:
+            _BRIDGE_STATUS_CACHE = (key, copy.deepcopy(data))
+        return data
+
+
 def _resolve_context_window() -> int:
     payload = _read_providers_config_payload()
     providers = payload.get("providers") if isinstance(payload.get("providers"), dict) else {}
@@ -2407,7 +2549,7 @@ def _context_snapshot_from_bridge(
 def _usage_aliases(value: Dict[str, Any]) -> Dict[str, Any]:
     input_tokens = int(value.get("input_tokens") or value.get("prompt_tokens") or 0)
     output_tokens = int(value.get("output_tokens") or value.get("completion_tokens") or 0)
-    return {
+    output = {
         **value,
         "prompt_tokens": input_tokens,
         "completion_tokens": output_tokens,
@@ -2416,6 +2558,13 @@ def _usage_aliases(value: Dict[str, Any]) -> Dict[str, Any]:
         "completionTokens": output_tokens,
         "totalTokens": input_tokens + output_tokens,
     }
+    reasoning = value.get("reasoning_tokens")
+    if reasoning is None:
+        reasoning = value.get("reasoningTokens")
+    if reasoning is not None:
+        output["reasoning_tokens"] = int(reasoning or 0)
+        output["reasoningTokens"] = int(reasoning or 0)
+    return output
 
 
 def _normalize_permission_mode(mode: str) -> str:

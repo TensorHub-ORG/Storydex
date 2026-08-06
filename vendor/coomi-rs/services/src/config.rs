@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
+use coomi_engine::ReasoningEffort;
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
@@ -22,6 +24,114 @@ pub enum RemoteCompactionMode {
     Legacy,
     #[default]
     V2,
+}
+
+/// Whether a concrete provider/model combination can honor an explicit
+/// reasoning level. This is deliberately separate from whether the model can
+/// reason internally: many gateways expose the latter without exposing a
+/// client-controlled knob.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningSupport {
+    Supported,
+    Unsupported,
+    #[default]
+    Unknown,
+}
+
+/// How a selected reasoning level is applied to the upstream request.
+///
+/// `Native` means the provider exposes a documented/request-level field.
+/// `Prompt` is a local soft control for compatible models that do not expose
+/// such a field; it must never be presented as native provider support.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningControlMode {
+    #[default]
+    Auto,
+    Native,
+    Prompt,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningCapabilitySource {
+    ModelConfig,
+    ProviderConfig,
+    ModelRule,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReasoningWireField {
+    pub path: String,
+    pub value: Value,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReasoningLevelCapability {
+    pub effort: ReasoningEffort,
+    #[serde(default)]
+    pub wire_fields: Vec<ReasoningWireField>,
+    #[serde(default)]
+    pub control: ReasoningControlMode,
+    #[serde(default)]
+    pub route_sensitive: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReasoningCapability {
+    pub support: ReasoningSupport,
+    #[serde(default)]
+    pub levels: Vec<ReasoningLevelCapability>,
+    pub source: ReasoningCapabilitySource,
+    #[serde(default)]
+    pub prompt_fallback: bool,
+    #[serde(default)]
+    pub route_sensitive: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReasoningRequestPlan {
+    pub requested: ReasoningEffort,
+    #[serde(default)]
+    pub control: ReasoningControlMode,
+    #[serde(default)]
+    pub sent: bool,
+    #[serde(default)]
+    pub prompt_applied: bool,
+    #[serde(default)]
+    pub wire_fields: Vec<ReasoningWireField>,
+    pub support: ReasoningSupport,
+    pub source: ReasoningCapabilitySource,
+    #[serde(default)]
+    pub route_sensitive: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct ReasoningProfileSettings {
+    #[serde(default, alias = "supports_reasoning_effort")]
+    pub supported: Option<bool>,
+    #[serde(default)]
+    pub levels: Option<Vec<ReasoningEffort>>,
+    #[serde(default, alias = "reasoning_effort_map")]
+    pub effort_map: BTreeMap<String, String>,
+    #[serde(default)]
+    pub route_sensitive: Option<bool>,
+    /// Defaults to false. Prompt control is a best-effort local instruction,
+    /// not proof that the upstream model honored a reasoning level, so it
+    /// must be explicitly enabled per profile/provider.
+    #[serde(default, alias = "supports_prompt_reasoning")]
+    pub prompt_fallback: Option<bool>,
 }
 
 impl ProviderKind {
@@ -70,6 +180,10 @@ pub struct ProviderConfig {
     pub model: String,
     pub fast_model: Option<String>,
     pub capabilities: coomi_engine::ModelCapabilities,
+    pub supports_reasoning_effort: Option<bool>,
+    pub reasoning_prompt_fallback: Option<bool>,
+    pub reasoning_effort_map: BTreeMap<String, String>,
+    pub reasoning_profiles: BTreeMap<String, ReasoningProfileSettings>,
     pub remote_compaction_mode: RemoteCompactionMode,
 }
 
@@ -85,6 +199,10 @@ impl std::fmt::Debug for ProviderConfig {
             .field("model", &self.model)
             .field("fast_model", &self.fast_model)
             .field("capabilities", &self.capabilities)
+            .field("supports_reasoning_effort", &self.supports_reasoning_effort)
+            .field("reasoning_prompt_fallback", &self.reasoning_prompt_fallback)
+            .field("reasoning_effort_map", &self.reasoning_effort_map)
+            .field("reasoning_profiles", &self.reasoning_profiles)
             .field("remote_compaction_mode", &self.remote_compaction_mode)
             .finish()
     }
@@ -155,6 +273,14 @@ pub struct ProviderSettings {
     pub supports_web_search: bool,
     #[serde(default)]
     pub supports_parallel_tool_calls: bool,
+    #[serde(default)]
+    pub supports_reasoning_effort: Option<bool>,
+    #[serde(default, alias = "supports_prompt_reasoning")]
+    pub reasoning_prompt_fallback: Option<bool>,
+    #[serde(default)]
+    pub reasoning_effort_map: BTreeMap<String, String>,
+    #[serde(default, alias = "reasoning_models")]
+    pub reasoning_profiles: BTreeMap<String, ReasoningProfileSettings>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -170,6 +296,7 @@ const fn default_true() -> bool {
 impl ProviderRegistry {
     pub fn load(path: &Path) -> Result<Self> {
         let raw = ProviderDocument::load(path)?;
+        raw.validate()?;
         let mut providers = BTreeMap::new();
         for (id, provider) in raw.providers {
             if provider.model.trim().is_empty() {
@@ -219,6 +346,10 @@ impl ProviderRegistry {
                         supports_web_search: provider.supports_web_search,
                         supports_parallel_tool_calls: provider.supports_parallel_tool_calls,
                     },
+                    supports_reasoning_effort: provider.supports_reasoning_effort,
+                    reasoning_prompt_fallback: provider.reasoning_prompt_fallback,
+                    reasoning_effort_map: provider.reasoning_effort_map,
+                    reasoning_profiles: provider.reasoning_profiles,
                     remote_compaction_mode: provider.remote_compaction_mode,
                 },
             );
@@ -276,18 +407,54 @@ impl ProviderRegistry {
             return Ok(provider.clone());
         }
 
-        for choice in self.choices() {
-            if choice.selector.eq_ignore_ascii_case(selector)
-                || choice.model.eq_ignore_ascii_case(selector)
-            {
-                let mut provider = self
-                    .providers
-                    .get(&choice.provider_id)
-                    .context("model choice references a missing provider")?
-                    .clone();
-                provider.model = choice.model;
-                return Ok(provider);
-            }
+        let choices = self.choices();
+        if let Some(choice) = choices
+            .iter()
+            .find(|choice| choice.selector.eq_ignore_ascii_case(selector))
+        {
+            let mut provider = self
+                .providers
+                .get(&choice.provider_id)
+                .context("model choice references a missing provider")?
+                .clone();
+            provider.model = choice.model.clone();
+            return Ok(provider);
+        }
+
+        let model_matches = choices
+            .iter()
+            .filter(|choice| choice.model.eq_ignore_ascii_case(selector))
+            .collect::<Vec<_>>();
+        let active_matches = model_matches
+            .iter()
+            .copied()
+            .filter(|choice| choice.provider_id.eq_ignore_ascii_case(&self.active))
+            .collect::<Vec<_>>();
+        let choice = if active_matches.len() == 1 {
+            active_matches.first().copied()
+        } else if model_matches.len() == 1 {
+            model_matches.first().copied()
+        } else {
+            None
+        };
+        if let Some(choice) = choice {
+            let mut provider = self
+                .providers
+                .get(&choice.provider_id)
+                .context("model choice references a missing provider")?
+                .clone();
+            provider.model = choice.model.clone();
+            return Ok(provider);
+        }
+        if model_matches.len() > 1 {
+            let candidates = model_matches
+                .iter()
+                .map(|choice| choice.selector.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::bail!(
+                "model selector `{selector}` is ambiguous across providers; use one of: {candidates}"
+            );
         }
 
         if let Some((provider_id, model)) = selector.split_once(':')
@@ -344,7 +511,7 @@ impl ProviderDocument {
             "at least one provider is required"
         );
         anyhow::ensure!(
-            self.providers.contains_key(&self.active),
+            self.active.trim().is_empty() || self.providers.contains_key(&self.active),
             "active provider `{}` does not exist",
             self.active
         );
@@ -359,6 +526,45 @@ impl ProviderDocument {
                 "provider `{id}` has no base_url"
             );
             ProviderKind::from_config(&provider.provider_type, provider.tool_protocol.as_deref())?;
+            for (model, profile) in &provider.reasoning_profiles {
+                anyhow::ensure!(
+                    !model.trim().is_empty(),
+                    "provider `{id}` has an empty reasoning profile key"
+                );
+                if let Some(levels) = &profile.levels {
+                    let mut seen = Vec::new();
+                    for level in levels {
+                        anyhow::ensure!(
+                            *level != ReasoningEffort::Auto,
+                            "provider `{id}` reasoning profile `{model}` must not declare auto"
+                        );
+                        anyhow::ensure!(
+                            !seen.iter().any(|value: &&str| *value == level.as_str()),
+                            "provider `{id}` reasoning profile `{model}` declares duplicate level `{}`",
+                            level.as_str()
+                        );
+                        seen.push(level.as_str());
+                    }
+                }
+                for (level, value) in &profile.effort_map {
+                    anyhow::ensure!(
+                        !value.trim().is_empty(),
+                        "provider `{id}` reasoning profile `{model}` map `{level}` must not be empty"
+                    );
+                }
+                if profile.supported == Some(false) {
+                    anyhow::ensure!(
+                        profile.levels.as_ref().is_none_or(Vec::is_empty),
+                        "provider `{id}` reasoning profile `{model}` cannot declare levels when supported is false"
+                    );
+                }
+            }
+            for (level, value) in &provider.reasoning_effort_map {
+                anyhow::ensure!(
+                    !value.trim().is_empty(),
+                    "provider `{id}` reasoning_effort_map `{level}` must not be empty"
+                );
+            }
         }
         Ok(())
     }
@@ -386,6 +592,10 @@ impl Default for ProviderSettings {
             supports_native_tools: true,
             supports_web_search: false,
             supports_parallel_tool_calls: false,
+            supports_reasoning_effort: None,
+            reasoning_prompt_fallback: None,
+            reasoning_effort_map: BTreeMap::new(),
+            reasoning_profiles: BTreeMap::new(),
             extra: BTreeMap::new(),
         }
     }
@@ -459,5 +669,61 @@ mod tests {
         let provider = registry.resolve(None).expect("active provider");
         assert_eq!(provider.kind, ProviderKind::AnthropicMessages);
         assert!(!provider.capabilities.supports_native_tools);
+    }
+
+    #[test]
+    fn bare_model_selector_prefers_active_provider_and_rejects_remaining_ambiguity() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("providers.json");
+        fs::write(
+            &path,
+            r#"{
+                "active": "primary",
+                "providers": {
+                    "primary": {
+                        "type": "generic",
+                        "base_url": "https://primary.example.test/v1",
+                        "model": "shared-model"
+                    },
+                    "secondary": {
+                        "type": "generic",
+                        "base_url": "https://secondary.example.test/v1",
+                        "model": "shared-model"
+                    },
+                    "third": {
+                        "type": "generic",
+                        "base_url": "https://third.example.test/v1",
+                        "model": "other-model",
+                        "fast_model": "ambiguous-fast"
+                    },
+                    "fourth": {
+                        "type": "generic",
+                        "base_url": "https://fourth.example.test/v1",
+                        "model": "ambiguous-fast"
+                    }
+                }
+            }"#,
+        )
+        .expect("write provider fixture");
+        let registry = ProviderRegistry::load(&path).expect("provider registry");
+
+        assert_eq!(
+            registry
+                .resolve(Some("shared-model"))
+                .expect("active provider wins")
+                .id,
+            "primary"
+        );
+        let error = registry
+            .resolve(Some("ambiguous-fast"))
+            .expect_err("non-active duplicate model must be explicit");
+        assert!(error.to_string().contains("ambiguous across providers"));
+        assert_eq!(
+            registry
+                .resolve(Some("third:ambiguous-fast"))
+                .expect("explicit selector")
+                .id,
+            "third"
+        );
     }
 }

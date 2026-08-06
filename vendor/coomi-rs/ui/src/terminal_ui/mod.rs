@@ -1650,6 +1650,7 @@ fn handle_runtime_event(app: &mut TuiState, runtime_event: RuntimeEvent) {
                     }
                 }
                 AgentEvent::TurnCompleted(_) => app.status = "Finalizing".into(),
+                AgentEvent::ModelCompleted { .. } => {}
                 AgentEvent::ProviderRetry {
                     attempt,
                     max_attempts,

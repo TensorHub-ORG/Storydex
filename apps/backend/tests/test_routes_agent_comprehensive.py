@@ -47,6 +47,11 @@ def test_request_workspace_story_options_lock_git_and_sse_helpers(monkeypatch, t
     target = tmp_path / "new"
     target.mkdir()
     payload = routes.AgentChatRequest(prompt="x", workspaceRoot=str(target))
+    assert payload.reasoning_effort == "high"
+    assert routes.AgentChatRequest(prompt="x", reasoningEffort="auto").reasoning_effort == "auto"
+    assert routes.AgentChatRequest(prompt="x", reasoningEffort="max").reasoning_effort == "max"
+    with pytest.raises(ValueError):
+        routes.AgentChatRequest(prompt="x", reasoningEffort="maximum")
     assert routes._resolve_agent_workspace_root(payload) == target.resolve()
     assert opened == [target.resolve().as_posix()]
     fallback = routes._resolve_agent_workspace_root(routes.AgentChatRequest(prompt="x", workspaceRoot=str(tmp_path / "missing")))
@@ -88,11 +93,47 @@ def test_request_workspace_story_options_lock_git_and_sse_helpers(monkeypatch, t
     assert _decode_sse(routes._encode_sse("Test", {"x": "中文"})) == ("Test", {"x": "中文"})
 
 
+def test_reasoning_contract_accepts_native_and_prompt_control_metadata() -> None:
+    status = routes.AgentCoomiStatusData(
+        reasoningCapability={
+            "support": "unknown",
+            "source": "model_config",
+            "promptFallback": True,
+            "fallbackReason": "high: invalid native mapping",
+            "levels": [
+                {
+                    "effort": "high",
+                    "control": "prompt",
+                    "wireFields": [],
+                    "routeSensitive": False,
+                }
+            ],
+        },
+        reasoningRequestPlan={
+            "requested": "high",
+            "control": "prompt",
+            "sent": False,
+            "promptApplied": True,
+            "wireFields": [],
+            "support": "unknown",
+            "source": "model_config",
+            "fallbackReason": "invalid native mapping",
+        },
+    )
+    dumped = status.model_dump(by_alias=True)
+    assert dumped["reasoningCapability"]["promptFallback"] is True
+    assert dumped["reasoningCapability"]["levels"][0]["control"] == "prompt"
+    assert dumped["reasoningRequestPlan"]["control"] == "prompt"
+    assert dumped["reasoningRequestPlan"]["promptApplied"] is True
+    assert dumped["reasoningCapability"]["fallbackReason"] == "high: invalid native mapping"
+    assert dumped["reasoningRequestPlan"]["fallbackReason"] == "invalid native mapping"
+
+
 def test_phase_status_detail_and_text_sanitization_helpers():
     phase_cases = {
         "ToolDone": "tool", "TextChunk": "model", "GitCommitResult": "version_control",
         "TaskStarted": "planning", "TurnContract": "orchestration",
-        "StoryGenerationValidation": "orchestration", "RunAccepted": "runtime",
+        "StoryGenerationValidation": "orchestration", "RunAccepted": "runtime", "ModelCompleted": "model",
         "AgentCompleted": "agent", "Other": "runtime",
     }
     for event, expected in phase_cases.items():
@@ -104,6 +145,7 @@ def test_phase_status_detail_and_text_sanitization_helpers():
         ("TaskFailed", {}, "error"), ("TaskSkipped", {}, "warning"),
         ("TaskPlanCreated", {}, "success"), ("GitAutoCommit", {"created": True}, "success"),
         ("TurnContract", {"status": "needs_user_input"}, "warning"), ("RunAccepted", {}, "running"),
+        ("ModelCompleted", {}, "success"),
         ("StoryGenerationValidation", {"passed": False}, "error"),
         ("StoryGenerationValidation", {"passed": True}, "success"),
         ("AgentCompleted", {}, "success"), ("AgentCancelled", {}, "warning"), ("Other", {}, "info"),
@@ -124,6 +166,16 @@ def test_phase_status_detail_and_text_sanitization_helpers():
     ]
     for event, payload, expected in detail_cases:
         assert routes._detail_for_event(event, payload) == expected
+    assert routes._detail_for_event(
+        "ReasoningPlan",
+        {
+            "plan": {
+                "requested": "high",
+                "wireFields": [],
+                "fallbackReason": "invalid native mapping",
+            }
+        },
+    ).endswith("fallback=invalid native mapping")
 
     reply_chunks = ["stable", "partial"]
     trace_events = [

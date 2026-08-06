@@ -545,6 +545,7 @@ impl AgentObserver for TerminalObserver {
                 eprintln!("[tool {} {status}] {}", call.name, preview(&result.output));
             }
             AgentEvent::TurnCompleted(usage) => print_usage(usage),
+            AgentEvent::ModelCompleted { .. } => {}
             AgentEvent::ModelStarted { .. } => {}
             AgentEvent::ProviderRetry {
                 attempt,

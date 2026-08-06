@@ -16,10 +16,18 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 VENDORED_RUNTIME_ROOT = REPOSITORY_ROOT / "vendor" / "coomi-rs"
 STORYDEX_COOMI_HOME = Path.home() / ".storydex" / ".coomi"
 STORYDEX_COOMI_CONFIG = STORYDEX_COOMI_HOME / "config" / "providers.json"
+REASONING_EFFORTS = frozenset({"auto", "low", "medium", "high", "xhigh", "max"})
 
 
 class CoomiBridgeError(RuntimeError):
     pass
+
+
+def _normalize_reasoning_effort(value: Any) -> str:
+    normalized = str(value or "auto").strip().lower()
+    if normalized not in REASONING_EFFORTS:
+        raise CoomiBridgeError(f"Unsupported reasoning effort: {normalized or '<empty>'}")
+    return normalized
 
 
 @dataclass
@@ -35,6 +43,8 @@ class BridgeLLMResponse:
     tool_calls: list[BridgeToolCall] | None
     usage: Dict[str, Any] | None
     reasoning_content: str | None = None
+    reasoning_request_plan: Dict[str, Any] | None = None
+    metadata: Dict[str, Any] | None = None
 
 
 def ensure_storydex_coomi_config() -> Path:
@@ -155,6 +165,40 @@ async def request_once(payload: Dict[str, Any], *, timeout: float = 190.0) -> Di
         await _kill_and_reap(process)
         await asyncio.gather(communication, return_exceptions=True)
         raise
+    packets = _decode_lines(stdout)
+    error_packet = next((packet for packet in reversed(packets) if packet.get("type") == "error"), None)
+    if process.returncode != 0 or error_packet is not None:
+        detail = ""
+        if error_packet:
+            detail = str((error_packet.get("data") or {}).get("message") or "")
+        if not detail:
+            detail = stderr.decode("utf-8", errors="replace").strip()
+        raise CoomiBridgeError(detail or f"Storydex Coomi bridge exited with {process.returncode}")
+    if not packets:
+        raise CoomiBridgeError("Storydex Coomi bridge returned no packets")
+    return packets[-1]
+
+
+def request_status_sync(*, timeout: float = 30.0) -> Dict[str, Any]:
+    """Run the read-only bridge status action from synchronous service code."""
+    request = {**_base_request("status"), "action": "status"}
+    process = subprocess.Popen(
+        bridge_command(),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=str(REPOSITORY_ROOT),
+        bufsize=0,
+        creationflags=(getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0),
+    )
+    encoded = (json.dumps(request, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    try:
+        stdout, stderr = process.communicate(encoded, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        _kill_process(process)
+        stdout, stderr = process.communicate()
+        del stdout, stderr
+        raise CoomiBridgeError(f"Storydex Coomi bridge status timed out after {timeout:g}s") from exc
     packets = _decode_lines(stdout)
     error_packet = next((packet for packet in reversed(packets) if packet.get("type") == "error"), None)
     if process.returncode != 0 or error_packet is not None:
@@ -359,11 +403,18 @@ def _required_tool_name(value: Any) -> str | None:
 
 
 class BridgeProvider:
-    def __init__(self, provider_id: str | None = None, *, use_fast_model: bool = False) -> None:
+    def __init__(
+        self,
+        provider_id: str | None = None,
+        *,
+        use_fast_model: bool = False,
+        reasoning_effort: str = "auto",
+    ) -> None:
         self.config = _provider_settings(provider_id, use_fast_model=use_fast_model)
         self.provider_id = self.config.id
         self.model = self.config.model
         self.use_fast_model = use_fast_model
+        self.reasoning_effort = _normalize_reasoning_effort(reasoning_effort)
 
     def get_model_display_name(self) -> str:
         return f"{self.config.display} / {self.model}"
@@ -393,6 +444,9 @@ class BridgeProvider:
             or 0
         )
         required_tool = _required_tool_name(tool_choice)
+        reasoning_effort = _normalize_reasoning_effort(
+            kwargs.get("reasoning_effort", self.reasoning_effort)
+        )
         if tool_choice == "required" and len(tools or []) == 1:
             required_tool = str(
                 ((tools or [{}])[0].get("function") or {}).get("name")
@@ -409,6 +463,7 @@ class BridgeProvider:
                 "tools": _wire_tools(tools),
                 "requiredTool": required_tool,
                 "maxOutputTokens": output_token_limit or None,
+                "reasoningEffort": reasoning_effort,
             }
         )
         if packet.get("type") != "completion":
@@ -439,6 +494,16 @@ class BridgeProvider:
             content=str(data.get("content") or ""),
             tool_calls=tool_calls or None,
             usage=usage,
+            reasoning_request_plan=(
+                data.get("reasoningRequestPlan")
+                if isinstance(data.get("reasoningRequestPlan"), dict)
+                else None
+            ),
+            metadata=(
+                data.get("metadata")
+                if isinstance(data.get("metadata"), dict)
+                else None
+            ),
         )
 
     async def chat_stream(self, messages: list[Dict[str, Any]], **kwargs: Any) -> AsyncIterator[str]:
@@ -463,5 +528,14 @@ class BridgeProvider:
         yield {"type": "usage", "data": response.usage or {}}
 
 
-def get_bridge_provider(provider_id: str | None = None, *, fast: bool = False) -> BridgeProvider:
-    return BridgeProvider(provider_id, use_fast_model=fast)
+def get_bridge_provider(
+    provider_id: str | None = None,
+    *,
+    fast: bool = False,
+    reasoning_effort: str = "auto",
+) -> BridgeProvider:
+    return BridgeProvider(
+        provider_id,
+        use_fast_model=fast,
+        reasoning_effort=reasoning_effort,
+    )

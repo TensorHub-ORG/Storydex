@@ -7,6 +7,7 @@ use crate::InputQueue;
 use crate::ModelProvider;
 use crate::ModelRequest;
 use crate::ModelStreamObserver;
+use crate::ReasoningEffort;
 use crate::SUMMARIZATION_PROMPT;
 use crate::Session;
 use crate::ToolRuntime;
@@ -46,6 +47,7 @@ pub struct Agent {
     max_tool_rounds: usize,
     force_compaction: bool,
     input_queue: Option<Arc<InputQueue>>,
+    reasoning_effort: ReasoningEffort,
 }
 
 impl Agent {
@@ -58,6 +60,7 @@ impl Agent {
             max_tool_rounds: 100,
             force_compaction: false,
             input_queue: None,
+            reasoning_effort: ReasoningEffort::Auto,
         }
     }
 
@@ -73,6 +76,11 @@ impl Agent {
 
     pub fn with_input_queue(mut self, input_queue: Arc<InputQueue>) -> Self {
         self.input_queue = Some(input_queue);
+        self
+    }
+
+    pub fn with_reasoning_effort(mut self, reasoning_effort: ReasoningEffort) -> Self {
+        self.reasoning_effort = reasoning_effort;
         self
     }
 
@@ -278,6 +286,7 @@ impl Agent {
                 tools: tool_specs.clone(),
                 max_output_tokens: None,
                 required_tool: None,
+                reasoning_effort: self.reasoning_effort,
             };
             let stream_observer = ObserverStream { observer };
             let response = match provider.complete_stream(request, &stream_observer).await {
@@ -292,13 +301,18 @@ impl Agent {
             };
 
             session.usage.add(&response.usage);
+            observer.on_event(&AgentEvent::ModelCompleted {
+                round,
+                metadata: response.metadata.clone(),
+                usage: response.usage.clone(),
+            });
             if !response.streamed && !response.content.is_empty() {
                 observer.on_event(&AgentEvent::Text(response.content.clone()));
             }
-            session.messages.push(ChatMessage::assistant(
-                response.content.clone(),
-                response.tool_calls.clone(),
-            ));
+            let mut assistant_message =
+                ChatMessage::assistant(response.content.clone(), response.tool_calls.clone());
+            assistant_message.provider_items = response.provider_items.clone();
+            session.messages.push(assistant_message);
             session.context.observe_usage(
                 &response.usage,
                 &self.system_prompt,
@@ -413,6 +427,7 @@ impl Agent {
                     tools: Vec::new(),
                     max_output_tokens: None,
                     required_tool: None,
+                    reasoning_effort: self.reasoning_effort,
                 })
                 .await
                 .map_err(AgentError::Compaction)?;

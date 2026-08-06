@@ -209,6 +209,33 @@ impl ImageContent {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    #[default]
+    Auto,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    /// The provider's highest user-selectable tier. This is distinct from
+    /// `XHigh` because several gateways expose both values on the wire.
+    Max,
+}
+
+impl ReasoningEffort {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ModelRequest {
     pub model: String,
@@ -216,6 +243,7 @@ pub struct ModelRequest {
     pub tools: Vec<ToolSpec>,
     pub max_output_tokens: Option<u64>,
     pub required_tool: Option<String>,
+    pub reasoning_effort: ReasoningEffort,
 }
 
 #[derive(Clone, Debug)]
@@ -237,6 +265,8 @@ pub struct TokenUsage {
     pub input_tokens: u64,
     pub cached_input_tokens: u64,
     pub output_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
 }
 
 impl TokenUsage {
@@ -246,6 +276,11 @@ impl TokenUsage {
             .cached_input_tokens
             .saturating_add(other.cached_input_tokens);
         self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.reasoning_tokens = match (self.reasoning_tokens, other.reasoning_tokens) {
+            (Some(current), Some(next)) => Some(current.saturating_add(next)),
+            (None, Some(next)) => Some(next),
+            (current, None) => current,
+        };
     }
 
     pub fn total_tokens(&self) -> u64 {
@@ -259,6 +294,21 @@ pub struct ModelResponse {
     pub tool_calls: Vec<ToolCall>,
     pub usage: TokenUsage,
     pub streamed: bool,
+    pub provider_items: Vec<Value>,
+    pub metadata: ModelResponseMetadata,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelResponseMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_status: Option<String>,
+    #[serde(default)]
+    pub native_reasoning: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -416,6 +466,11 @@ pub enum AgentEvent {
         provider: String,
         model: String,
         round: usize,
+    },
+    ModelCompleted {
+        round: usize,
+        metadata: ModelResponseMetadata,
+        usage: TokenUsage,
     },
     Text(String),
     TextDelta(String),

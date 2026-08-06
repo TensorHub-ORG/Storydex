@@ -37,6 +37,15 @@ import type {
   AgentPendingSnapshotConfirmation,
   AgentPendingApproval,
   AgentPendingCommitPrompt,
+  AgentReasoningEffort,
+  AgentReasoningControlMode,
+  AgentReasoningCapability,
+  AgentReasoningCapabilitySource,
+  AgentCoomiModelChoice,
+  AgentReasoningLevelCapability,
+  AgentReasoningRequestPlan,
+  AgentReasoningSupport,
+  AgentReasoningWireField,
   AgentRunChangeLedger,
   AgentRunStatus,
   AgentSessionSummary,
@@ -86,6 +95,7 @@ interface AgentState {
   runStartedAt: number | null;
   isCommittingGit: boolean;
   commitActionLabel: string;
+  reasoningEffort: AgentReasoningEffort;
   storyFragmentCount: number;
   chapterLengthTier: ChapterLengthTier;
   chapterWordCountTarget: number;
@@ -153,6 +163,7 @@ export const useAgentStore = defineStore("agent", {
     runStartedAt: null,
     isCommittingGit: false,
     commitActionLabel: "",
+    reasoningEffort: "high",
     storyFragmentCount: 1,
     chapterLengthTier: "medium",
     chapterWordCountTarget: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
@@ -305,6 +316,7 @@ export const useAgentStore = defineStore("agent", {
         this.applyCoomiStatusContext(this.coomiStatus);
       } catch {
         this.coomiStatus = null;
+        this.reasoningEffort = "auto";
       }
     },
 
@@ -661,6 +673,10 @@ export const useAgentStore = defineStore("agent", {
       if (!status) {
         return;
       }
+      this.reasoningEffort = resolveReasoningEffort(
+        this.reasoningEffort,
+        status.reasoningCapability
+      );
       this.applyContextMetrics({
         contextWindow: status.contextWindow,
         usedTokens: status.usedTokens,
@@ -873,6 +889,10 @@ export const useAgentStore = defineStore("agent", {
             prompt: next.content,
             activeFile: workspaceStore.activeFileBindingOrPath || workspaceStore.activeFile || "",
             workspaceRoot: workspaceStore.currentProject?.workspaceRoot || workspaceStore.health?.workspaceRoot || "",
+            reasoningEffort: resolveReasoningEffort(
+              this.reasoningEffort,
+              this.coomiStatus?.reasoningCapability
+            ),
             storyGeneration: {
               fragmentCount: this.storyFragmentCount,
               chapterLengthTier: this.chapterLengthTier,
@@ -977,6 +997,10 @@ export const useAgentStore = defineStore("agent", {
         prompt,
         activeFile: workspaceStore.activeFileBindingOrPath || workspaceStore.activeFile || "",
         workspaceRoot: workspaceStore.currentProject?.workspaceRoot || workspaceStore.health?.workspaceRoot || "",
+        reasoningEffort: resolveReasoningEffort(
+          this.reasoningEffort,
+          this.coomiStatus?.reasoningCapability
+        ),
         storyGeneration: {
           fragmentCount: this.storyFragmentCount,
           chapterLengthTier: this.chapterLengthTier,
@@ -1032,6 +1056,10 @@ export const useAgentStore = defineStore("agent", {
         prompt,
         activeFile: workspaceStore.activeFileBindingOrPath || workspaceStore.activeFile || "",
         workspaceRoot: workspaceStore.currentProject?.workspaceRoot || workspaceStore.health?.workspaceRoot || "",
+        reasoningEffort: resolveReasoningEffort(
+          this.reasoningEffort,
+          this.coomiStatus?.reasoningCapability
+        ),
         storyGeneration: {
           fragmentCount: this.storyFragmentCount,
           chapterLengthTier: this.chapterLengthTier,
@@ -1179,6 +1207,10 @@ export const useAgentStore = defineStore("agent", {
         prompt,
         activeFile: workspaceStore.activeFileBindingOrPath || workspaceStore.activeFile || "",
         workspaceRoot: workspaceStore.currentProject?.workspaceRoot || workspaceStore.health?.workspaceRoot || "",
+        reasoningEffort: resolveReasoningEffort(
+          this.reasoningEffort,
+          this.coomiStatus?.reasoningCapability
+        ),
         storyGeneration: {
           fragmentCount: this.storyFragmentCount,
           chapterLengthTier: this.chapterLengthTier,
@@ -1484,6 +1516,11 @@ export const useAgentStore = defineStore("agent", {
           cacheHitRatio: 0,
           cacheSavings: 0
         };
+      } else if (eventName === "ReasoningPlan") {
+        const plan = normalizeReasoningRequestPlan(visiblePacket.plan || visiblePacket.reasoningRequestPlan);
+        if (this.coomiStatus && plan) {
+          this.coomiStatus = { ...this.coomiStatus, reasoningRequestPlan: plan };
+        }
       } else if (eventName === "CompressionEvent") {
         this.applyContextMetrics(visiblePacket);
         this.compressionSummary = String(visiblePacket.summary || "");
@@ -1793,6 +1830,16 @@ function streamPacketToWaterfallItem(
 ): CoomiWaterfallItem | null {
   const eventName = String(packet._type || packet.type || "");
   const raw = packet as unknown as Record<string, unknown>;
+  if (eventName === "ReasoningPlan") {
+    // The plan remains in the trace event as structured diagnostics. It is
+    // intentionally omitted from the conversational waterfall.
+    return null;
+  }
+  if (eventName === "ModelCompleted") {
+    // Response metadata and usage are retained in `run.events` for logs and
+    // diagnostics, but are not user-facing conversation content.
+    return null;
+  }
   if (eventName === "RunAccepted" || eventName === "TurnPhase") {
     const elapsedMs = Math.max(0, Number(packet.elapsedMs || 0));
     const label = String(packet.label || packet.detail || (eventName === "RunAccepted" ? "请求已接收" : "正在准备"));
@@ -2078,7 +2125,8 @@ function phaseForEvent(eventName: string): string {
     || eventName === "StoryCallAccounting"
     || eventName === "StoryGenerationValidation"
   ) return "orchestration";
-  if (eventName === "RunAccepted" || eventName === "UsageUpdate" || eventName === "CompressionEvent" || eventName === "TurnPhase") return "runtime";
+  if (eventName === "RunAccepted" || eventName === "UsageUpdate" || eventName === "CompressionEvent" || eventName === "TurnPhase" || eventName === "ReasoningPlan") return "runtime";
+  if (eventName === "ModelCompleted") return "model";
   if (eventName.startsWith("Agent")) return "agent";
   return "runtime";
 }
@@ -2086,6 +2134,8 @@ function phaseForEvent(eventName: string): string {
 function statusForPacket(eventName: string, packet: AgentStreamPacket): CoomiWaterfallItemStatus {
   if (eventName === "AgentWarning") return "warning";
   if (eventName === "AgentNotice" || eventName === "PlanModeChanged") return "info";
+  if (eventName === "ReasoningPlan") return "info";
+  if (eventName === "ModelCompleted") return "success";
   if (eventName === "AgentError" || packet.is_error) return "error";
   if (eventName === "TaskFailed") return "error";
   if (eventName === "TaskSkipped") return "warning";
@@ -2142,7 +2192,26 @@ function detailForPacket(eventName: string, packet: AgentStreamPacket): string {
   if (eventName === "StoryCallAccounting") return summarizeStoryCallAccountingPacket(packet);
   if (eventName === "StoryGenerationValidation") return summarizeStoryGenerationValidationPacket(packet);
   if (eventName === "RunAccepted" || eventName === "TurnPhase") return String(packet.detail || packet.label || eventName);
-  if (eventName === "AgentCompleted") return `tokens ${Number(packet.total_tokens || 0)}`;
+  if (eventName === "ReasoningPlan") {
+    const plan = toRecord(packet.plan) || {};
+    const fields = Array.isArray(plan.wireFields) ? plan.wireFields.length : 0;
+    return `requested=${String(plan.requested || "auto")} · wireFields=${fields}`;
+  }
+  if (eventName === "ModelCompleted") {
+    const usage = toRecord(packet.usage) || {};
+    const reasoning = Number(packet.reasoning_tokens || packet.reasoningTokens || usage.reasoning_tokens || usage.reasoningTokens || 0);
+    return packet.nativeReasoning === true
+      ? `原生推理证据，reasoning tokens=${reasoning}`
+      : reasoning > 0
+        ? `已返回 reasoning tokens=${reasoning}，参数语义尚未完全验证`
+        : "上游已响应，未返回原生推理证据";
+  }
+  if (eventName === "AgentCompleted") {
+    const reasoning = Number(packet.reasoning_tokens || packet.reasoningTokens || 0);
+    return reasoning > 0
+      ? `tokens ${Number(packet.total_tokens || 0)} · reasoning ${reasoning}`
+      : `tokens ${Number(packet.total_tokens || 0)}`;
+  }
   return eventName;
 }
 
@@ -2736,8 +2805,139 @@ function normalizeCoomiStatus(value: unknown): AgentCoomiStatusResponse | null {
     cumulativeTokens: firstNumber(record, ["cumulativeTokens", "cumulative_tokens"]) ?? undefined,
     compactThreshold: firstNumber(record, ["compactThreshold", "compact_threshold"]) ?? undefined,
     warningThreshold: firstNumber(record, ["warningThreshold", "warning_threshold"]) ?? undefined,
-    compressionStatus: firstString(record, ["compressionStatus", "compression_status"]) || undefined
+    compressionStatus: firstString(record, ["compressionStatus", "compression_status"]) || undefined,
+    reasoningCapability: record.reasoningCapability !== undefined
+      ? normalizeReasoningCapability(record.reasoningCapability)
+      : undefined,
+    reasoningRequestPlan: record.reasoningRequestPlan !== undefined
+      ? normalizeReasoningRequestPlan(record.reasoningRequestPlan)
+      : undefined,
+    models: normalizeCoomiModelChoices(record.models),
+    providerCapabilities: toRecord(record.providerCapabilities) || undefined
   };
+}
+
+function normalizeReasoningWireFields(value: unknown): AgentReasoningWireField[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => {
+      const record = toRecord(item);
+      const path = (asString(record?.path) || "").trim();
+      return path ? { path, value: record?.value } : null;
+    })
+    .filter((item): item is AgentReasoningWireField => item !== null);
+}
+
+function normalizeReasoningCapability(value: unknown): AgentReasoningCapability {
+  const record = toRecord(value);
+  const support = (asString(record?.support) || "").toLowerCase();
+  const source = (asString(record?.source) || "").toLowerCase();
+  const promptFallback = asBoolean(record?.promptFallback ?? record?.prompt_fallback) ?? false;
+  const levels = Array.isArray(record?.levels)
+    ? record.levels
+        .map((item) => {
+          const level = toRecord(item);
+          const effort = (asString(level?.effort) || "").toLowerCase() as AgentReasoningEffort;
+          if (!["low", "medium", "high", "xhigh", "max"].includes(effort)) {
+            return null;
+          }
+          const wireFields = normalizeReasoningWireFields(level?.wireFields || level?.wire_fields);
+          const rawControl = (asString(level?.control) || "").toLowerCase() as AgentReasoningControlMode;
+          const control: AgentReasoningControlMode = rawControl === "native"
+            ? (wireFields.length > 0 ? "native" : "auto")
+            : rawControl === "prompt"
+              ? "prompt"
+              : rawControl === "auto"
+                ? "auto"
+                : wireFields.length > 0
+                  ? "native"
+                  : promptFallback
+                    ? "prompt"
+                    : "auto";
+          if (control === "auto") {
+            return null;
+          }
+          const selectableControl: "native" | "prompt" = control === "native" ? "native" : "prompt";
+          return {
+            effort,
+            control: selectableControl,
+            wireFields,
+            routeSensitive: asBoolean(level?.routeSensitive ?? level?.route_sensitive) ?? false
+          } satisfies AgentReasoningLevelCapability;
+        })
+        .filter((item) => item !== null) as AgentReasoningLevelCapability[]
+    : [];
+  return {
+    support: (["supported", "unsupported", "unknown"] as AgentReasoningSupport[]).includes(support as AgentReasoningSupport)
+      ? (support as AgentReasoningSupport)
+      : "unknown",
+    levels,
+    source: (["model_config", "provider_config", "model_rule", "unknown"] as AgentReasoningCapabilitySource[]).includes(source as AgentReasoningCapabilitySource)
+      ? (source as AgentReasoningCapabilitySource)
+      : "unknown",
+    promptFallback,
+    routeSensitive: asBoolean(record?.routeSensitive ?? record?.route_sensitive) ?? false,
+    fallbackReason: firstString(record || {}, ["fallbackReason", "fallback_reason"]) || undefined
+  };
+}
+
+function normalizeReasoningRequestPlan(value: unknown): AgentReasoningRequestPlan {
+  const record = toRecord(value);
+  const requested = (asString(record?.requested) || "").toLowerCase() as AgentReasoningEffort;
+  const rawControl = (asString(record?.control) || "").toLowerCase() as AgentReasoningControlMode;
+  const support = (asString(record?.support) || "").toLowerCase() as AgentReasoningSupport;
+  const source = (asString(record?.source) || "").toLowerCase() as AgentReasoningCapabilitySource;
+  return {
+    requested: (["auto", "low", "medium", "high", "xhigh", "max"] as AgentReasoningEffort[]).includes(requested) ? requested : "auto",
+    control: (["auto", "native", "prompt"] as AgentReasoningControlMode[]).includes(rawControl) ? rawControl : "auto",
+    sent: asBoolean(record?.sent) ?? false,
+    promptApplied: asBoolean(record?.promptApplied ?? record?.prompt_applied) ?? false,
+    wireFields: normalizeReasoningWireFields(record?.wireFields || record?.wire_fields),
+    support: (["supported", "unsupported", "unknown"] as AgentReasoningSupport[]).includes(support) ? support : "unknown",
+    source: (["model_config", "provider_config", "model_rule", "unknown"] as AgentReasoningCapabilitySource[]).includes(source) ? source : "unknown",
+    routeSensitive: asBoolean(record?.routeSensitive ?? record?.route_sensitive) ?? false,
+    fallbackReason: firstString(record || {}, ["fallbackReason", "fallback_reason"]) || undefined
+  };
+}
+
+function resolveReasoningEffort(
+  selected: AgentReasoningEffort,
+  capability: AgentReasoningCapability | null | undefined
+): AgentReasoningEffort {
+  if (selected === "auto") {
+    return selected;
+  }
+  if (!capability) {
+    return "auto";
+  }
+  return capability?.levels.some((level) => level.effort === selected && level.control !== "auto")
+    ? selected
+    : "auto";
+}
+
+function normalizeCoomiModelChoices(value: unknown): AgentCoomiModelChoice[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => {
+      const record = toRecord(item);
+      const selector = (asString(record?.selector) || "").trim();
+      if (!selector) {
+        return null;
+      }
+      return {
+        selector,
+        providerId: asString(record?.providerId) || "",
+        providerDisplay: asString(record?.providerDisplay) || "",
+        model: asString(record?.model) || "",
+        isFast: asBoolean(record?.isFast) ?? false,
+        reasoningCapability: normalizeReasoningCapability(record?.reasoningCapability)
+      } satisfies AgentCoomiModelChoice;
+    })
+    .filter((item): item is AgentCoomiModelChoice => item !== null);
 }
 
 function normalizeSessionSummaries(items: unknown): AgentSessionSummary[] {
