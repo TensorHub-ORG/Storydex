@@ -132,6 +132,9 @@ test("advisory mode reports regressions without failing standard CI", (t) => {
 
 test("standard CI has one canonical coverage job while full CI retains its compatibility matrix", () => {
   const workflow = fs.readFileSync(path.resolve(__dirname, "..", "..", ".github", "workflows", "quality-gate.yml"), "utf8");
+  const hashedBackendTestInstall = /python -m pip install --require-hashes -r apps\/backend\/requirements-test\.lock/g;
+  assert.equal((workflow.match(hashedBackendTestInstall) || []).length, 3);
+  assert.doesNotMatch(workflow, /python -m pip install -r apps\/backend\/requirements-test\.txt/);
   assert.match(workflow, /inputs\.full\s*&&/);
   assert.equal((workflow.match(/"coverage_ratchet":true/g) || []).length, 2);
   assert.equal((workflow.match(/"coverage_ratchet":false/g) || []).length, 2);
