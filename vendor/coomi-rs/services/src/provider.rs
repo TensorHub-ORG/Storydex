@@ -5614,14 +5614,30 @@ mod tests {
 
     #[test]
     fn replays_native_reasoning_items_across_tool_rounds() {
-        let mut openai = ChatMessage::assistant("answer", Vec::new());
+        let mut openai = ChatMessage::assistant(
+            "",
+            vec![ToolCall {
+                id: "call-1".into(),
+                name: "read_file".into(),
+                arguments: json!({"path": "README.md"}),
+            }],
+        );
         openai.provider_items.push(json!({
             "role": "assistant",
-            "content": "answer",
-            "reasoning_content": "opaque reasoning"
+            "content": null,
+            "reasoning_content": "opaque reasoning",
+            "tool_calls": [{
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "read_file", "arguments": "{\"path\":\"README.md\"}"}
+            }]
         }));
         let chat = openai_messages(&[openai]).expect("OpenAI chat history");
         assert_eq!(chat[0]["reasoning_content"], "opaque reasoning");
+        assert_eq!(
+            chat[0].pointer("/tool_calls/0/function/name"),
+            Some(&Value::String("read_file".into()))
+        );
 
         let mut anthropic = ChatMessage::assistant(
             "",
