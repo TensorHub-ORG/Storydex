@@ -10,6 +10,8 @@ import pytest
 
 from core import feature_flags
 from services import retrieval_service
+from services.content_catalog_service import get_content_catalog_service
+from services.content_pipeline_service import ContentPipelineService
 from services.context_policy import ContextPolicy
 from services.retrieval_service import (
     INDEX_ERROR,
@@ -99,6 +101,7 @@ def test_v3_reports_stale_then_replaces_update_delete_and_rename_chunks(tmp_path
     service.build_index()
 
     _write_exact(chapter, "newuniquey82\n")
+    get_content_catalog_service(tmp_path).notify_external_changes([chapter])
     stale = service.search_detailed("newuniquey82")
     assert stale["status"] == INDEX_STALE
     assert stale["resultState"] == "unavailable"
@@ -109,11 +112,13 @@ def test_v3_reports_stale_then_replaces_update_delete_and_rename_chunks(tmp_path
     renamed = chapter.with_name("renamed.md")
     chapter.rename(renamed)
     _write_exact(renamed, "renameduniquez73\n")
+    get_content_catalog_service(tmp_path).notify_external_changes([chapter, renamed])
     assert service.watch_files() == 2
     renamed_result = service.search_detailed("renameduniquez73")
     assert renamed_result["hits"][0]["path"] == "chapters/renamed.md"
 
     renamed.unlink()
+    get_content_catalog_service(tmp_path).notify_external_changes([renamed])
     assert service.watch_files() == 1
     assert service.search_detailed("renameduniquez73")["resultState"] == "no_hits"
     assert service.index_status()["coverage"]["documentCount"] == 0
@@ -153,6 +158,7 @@ def test_failed_full_build_keeps_last_complete_index_and_exposes_error(tmp_path,
 def test_project_search_distinguishes_complete_no_hits_from_index_error(tmp_path) -> None:
     _write_exact(tmp_path / "chapters" / "001.md", "known-search-token\n")
     reset_retrieval_cache()
+    ContentPipelineService().process_workspace(tmp_path)
     tool = StorydexProjectSearchTool(workspace_root=tmp_path)
 
     no_hit = tool.run({"query": "missinguniquex99"})
@@ -178,16 +184,23 @@ def test_project_search_distinguishes_complete_no_hits_from_index_error(tmp_path
     assert failed_payload["results"] == []
 
 
-def test_project_search_refresh_exception_fails_closed_even_if_old_state_says_ok(
+def test_project_search_surfaces_published_index_error_without_query_refresh(
     tmp_path,
     monkeypatch,
 ) -> None:
+    outcome = {
+        "status": INDEX_ERROR,
+        "resultState": "unavailable",
+        "hits": [],
+        "candidatePaths": [],
+        "index": {"status": INDEX_ERROR, "generation": "sha256:last-good"},
+        "error": "published-index-error",
+    }
     fake_service = SimpleNamespace(
-        watch_files=lambda: (_ for _ in ()).throw(RuntimeError("refresh-crashed")),
-        index_status=lambda **_kwargs: {"status": INDEX_OK, "generation": "sha256:old"},
-        search_detailed=lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("must not query after a failed refresh")
+        watch_files=lambda: (_ for _ in ()).throw(
+            AssertionError("query path must not refresh retrieval sources")
         ),
+        search_detailed=lambda *_args, **_kwargs: outcome,
     )
     monkeypatch.setattr(retrieval_service, "get_retrieval_service", lambda _root: fake_service)
 
@@ -197,18 +210,56 @@ def test_project_search_refresh_exception_fails_closed_even_if_old_state_says_ok
     assert result.success is False
     assert payload["status"] == INDEX_ERROR
     assert payload["resultState"] == "unavailable"
-    assert payload["error"] == "refresh-crashed"
+    assert payload["error"] == "published-index-error"
+
+
+def test_project_search_reads_published_index_without_refreshing_in_query_path(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    outcome = {
+        "status": INDEX_OK,
+        "resultState": "no_hits",
+        "hits": [],
+        "candidatePaths": [],
+        "index": {"status": INDEX_OK, "generation": "sha256:published"},
+        "error": "",
+    }
+    fake_service = SimpleNamespace(
+        watch_files=lambda: (_ for _ in ()).throw(
+            AssertionError("query path must not refresh retrieval sources")
+        ),
+        search_detailed=lambda *_args, **_kwargs: outcome,
+    )
+    monkeypatch.setattr(retrieval_service, "get_retrieval_service", lambda _root: fake_service)
+
+    result = StorydexProjectSearchTool(workspace_root=tmp_path).run({"query": "anything"})
+    payload = json.loads(result.output)
+
+    assert result.success is True
+    assert payload["status"] == INDEX_OK
+    assert payload["resultState"] == "no_hits"
 
 
 def test_passive_retrieval_error_is_visible_in_block_notes_and_context_trace(tmp_path, monkeypatch) -> None:
+    index = {
+        "status": INDEX_ERROR,
+        "schemaVersion": 3,
+        "generation": "sha256:last-good",
+        "coverage": {"documentCount": 2, "chunkCount": 7},
+        "lastError": "forced-passive-index-error",
+    }
     fake_service = SimpleNamespace(
-        watch_files=lambda: (_ for _ in ()).throw(RuntimeError("forced-passive-index-error")),
-        index_status=lambda **_kwargs: {
+        watch_files=lambda: (_ for _ in ()).throw(
+            AssertionError("query path must not refresh retrieval sources")
+        ),
+        search_detailed=lambda *_args, **_kwargs: {
             "status": INDEX_ERROR,
-            "schemaVersion": 3,
-            "generation": "sha256:last-good",
-            "coverage": {"documentCount": 2, "chunkCount": 7},
-            "lastError": "forced-passive-index-error",
+            "resultState": "unavailable",
+            "hits": [],
+            "candidatePaths": [],
+            "index": index,
+            "error": "forced-passive-index-error",
         },
     )
     monkeypatch.setattr(feature_flags, "get_flags", lambda: SimpleNamespace(get_bool=lambda _name: True))

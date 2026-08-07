@@ -222,14 +222,14 @@ def test_catalog_dirty_queue_ignores_paths_outside_declared_roots(tmp_path: Path
     assert initial.get(".storydex/memory/file-history/ignored.md") is None
 
 
-def test_catalog_dirty_parent_expands_to_declared_child_roots(tmp_path: Path) -> None:
+def test_catalog_dirty_parent_targets_unified_storydex_root(tmp_path: Path) -> None:
     _write_source(tmp_path, ".storydex/memory/current/items.json", "{}")
     service = ContentCatalogService(tmp_path)
     service.snapshot()
 
     service.mark_dirty([".storydex"])
 
-    assert service.dirty_file_count == 7
+    assert service.dirty_file_count == 1
 
 
 def test_catalog_registry_isolated_by_canonical_workspace(tmp_path: Path) -> None:

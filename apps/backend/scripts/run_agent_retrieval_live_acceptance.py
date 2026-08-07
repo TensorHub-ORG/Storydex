@@ -192,9 +192,11 @@ async def run_live(args: argparse.Namespace, *, workspace: Path, coomi_home: Pat
     os.environ["STORYDEX_COOMI_BRIDGE"] = str(bridge)
 
     from services import coomi_agent_service as coomi
+    from services.content_pipeline_service import bootstrap_content_workspace
     from services.retrieval_service import get_retrieval_service
 
     source_path = workspace / SOURCE_PATH
+    bootstrap_content_workspace(workspace)
     service = coomi.StorydexCoomiAgentService()
     session_id = f"opencode-p03-{uuid.uuid4().hex[:10]}"
     service.set_plan_mode(session_id=session_id, workspace_root=workspace, active=True)
@@ -242,6 +244,13 @@ async def run_live(args: argparse.Namespace, *, workspace: Path, coomi_home: Pat
 
     retrieval = get_retrieval_service(workspace)
     index_before_failure = retrieval.index_status()
+    # The next assertion intentionally corrupts the published FTS table.  Stop
+    # the background publisher first so it does not repeatedly retry against a
+    # deliberately broken database; the query path must surface the error
+    # without attempting a repair.
+    from services.content_pipeline_service import stop_content_pipeline
+
+    stop_content_pipeline()
     conn = sqlite3.connect(retrieval.db_path)
     try:
         conn.execute("DROP TABLE chunks")
@@ -323,20 +332,28 @@ def main() -> int:
     started = now_iso()
     try:
         with tempfile.TemporaryDirectory(prefix="storydex-agent-retrieval-") as temporary:
-            root = Path(temporary)
-            workspace = root / "workspace"
-            coomi_home = root / "coomi-home"
-            prepare_workspace(workspace)
-            prepare_retrieval_source(workspace)
-            source_config = Path(args.config).resolve() if args.config else provider_config_path()
-            provider = load_isolated_provider(
-                source_config,
-                coomi_home,
-                args.provider_id,
-                args.model,
-            )
-            report = asyncio.run(run_live(args, workspace=workspace, coomi_home=coomi_home))
-            report.update({"startedAt": started, "finishedAt": now_iso(), "providerConfig": provider})
+            try:
+                root = Path(temporary)
+                workspace = root / "workspace"
+                coomi_home = root / "coomi-home"
+                prepare_workspace(workspace)
+                prepare_retrieval_source(workspace)
+                source_config = Path(args.config).resolve() if args.config else provider_config_path()
+                provider = load_isolated_provider(
+                    source_config,
+                    coomi_home,
+                    args.provider_id,
+                    args.model,
+                )
+                report = asyncio.run(run_live(args, workspace=workspace, coomi_home=coomi_home))
+                report.update({"startedAt": started, "finishedAt": now_iso(), "providerConfig": provider})
+            finally:
+                # Stop the native watcher before TemporaryDirectory removes the
+                # workspace; otherwise its worker can retry against a deleted
+                # path and leak noisy errors into the acceptance output.
+                from services.content_pipeline_service import stop_content_pipeline
+
+                stop_content_pipeline()
         write_json(report_path, redact(report))
         print(json.dumps({"status": "passed", "report": report_path.as_posix()}, ensure_ascii=False))
         return 0
@@ -352,7 +369,5 @@ def main() -> int:
             )
         )
         return 1
-
-
 if __name__ == "__main__":
     raise SystemExit(main())

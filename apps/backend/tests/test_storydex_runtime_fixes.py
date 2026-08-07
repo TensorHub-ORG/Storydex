@@ -15,6 +15,7 @@ from services.coomi_agent_service import (
     _create_storydex_tool_registry,
     _resolve_context_window,
 )
+from services.content_pipeline_service import ContentPipelineService
 from services.retrieval_service import RetrievalService, reset_retrieval_cache
 from services.story_project_service import get_story_project_service
 from services.storydex_agent_tools import (
@@ -212,6 +213,7 @@ def test_project_search_tool_returns_ranked_workspace_hits(tmp_path) -> None:
     (chapters / "001.md").write_text("沈青抵达云桥，在藏经阁外驻足良久。\n", encoding="utf-8")
     (chapters / "002.md").write_text("阿离在荒村夜宿，遇见了旧识。\n", encoding="utf-8")
     reset_retrieval_cache()
+    ContentPipelineService().process_workspace(tmp_path)
     result = StorydexProjectSearchTool(workspace_root=tmp_path).run({"query": "云桥 藏经阁"})
     assert result.success is True
     payload = json.loads(result.output)
@@ -227,6 +229,7 @@ def test_project_search_returns_snippet_for_match_after_first_4000_chars(tmp_pat
         encoding="utf-8",
     )
     reset_retrieval_cache()
+    ContentPipelineService().process_workspace(tmp_path)
 
     result = StorydexProjectSearchTool(workspace_root=tmp_path).run({"query": "暮色钥印"})
 

@@ -296,28 +296,12 @@ class StorydexProjectSearchTool(_StorydexWorkspaceToolMixin, BaseTool):
         from services.retrieval_service import RECALL_CANDIDATE_LIMIT, get_retrieval_service
 
         service = get_retrieval_service(workspace_root)
-        try:
-            service.watch_files()
-        except Exception as exc:
-            try:
-                index = service.index_status(check_stale=False)
-            except Exception:
-                index = {}
-            outcome = {
-                "status": "index_error",
-                "resultState": "unavailable",
-                "hits": [],
-                "candidatePaths": [],
-                "index": index,
-                "error": str(exc),
-            }
-        else:
-            outcome = service.search_detailed(
-                query,
-                top_k=max_results,
-                candidate_limit=RECALL_CANDIDATE_LIMIT,
-                path_prefix=path_prefix,
-            )
+        outcome = service.search_detailed(
+            query,
+            top_k=max_results,
+            candidate_limit=RECALL_CANDIDATE_LIMIT,
+            path_prefix=path_prefix,
+        )
         status = str(outcome.get("status") or "index_error")
         result_state = str(outcome.get("resultState") or "unavailable")
         hits = outcome.get("hits") if isinstance(outcome.get("hits"), list) else []

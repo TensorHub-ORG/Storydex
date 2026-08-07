@@ -156,6 +156,9 @@ class ProjectService:
             self._current_workspace_root = normalized
             self._opened_at = datetime.now(timezone.utc).isoformat()
             self._persist_state(normalized)
+        from services.content_pipeline_service import register_content_workspace
+
+        register_content_workspace(normalized)
 
     def _load_initial_workspace_root(self) -> Path:
         forced_root = str(os.environ.get("STORYDEX_FORCE_WORKSPACE_ROOT") or "").strip()

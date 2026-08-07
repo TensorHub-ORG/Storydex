@@ -10,11 +10,14 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
-from services.performance_trace_service import record_counter
+from services.performance_trace_service import record_value
 from services.source_contract import source_line_count, source_revision_id
 from services.storydex_retrieval import tokenize
+
+if TYPE_CHECKING:
+    from services.content_catalog_service import CatalogEntry, ContentCatalogSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +107,12 @@ class RetrievalService:
         self.db_path = self.project_root / DEFAULT_INDEX_REL
         self.legacy_db_path = self.project_root / LEGACY_INDEX_REL
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._legacy_index_present = self.legacy_db_path.is_file()
         self._lock = Lock()
+        self._catalog_service: Any | None = None
+        self._published_catalog_generation = 0
+        self._published_catalog_revision = ""
+        self._published_catalog_projection_generation = ""
         self._initialize_database(self.db_path)
 
     # -------------------- database lifecycle --------------------
@@ -168,22 +176,30 @@ class RetrievalService:
 
     # -------------------- source discovery and chunking --------------------
 
-    def _candidate_files(self) -> Iterable[Path]:
-        roots = [self.project_root / "chapters", self.project_root / ".storydex"]
-        candidates: List[Path] = []
-        for root in roots:
-            if not root.exists():
-                continue
-            record_counter("directoryScanCount")
-            for path in root.rglob("*"):
-                record_counter("statCount")
-                if not path.is_file() or path.suffix.lower() not in INDEXABLE_SUFFIXES:
-                    continue
-                relative_parts = path.relative_to(self.project_root).parts
-                if self._is_runtime_path(relative_parts):
-                    continue
-                candidates.append(path)
-        return sorted(candidates, key=lambda item: item.as_posix())
+    def _catalog_entries(
+        self,
+        snapshot: "ContentCatalogSnapshot",
+    ) -> Dict[str, "CatalogEntry"]:
+        return {
+            path: entry
+            for path, entry in snapshot.entries.items()
+            if Path(path).suffix.lower() in INDEXABLE_SUFFIXES
+            and not self._is_runtime_path(tuple(Path(path).parts))
+        }
+
+    def _content_catalog(self) -> Any:
+        if self._catalog_service is None:
+            from services.content_catalog_service import get_content_catalog_service
+
+            self._catalog_service = get_content_catalog_service(self.project_root)
+        return self._catalog_service
+
+    @staticmethod
+    def _catalog_generation(entries: Dict[str, "CatalogEntry"]) -> str:
+        payload = "\n".join(
+            f"{path}\0{entry.revision}" for path, entry in sorted(entries.items())
+        )
+        return f"sha256:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
 
     @staticmethod
     def _tokenized(text: str) -> str:
@@ -301,8 +317,13 @@ class RetrievalService:
         *,
         indexed_at: float,
         stat: os.stat_result | None = None,
+        expected_revision: str = "",
     ) -> int:
         source = self._read_source(path, stat=stat)
+        if expected_revision and str(source["revision"]) != expected_revision:
+            raise RetrievalIndexStaleError(
+                f"retrieval source revision changed before indexing: {relative_path}"
+            )
         chunks = self._chunks(str(source["text"]), str(source["revision"]))
         conn.execute("DELETE FROM chunks WHERE path=?", (relative_path,))
         conn.execute("DELETE FROM documents WHERE path=?", (relative_path,))
@@ -414,8 +435,13 @@ class RetrievalService:
                     f"retrieval chunk coverage incomplete for {document['path']}: {cursor}/{total_chars}"
                 )
 
-    def build_index(self) -> int:
+    def build_index(self, catalog_snapshot: "ContentCatalogSnapshot | None" = None) -> int:
         """Build a complete temporary v3 database and atomically publish it."""
+        catalog_service = self._content_catalog()
+        if catalog_snapshot is None:
+            catalog_snapshot = catalog_service.refresh_all()
+        catalog_entries = self._catalog_entries(catalog_snapshot)
+        expected_generation = self._catalog_generation(catalog_entries)
         temporary_path = self.db_path.with_name(f".{self.db_path.name}.{uuid.uuid4().hex}.tmp")
         with self._lock:
             self._write_current_state(INDEX_BUILDING)
@@ -426,22 +452,32 @@ class RetrievalService:
                     count = 0
                     indexed_at = time.time()
                     with _immediate_transaction(conn):
-                        for path in self._candidate_files():
-                            relative = path.relative_to(self.project_root).as_posix()
+                        for relative, entry in sorted(catalog_entries.items()):
+                            path = self.project_root / relative
                             self._index_document(
                                 conn,
                                 path,
                                 relative,
                                 indexed_at=indexed_at,
+                                expected_revision=entry.revision,
                             )
                             count += 1
                         self._validate_database(conn, integrity_check=True)
+                        actual_generation = self._generation(conn)
+                        if actual_generation != expected_generation:
+                            raise RetrievalIndexStaleError(
+                                "retrieval generation did not match the published content catalog"
+                            )
                         self._write_state(
                             conn,
                             INDEX_OK,
-                            generation=self._generation(conn),
+                            generation=actual_generation,
                         )
                 os.replace(temporary_path, self.db_path)
+                self._remember_catalog_projection(
+                    catalog_snapshot,
+                    projection_generation=expected_generation,
+                )
                 return count
             except BaseException as exc:
                 self._write_current_state(INDEX_ERROR, error=str(exc))
@@ -452,79 +488,94 @@ class RetrievalService:
                 except OSError:
                     logger.warning("Failed to remove temporary retrieval database %s", temporary_path)
 
-    def watch_files(self) -> int:
-        """Atomically refresh changed files and delete chunks for removed paths."""
+    def refresh_from_catalog(
+        self,
+        catalog_snapshot: "ContentCatalogSnapshot | None" = None,
+    ) -> int:
+        """Publish the exact retrieval projection of one catalog snapshot."""
+        catalog_service = self._content_catalog()
+        if catalog_snapshot is None:
+            catalog_snapshot = catalog_service.snapshot()
+        catalog_entries = self._catalog_entries(catalog_snapshot)
+        expected_generation = self._catalog_generation(catalog_entries)
         with self._lock:
             try:
                 with self._connect() as conn:
                     existing = {
-                        str(row["path"]): (int(row["mtime_ns"]), int(row["size_bytes"]))
+                        str(row["path"]): str(row["revision"])
                         for row in conn.execute(
-                            "SELECT path, mtime_ns, size_bytes FROM documents"
+                            "SELECT path, revision FROM documents"
                         ).fetchall()
                     }
-                    pending: List[Tuple[Path, str, os.stat_result]] = []
-                    seen_paths: set[str] = set()
-                    for path in self._candidate_files():
-                        relative = path.relative_to(self.project_root).as_posix()
-                        seen_paths.add(relative)
-                        try:
-                            record_counter("statCount")
-                            stat = path.stat()
-                        except OSError as exc:
-                            raise RetrievalIndexError(
-                                f"failed to stat retrieval source {path}: {exc}"
-                            ) from exc
-                        signature = (int(stat.st_mtime_ns), int(stat.st_size))
-                        if existing.get(relative) != signature:
-                            pending.append((path, relative, stat))
-                    removed_paths = sorted(set(existing) - seen_paths)
-                    watcher_changes = [relative for _path, relative, _stat in pending]
-                    watcher_changes.extend(removed_paths)
-                    if watcher_changes:
-                        from services.content_catalog_service import get_content_catalog_service
-
-                        get_content_catalog_service(self.project_root).notify_external_changes(
-                            watcher_changes
-                        )
+                    pending = [
+                        (self.project_root / relative, relative, entry)
+                        for relative, entry in sorted(catalog_entries.items())
+                        if existing.get(relative) != entry.revision
+                    ]
+                    removed_paths = sorted(set(existing) - set(catalog_entries))
                     state_row = conn.execute(
-                        "SELECT state FROM index_state WHERE singleton=1"
+                        "SELECT state, generation FROM index_state WHERE singleton=1"
                     ).fetchone()
                     current_state = str(state_row["state"] or INDEX_ERROR) if state_row else INDEX_ERROR
-                    if not pending and not removed_paths and current_state == INDEX_OK:
+                    current_generation = str(state_row["generation"] or "") if state_row else ""
+                    if (
+                        not pending
+                        and not removed_paths
+                        and current_state == INDEX_OK
+                        and current_generation == expected_generation
+                    ):
+                        self._remember_catalog_projection(
+                            catalog_snapshot,
+                            projection_generation=expected_generation,
+                        )
                         return 0
                     self._write_state(conn, INDEX_BUILDING)
                     updated = 0
                     indexed_at = time.time()
                     with _immediate_transaction(conn):
-                        for path, relative, stat in pending:
+                        for path, relative, entry in pending:
                             self._index_document(
                                 conn,
                                 path,
                                 relative,
                                 indexed_at=indexed_at,
-                                stat=stat,
+                                expected_revision=entry.revision,
                             )
                             updated += 1
                         for relative in removed_paths:
                             conn.execute("DELETE FROM chunks WHERE path=?", (relative,))
                             conn.execute("DELETE FROM documents WHERE path=?", (relative,))
                             updated += 1
-                        changed_paths = [relative for _path, relative, _stat in pending]
+                        changed_paths = [relative for _path, relative, _entry in pending]
                         self._validate_database(
                             conn,
                             paths=changed_paths if pending or removed_paths else None,
                             integrity_check=not pending and not removed_paths,
                         )
+                        actual_generation = self._generation(conn)
+                        if actual_generation != expected_generation:
+                            raise RetrievalIndexStaleError(
+                                "retrieval generation did not match the published content catalog"
+                            )
                         self._write_state(
                             conn,
                             INDEX_OK,
-                            generation=self._generation(conn),
+                            generation=actual_generation,
                         )
+                    self._remember_catalog_projection(
+                        catalog_snapshot,
+                        projection_generation=expected_generation,
+                    )
                     return updated
             except BaseException as exc:
                 self._write_current_state(INDEX_ERROR, error=str(exc))
                 raise
+
+    def watch_files(self) -> int:
+        """Compatibility reconciliation entry point; never call this from a query."""
+        catalog_service = self._content_catalog()
+        catalog_service.reconcile()
+        return self.refresh_from_catalog(catalog_service.refresh_dirty())
 
     # -------------------- status and search --------------------
 
@@ -553,7 +604,7 @@ class RetrievalService:
                     "lastError": str(state["last_error"] or ""),
                     "updatedAt": float(state["updated_at"] or 0.0),
                     "database": self.db_path.relative_to(self.project_root).as_posix(),
-                    "legacyDatabasePresent": self.legacy_db_path.is_file(),
+                    "legacyDatabasePresent": self._legacy_index_present,
                     "coverage": {
                         "documentCount": int(coverage["document_count"] or 0),
                         "chunkCount": int(coverage["chunk_count"] or 0),
@@ -562,10 +613,54 @@ class RetrievalService:
                     },
                 }
                 if persisted_state == INDEX_OK and check_stale:
-                    stale_paths = self._stale_paths(conn)
-                    if stale_paths:
+                    catalog_service = self._content_catalog()
+                    catalog_snapshot = catalog_service.peek_snapshot()
+                    dirty_count = catalog_service.dirty_file_count
+                    background_metrics = catalog_service.background_metrics
+                    from services.content_pipeline_service import content_workspace_monitor_status
+
+                    monitor = content_workspace_monitor_status(self.project_root)
+                    result["contentMonitor"] = monitor
+                    result["catalogBackground"] = background_metrics
+                    result["catalogDirtyFileCount"] = dirty_count
+                    for metric_name, metric_value in background_metrics.items():
+                        record_value(metric_name, metric_value)
+                    if monitor["enabled"] and (
+                        not monitor["running"]
+                        or not monitor["registered"]
+                        or bool(monitor["watcherError"])
+                    ):
                         result["status"] = INDEX_STALE
-                        result["stalePaths"] = stale_paths[:32]
+                        result["lastError"] = str(
+                            monitor["watcherError"] or "content workspace watcher is unavailable"
+                        )
+                    elif catalog_snapshot is None:
+                        result["status"] = INDEX_STALE
+                        result["lastError"] = "content catalog has no published snapshot"
+                    else:
+                        result["catalogGeneration"] = catalog_snapshot.generation
+                        result["catalogRevision"] = catalog_snapshot.catalog_revision
+                        result["catalogProjectionGeneration"] = (
+                            self._published_catalog_projection_generation
+                        )
+                        if dirty_count:
+                            result["status"] = INDEX_STALE
+                            result["lastError"] = "content catalog has unpublished dirty sources"
+                        elif (
+                            self._published_catalog_generation != catalog_snapshot.generation
+                            or self._published_catalog_revision != catalog_snapshot.catalog_revision
+                        ):
+                            result["status"] = INDEX_STALE
+                            result["lastError"] = (
+                                "retrieval has not consumed the published content catalog generation"
+                            )
+                        elif self._published_catalog_projection_generation != str(
+                            result["generation"] or ""
+                        ):
+                            result["status"] = INDEX_STALE
+                            result["lastError"] = (
+                                "retrieval generation does not match the published content catalog"
+                            )
                 return result
         except Exception as exc:
             return {
@@ -575,7 +670,7 @@ class RetrievalService:
                 "lastError": str(exc),
                 "updatedAt": 0.0,
                 "database": self.db_path.relative_to(self.project_root).as_posix(),
-                "legacyDatabasePresent": self.legacy_db_path.is_file(),
+                "legacyDatabasePresent": self._legacy_index_present,
                 "coverage": {
                     "documentCount": 0,
                     "chunkCount": 0,
@@ -584,26 +679,15 @@ class RetrievalService:
                 },
             }
 
-    def _stale_paths(self, conn: sqlite3.Connection) -> List[str]:
-        existing = {
-            str(row["path"]): (int(row["mtime_ns"]), int(row["size_bytes"]))
-            for row in conn.execute("SELECT path, mtime_ns, size_bytes FROM documents").fetchall()
-        }
-        stale: List[str] = []
-        seen: set[str] = set()
-        for path in self._candidate_files():
-            relative = path.relative_to(self.project_root).as_posix()
-            seen.add(relative)
-            try:
-                record_counter("statCount")
-                stat = path.stat()
-            except OSError:
-                stale.append(relative)
-                continue
-            if existing.get(relative) != (int(stat.st_mtime_ns), int(stat.st_size)):
-                stale.append(relative)
-        stale.extend(sorted(set(existing) - seen))
-        return list(dict.fromkeys(stale))
+    def _remember_catalog_projection(
+        self,
+        snapshot: "ContentCatalogSnapshot",
+        *,
+        projection_generation: str,
+    ) -> None:
+        self._published_catalog_generation = snapshot.generation
+        self._published_catalog_revision = snapshot.catalog_revision
+        self._published_catalog_projection_generation = str(projection_generation or "")
 
     def search_detailed(
         self,

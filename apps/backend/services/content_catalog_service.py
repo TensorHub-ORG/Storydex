@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import threading
 import time
@@ -18,17 +19,26 @@ CATALOG_SCHEMA_VERSION = 1
 CATALOG_TEXT_SUFFIXES = frozenset({".md", ".txt", ".json", ".yaml", ".yml"})
 CATALOG_ROOTS = (
     "chapters",
-    ".storydex/characters",
-    ".storydex/worldbook",
-    ".storydex/memory",
-    ".storydex/wiki",
-    ".storydex/scripts",
-    ".storydex/presets",
-    ".storydex/skills",
+    ".storydex",
 )
 CATALOG_EXCLUDED_DIRECTORY_NAMES = frozenset(
-    {".cache", ".agent", "trace", "traces", "sessions", "logs", "file-history", "__pycache__"}
+    {
+        ".cache",
+        ".agent",
+        "autopilot",
+        "file-history",
+        "logs",
+        "projections",
+        "rollback_backups",
+        "sessions",
+        "temp",
+        "trace",
+        "traces",
+        "__pycache__",
+    }
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ContentCatalogRefreshError(RuntimeError):
@@ -132,7 +142,11 @@ class ContentCatalogService:
         self._refresh_lock = threading.Lock()
         self._snapshot: ContentCatalogSnapshot | None = None
         self._dirty: Dict[str, int] = {}
+        self._dirty_enqueued_at: Dict[str, float] = {}
         self._next_dirty_revision = 0
+        self._last_event_lag_ms = 0.0
+        self._reconciliation_scan_count = 0
+        self._reconciliation_changed_count = 0
 
     def snapshot(self) -> ContentCatalogSnapshot:
         with self._state_lock:
@@ -157,7 +171,6 @@ class ContentCatalogService:
         *,
         source: str = "workspace_write",
     ) -> int:
-        del source
         normalized = {
             target
             for path in paths
@@ -166,10 +179,14 @@ class ContentCatalogService:
         if not normalized:
             return self.dirty_file_count
         with self._state_lock:
+            enqueued_at = time.monotonic()
             for relative in sorted(normalized):
                 self._next_dirty_revision += 1
                 self._dirty[relative] = self._next_dirty_revision
-            return len(self._dirty)
+                self._dirty_enqueued_at[relative] = enqueued_at
+            dirty_count = len(self._dirty)
+        self._notify_background(source=source)
+        return dirty_count
 
     def notify_external_changes(self, paths: Iterable[str | Path]) -> int:
         return self.mark_dirty(paths, source="external_watcher")
@@ -178,6 +195,15 @@ class ContentCatalogService:
     def dirty_file_count(self) -> int:
         with self._state_lock:
             return len(self._dirty)
+
+    @property
+    def background_metrics(self) -> Dict[str, Any]:
+        with self._state_lock:
+            return {
+                "catalogEventLagMs": round(self._last_event_lag_ms, 3),
+                "reconciliationScanCount": self._reconciliation_scan_count,
+                "reconciliationChangedCount": self._reconciliation_changed_count,
+            }
 
     def refresh_all(self) -> ContentCatalogSnapshot:
         started = time.perf_counter()
@@ -193,6 +219,12 @@ class ContentCatalogService:
                 for relative, dirty_revision in pending.items():
                     if self._dirty.get(relative) == dirty_revision:
                         self._dirty.pop(relative, None)
+                        enqueued_at = self._dirty_enqueued_at.pop(relative, None)
+                        if enqueued_at is not None:
+                            self._last_event_lag_ms = max(
+                                self._last_event_lag_ms,
+                                (time.monotonic() - enqueued_at) * 1000,
+                            )
                 snapshot = self._publish(
                     generation=generation,
                     entries=entries,
@@ -237,6 +269,12 @@ class ContentCatalogService:
                 for relative, dirty_revision in pending.items():
                     if self._dirty.get(relative) == dirty_revision:
                         self._dirty.pop(relative, None)
+                        enqueued_at = self._dirty_enqueued_at.pop(relative, None)
+                        if enqueued_at is not None:
+                            self._last_event_lag_ms = max(
+                                self._last_event_lag_ms,
+                                (time.monotonic() - enqueued_at) * 1000,
+                            )
                 snapshot = self._publish(
                     generation=generation,
                     entries=entries,
@@ -246,6 +284,34 @@ class ContentCatalogService:
                 self._snapshot = snapshot
             self._record_snapshot(snapshot, (time.perf_counter() - started) * 1000)
             return snapshot
+
+    def reconcile(self) -> int:
+        """Discover missed filesystem events without publishing on the query path."""
+        with self._state_lock:
+            current = self._snapshot
+        if current is None:
+            self.refresh_all()
+            with self._state_lock:
+                self._reconciliation_scan_count += 1
+            record_counter("reconciliationScanCount")
+            record_value("reconciliationChangedCount", 0)
+            return 0
+
+        entries, directories = self._scan_roots()
+        changed = {
+            path
+            for path in set(current.entries) | set(entries)
+            if current.entries.get(path) != entries.get(path)
+        }
+        changed.update(set(current.directories) ^ set(directories))
+        with self._state_lock:
+            self._reconciliation_scan_count += 1
+            self._reconciliation_changed_count += len(changed)
+        record_counter("reconciliationScanCount")
+        record_value("reconciliationChangedCount", len(changed))
+        if changed:
+            self.mark_dirty(changed, source="reconciliation")
+        return len(changed)
 
     def _scan_roots(self) -> tuple[Dict[str, CatalogEntry], Dict[str, int]]:
         entries: Dict[str, CatalogEntry] = {}
@@ -403,6 +469,21 @@ class ContentCatalogService:
             return ""
         return normalized
 
+    def _notify_background(self, *, source: str) -> None:
+        try:
+            from services.content_pipeline_service import notify_content_workspace_dirty
+
+            notify_content_workspace_dirty(self.workspace_root)
+        except ImportError:
+            logger.debug("Content pipeline is not available for %s", self.workspace_root)
+        except Exception as exc:
+            logger.warning(
+                "Unable to notify content pipeline for %s source=%s: %s",
+                self.workspace_root,
+                source,
+                exc,
+            )
+
     @staticmethod
     def _kind_for_path(relative: str) -> str:
         normalized = str(relative).replace("\\", "/")
@@ -477,7 +558,13 @@ def get_content_catalog_service(workspace_root: Path) -> ContentCatalogService:
         if service is None:
             service = ContentCatalogService(root)
             _CATALOGS[root] = service
-        return service
+    try:
+        from services.content_pipeline_service import register_content_workspace
+
+        register_content_workspace(root)
+    except ImportError:
+        logger.debug("Content pipeline is not available for %s", root)
+    return service
 
 
 def reset_content_catalog_services() -> None:

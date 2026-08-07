@@ -71,7 +71,7 @@ const backendProcessLogs = new WeakMap();
 
 const PYTHON_PREFLIGHT_CODE = [
   "import sys",
-  "modules = ('fastapi', 'uvicorn', 'anthropic', 'pydantic_settings', 'dotenv')",
+  "modules = ('fastapi', 'uvicorn', 'anthropic', 'pydantic_settings', 'dotenv', 'watchdog')",
   "for name in modules: __import__(name)",
   "import main",
   "print('storydex-preflight-ok')",

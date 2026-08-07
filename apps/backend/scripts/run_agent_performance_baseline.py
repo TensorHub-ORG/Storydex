@@ -20,6 +20,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from services.context_policy import ContextPolicy  # noqa: E402
+from services.content_catalog_service import get_content_catalog_service  # noqa: E402
 from services.retrieval_service import RetrievalService  # noqa: E402
 from services.story_project_service import StoryProjectService  # noqa: E402
 from services.storydex_orchestration_service import StorydexOrchestrationService  # noqa: E402
@@ -141,9 +142,15 @@ def run_baseline(
     _add_retrieval_files(root, total_file_count=file_count, existing_count=chapter_count)
     retrieval = RetrievalService(root)
     _initial_count, initial_index_ms, initial_counter = _measure(retrieval.build_index)
-    warm_update_count, warm_refresh_ms, warm_refresh_counter = _measure(retrieval.watch_files)
+    catalog_snapshot = get_content_catalog_service(root).snapshot()
+    warm_update_count, warm_refresh_ms, warm_refresh_counter = _measure(
+        lambda: retrieval.refresh_from_catalog(catalog_snapshot)
+    )
     index_status, status_ms, status_counter = _measure(
         lambda: retrieval.index_status(check_stale=True)
+    )
+    query_result, query_ms, query_counter = _measure(
+        lambda: retrieval.search_detailed("baseline-00001", top_k=1)
     )
 
     return {
@@ -175,6 +182,11 @@ def run_baseline(
             "staleCheckPathStatCount": status_counter.stat_count,
             "staleCheckDirectoryScanCount": status_counter.directory_scan_count,
             "status": index_status,
+            "warmQueryMs": round(query_ms, 3),
+            "warmQueryPathStatCount": query_counter.stat_count,
+            "warmQueryDirectoryScanCount": query_counter.directory_scan_count,
+            "warmQueryReadCount": query_counter.read_count,
+            "warmQueryResultState": query_result.get("resultState"),
         },
     }
 

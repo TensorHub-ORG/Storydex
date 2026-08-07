@@ -738,9 +738,6 @@ class StorydexContextAssemblerService:
             from services.retrieval_service import RECALL_CANDIDATE_LIMIT, get_retrieval_service
 
             service = get_retrieval_service(root)
-            refresh_started = time.perf_counter()
-            service.watch_files()
-            record_duration("ftsRefreshMs", (time.perf_counter() - refresh_started) * 1000)
             outcome = service.search_detailed(
                 query,
                 top_k=8,

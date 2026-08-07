@@ -22,6 +22,10 @@ from core.logger import get_logger, with_trace
 from services.project_service import get_project_service
 from services.coomi_version_service import check_coomi_version
 from services.execution_coordinator import get_execution_coordinator
+from services.content_pipeline_service import (
+    bootstrap_content_workspace,
+    stop_content_pipeline,
+)
 
 settings = get_settings()
 app_logger = get_logger(__name__)
@@ -60,6 +64,15 @@ def bootstrap_workspace() -> None:
     project = get_project_service().current_project()
     app_logger.info("Workspace bootstrap completed at %s", project["workspaceRoot"])
     try:
+        pipeline = bootstrap_content_workspace(Path(project["workspaceRoot"]))
+        app_logger.info(
+            "Content pipeline published catalog generation %s and updated %s retrieval source(s)",
+            pipeline["catalogGeneration"],
+            pipeline["retrievalUpdatedFileCount"],
+        )
+    except Exception as exc:
+        app_logger.error("Content pipeline bootstrap failed: %s", exc)
+    try:
         reconciled = get_execution_coordinator().reconcile_workspace(Path(project["workspaceRoot"]))
         if reconciled:
             app_logger.warning("Marked %s interrupted execution(s) as unfinished", len(reconciled))
@@ -75,6 +88,11 @@ def bootstrap_workspace() -> None:
         coomi_status["expected"],
         coomi_status["expectedFingerprint"],
     )
+
+
+@app.on_event("shutdown")
+def shutdown_content_pipeline() -> None:
+    stop_content_pipeline()
 
 
 def _resolve_trace_id(request: Request) -> str:

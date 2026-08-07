@@ -275,7 +275,7 @@ if (!failures.length) {
     "from importlib.metadata import PackageNotFoundError, version",
     `expected = json.loads(${JSON.stringify(lockedVersionsJson)})`,
     "errors = []",
-    "modules = ('fastapi', 'uvicorn', 'anthropic', 'pydantic_settings', 'dotenv', 'bcrypt', 'greenlet', 'jiter', 'psycopg', 'pydantic_core', 'ssl', 'sqlite3', 'tiktoken')",
+    "modules = ('fastapi', 'uvicorn', 'anthropic', 'pydantic_settings', 'dotenv', 'bcrypt', 'greenlet', 'jiter', 'psycopg', 'pydantic_core', 'ssl', 'sqlite3', 'tiktoken', 'watchdog')",
     "for name in modules: __import__(name)",
     "import ssl",
     "import sqlite3",
