@@ -210,6 +210,13 @@ def check_coomi_version(
         warnings.append(f"Storydex Coomi Rust bridge {installed} != expected {expected}")
     expected_fingerprint = expected_identity["sourceFingerprint"]
     installed_fingerprint = installed_identity["sourceFingerprint"]
+    expected_git_sha = expected_identity["gitSha"]
+    installed_git_sha = installed_identity["gitSha"]
+    if expected_git_sha and installed_git_sha and installed_git_sha != expected_git_sha:
+        warnings.append(
+            "Storydex Coomi Rust bridge Git SHA "
+            f"{installed_git_sha} != expected {expected_git_sha}"
+        )
     if expected_fingerprint and installed_fingerprint and installed_fingerprint != expected_fingerprint:
         warnings.append(
             "Storydex Coomi Rust bridge source fingerprint "

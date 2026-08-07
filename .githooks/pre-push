@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(git rev-parse --show-toplevel)
+guard="$repo_root/scripts/run_pre_push_ci.ps1"
+
+if command -v pwsh >/dev/null 2>&1; then
+  exec pwsh -NoLogo -NoProfile -File "$guard"
+fi
+
+if command -v powershell.exe >/dev/null 2>&1; then
+  exec powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$guard"
+fi
+
+echo "Storydex pre-push gate requires PowerShell (pwsh or powershell.exe)." >&2
+exit 1

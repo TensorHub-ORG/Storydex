@@ -114,8 +114,8 @@ jobs:
           $global:LASTEXITCODE = 0
           node scripts/validate_version_consistency.cjs
           git diff --check
-      - name: Coverage gate parser regressions
-        run: node --test scripts/tests/check-coverage.test.cjs scripts/tests/resolve-ci-scope.test.cjs
+      - name: CI policy regressions
+        run: node --test scripts/tests/check-coverage.test.cjs scripts/tests/resolve-ci-scope.test.cjs scripts/tests/ci-preflight.test.cjs
 
   backend-tests:
     name: backend-tests (${{ matrix.os }}, py${{ matrix.python }})

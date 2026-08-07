@@ -45,10 +45,20 @@ $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
 $env:STORYDEX_DISABLE_NETWORK = "1"
 $env:STORYDEX_TESTING = "1"
-$coverageMode = if ($Mode -eq "Release") { "release" } else { "ci" }
+$headSha = (& git -C $repoRoot rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $headSha -notmatch "^[0-9a-f]{40}$") {
+  throw "Unable to resolve the current Git SHA for the Coomi runtime build"
+}
+$env:STORYDEX_COOMI_GIT_SHA = $headSha
+$coverageMode = if ($Mode -eq "Release") { "release" } else { "advisory" }
 
 Invoke-Step "Encoding policy" { node (Join-Path $repoRoot "scripts/validate_text_encoding.cjs") }
-Invoke-Step "Coverage gate parser regressions" { node --test (Join-Path $repoRoot "scripts/tests/check-coverage.test.cjs") }
+Invoke-Step "CI policy regressions" {
+  node --test `
+    (Join-Path $repoRoot "scripts/tests/check-coverage.test.cjs") `
+    (Join-Path $repoRoot "scripts/tests/resolve-ci-scope.test.cjs") `
+    (Join-Path $repoRoot "scripts/tests/ci-preflight.test.cjs")
+}
 Invoke-Step "Conflict markers" {
   $conflicts = & git -C $repoRoot grep -n -E '^(<<<<<<< .+|=======|>>>>>>> .+)$' -- . `
     ':(exclude)apps/desktop/app/**' `
@@ -66,6 +76,10 @@ Invoke-Step "Rust Coomi workspace tests" { cargo test --manifest-path (Join-Path
 Invoke-Step "Build Storydex Coomi runtime" { cargo build --manifest-path (Join-Path $repoRoot "vendor/coomi-rs/Cargo.toml") --release --locked -p storydex-coomi-bridge }
 Invoke-Step "Pinned Coomi runtime" { & $python (Join-Path $repoRoot "scripts/verify_coomi_runtime.py") }
 Invoke-Step "Python compile" { & $python -m compileall -q (Join-Path $backend "api") (Join-Path $backend "core") (Join-Path $backend "services") }
+Invoke-Step "Backend app import" {
+  Push-Location $backend
+  try { & $python -c "import main; assert main.app.title" } finally { Pop-Location }
+}
 Invoke-Step "Backend tests and coverage" {
   Push-Location $backend
   try {

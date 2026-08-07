@@ -90,3 +90,22 @@ def test_binary_fingerprint_mismatch_is_reported(monkeypatch) -> None:
     status = version_service.check_coomi_version()
     assert status["ok"] is False
     assert "source fingerprint" in status["warnings"][0]
+
+
+def test_binary_git_sha_mismatch_is_reported(monkeypatch) -> None:
+    expected = version_service._expected_build_identity()
+    monkeypatch.setattr(
+        version_service,
+        "_installed_bridge_identity",
+        lambda: (
+            {
+                "version": version_service.STORYDEX_COOMI_RUNTIME_VERSION,
+                "gitSha": "stale-commit",
+                "sourceFingerprint": expected["sourceFingerprint"],
+            },
+            "bridge",
+        ),
+    )
+    status = version_service.check_coomi_version()
+    assert status["ok"] is False
+    assert "Git SHA" in status["warnings"][0]
