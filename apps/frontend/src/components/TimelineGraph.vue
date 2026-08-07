@@ -2,12 +2,12 @@
   <div ref="rootRef" class="wl" :class="[`is-${density}`]" :style="rootStyle">
     <!-- 工具条 -->
     <header v-if="hasNodes" class="wl-toolbar">
-      <span class="wl-stat" :title="`${branches.length} 条世界线 · ${rawNodes.length} 个版本节点`">
+      <span v-if="density === 'compact'" class="wl-stat" :title="`${branches.length} 条世界线 · ${rawNodes.length} 个版本节点`">
         <span class="material-symbols-rounded">account_tree</span>
         <span>{{ branches.length }} 条线 · {{ rawNodes.length }} 个节点</span>
       </span>
 
-      <span class="wl-toolbar-spacer"></span>
+      <span v-if="density === 'compact'" class="wl-toolbar-spacer"></span>
 
       <button class="wl-tool-btn" type="button" title="缩小" :disabled="zoom <= MIN_ZOOM" @click="zoomBy(-ZOOM_STEP)">
         <span class="material-symbols-rounded">zoom_out</span>
@@ -33,7 +33,7 @@
     </header>
 
     <!-- 观测态提示 -->
-    <div v-if="hasNodes && detached" class="wl-observing" role="status">
+    <div v-if="hasNodes && detached && density === 'compact'" class="wl-observing" role="status">
       <span class="material-symbols-rounded">visibility</span>
       <span>
         观测态：你正停在一个历史节点上，不在任何世界线上。此处一旦写入并提交，会自动开辟一条新的世界线，原线不受影响。
@@ -807,6 +807,19 @@ defineExpose({
   border-bottom: 1px solid var(--border-ghost);
 }
 
+.wl.is-full .wl-toolbar {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  z-index: 6;
+  padding: 3px;
+  border: 0;
+  border-radius: var(--radius-md, 6px);
+  background: color-mix(in srgb, var(--bg-editor) 88%, transparent);
+  box-shadow: var(--shadow-sm);
+  backdrop-filter: blur(8px);
+}
+
 .wl-toolbar-spacer {
   flex: 1 1 auto;
 }
@@ -884,6 +897,15 @@ defineExpose({
   background: var(--bg-card);
   border: 1px solid var(--border-ghost);
   border-radius: var(--radius-md, 6px);
+}
+
+.wl.is-full .wl-empty {
+  flex: 1 1 auto;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  border: 0;
+  background: transparent;
 }
 
 /* ---------- 画布 ---------- */

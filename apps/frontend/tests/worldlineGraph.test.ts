@@ -216,6 +216,20 @@ describe("平行时空线树状图", () => {
     wrapper.unmount();
   });
 
+  it("主区只保留画布操作，不重复展示统计和观测说明", () => {
+    const full = mountGraph({ density: "full", detachedOverride: true });
+    expect(full.find(".wl-toolbar").exists()).toBe(true);
+    expect(full.find(".wl-stat").exists()).toBe(false);
+    expect(full.find(".wl-observing").exists()).toBe(false);
+    expect(full.findAll(".wl-tool-btn")).toHaveLength(4);
+    full.unmount();
+
+    const compact = mountGraph({ density: "compact", detachedOverride: true });
+    expect(compact.find(".wl-stat").exists()).toBe(true);
+    expect(compact.find(".wl-observing").exists()).toBe(true);
+    compact.unmount();
+  });
+
   it("空时空线显示对应的引导文案", () => {
     const empty = mount(TimelineGraph, {
       props: { timeline: { ...buildTimeline(), nodes: [], branches: [] } }

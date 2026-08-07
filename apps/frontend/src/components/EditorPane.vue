@@ -44,10 +44,10 @@
           从左侧资源管理器选择文件，或点击待审批文件查看临时预览。
         </div>
         <section v-else ref="editorPaneRef" class="editor-pane">
-          <div class="editor-pane-head">
-            <div>
+          <div class="editor-pane-head" :class="{ 'is-worldline-map': workspaceStore.isWorldlineMapActive }">
+            <div class="editor-pane-heading">
               <div class="editor-pane-title">{{ workspaceStore.activeFileName }}</div>
-              <div class="editor-pane-subtitle">
+              <div v-if="!workspaceStore.isWorldlineMapActive" class="editor-pane-subtitle">
                 <span>{{ workspaceStore.activeDisplayPath || "未命名文件" }}</span>
                 <span>{{ activeFileStats }}</span>
                 <span>{{ formatDate(workspaceStore.activeFileUpdatedAt) }}</span>
@@ -55,10 +55,35 @@
             </div>
 
             <div class="editor-pane-actions">
-              <button class="editor-mode-btn" type="button" title="在文件中查找" aria-label="在文件中查找" @click="toggleFind">
+              <button v-if="!workspaceStore.isWorldlineMapActive" class="editor-mode-btn" type="button" title="在文件中查找" aria-label="在文件中查找" @click="toggleFind">
                 <span class="material-symbols-rounded">find_in_page</span>
               </button>
-              <div v-if="workspaceStore.isGitReviewActive" class="editor-readonly-badge">
+
+              <div v-if="workspaceStore.isWorldlineMapActive" class="worldline-head-controls" role="group" aria-label="时空线状态与操作">
+                <span
+                  class="worldline-head-status"
+                  :class="{ 'is-observing': gitStore.isDetached }"
+                  :title="gitStore.isDetached ? '当前处于观测态' : `当前世界线：${worldlineStatusLabel}`"
+                >
+                  <span class="material-symbols-rounded">{{ gitStore.isDetached ? "visibility" : "fork_right" }}</span>
+                  <span>{{ gitStore.isDetached ? "观测态" : worldlineStatusLabel }}</span>
+                </span>
+                <span v-if="worldlineHasChanges" class="worldline-head-status is-dirty">
+                  <span class="material-symbols-rounded">edit_note</span>
+                  <span>{{ gitStore.changedCount }} 个文件有更改</span>
+                </span>
+                <button
+                  class="worldline-head-refresh"
+                  type="button"
+                  title="刷新时空线"
+                  aria-label="刷新时空线"
+                  @click="refreshWorldline"
+                >
+                  <span class="material-symbols-rounded" :class="{ 'is-spinning': gitStore.isTimelineLoading }">refresh</span>
+                </button>
+              </div>
+
+              <div v-else-if="workspaceStore.isGitReviewActive" class="editor-readonly-badge">
                 <span class="material-symbols-rounded">difference</span>
                 <span>只读 Diff</span>
               </div>
@@ -254,6 +279,7 @@ import GitReviewPane from "@/components/GitReviewPane.vue";
 import WorldlineMapPane from "@/components/WorldlineMapPane.vue";
 import LargeFileViewer from "@/components/LargeFileViewer.vue";
 import WelcomeStartPage from "@/components/WelcomeStartPage.vue";
+import { useGitStore } from "@/stores/git";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type { WorkspaceEditorTab } from "@/types/workspace";
 import { createMarkdownRenderer } from "@/utils/markdown";
@@ -264,6 +290,7 @@ import {
 } from "@/utils/workspaceLinks";
 
 const workspaceStore = useWorkspaceStore();
+const gitStore = useGitStore();
 const markdown = createMarkdownRenderer();
 
 const showLaunchScreen = computed(() => workspaceStore.launchScreenVisible && !workspaceStore.isHelpGuideActive);
@@ -337,6 +364,8 @@ const activeFileStats = computed(() => {
   }
   return parts.length ? parts.join(" · ") : formatBytes(workspaceStore.activeFileSize);
 });
+const worldlineHasChanges = computed(() => gitStore.changedCount > 0);
+const worldlineStatusLabel = computed(() => gitStore.currentWorldline || "尚未确定世界线");
 onMounted(() => {
   document.addEventListener("pointerdown", handleDocumentPointerDown, true);
   document.addEventListener("keydown", handleDocumentKeydown, true);
@@ -387,6 +416,13 @@ function toggleFind(): void {
   editorSearchOpen.value = true;
   void nextTick(() => editorFindInputRef.value?.focus());
 }
+
+function refreshWorldline(): void {
+  void gitStore.refreshSummary({ force: true });
+  void gitStore.refreshBranches();
+  void gitStore.refreshTimeline({ force: true });
+}
+
 function closeFind(): void {
   editorSearchOpen.value = false;
   editorFindQuery.value = "";
@@ -823,7 +859,8 @@ async function writeClipboard(text: string): Promise<void> {
 }
 defineExpose({
   __testUtils: import.meta.env.MODE === "test" ? {
-    tabContextMenu, agentPreviewMode, contextTab, contextTabIndex, activeFileStats, renderedMarkdown,
+    tabContextMenu, agentPreviewMode, contextTab, contextTabIndex, activeFileStats, worldlineHasChanges,
+    worldlineStatusLabel, renderedMarkdown,
     renderedCharacterJsonMarkdown, isCharacterJsonDocument, handleInput, handleModeChange,
     handleAgentPreviewModeChange, handleMarkdownLinkClick, handleGitReviewRefresh, handleActivateTab,
     handleCloseTab, handleDocumentPointerDown, handleDocumentKeydown, handleTabStripContextMenu,
@@ -831,7 +868,7 @@ defineExpose({
     handleContextCloseOthers, handleContextCloseRight, handleContextCloseSaved, handleContextCloseAll,
     closeTabBatch, handleCopyPath, handleCopyRelativePath, formatDate, formatInteger, formatBytes, iconFor,
     samePath, absolutePathFor, normalizeRelativePath, renderCharacterJsonAsMarkdown, parseCharacterJson,
-    renderMarkdownValue, renderInlineValue, stringValue, writeClipboard
+    renderMarkdownValue, renderInlineValue, stringValue, writeClipboard, refreshWorldline
   } : null
 });
 </script>
@@ -875,6 +912,8 @@ defineExpose({
 }
 
 .editor-pane { position: relative; min-height: 0; height: 100%; }
+.editor-pane-heading { min-width: 0; }
+.editor-pane-head.is-worldline-map { align-items: center; }
 .doc-editor,
 .doc-preview,
 .doc-markdown {
@@ -888,6 +927,76 @@ defineExpose({
   gap: 12px;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.worldline-head-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  min-width: 0;
+}
+
+.worldline-head-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 240px;
+  color: var(--text-soft);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.worldline-head-status > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.worldline-head-status .material-symbols-rounded {
+  flex: 0 0 auto;
+  font-size: 16px;
+}
+
+.worldline-head-status.is-observing,
+.worldline-head-status.is-dirty {
+  color: var(--warning);
+}
+
+.worldline-head-refresh {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.worldline-head-refresh:hover {
+  background: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.worldline-head-refresh .material-symbols-rounded {
+  font-size: 17px;
+}
+
+.worldline-head-refresh .is-spinning {
+  animation: editor-worldline-spin 0.9s linear infinite;
+}
+
+@keyframes editor-worldline-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .worldline-head-refresh .is-spinning { animation: none; }
 }
 
 .editor-find-box {
