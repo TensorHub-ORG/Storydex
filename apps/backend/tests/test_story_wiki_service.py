@@ -1,8 +1,12 @@
 import asyncio
 import copy
 import json
+import os
+
+import pytest
 
 from services.story_project_service import StoryProjectService
+from services.story_knowledge_relation_service import StoryKnowledgeRelationService
 from services.story_wiki_service import WIKI_CATEGORY_SCHEMA_VERSION, StoryWikiService
 
 
@@ -326,7 +330,15 @@ def test_relationship_query_accepts_agent_domain_edge_types_without_structural_e
         "plot", "timeline", "appearance", "introduction", "setting", "possession",
         "discovery", "pursuit", "location", "spatial", "foreshadowing",
     }.intersection(edge["type"] for edge in relation_view["graph"]["edges"])
-    assert relation_view["total"] == {"entryCount": 3, "nodeCount": 3, "edgeCount": 1}
+    assert relation_view["total"] == {
+        "entryCount": 3,
+        "nodeCount": 3,
+        "edgeCount": 1,
+        "confirmedEdgeCount": 1,
+        "reviewRequiredEdgeCount": 0,
+        "connectedNodeCount": 2,
+        "isolatedNodeCount": 1,
+    }
 
     payload["graphPolicy"]["agentGraphAccepted"] = False
     unaccepted_view = service.query_graph(tmp_path, category="relationships")
@@ -377,18 +389,14 @@ def test_agent_graph_is_ignored_and_graph_refresh_uses_no_provider_call(tmp_path
                     "id": "character:eve",
                     "title": "Eve",
                     "category": "characters",
-                    "sourcePaths": ["chapters/missing.md"],
+                        "sourcePaths": [],
                 }],
-                "graph": {
-                    "nodes": [{"id": "character:eve", "label": "Eve", "type": "character"}],
-                    "edges": [{
-                        "source": "char:alice",
-                        "target": "character:eve",
-                        "type": "relationship",
-                        "label": "宿敌",
-                        "evidence": "不存在的证据",
-                    }],
-                },
+                    # v3 Agent 契约禁止返回 graph.nodes/edges；正式图谱只
+                    # 由本地证据和候选审阅账本投影。
+                    "graph": {},
+                "entityCandidates": [],
+                "relationCandidates": [],
+                "review": {},
             }, ensure_ascii=False),
             "events": [],
             "traceId": "agent-malicious",
@@ -420,6 +428,87 @@ def test_agent_graph_is_ignored_and_graph_refresh_uses_no_provider_call(tmp_path
     assert refresh_calls == 0
     assert refreshed["agentAttempted"] is False
     assert refreshed["fallbackUsed"] is False
+
+
+def test_agent_candidate_projection_is_immediately_current_after_ledger_write(tmp_path):
+    worldbook = tmp_path / ".storydex" / "worldbook"
+    chapter = tmp_path / "chapters" / "001.md"
+    worldbook.mkdir(parents=True)
+    chapter.parent.mkdir(parents=True)
+    worldbook.joinpath("潮汐兽.md").write_text("# 潮汐兽\n", encoding="utf-8")
+    worldbook.joinpath("夜港星.md").write_text("# 夜港星\n", encoding="utf-8")
+    quote = "潮汐兽长期栖息在夜港星浅海。"
+    chapter.write_text(quote + "\n", encoding="utf-8")
+
+    relation_service = StoryKnowledgeRelationService()
+    subject = relation_service.ensure_entity(
+        tmp_path,
+        "潮汐兽",
+        source_path=".storydex/worldbook/潮汐兽.md",
+        kind="setting",
+    )
+    obj = relation_service.ensure_entity(
+        tmp_path,
+        "夜港星",
+        source_path=".storydex/worldbook/夜港星.md",
+        kind="setting",
+    )
+    service = StoryWikiService()
+    service.rebuild(tmp_path)
+
+    async def candidate_runner(**_kwargs):
+        return {
+            "completed": True,
+            "reply": json.dumps(
+                {
+                    "entries": [],
+                    "entityCandidates": [],
+                    "relationCandidates": [
+                        {
+                            "subjectId": subject["entityId"],
+                            "predicate": "栖息于",
+                            "objectId": obj["entityId"],
+                            "sourceRefs": [
+                                {
+                                    "path": "chapters/001.md",
+                                    "quote": quote,
+                                    "role": "chapter_evidence",
+                                }
+                            ],
+                        }
+                    ],
+                    "review": {},
+                },
+                ensure_ascii=False,
+            ),
+            "events": [],
+            "traceId": "agent-candidate",
+            "providerId": "test-provider",
+            "model": "test-model",
+        }
+
+    generated = asyncio.run(
+        service.run_agent_workflow(
+            tmp_path,
+            workflow="generate_wiki",
+            agent_runner=candidate_runner,
+        )
+    )
+    assert generated["candidateSubmission"]["acceptedCount"] == 1
+    expected_checksum = service._source_set_checksum(service._collect_sources(tmp_path))
+    assert generated["wiki"]["sourceSetChecksum"] == expected_checksum
+
+    revision = generated["wiki"]["knowledgeRevision"]
+    reloaded = service.read_or_build(tmp_path)
+    assert reloaded["knowledgeRevision"] == revision
+    assert reloaded["sourceSetChecksum"] == expected_checksum
+    graph = service.query_graph(tmp_path, category="setting", include_review=True)
+    assert graph["total"]["nodeCount"] == 2
+    assert graph["total"]["edgeCount"] == 1
+    assert graph["total"]["confirmedEdgeCount"] == 0
+    assert graph["total"]["reviewRequiredEdgeCount"] == 1
+    assert graph["total"]["isolatedNodeCount"] == 2
+    assert any(edge.get("reviewStatus") == "review_required" for edge in graph["graph"]["edges"])
 
 
 def test_read_or_build_rebuilds_old_category_schema_payload(tmp_path):
@@ -657,6 +746,121 @@ def test_character_relationship_mentions_do_not_crosswire_primary_cards(tmp_path
     assert all(edge.get("relationType") != "unknown" for edge in relationship_edges)
 
 
+def test_dynamic_relationship_projection_preserves_audit_fields_and_filters_inactive_records(tmp_path):
+    cards = tmp_path / ".storydex" / "characters"
+    chapter = tmp_path / "chapters" / "001.md"
+    cards.mkdir(parents=True)
+    chapter.parent.mkdir(parents=True)
+    cards.joinpath("Alice.md").write_text(
+        "# Alice\n\n> 稳定实体ID: `char:alice`\n",
+        encoding="utf-8",
+    )
+    cards.joinpath("Bob.md").write_text(
+        "# Bob\n\n> 稳定实体ID: `char:bob`\n",
+        encoding="utf-8",
+    )
+    cards.joinpath("Carol.md").write_text(
+        "# Carol\n\n> 稳定实体ID: `char:carol`\n",
+        encoding="utf-8",
+    )
+    cards.joinpath("Dave.md").write_text(
+        "# Dave\n\n> 稳定实体ID: `char:dave`\n",
+        encoding="utf-8",
+    )
+    confirmed_quote = "Alice now trusts Bob."
+    rejected_quote = "Alice is hostile toward Carol."
+    superseded_quote = "Alice formed an alliance with Dave."
+    chapter.write_text(
+        f"{confirmed_quote}\n\n{rejected_quote}\n\n{superseded_quote}\n",
+        encoding="utf-8",
+    )
+    _write_json(
+        tmp_path / ".storydex" / "memory" / "current" / "relationship_graph.json",
+        {
+            "version": 1,
+            "edges": [
+                {
+                    # Stable IDs remain authoritative even if legacy display names drift.
+                    "source": "Alice Legacy",
+                    "target": "Bob Legacy",
+                    "sourceId": "char:alice",
+                    "targetId": "char:bob",
+                    "dimension": "trust",
+                    "reviewStatus": "confirmed",
+                    "knowledgeStatus": "observed",
+                    "confidence": 0.93,
+                    "sourceRefs": [
+                        {
+                            "path": "chapters/001.md",
+                            "quote": confirmed_quote,
+                            "role": "story_generation",
+                        }
+                    ],
+                    "provenance": {
+                        "origin": "story_generation",
+                        "extractorVersion": "storydex-story-increment-v1",
+                        "providerId": "test-provider",
+                        "model": "test-model",
+                    },
+                    "traceId": "trace-dynamic-confirmed",
+                },
+                {
+                    "source": "Alice",
+                    "target": "Carol",
+                    "sourceId": "char:alice",
+                    "targetId": "char:carol",
+                    "dimension": "hostility",
+                    "reviewStatus": "rejected",
+                    "sourceRefs": [
+                        {"path": "chapters/001.md", "quote": rejected_quote, "role": "story_generation"}
+                    ],
+                },
+                {
+                    "source": "Alice",
+                    "target": "Dave",
+                    "sourceId": "char:alice",
+                    "targetId": "char:dave",
+                    "dimension": "alliance",
+                    "reviewStatus": "superseded",
+                    "sourceRefs": [
+                        {"path": "chapters/001.md", "quote": superseded_quote, "role": "story_generation"}
+                    ],
+                },
+            ],
+        },
+    )
+
+    service = StoryWikiService()
+    payload = service.rebuild(tmp_path)
+    relationship_edges = [
+        edge
+        for edge in payload["graph"]["edges"]
+        if edge.get("type") == "relationship"
+    ]
+
+    assert len(relationship_edges) == 1
+    edge = relationship_edges[0]
+    assert edge["source"] == "char:alice"
+    assert edge["target"] == "char:bob"
+    assert edge["predicate"] == "trust"
+    assert edge["reviewStatus"] == "confirmed"
+    assert edge["knowledgeStatus"] == "observed"
+    assert edge["confidence"] == 0.93
+    assert edge["sourceRefs"] == [
+        {"path": "chapters/001.md", "quote": confirmed_quote, "role": "story_generation"}
+    ]
+    assert edge["provenance"]["providerId"] == "test-provider"
+    assert edge["provenance"]["model"] == "test-model"
+    assert edge["traceId"] == "trace-dynamic-confirmed"
+    assert edge["id"].startswith("relationship:")
+    assert len(edge["fingerprint"]) == 64
+
+    queried = service.query_graph(tmp_path, category="relationships")
+    queried_edge = next(edge for edge in queried["graph"]["edges"] if edge.get("type") == "relationship")
+    assert queried_edge["fingerprint"] == edge["fingerprint"]
+    assert queried_edge["sourceRefs"] == edge["sourceRefs"]
+
+
 def test_rebuild_layers_planned_and_observed_sources_with_aligned_revision(tmp_path):
     cards = tmp_path / ".storydex" / "characters"
     scripts = tmp_path / ".storydex" / "scripts"
@@ -682,7 +886,7 @@ def test_rebuild_layers_planned_and_observed_sources_with_aligned_revision(tmp_p
     service = StoryWikiService()
     initial = service.rebuild(tmp_path)
 
-    assert initial["schemaVersion"] == 2
+    assert initial["schemaVersion"] == 3
     assert initial["status"] == "ready"
     assert initial["knowledgeRevision"] == initial["builtFromRevision"]
     assert initial["sourceSetChecksum"].startswith("sha256:")
@@ -892,6 +1096,47 @@ def test_blocking_revision_mismatch_keeps_last_good_projection(tmp_path):
     assert rejected["lastSuccessfulRevision"] == baseline["knowledgeRevision"]
     assert persisted["graphChecksum"] == baseline["graphChecksum"]
     assert service._read_projection_status(tmp_path)["status"] == "error"
+
+
+def test_projection_bundle_restores_all_files_when_commit_fails(tmp_path, monkeypatch):
+    service = StoryWikiService()
+    targets = {
+        service.wiki_json_path(tmp_path): None,
+        service.wiki_markdown_path(tmp_path): b"old-markdown\n",
+        service.wiki_index_path(tmp_path): b"old-index\n",
+        service.projection_status_path(tmp_path): b"old-status\n",
+    }
+    for path, content in targets.items():
+        if content is None:
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+    original_replace = os.replace
+    replace_calls = 0
+
+    def fail_third_replace(source, target):
+        nonlocal replace_calls
+        replace_calls += 1
+        if replace_calls == 3:
+            raise OSError("simulated projection commit failure")
+        original_replace(source, target)
+
+    monkeypatch.setattr(os, "replace", fail_third_replace)
+    with pytest.raises(OSError, match="simulated projection commit failure"):
+        service._write_projection_bundle(
+            tmp_path,
+            payload={"entries": [], "graph": {"nodes": [], "edges": []}},
+            index_payload={"version": 2},
+            status_payload={"status": "ready"},
+        )
+
+    assert {
+        path: path.read_bytes() if path.exists() else None
+        for path in targets
+    } == targets
+    assert not list(service.wiki_root(tmp_path).glob(".*.tmp"))
+    assert not list(service.wiki_root(tmp_path).glob(".*.restore"))
 
 
 def test_invalid_previous_projection_is_never_served_as_is(tmp_path):

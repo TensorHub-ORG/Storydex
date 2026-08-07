@@ -106,10 +106,12 @@ followup_mailbox_service = get_followup_mailbox_service()
 
 _PHASE_HEARTBEAT_SECONDS = 0.6
 _COMMIT_MESSAGE_TIMEOUT_SECONDS = 2.0
-# The configured DeepSeek-compatible metadata route commonly needs 2-3 seconds
-# even for a compact JSON response. The stream already emits heartbeats, so give
-# the classifier enough time to answer accurately while keeping a hard bound.
-_INTENT_STAGE_TIMEOUT_SECONDS = 5.0
+# The Rust bridge starts a bounded one-shot provider process for intent JSON.
+# Cold DeepSeek-compatible requests take roughly 10-14 seconds in the packaged
+# Windows path. The stream emits heartbeats throughout, so keep a hard deadline
+# above the service-level 20-second bound instead of forcing every real turn
+# into the fail-closed read-only fallback.
+_INTENT_STAGE_TIMEOUT_SECONDS = 22.0
 _PLANNER_TIMEOUT_SECONDS = 3.0
 # Legacy contracts only. Current chapter-scoped word-count contracts run the
 # bounded path, which resolves length before the single write instead of using a
@@ -891,6 +893,8 @@ def _build_turn_contract_with_active_model(
     story_generation: Dict[str, Any],
     intent_frame: Dict[str, Any],
     context_policy: ContextPolicy | None,
+    trace_id: str = "",
+    session_id: str = "",
 ) -> Dict[str, Any]:
     provider = ""
     model = ""
@@ -909,6 +913,8 @@ def _build_turn_contract_with_active_model(
         context_policy=context_policy,
         provider=provider,
         model=model,
+        trace_id=trace_id,
+        session_id=session_id,
     )
 
 
@@ -6504,6 +6510,8 @@ async def _stream_agent_chat_request_sse(
                 story_generation=story_generation,
                 intent_frame=intent_frame,
                 context_policy=context_policy_override,
+                trace_id=trace_id,
+                session_id=session_id,
             )
         )
         while not contract_task.done():

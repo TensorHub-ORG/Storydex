@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict
 
+from core.exceptions import GitServiceError
 from services.git_service import get_git_service
 from services.help_guide_service import get_help_guide_service
 from services.story_project_service import get_story_project_service
@@ -180,7 +181,19 @@ class StorydexVersionStatusTool(_StorydexWorkspaceToolMixin, BaseTool):
             history_limit = max(1, min(50, int(payload.get("historyLimit") or 12)))
         except (TypeError, ValueError):
             history_limit = 12
-        summary = get_git_service().read_summary(workspace_root, history_limit=history_limit)
+        try:
+            summary = get_git_service().read_summary(workspace_root, history_limit=history_limit)
+        except GitServiceError as exc:
+            # Temporary/imported Storydex workspaces may intentionally have no
+            # repository (for example before the first restore point). Git
+            # status is informational and must not turn a valid knowledge
+            # operation into a failed agent turn.
+            summary = {
+                "available": False,
+                "status": "unavailable",
+                "warning": str(exc),
+                "history": [],
+            }
         result = {
             "ok": True,
             "target": "story_project_workspace",
@@ -491,11 +504,229 @@ class StorydexSyncWikiTool(_StorydexWorkspaceToolMixin, BaseTool):
             },
             "paths": {
                 "json": ".storydex/wiki/knowledge_graph.json",
-                "markdown": ".storydex/wiki/knowledge_graph.md",
-                "index": ".storydex/wiki/source_index.json",
+                "markdown": ".storydex/wiki/WIKI.md",
+                "index": ".storydex/wiki/index.json",
             },
         }
         return ToolResult(success=True, output=json.dumps(summary, ensure_ascii=False, indent=2), error=None)
+
+
+class StorydexApplyKnowledgeUpdateTool(_StorydexWorkspaceToolMixin, BaseTool):
+    name = "StorydexApplyKnowledgeUpdate"
+    description = (
+        "Prepare or apply deterministic Storydex knowledge bindings, or submit evidence-grounded "
+        "relation candidates for user review. Use prepare_explicit first for an explicit user binding; "
+        "apply_explicit is allowed only in a later trace after the user confirms the returned planId. "
+        "submit_candidates writes only the review ledger and never publishes confirmed facts. "
+        "For endpoint fields, use canonical subject/object names and source paths when available; "
+        "subjectId/objectId are optional existing stable IDs from entities.json, so never invent an ID "
+        "or copy a display name into an Id field. targetSourcePath is the formal Markdown destination "
+        "(normally the subject file), not the object's source file; use objectSourcePath for that."
+    )
+    access = ToolAccess.WRITE
+    concurrency = ToolConcurrency.BLOCKING
+    requires_confirmation = False
+
+    def __init__(self, *, workspace_root: Path, turn_contract: Dict[str, Any] | None = None) -> None:
+        super().__init__(workspace_root=workspace_root)
+        self.turn_contract = dict(turn_contract) if isinstance(turn_contract, dict) else {}
+
+    def get_parameters_schema(self) -> Dict[str, Any]:
+        relation_schema = {
+            "type": "object",
+            "properties": {
+                "subjectId": {
+                    "type": "string",
+                    "description": "Optional existing stable entityId from .storydex/memory/current/entities.json; omit when unknown and never copy the subject name here.",
+                },
+                "subject": {
+                    "type": "string",
+                    "description": "Canonical subject name; use with subjectSourcePath when the stable ID is unknown.",
+                },
+                "subjectSourcePath": {
+                    "type": "string",
+                    "description": "Workspace-relative source file for the subject entity, used for deterministic discovery/registration.",
+                },
+                "predicate": {"type": "string", "description": "Relationship predicate."},
+                "objectId": {
+                    "type": "string",
+                    "description": "Optional existing stable entityId from .storydex/memory/current/entities.json; omit when unknown and never copy the object name here.",
+                },
+                "object": {
+                    "type": "string",
+                    "description": "Canonical object name; use with objectSourcePath when the stable ID is unknown.",
+                },
+                "objectSourcePath": {
+                    "type": "string",
+                    "description": "Workspace-relative source file for the object entity; do not put this in targetSourcePath.",
+                },
+                "targetSourcePath": {
+                    "type": "string",
+                    "description": "Optional formal Markdown destination for the relation block, normally the subject file; this is not the object source path.",
+                },
+                "formalPath": {
+                    "type": "string",
+                    "description": "Alias for the formal Markdown destination when an explicit path is required.",
+                },
+                "knowledgeStatus": {
+                    "type": "string",
+                    "enum": ["planned", "observed", "inferred"],
+                },
+                "confidence": {},
+                "sourceRefs": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["path", "quote"],
+                        "properties": {
+                            "path": {"type": "string"},
+                            "quote": {"type": "string"},
+                            "lineStart": {"type": "integer", "minimum": 1},
+                            "lineEnd": {"type": "integer", "minimum": 1},
+                            "role": {"type": "string"},
+                        },
+                        "additionalProperties": False,
+                    },
+                },
+                "provenance": {"type": "object"},
+            },
+            "additionalProperties": True,
+        }
+        return {
+            "type": "object",
+            "required": ["operation"],
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "enum": ["prepare_explicit", "apply_explicit", "submit_candidates"],
+                },
+                "workspaceRoot": {
+                    "type": "string",
+                    "description": "Optional active workspace root; external paths are ignored.",
+                },
+                "relations": {"type": "array", "items": relation_schema},
+                "candidates": {"type": "array", "items": relation_schema},
+                "planId": {"type": "string"},
+                "expectedFingerprint": {"type": "string"},
+                "sessionId": {"type": "string"},
+                "traceId": {"type": "string"},
+                "providerId": {"type": "string"},
+                "model": {"type": "string"},
+                "extractorVersion": {"type": "string"},
+            },
+            "additionalProperties": False,
+        }
+
+    def run(self, arguments: Dict[str, Any]) -> ToolResult:
+        payload = dict(arguments or {})
+        operation = str(payload.get("operation") or "").strip()
+        workspace_root = self._resolve_workspace_root(payload.get("workspaceRoot"))
+        contract = self.turn_contract
+        try:
+            from services.story_knowledge_relation_service import (
+                KnowledgeRelationError,
+                get_story_knowledge_relation_service,
+            )
+
+            def contract_value(payload_key: str, contract_key: str) -> str:
+                supplied = str(payload.get(payload_key) or "").strip()
+                authoritative = str(contract.get(contract_key) or "").strip()
+                if contract and supplied and supplied != authoritative:
+                    raise KnowledgeRelationError(
+                        f"{payload_key} 与当前 TurnContract 不一致。",
+                        code="knowledge_contract_mismatch",
+                        status_code=409,
+                        details={"field": payload_key},
+                    )
+                return authoritative if contract else supplied
+
+            session_id = contract_value("sessionId", "sessionId")
+            trace_id = contract_value("traceId", "traceId")
+            provider_id = contract_value("providerId", "providerId")
+            model = contract_value("model", "model")
+            knowledge_policy = (
+                contract.get("knowledgeWritePolicy")
+                if isinstance(contract.get("knowledgeWritePolicy"), dict)
+                else {}
+            )
+            if str(knowledge_policy.get("mode") or "") == "explicit_binding":
+                if not session_id or not trace_id:
+                    raise KnowledgeRelationError(
+                        "显式绑定缺少服务端 sessionId/traceId。",
+                        code="knowledge_contract_identity_missing",
+                        status_code=409,
+                    )
+                confirmed = bool(knowledge_policy.get("confirmed"))
+                allowed_operation = "apply_explicit" if confirmed else "prepare_explicit"
+                if operation != allowed_operation:
+                    raise KnowledgeRelationError(
+                        "当前显式绑定轮次不允许该知识写入操作。",
+                        code="knowledge_operation_not_allowed",
+                        status_code=409,
+                        details={
+                            "operation": operation,
+                            "allowedOperation": allowed_operation,
+                            "confirmed": confirmed,
+                        },
+                    )
+
+            service = get_story_knowledge_relation_service()
+            if operation == "prepare_explicit":
+                relations = payload.get("relations") if isinstance(payload.get("relations"), list) else []
+                result = service.prepare_explicit(
+                    workspace_root,
+                    relations,
+                    session_id=session_id,
+                    trace_id=trace_id,
+                    provider_id=provider_id,
+                    model=model,
+                )
+            elif operation == "apply_explicit":
+                result = service.apply_explicit(
+                    workspace_root,
+                    str(payload.get("planId") or ""),
+                    session_id=session_id,
+                    trace_id=trace_id,
+                    expected_fingerprint=str(payload.get("expectedFingerprint") or ""),
+                )
+            elif operation == "submit_candidates":
+                candidates = (
+                    payload.get("candidates")
+                    if isinstance(payload.get("candidates"), list)
+                    else payload.get("relations")
+                    if isinstance(payload.get("relations"), list)
+                    else []
+                )
+                result = service.submit_candidates(
+                    workspace_root,
+                    candidates,
+                    trace_id=trace_id,
+                    provider_id=provider_id,
+                    model=model,
+                    extractor_version=str(payload.get("extractorVersion") or ""),
+                )
+            else:
+                return ToolResult(success=False, output="", error="unknown knowledge update operation")
+        except (KnowledgeRelationError, OSError, ValueError, json.JSONDecodeError) as exc:
+            code = getattr(exc, "code", "knowledge_relation_error")
+            return ToolResult(
+                success=False,
+                output=json.dumps(
+                    {
+                        "ok": False,
+                        "code": code,
+                        "details": getattr(exc, "details", {}),
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                error=str(exc),
+            )
+        return ToolResult(
+            success=bool(result.get("ok", True)),
+            output=json.dumps(result, ensure_ascii=False, separators=(",", ":")),
+            error=None if bool(result.get("ok", True)) else str(result.get("message") or "knowledge update failed"),
+        )
 
 
 class StorydexWordCountTool(_StorydexWorkspaceToolMixin, BaseTool):

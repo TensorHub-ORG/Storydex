@@ -241,4 +241,226 @@ describe("StoryStatePanel deterministic graph and inspector behavior", () => {
     expect(u.entryHasSegmentPath({ written: ["chapters/a.md"] })).toBe(true); expect(u.entryHasSegmentPath({})).toBe(false);
     wrapper.unmount();
   });
+
+  it("merges paged graph results and preserves project-wide statistics", async () => {
+    const wrapper = mountPanel(); const u = (wrapper.vm as any).__testUtils;
+    await flushPromises();
+    transport.get.mockReset();
+    const firstNodes = Array.from({ length: 60 }, (_, index) => ({
+      id: `setting:${index}`,
+      label: `设定 ${index}`,
+      type: "setting",
+    }));
+    u.selectedWikiCategory.value = "setting";
+    u.wikiGraphQueryData.value = {
+      graph: { nodes: firstNodes, edges: [] },
+      entries: [],
+      total: {
+        entryCount: 62,
+        nodeCount: 62,
+        edgeCount: 52,
+        confirmedEdgeCount: 52,
+        reviewRequiredEdgeCount: 0,
+        connectedNodeCount: 62,
+        isolatedNodeCount: 0,
+      },
+      offset: 0,
+      returnedNodeCount: 60,
+      hasMore: true,
+      nextOffset: 60,
+    };
+    u.wikiGraphHasMore.value = true;
+    u.wikiGraphNextOffset.value = 60;
+    transport.get.mockResolvedValueOnce(envelope({
+      graph: {
+        nodes: [
+          { id: "setting:60", label: "设定 60", type: "setting" },
+          { id: "setting:61", label: "设定 61", type: "setting" },
+        ],
+        edges: [],
+      },
+      entries: [],
+      total: u.wikiGraphQueryData.value.total,
+      offset: 60,
+      returnedNodeCount: 2,
+      hasMore: false,
+      nextOffset: null,
+    }));
+
+    await u.loadMoreWikiGraph();
+
+    expect(transport.get).toHaveBeenCalledWith("/story/wiki/graph", {
+      params: expect.objectContaining({ offset: 60, includeReview: 1, category: "setting" }),
+    });
+    expect(unref(u.wikiGraphStats)).toMatchObject({
+      nodeCount: 62,
+      returnedNodeCount: 62,
+      confirmedEdgeCount: 52,
+      isolatedNodeCount: 0,
+      notLoadedNodeCount: 0,
+    });
+    expect(u.wikiGraphQueryData.value.graph.nodes).toHaveLength(62);
+    expect(u.wikiGraphHasMore.value).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("sends fingerprint-safe confirm and reject requests with reviewer edits", async () => {
+    const wrapper = mountPanel(); const u = (wrapper.vm as any).__testUtils;
+    await flushPromises();
+    transport.get.mockReset();
+    transport.post.mockReset();
+    const first = {
+      id: "candidate:first",
+      fingerprint: "fingerprint-first",
+      subjectId: "entity:beast",
+      predicate: "栖息于",
+      objectId: "entity:planet",
+      targetSourcePath: ".storydex/worldbook/潮汐兽.md",
+      sourceRefs: [{ path: "chapters/001.md", quote: "潮汐兽长期栖息在夜港星浅海。" }],
+    };
+    const second = {
+      id: "candidate:second",
+      fingerprint: "fingerprint-second",
+      subjectId: "entity:whale",
+      predicate: "来自",
+      objectId: "entity:tide",
+      targetSourcePath: ".storydex/characters/雾鲸.relations.md",
+      usesSidecar: true,
+      sourceRefs: [{ path: "chapters/001.md", quote: "水手传闻雾鲸来自远潮星。" }],
+    };
+    let reviewRelations = [second];
+    transport.post.mockImplementation(async (url: string) => {
+      if (url.endsWith("/reject")) reviewRelations = [];
+      return envelope({ ok: true });
+    });
+    transport.get.mockImplementation(async (url: string) => {
+      if (url === "/story/wiki") {
+        return envelope({ projectName: "Demo", entries: [], graph: { nodes: [], edges: [] } });
+      }
+      if (url === "/story/wiki/graph") {
+        return envelope({
+          graph: { nodes: [], edges: [] }, entries: [],
+          total: { entryCount: 0, nodeCount: 0, edgeCount: 0, confirmedEdgeCount: 0, reviewRequiredEdgeCount: 0, connectedNodeCount: 0, isolatedNodeCount: 0 },
+          returnedNodeCount: 0, hasMore: false, nextOffset: null,
+        });
+      }
+      if (url === "/story/wiki/relations/review") {
+        return envelope({ relations: reviewRelations, total: reviewRelations.length, offset: 0, limit: 500, hasMore: false, nextOffset: null });
+      }
+      throw new Error(`unexpected GET ${url}`);
+    });
+    u.wikiReviewQueue.value = [first, second];
+    u.wikiReviewDrafts.value = {
+      [first.id]: {
+        subjectId: "entity:beast",
+        predicate: "长期栖息于",
+        objectId: "entity:planet",
+        targetSourcePath: ".storydex/worldbook/潮汐兽.md",
+        rejectReason: "incorrect",
+        rejectNote: "",
+      },
+      [second.id]: {
+        subjectId: "entity:whale",
+        predicate: "来自",
+        objectId: "entity:tide",
+        targetSourcePath: ".storydex/characters/雾鲸.relations.md",
+        rejectReason: "ambiguous",
+        rejectNote: "仅为传闻",
+      },
+    };
+
+    await u.confirmWikiCandidate(first);
+    expect(transport.post).toHaveBeenCalledWith(
+      "/story/wiki/relations/candidate%3Afirst/confirm",
+      {
+        expectedFingerprint: "fingerprint-first",
+        subjectId: "entity:beast",
+        predicate: "长期栖息于",
+        objectId: "entity:planet",
+        targetSourcePath: ".storydex/worldbook/潮汐兽.md",
+      },
+    );
+    expect(u.wikiReviewQueue.value.map((candidate: { id: string }) => candidate.id)).toEqual(["candidate:second"]);
+
+    await u.rejectWikiCandidate(second);
+    expect(transport.post).toHaveBeenCalledWith(
+      "/story/wiki/relations/candidate%3Asecond/reject",
+      {
+        expectedFingerprint: "fingerprint-second",
+        reason: "ambiguous",
+        note: "仅为传闻",
+      },
+    );
+    expect(u.wikiReviewQueue.value).toEqual([]);
+    wrapper.unmount();
+  });
+
+  it("renders review-required evidence as a warning edge and shows sidecar guidance", async () => {
+    const wrapper = mountPanel({ relationshipOnly: true }); const u = (wrapper.vm as any).__testUtils;
+    await flushPromises();
+    const candidate = {
+      id: "candidate:review",
+      fingerprint: "fingerprint-review",
+      subjectId: "entity:whale",
+      subject: "雾鲸",
+      predicate: "来自",
+      objectId: "entity:tide",
+      object: "远潮星",
+      reviewStatus: "review_required",
+      knowledgeStatus: "inferred",
+      confidence: 0.55,
+      provenance: { providerId: "test-provider", model: "test-model" },
+      traceId: "trace-review",
+      targetSourcePath: ".storydex/characters/雾鲸.relations.md",
+      usesSidecar: true,
+      sourceRefs: [{ path: "chapters/001.md", quote: "水手传闻雾鲸来自远潮星。" }],
+    };
+    u.wikiData.value = { projectName: "Demo", entries: [], graph: { nodes: [], edges: [] } };
+    u.wikiGraphQueryData.value = {
+      graph: {
+        nodes: [
+          { id: "entity:whale", label: "雾鲸", type: "setting" },
+          { id: "entity:tide", label: "远潮星", type: "setting" },
+        ],
+        edges: [{
+          id: candidate.id,
+          fingerprint: candidate.fingerprint,
+          source: candidate.subjectId,
+          target: candidate.objectId,
+          label: candidate.predicate,
+          type: "relationship",
+          reviewStatus: candidate.reviewStatus,
+          knowledgeStatus: candidate.knowledgeStatus,
+          confidence: candidate.confidence,
+          provenance: candidate.provenance,
+          traceId: candidate.traceId,
+          sourceRefs: candidate.sourceRefs,
+          evidence: candidate.sourceRefs[0].quote,
+        }],
+      },
+      entries: [],
+      total: { entryCount: 62, nodeCount: 62, edgeCount: 53, confirmedEdgeCount: 52, reviewRequiredEdgeCount: 1, connectedNodeCount: 62, isolatedNodeCount: 0 },
+      returnedNodeCount: 60,
+      hasMore: true,
+      nextOffset: 60,
+    };
+    u.wikiGraphHasMore.value = true;
+    u.wikiGraphNextOffset.value = 60;
+    u.wikiReviewQueue.value = [candidate];
+    u.wikiReviewTotal.value = 1;
+    u.wikiReviewOpen.value = true;
+    u.recomputeWikiLayout();
+    u.selectWikiEdge(candidate.id);
+    await nextTick();
+
+    expect(wrapper.find(".ssp-wiki-edge.edge-review-required").exists()).toBe(true);
+    expect(wrapper.text()).toContain("总节点 62");
+    expect(wrapper.text()).toContain("当前返回 60");
+    expect(wrapper.text()).toContain("待确认边 1");
+    expect(wrapper.text()).toContain("水手传闻雾鲸来自远潮星。");
+    expect(wrapper.text()).toContain("test-provider / test-model");
+    expect(wrapper.text()).toContain("该关系将写入 JSON 角色卡 sidecar。");
+    expect(wrapper.find(".ssp-wiki-source-link").exists()).toBe(true);
+    wrapper.unmount();
+  });
 });

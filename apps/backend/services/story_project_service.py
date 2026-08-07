@@ -3369,6 +3369,11 @@ class StoryProjectService:
         knowledge_review_items: List[Dict[str, Any]] = []
         applied_knowledge_command_count = 0
         applied_non_command_snapshot_updates = False
+        unified_relation_candidates: List[Dict[str, Any]] = []
+        use_unified_relation_service = bool(
+            isinstance(generation_contract, dict)
+            and isinstance(generation_contract.get("knowledgeWritePolicy"), dict)
+        )
         chapter_path_mapping: Dict[str, str] = {}
         has_variable_payload = self._story_increment_has_variable_payload(top_level_increment)
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -3526,8 +3531,40 @@ class StoryProjectService:
                 )
 
             if apply_variables:
-                applied_facts.extend(stage2_output.get("fact_updates", []))
-                applied_relationships.extend(stage2_output.get("relationship_updates", []))
+                if use_unified_relation_service:
+                    for raw_fact in stage2_output.get("fact_updates", []):
+                        if not isinstance(raw_fact, dict):
+                            continue
+                        candidate = dict(raw_fact)
+                        if not str(candidate.get("established_in") or "").strip():
+                            candidate["established_in"] = segment_relative_path
+                        if not isinstance(candidate.get("sourceRefs"), list) or not candidate.get("sourceRefs"):
+                            candidate["sourceRefs"] = []
+                        unified_relation_candidates.append(candidate)
+                    for raw_relationship in stage2_output.get("relationship_updates", []):
+                        if not isinstance(raw_relationship, dict):
+                            continue
+                        dynamic_relationship = dict(raw_relationship)
+                        dynamic_relationship.setdefault(
+                            "traceId",
+                            str((generation_contract or {}).get("traceId") or ""),
+                        )
+                        provenance = (
+                            dict(dynamic_relationship.get("provenance"))
+                            if isinstance(dynamic_relationship.get("provenance"), dict)
+                            else {}
+                        )
+                        dynamic_relationship["provenance"] = {
+                            "origin": "story_generation",
+                            "extractorVersion": "storydex-story-relationship-v2",
+                            "providerId": str((generation_contract or {}).get("providerId") or ""),
+                            "model": str((generation_contract or {}).get("model") or ""),
+                            **provenance,
+                        }
+                        applied_relationships.append(dynamic_relationship)
+                else:
+                    applied_facts.extend(stage2_output.get("fact_updates", []))
+                    applied_relationships.extend(stage2_output.get("relationship_updates", []))
                 applied_items.extend(item_updates)
 
             fragment_results.append(
@@ -3566,6 +3603,15 @@ class StoryProjectService:
 
         if all_character_updates:
             written_paths.extend(self._upsert_entities_from_character_updates(root, all_character_updates, updated_at=now_iso))
+        relation_submission: Dict[str, Any] | None = None
+        if apply_variables and use_unified_relation_service and unified_relation_candidates:
+            relation_submission = self._submit_generation_relation_candidates(
+                root,
+                unified_relation_candidates,
+                generation_contract=generation_contract,
+            )
+            written_paths.extend(relation_submission.get("writtenPaths") or [])
+            knowledge_review_items.extend(relation_submission.get("skipped") or [])
         if apply_variables and applied_facts:
             written_paths.extend(self._apply_fact_updates(root, applied_facts, updated_at=now_iso))
         if apply_variables and applied_relationships:
@@ -3591,6 +3637,9 @@ class StoryProjectService:
             if chapter_summary_path:
                 written_paths.append(chapter_summary_path)
 
+        relation_submission_written = bool(
+            relation_submission and relation_submission.get("acceptedCount")
+        )
         review_only_knowledge_batch = bool(knowledge_review_items) and not any(
             (
                 applied_knowledge_command_count,
@@ -3601,7 +3650,9 @@ class StoryProjectService:
                 all_character_updates,
             )
         )
-        wiki_applied = apply_wiki and not review_only_knowledge_batch
+        wiki_applied = apply_wiki and (
+            not review_only_knowledge_batch or relation_submission_written
+        )
         wiki_payload: Dict[str, Any] = {}
         if wiki_applied:
             from services.story_wiki_service import get_story_wiki_service
@@ -3678,6 +3729,11 @@ class StoryProjectService:
                 "code": "knowledge_review_required",
                 "items": knowledge_review_items,
                 "appliedCount": applied_knowledge_command_count,
+            }
+        if relation_submission is not None:
+            result["knowledgeReview"] = {
+                **(result.get("knowledgeReview") if isinstance(result.get("knowledgeReview"), dict) else {}),
+                "relationSubmission": relation_submission,
             }
         return result
 
@@ -6513,18 +6569,18 @@ class StoryProjectService:
             obj = self._clean_increment_text(item.get("object") or item.get("value") or item.get("detail"))
             if not subject or not predicate or not obj:
                 continue
-            normalized.append(
-                {
-                    "id": self._clean_increment_text(item.get("id")),
-                    "subject": subject,
-                    "predicate": predicate,
-                    "object": obj,
-                    "confidence": self._clean_increment_text(item.get("confidence")).lower() or "canon",
-                    "established_in": self._clean_increment_text(item.get("established_in") or item.get("establishedIn")),
-                    "updated_at": self._clean_increment_text(item.get("updated_at") or item.get("updatedAt")),
-                    "evidence": self._clean_increment_text(item.get("evidence")),
-                }
-            )
+            fact = {
+                "id": self._clean_increment_text(item.get("id")),
+                "subject": subject,
+                "predicate": predicate,
+                "object": obj,
+                "confidence": self._clean_increment_text(item.get("confidence")).lower() or "canon",
+                "established_in": self._clean_increment_text(item.get("established_in") or item.get("establishedIn")),
+                "updated_at": self._clean_increment_text(item.get("updated_at") or item.get("updatedAt")),
+                "evidence": self._clean_increment_text(item.get("evidence")),
+            }
+            self._copy_relation_candidate_metadata(item, fact)
+            normalized.append(fact)
         return normalized
 
     def _normalize_relationship_updates(self, value: Any) -> List[Dict[str, Any]]:
@@ -6538,20 +6594,62 @@ class StoryProjectService:
             target = self._clean_increment_text(item.get("target") or item.get("to") or item.get("character"))
             if not source or not target or source == target:
                 continue
-            normalized.append(
-                {
-                    "source": source,
-                    "target": target,
-                    "dimension": self._clean_increment_text(item.get("dimension") or item.get("type")) or "relationship",
-                    "current_level": self._safe_relationship_level(item.get("current_level", item.get("currentLevel"))),
-                    "delta": self._clean_increment_text(item.get("delta")),
-                    "magnitude": self._clean_increment_text(item.get("magnitude")),
-                    "detail": self._clean_increment_text(item.get("detail") or item.get("summary")),
-                    "evidence": self._clean_increment_text(item.get("evidence")),
-                    "last_updated_in": self._clean_increment_text(item.get("last_updated_in") or item.get("lastUpdatedIn")),
-                }
-            )
+            relationship = {
+                "source": source,
+                "target": target,
+                "dimension": self._clean_increment_text(item.get("dimension") or item.get("type")) or "relationship",
+                "current_level": self._safe_relationship_level(item.get("current_level", item.get("currentLevel"))),
+                "delta": self._clean_increment_text(item.get("delta")),
+                "magnitude": self._clean_increment_text(item.get("magnitude")),
+                "detail": self._clean_increment_text(item.get("detail") or item.get("summary")),
+                "evidence": self._clean_increment_text(item.get("evidence")),
+                "last_updated_in": self._clean_increment_text(item.get("last_updated_in") or item.get("lastUpdatedIn")),
+            }
+            self._copy_relation_candidate_metadata(item, relationship)
+            relationship["reviewStatus"] = self._clean_increment_text(
+                item.get("reviewStatus") or item.get("review_status")
+            ) or "confirmed"
+            relationship["knowledgeStatus"] = self._clean_increment_text(
+                item.get("knowledgeStatus") or item.get("knowledge_status")
+            ) or "observed"
+            if not relationship.get("sourceRefs") and relationship["last_updated_in"] and relationship["evidence"]:
+                relationship["sourceRefs"] = [
+                    {
+                        "path": relationship["last_updated_in"],
+                        "quote": relationship["evidence"],
+                        "role": "story_generation",
+                    }
+                ]
+            normalized.append(relationship)
         return normalized
+
+    @staticmethod
+    def _copy_relation_candidate_metadata(source: Dict[str, Any], target: Dict[str, Any]) -> None:
+        """Retain review-only relation fields through story increment normalization."""
+
+        for key in (
+            "subjectId",
+            "subject_id",
+            "sourceId",
+            "objectId",
+            "object_id",
+            "targetId",
+            "subjectSourcePath",
+            "objectSourcePath",
+            "knowledgeStatus",
+            "knowledge_status",
+            "reviewStatus",
+            "review_status",
+            "traceId",
+        ):
+            if source.get(key) not in (None, ""):
+                target[key] = source[key]
+        if isinstance(source.get("sourceRefs"), list):
+            target["sourceRefs"] = [
+                dict(item) for item in source["sourceRefs"] if isinstance(item, dict)
+            ]
+        if isinstance(source.get("provenance"), dict):
+            target["provenance"] = dict(source["provenance"])
 
     def _story_increment_has_variable_payload(self, payload: Dict[str, Any]) -> bool:
         return any(
@@ -6667,6 +6765,106 @@ class StoryProjectService:
         entities_path.parent.mkdir(parents=True, exist_ok=True)
         entities_path.write_text(serialized, encoding="utf-8")
         return [entities_path.relative_to(root).as_posix()]
+
+    def _submit_generation_relation_candidates(
+        self,
+        workspace_root: Path,
+        candidates: List[Dict[str, Any]],
+        *,
+        generation_contract: Dict[str, Any] | None,
+    ) -> Dict[str, Any]:
+        """Submit story-derived relations to the review ledger only.
+
+        Story generation may describe relationships in prose, but it is not an
+        authority for publishing confirmed facts. Preserve verbatim evidence
+        and authoritative turn metadata, then delegate validation and
+        deduplication to the unified relation service.
+        """
+
+        from services.story_knowledge_relation_service import (
+            get_story_knowledge_relation_service,
+        )
+
+        root = Path(workspace_root).resolve()
+        contract = dict(generation_contract) if isinstance(generation_contract, dict) else {}
+        prepared: List[Dict[str, Any]] = []
+        for raw in candidates:
+            if not isinstance(raw, dict):
+                continue
+            candidate = dict(raw)
+            candidate["subject"] = self._clean_increment_text(
+                raw.get("subject") or raw.get("source")
+            )
+            candidate["predicate"] = self._clean_increment_text(
+                raw.get("predicate") or raw.get("relation") or raw.get("dimension")
+            )
+            candidate["object"] = self._clean_increment_text(
+                raw.get("object") or raw.get("target")
+            )
+            if raw.get("subjectId") or raw.get("subject_id") or raw.get("sourceId"):
+                candidate["subjectId"] = self._clean_increment_text(
+                    raw.get("subjectId") or raw.get("subject_id") or raw.get("sourceId")
+                )
+            if raw.get("objectId") or raw.get("object_id") or raw.get("targetId"):
+                candidate["objectId"] = self._clean_increment_text(
+                    raw.get("objectId") or raw.get("object_id") or raw.get("targetId")
+                )
+
+            established_in = self._normalize_relative_path(
+                str(
+                    raw.get("established_in")
+                    or raw.get("establishedIn")
+                    or raw.get("last_updated_in")
+                    or raw.get("lastUpdatedIn")
+                    or ""
+                )
+            )
+            evidence = str(raw.get("evidence") or "").strip()
+            raw_refs = raw.get("sourceRefs") if isinstance(raw.get("sourceRefs"), list) else []
+            source_refs: List[Dict[str, Any]] = []
+            for raw_ref in raw_refs:
+                if not isinstance(raw_ref, dict):
+                    continue
+                source_path = self._normalize_relative_path(
+                    str(raw_ref.get("path") or raw_ref.get("sourcePath") or established_in)
+                )
+                quote = str(raw_ref.get("quote") or raw_ref.get("evidence") or "").strip()
+                source_ref: Dict[str, Any] = {
+                    "path": source_path,
+                    "quote": quote,
+                    "role": self._clean_increment_text(raw_ref.get("role")) or "story_generation",
+                }
+                for source_key, target_key in (
+                    ("lineStart", "lineStart"),
+                    ("line_start", "lineStart"),
+                    ("lineEnd", "lineEnd"),
+                    ("line_end", "lineEnd"),
+                ):
+                    if source_key in raw_ref:
+                        source_ref[target_key] = raw_ref[source_key]
+                source_refs.append(source_ref)
+            if not source_refs and established_in and evidence:
+                source_refs.append(
+                    {
+                        "path": established_in,
+                        "quote": evidence,
+                        "role": "story_generation",
+                    }
+                )
+            candidate["sourceRefs"] = source_refs
+            candidate["knowledgeStatus"] = self._clean_increment_text(
+                raw.get("knowledgeStatus") or raw.get("knowledge_status")
+            ) or "observed"
+            prepared.append(candidate)
+
+        return get_story_knowledge_relation_service().submit_candidates(
+            root,
+            prepared,
+            trace_id=contract.get("traceId"),
+            provider_id=contract.get("providerId"),
+            model=contract.get("model"),
+            extractor_version="storydex-story-increment-v1",
+        )
 
     def _apply_fact_updates(
         self,
@@ -6813,6 +7011,37 @@ class StoryProjectService:
             if key[0] and key[1]:
                 by_key[key] = dict(item)
 
+        entity_ids_by_name: Dict[str, set[str]] = {}
+        try:
+            from services.story_knowledge_relation_service import (
+                get_story_knowledge_relation_service,
+            )
+
+            entities = get_story_knowledge_relation_service().load_entities(root).get("entities", [])
+            for entity in entities if isinstance(entities, list) else []:
+                if not isinstance(entity, dict):
+                    continue
+                entity_id = self._clean_increment_text(entity.get("entityId"))
+                if not entity_id:
+                    continue
+                names = [
+                    self._clean_increment_text(entity.get("canonical_name") or entity.get("canonicalName")),
+                    *[
+                        self._clean_increment_text(alias)
+                        for alias in entity.get("aliases", [])
+                        if isinstance(entity.get("aliases"), list)
+                    ],
+                ]
+                for name in names:
+                    if name:
+                        entity_ids_by_name.setdefault(name, set()).add(entity_id)
+        except (OSError, ValueError, json.JSONDecodeError):
+            entity_ids_by_name = {}
+
+        def unique_entity_id(name: str) -> str:
+            candidates = entity_ids_by_name.get(name, set())
+            return next(iter(candidates)) if len(candidates) == 1 else ""
+
         for update in relationship_updates:
             key = (update["source"], update["target"], update["dimension"])
             entry = by_key.get(key, {"source": key[0], "target": key[1], "dimension": key[2], "history": []})
@@ -6823,6 +7052,34 @@ class StoryProjectService:
                     (base_level if base_level is not None else 0) + self._relationship_delta_value(update)
                 )
             history = entry.get("history") if isinstance(entry.get("history"), list) else []
+            source_refs = [
+                dict(ref)
+                for ref in update.get("sourceRefs", [])
+                if isinstance(update.get("sourceRefs"), list) and isinstance(ref, dict)
+            ]
+            if not source_refs:
+                source_refs = [
+                    dict(ref)
+                    for ref in entry.get("sourceRefs", [])
+                    if isinstance(entry.get("sourceRefs"), list) and isinstance(ref, dict)
+                ]
+            review_status = self._clean_increment_text(
+                update.get("reviewStatus") or update.get("review_status") or entry.get("reviewStatus")
+            )
+            if review_status not in {"confirmed", "review_required", "rejected", "superseded"}:
+                review_status = "confirmed"
+            knowledge_status = self._clean_increment_text(
+                update.get("knowledgeStatus") or update.get("knowledge_status") or entry.get("knowledgeStatus")
+            )
+            if knowledge_status not in {"planned", "observed", "inferred"}:
+                knowledge_status = "observed"
+            source_id = self._clean_increment_text(
+                update.get("sourceId") or update.get("subjectId") or entry.get("sourceId")
+            ) or unique_entity_id(update["source"])
+            target_id = self._clean_increment_text(
+                update.get("targetId") or update.get("objectId") or entry.get("targetId")
+            ) or unique_entity_id(update["target"])
+            trace_id = self._clean_increment_text(update.get("traceId") or entry.get("traceId"))
             history.append(
                 {
                     "updated_at": updated_at,
@@ -6831,6 +7088,8 @@ class StoryProjectService:
                     "magnitude": update.get("magnitude") or "",
                     "detail": update.get("detail") or "",
                     "evidence": update.get("evidence") or "",
+                    "sourceRefs": source_refs,
+                    "traceId": trace_id,
                 }
             )
             entry.update(
@@ -6841,9 +7100,17 @@ class StoryProjectService:
                     "current_level": self._clamp_relationship_level(current_level),
                     "last_updated_at": updated_at,
                     "last_updated_in": update.get("last_updated_in") or entry.get("last_updated_in") or "",
+                    "sourceId": source_id,
+                    "targetId": target_id,
+                    "sourceRefs": source_refs,
+                    "reviewStatus": review_status,
+                    "knowledgeStatus": knowledge_status,
+                    "traceId": trace_id,
                     "history": history[-20:],
                 }
             )
+            if isinstance(update.get("provenance"), dict):
+                entry["provenance"] = dict(update["provenance"])
             by_key[key] = entry
 
         payload["version"] = 1

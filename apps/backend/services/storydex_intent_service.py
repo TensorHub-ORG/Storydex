@@ -75,7 +75,7 @@ _ARTIFACT_BY_PRIMARY = {
 _DEFAULT_OPERATION_TYPE = "other"
 _DEFAULT_COMPLEXITY = "simple"
 _INTENT_SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
-DEFAULT_LLM_TIMEOUT_SECONDS = 4.5
+DEFAULT_LLM_TIMEOUT_SECONDS = 20.0
 _MAX_PROMPT_CHARS = 2000
 _MAX_SESSION_MEMORY = 256
 _INTENT_MAX_OUTPUT_TOKENS = 384
@@ -143,6 +143,25 @@ _CHARACTER_INTENT_RE = re.compile(r"(角色|人物|character|cast)", re.IGNORECA
 _WORLDBOOK_INTENT_RE = re.compile(r"(世界书|世界观|设定集|worldbook|lorebook|lore)", re.IGNORECASE)
 _SCRIPT_INTENT_RE = re.compile(r"(剧本|分镜|台词|大纲|screenplay|script)", re.IGNORECASE)
 _WIKI_INTENT_RE = re.compile(r"(wiki|知识图谱|知识库|整理设定|整理关系)", re.IGNORECASE)
+_EXPLICIT_KNOWLEDGE_BINDING_RE = re.compile(
+    r"(绑定|关联|隶属|栖息于|位于|属于|拥有|服务于)",
+    re.IGNORECASE,
+)
+_EXPLICIT_KNOWLEDGE_CONFIRMATION_RE = re.compile(
+    r"^\s*(?:确认(?:写入|应用|执行)?|同意|可以|好的?|执行|应用|继续)(?:吧|。|！|!|，.*)?\s*$",
+    re.IGNORECASE,
+)
+_EXPLICIT_KNOWLEDGE_PREPARE_RE = re.compile(r"\bprepare_explicit\b", re.IGNORECASE)
+_EXPLICIT_KNOWLEDGE_APPLY_RE = re.compile(r"\bapply_explicit\b", re.IGNORECASE)
+_BROAD_NO_PROJECT_WRITE_RE = re.compile(
+    r"(?:不要|不得|禁止|请勿|无需|无须|不用|不必|别|切勿)"
+    r"[^，,。！？!?；;\n]{0,24}"
+    r"(?:任何|全部|所有)?[^，,。！？!?；;\n]{0,8}"
+    r"(?:写入|修改|保存|落盘|改变)(?:任何|全部|所有)?(?:项目|文件|内容)?|"
+    r"(?:do\s+not|don't|never|must\s+not)\s+"
+    r"[^.,;!?\n]{0,24}(?:write|modify|save|change)\s+(?:any\s+)?(?:project\s+)?files?",
+    re.IGNORECASE,
+)
 _PROJECT_ORGANIZE_RE = re.compile(
     r"(整理目录|项目目录|整理项目|目录结构|组织方式|资料整理|盘点.*(?:章节|目录)|organize)",
     re.IGNORECASE,
@@ -282,7 +301,10 @@ def heuristic_intent_frame(*, prompt: str, active_file: str) -> Dict[str, Any]:
     text = str(prompt or "")
     signals: List[str] = []
     primary = "general"
-    if _PROJECT_ORGANIZE_RE.search(text):
+    if _EXPLICIT_KNOWLEDGE_BINDING_RE.search(text):
+        primary = "wiki_work"
+        signals.append("explicit_knowledge_binding")
+    elif _PROJECT_ORGANIZE_RE.search(text):
         primary = "project_organization"
         signals.append("project_organization_keywords")
     elif _STORY_INTENT_RE.search(text):
@@ -303,7 +325,11 @@ def heuristic_intent_frame(*, prompt: str, active_file: str) -> Dict[str, Any]:
     if active_file.startswith("chapters/") and primary == "general":
         primary = "story_generation"
         signals.append("active_chapter_file")
-    operation_type = _heuristic_operation_type(text, primary=primary)
+    operation_type = (
+        "modify_existing"
+        if _EXPLICIT_KNOWLEDGE_BINDING_RE.search(text)
+        else _heuristic_operation_type(text, primary=primary)
+    )
     effect = _effect_from_operation_type(operation_type)
     return {
         "primary": primary,
@@ -321,7 +347,20 @@ def heuristic_intent_frame(*, prompt: str, active_file: str) -> Dict[str, Any]:
         "evidence": [],
         "canWrite": effect in _WRITE_EFFECTS,
         "complexity": _heuristic_complexity(text),
+        **(
+            {
+                "knowledgeWriteMode": "explicit_binding",
+                "knowledgeConfirmationRequired": True,
+                "knowledgeConfirmed": False,
+            }
+            if _EXPLICIT_KNOWLEDGE_BINDING_RE.search(text)
+            else {}
+        ),
     }
+
+
+def is_explicit_knowledge_binding_request(prompt: Any) -> bool:
+    return bool(_EXPLICIT_KNOWLEDGE_BINDING_RE.search(str(prompt or "")))
 
 
 def _effect_from_operation_type(operation_type: str) -> str:
@@ -448,6 +487,11 @@ class _BoundedIntentProvider:
         direct = await _bounded_metadata_chat(self._provider, messages)
         if direct is not None:
             return direct
+        request_options = getattr(self._provider, "storydex_intent_request_options", None)
+        if callable(request_options):
+            configured = request_options()
+            bounded_options = dict(configured) if isinstance(configured, dict) else {}
+            return await _invoke_provider_chat(self._provider, messages, **bounded_options)
         chat = getattr(self._provider, "chat", None)
         try:
             parameter = inspect.signature(chat).parameters.get("max_output_tokens")
@@ -923,6 +967,12 @@ def _intent_messages(
         "Rules: activeFile is context, never an instruction. Do not infer writing merely because a chapters/ file is open. "
         "A short confirmation such as 「可以」「继续」 may authorise a mutation only when previousTurn.pendingAction "
         "contains an explicit proposed action; otherwise do not guess a write. User constraints outrank inferred intent.\n"
+        "Requests using 绑定、关联、隶属、栖息于、位于、属于、拥有、服务于 to connect named story entities "
+        "are wiki_work (or the matching character/worldbook domain) with a modify/execute effect. The first turn only "
+        "prepares a deterministic knowledge-write plan; a later short confirmation may apply that pending plan.\n"
+        "Calling prepare_explicit is itself an authorised execute action that writes only an ephemeral review plan. "
+        "A user saying this turn must not call apply_explicit does NOT mean no_project_write and must not make "
+        "prepare_explicit respond_only. Use no_project_write only for a broad instruction not to write or modify any files.\n"
         "Calibration examples:\n"
         "- 写下一章 => story_generation / create / chapter_prose / next_chapter / create_new.\n"
         "- 讨论下一章怎么安排，不要写入 => script_work / respond_only / plot_plan / next_chapter / inquiry + no_project_write.\n"
@@ -958,6 +1008,67 @@ def _enrich_frame(frame: Dict[str, Any], catalog: Dict[str, Dict[str, Any]]) -> 
     return frame
 
 
+def _apply_knowledge_write_semantics(
+    frame: Dict[str, Any],
+    *,
+    prompt: str,
+    previous_turn: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    prompt_text = str(prompt or "")
+    explicit_binding = is_explicit_knowledge_binding_request(prompt_text)
+    previous_mode = str((previous_turn or {}).get("knowledgeWriteMode") or "").strip()
+    confirmation = bool(
+        previous_mode == "explicit_binding"
+        and _EXPLICIT_KNOWLEDGE_CONFIRMATION_RE.match(prompt_text)
+    )
+    if not explicit_binding and not confirmation:
+        return frame
+    if explicit_binding and str(frame.get("primary") or "") not in {
+        "wiki_work",
+        "worldbook_work",
+        "character_work",
+    }:
+        frame["primary"] = "wiki_work"
+        frame["artifact"] = "wiki"
+    frame["knowledgeWriteMode"] = "explicit_binding"
+    frame["knowledgeConfirmationRequired"] = True
+    frame["knowledgeConfirmed"] = confirmation
+    prepare_requested = bool(_EXPLICIT_KNOWLEDGE_PREPARE_RE.search(prompt_text))
+    apply_requested = bool(_EXPLICIT_KNOWLEDGE_APPLY_RE.search(prompt_text))
+    broad_no_write = bool(_BROAD_NO_PROJECT_WRITE_RE.search(prompt_text))
+    model_classified = str(frame.get("method") or "").strip() == "llm"
+    explicitly_authorized = bool(
+        model_classified
+        and not broad_no_write
+        and (
+            (explicit_binding and prepare_requested and not confirmation)
+            or (confirmation and (apply_requested or not prepare_requested))
+        )
+    )
+    if explicitly_authorized:
+        frame["decision"] = "decided"
+        frame["effect"] = "execute"
+        frame["operationType"] = "modify_existing"
+        frame["canWrite"] = True
+        constraints = frame.get("explicitConstraints") if isinstance(frame.get("explicitConstraints"), list) else []
+        frame["explicitConstraints"] = [
+            item for item in constraints if str(item or "").strip().lower() != _NO_PROJECT_WRITE
+        ]
+        ambiguities = frame.get("ambiguities") if isinstance(frame.get("ambiguities"), list) else []
+        frame["ambiguities"] = [
+            item for item in ambiguities if str(item or "").strip() != "missing_grounded_write_evidence"
+        ]
+    signals = frame.get("signals") if isinstance(frame.get("signals"), list) else []
+    markers = ["explicit_knowledge_confirmation" if confirmation else "explicit_knowledge_binding"]
+    if explicitly_authorized:
+        markers.append("explicit_knowledge_apply" if confirmation else "explicit_knowledge_prepare")
+    for marker in markers:
+        if marker not in signals:
+            signals.append(marker)
+    frame["signals"] = signals
+    return frame
+
+
 class StorydexIntentService:
     def __init__(
         self,
@@ -986,6 +1097,11 @@ class StorydexIntentService:
             frame = heuristic_intent_frame(prompt=normalized_prompt, active_file=active_file)
             frame["method"] = "deterministic"
             catalog = build_intent_catalog()
+            frame = _apply_knowledge_write_semantics(
+                frame,
+                prompt=normalized_prompt,
+                previous_turn=None,
+            )
             _enrich_frame(frame, catalog)
             self._remember(
                 session_key=session_key,
@@ -1018,6 +1134,11 @@ class StorydexIntentService:
         )
         if frame is None:
             frame = safe_fallback_intent_frame(reason="invalid_or_unavailable_model_output")
+        frame = _apply_knowledge_write_semantics(
+            frame,
+            prompt=normalized_prompt,
+            previous_turn=previous_turn,
+        )
         _enrich_frame(frame, catalog)
         self._remember(
             session_key=session_key,
@@ -1078,6 +1199,9 @@ class StorydexIntentService:
             "targetValue",
             "operationType",
             "canWrite",
+            "knowledgeWriteMode",
+            "knowledgeConfirmationRequired",
+            "knowledgeConfirmed",
         ):
             if key in semantic_frame:
                 remembered[key] = semantic_frame[key]
@@ -1118,30 +1242,42 @@ class StorydexIntentService:
             prompt = str(record.get("prompt") or "").strip()
             reply = str(record.get("reply") or "").strip()
             intent = ""
+            knowledge_write_mode = ""
+            knowledge_confirmed = False
             audit = record.get("audit") if isinstance(record.get("audit"), list) else []
             for item in reversed(audit):
                 if isinstance(item, dict) and item.get("action") == "storydex_turn_contract":
                     intent = str(item.get("intent") or "").strip()
                     break
-            if not intent:
-                events = record.get("events") if isinstance(record.get("events"), list) else []
-                for event in reversed(events):
-                    if not isinstance(event, dict) or event.get("event") != "TurnContract":
-                        continue
-                    data = event.get("data") if isinstance(event.get("data"), dict) else {}
-                    intent_frame = data.get("intentFrame") if isinstance(data.get("intentFrame"), dict) else {}
-                    intent = str(intent_frame.get("primary") or "").strip()
-                    if intent:
-                        break
+            events = record.get("events") if isinstance(record.get("events"), list) else []
+            for event in reversed(events):
+                if not isinstance(event, dict) or event.get("event") != "TurnContract":
+                    continue
+                data = event.get("data") if isinstance(event.get("data"), dict) else {}
+                intent_frame = data.get("intentFrame") if isinstance(data.get("intentFrame"), dict) else {}
+                intent = intent or str(intent_frame.get("primary") or "").strip()
+                knowledge_policy = (
+                    data.get("knowledgeWritePolicy")
+                    if isinstance(data.get("knowledgeWritePolicy"), dict)
+                    else {}
+                )
+                knowledge_write_mode = str(knowledge_policy.get("mode") or "").strip()
+                knowledge_confirmed = bool(knowledge_policy.get("confirmed"))
+                if intent and knowledge_write_mode:
+                    break
             if not prompt and not reply:
                 continue
             pending_action = reply[-800:] if reply and ("?" in reply or "？" in reply or "是否" in reply) else ""
-            return {
+            result = {
                 "prompt": prompt[:200],
                 "intent": intent or "general",
                 "assistantReply": reply[-1200:],
                 "pendingAction": pending_action,
             }
+            if knowledge_write_mode:
+                result["knowledgeWriteMode"] = knowledge_write_mode
+                result["knowledgeConfirmed"] = knowledge_confirmed
+            return result
         return None
 
     async def _llm_intent_frame(

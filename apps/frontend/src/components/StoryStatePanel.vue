@@ -105,8 +105,28 @@
             </button>
           </form>
           <div class="ssp-wiki-toolbar-stats">
-            <span>{{ wikiGraphNodes.length }} 节点 · {{ wikiGraphEdges.length }} 连接</span>
-            <span v-if="wikiNeedsReviewCount > 0" class="ssp-wiki-review-alert">待确认 {{ wikiNeedsReviewCount }}</span>
+            <span>总节点 {{ wikiGraphStats.nodeCount }}</span>
+            <span>当前返回 {{ wikiGraphStats.returnedNodeCount }}</span>
+            <span>confirmed 边 {{ wikiGraphStats.confirmedEdgeCount }}</span>
+            <span>待确认边 {{ wikiGraphStats.reviewRequiredEdgeCount }}</span>
+            <span>无 confirmed 关系节点 {{ wikiGraphStats.isolatedNodeCount }}</span>
+            <span v-if="wikiGraphStats.notLoadedNodeCount > 0">尚未加载 {{ wikiGraphStats.notLoadedNodeCount }}</span>
+            <button
+              v-if="wikiGraphHasMore"
+              class="ssp-wiki-load-more"
+              type="button"
+              :disabled="wikiGraphLoading"
+              @click="loadMoreWikiGraph"
+            >
+              加载更多
+            </button>
+            <button
+              class="ssp-wiki-review-alert"
+              type="button"
+              @click="toggleWikiReviewQueue"
+            >
+              关系待确认 {{ wikiNeedsReviewCount }}
+            </button>
           </div>
         </section>
 
@@ -144,6 +164,7 @@
                       dimmed: isWikiEdgeDimmed(edge),
                       'edge-co-occurrence': edge.coOccurrence,
                       'edge-real-relation': edge.realRelation,
+                      'edge-review-required': edge.reviewStatus === 'review_required',
                     }]"
                     :d="edge.pathD"
                     @click.stop="selectWikiEdge(edge.id)"
@@ -190,8 +211,9 @@
                   </g>
                 </g>
               </svg>
-              <div v-if="wikiHiddenIsolatedNodeCount > 0" class="ssp-wiki-graph-note">
-                另有 {{ wikiHiddenIsolatedNodeCount }} 个孤立条目，可通过搜索查看
+              <div v-if="wikiGraphHasMore" class="ssp-wiki-graph-note">
+                已加载 {{ wikiGraphStats.returnedNodeCount }} / {{ wikiGraphStats.nodeCount }} 个节点。
+                <button type="button" @click="loadMoreWikiGraph">继续加载</button>
               </div>
               <div v-if="wikiGraphLegend.length" class="ssp-wiki-graph-legend">
                 <span v-for="item in wikiGraphLegend" :key="item.key" class="ssp-wiki-legend-item">
@@ -233,7 +255,7 @@
 
             <div class="ssp-wiki-inspector-body">
               <article v-if="selectedWikiRelationEdge" class="ssp-wiki-inspector-detail">
-                <div class="ssp-wiki-entry-kicker">{{ selectedWikiRelationEdge.coOccurrence ? "章节共现" : "角色关系" }}</div>
+                <div class="ssp-wiki-entry-kicker">{{ selectedWikiRelationEdge.coOccurrence ? "章节共现" : "知识关系" }}</div>
                 <h3>{{ selectedWikiRelationEdge.label }}</h3>
                 <div class="ssp-wiki-relation-endpoints">
                   <span>{{ selectedWikiRelationEdge.source.label }}</span>
@@ -254,6 +276,39 @@
                   <span v-if="selectedWikiRelationEdge.evidence" class="ssp-wiki-evidence-note">共现章节：{{ selectedWikiRelationEdge.evidence }}</span>
                 </p>
                 <p v-else>{{ selectedWikiRelationEdge.evidence || "该关系来自知识图谱，可在下方相关条目查看更多上下文。" }}</p>
+                <div class="ssp-wiki-audit-grid">
+                  <span>reviewStatus</span><strong>{{ selectedWikiRelationEdge.reviewStatus }}</strong>
+                  <span>knowledgeStatus</span><strong>{{ selectedWikiRelationEdge.knowledgeStatus }}</strong>
+                  <span>confidence</span><strong>{{ selectedWikiRelationEdge.confidence ?? "-" }}</strong>
+                  <span>provider/model</span>
+                  <strong>
+                    {{ String(selectedWikiRelationEdge.provenance?.providerId || "-") }} /
+                    {{ String(selectedWikiRelationEdge.provenance?.model || "-") }}
+                  </strong>
+                  <span>trace</span><strong>{{ selectedWikiRelationEdge.traceId || "-" }}</strong>
+                </div>
+                <div v-if="selectedWikiRelationEdge.sourceRefs.length" class="ssp-wiki-source-ref-list">
+                  <div v-for="(sourceRef, sourceIndex) in selectedWikiRelationEdge.sourceRefs" :key="`${sourceRef.path}-${sourceIndex}`" class="ssp-wiki-source-ref">
+                    <button type="button" class="ssp-wiki-source-link" @click="openWikiSource(sourceRef.path)">
+                      {{ sourceRef.path }}
+                    </button>
+                    <blockquote>{{ sourceRef.quote }}</blockquote>
+                  </div>
+                </div>
+                <div v-if="selectedWikiReviewCandidate" class="ssp-wiki-review-inline-actions">
+                  <button
+                    class="ssp-btn accept"
+                    type="button"
+                    :disabled="wikiReviewActionId === selectedWikiReviewCandidate.id"
+                    @click="confirmWikiCandidate(selectedWikiReviewCandidate)"
+                  >确认</button>
+                  <button
+                    class="ssp-btn dismiss"
+                    type="button"
+                    :disabled="wikiReviewActionId === selectedWikiReviewCandidate.id"
+                    @click="toggleWikiReviewQueue"
+                  >查看审核队列</button>
+                </div>
               </article>
 
               <article v-else-if="selectedWikiNode || selectedWikiDetailEntry" class="ssp-wiki-inspector-detail">
@@ -280,6 +335,70 @@
                 <h3>{{ wikiInspectorEmptyTitle }}</h3>
                 <p>{{ wikiInspectorEmptyHint }}</p>
               </article>
+
+              <section v-if="wikiReviewOpen" class="ssp-wiki-review-queue">
+                <div class="ssp-wiki-inspector-heading">
+                  关系待确认 · {{ wikiReviewTotal }}
+                  <button type="button" class="ssp-wiki-review-refresh" @click="loadWikiReviewQueue">刷新</button>
+                </div>
+                <div v-if="wikiReviewLoading" class="ssp-wiki-review-empty">正在读取审核队列…</div>
+                <div v-else-if="wikiReviewError" class="ssp-wiki-review-error">{{ wikiReviewError }}</div>
+                <div v-else-if="!wikiReviewQueue.length" class="ssp-wiki-review-empty">暂无待确认关系。</div>
+                <article v-for="candidate in wikiReviewQueue" :key="candidate.id" class="ssp-wiki-review-card">
+                  <div class="ssp-wiki-review-card-title">
+                    <strong>{{ candidate.subject || candidate.subjectId || "未知主体" }}</strong>
+                    <span>→</span>
+                    <strong>{{ candidate.object || candidate.objectId || "未知客体" }}</strong>
+                  </div>
+                  <label class="ssp-wiki-review-field">
+                    谓词
+                    <input v-model="wikiReviewDraft(candidate).predicate" type="text" />
+                  </label>
+                  <label class="ssp-wiki-review-field">
+                    主体 ID
+                    <input v-model="wikiReviewDraft(candidate).subjectId" type="text" />
+                  </label>
+                  <label class="ssp-wiki-review-field">
+                    客体 ID
+                    <input v-model="wikiReviewDraft(candidate).objectId" type="text" />
+                  </label>
+                  <label class="ssp-wiki-review-field">
+                    正式写入路径
+                    <input v-model="wikiReviewDraft(candidate).targetSourcePath" type="text" placeholder="可选 .storydex/...md" />
+                  </label>
+                  <div class="ssp-wiki-audit-grid compact">
+                    <span>状态</span><strong>{{ candidate.reviewStatus || "review_required" }} / {{ candidate.knowledgeStatus || "observed" }}</strong>
+                    <span>confidence</span><strong>{{ candidate.confidence ?? "-" }}</strong>
+                    <span>provider/model</span><strong>{{ String(candidate.provenance?.providerId || "-") }} / {{ String(candidate.provenance?.model || "-") }}</strong>
+                    <span>trace</span><strong>{{ candidate.traceId || "-" }}</strong>
+                  </div>
+                  <div v-for="(sourceRef, sourceIndex) in (candidate.sourceRefs || [])" :key="`${candidate.id}-source-${sourceIndex}`" class="ssp-wiki-source-ref">
+                    <button type="button" class="ssp-wiki-source-link" @click="openWikiSource(sourceRef.path)">
+                      打开来源：{{ sourceRef.path }}
+                    </button>
+                    <blockquote>{{ sourceRef.quote }}</blockquote>
+                  </div>
+                  <label class="ssp-wiki-review-field">
+                    驳回原因
+                    <select v-model="wikiReviewDraft(candidate).rejectReason">
+                      <option value="incorrect">incorrect</option>
+                      <option value="ambiguous">ambiguous</option>
+                      <option value="duplicate">duplicate</option>
+                      <option value="not_canon">not_canon</option>
+                      <option value="other">other</option>
+                    </select>
+                  </label>
+                  <label class="ssp-wiki-review-field">
+                    驳回备注
+                    <textarea v-model="wikiReviewDraft(candidate).rejectNote" rows="2" />
+                  </label>
+                  <div class="ssp-action-row">
+                    <button class="ssp-btn accept" type="button" :disabled="wikiReviewActionId === candidate.id" @click="confirmWikiCandidate(candidate)">确认</button>
+                    <button class="ssp-btn dismiss" type="button" :disabled="wikiReviewActionId === candidate.id" @click="rejectWikiCandidate(candidate)">驳回</button>
+                  </div>
+                  <small v-if="candidate.usesSidecar" class="ssp-wiki-sidecar-note">该关系将写入 JSON 角色卡 sidecar。</small>
+                </article>
+              </section>
 
               <section class="ssp-wiki-entry-list">
                 <div class="ssp-wiki-inspector-heading">相关条目 · {{ visibleWikiEntries.length }}</div>
@@ -706,8 +825,21 @@ interface StoryWikiEntry {
   sourcePaths?: string[];
   confidence?: number;
   needsReview?: boolean;
+  reviewStatus?: string;
   knowledgeStatus?: string;
+  sourceRefs?: WikiSourceRef[];
+  provenance?: Record<string, unknown>;
+  traceId?: string;
+  fingerprint?: string;
   updatedAt?: string;
+}
+
+interface WikiSourceRef {
+  path: string;
+  quote: string;
+  lineStart?: number;
+  lineEnd?: number;
+  role?: string;
 }
 
 type StoryWikiSyntheticRole = "categoryHub" | "projectHub";
@@ -727,13 +859,16 @@ interface StoryWikiNodePayload {
   count?: number;
   needsReviewCount?: number;
   needsReview?: boolean;
+  reviewStatus?: string;
   knowledgeStatus?: string;
 }
 
 interface StoryWikiEdgePayload {
+  id?: string;
   source: string;
   target: string;
   label: string;
+  predicate?: string;
   type: string;
   weight?: number;
   evidence?: string;
@@ -745,6 +880,14 @@ interface StoryWikiEdgePayload {
   polarity?: string;
   strength?: number;
   status?: string;
+  needsReview?: boolean;
+  reviewStatus?: string;
+  knowledgeStatus?: string;
+  confidence?: number | string;
+  sourceRefs?: WikiSourceRef[];
+  provenance?: Record<string, unknown>;
+  traceId?: string;
+  fingerprint?: string;
 }
 
 interface StoryWikiData {
@@ -802,7 +945,54 @@ interface StoryWikiGraphQueryResponse {
     entryCount: number;
     nodeCount: number;
     edgeCount: number;
+    confirmedEdgeCount?: number;
+    reviewRequiredEdgeCount?: number;
+    connectedNodeCount?: number;
+    isolatedNodeCount?: number;
   };
+  offset?: number;
+  includeReview?: boolean;
+  returnedNodeCount?: number;
+  hasMore?: boolean;
+  nextOffset?: number | null;
+  pagination?: {
+    offset: number;
+    limit: number;
+    returnedNodeCount: number;
+    hasMore: boolean;
+    nextOffset?: number | null;
+  };
+}
+
+interface WikiReviewCandidate {
+  id: string;
+  subjectId?: string;
+  subject?: string;
+  predicate?: string;
+  objectId?: string;
+  object?: string;
+  reviewStatus?: string;
+  knowledgeStatus?: string;
+  confidence?: number | string;
+  sourceRefs?: WikiSourceRef[];
+  provenance?: Record<string, unknown>;
+  traceId?: string;
+  fingerprint?: string;
+  targetSourcePath?: string;
+  usesSidecar?: boolean;
+  reviewReason?: string;
+  evidenceHash?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+interface WikiReviewDraft {
+  subjectId: string;
+  predicate: string;
+  objectId: string;
+  targetSourcePath: string;
+  rejectReason: string;
+  rejectNote: string;
 }
 
 interface StoryWikiAgentWorkflowResponse {
@@ -872,6 +1062,13 @@ interface WikiGraphEdge {
   labelX: number;
   labelY: number;
   labelWidth: number;
+  reviewStatus: string;
+  knowledgeStatus: string;
+  confidence: number | string | null;
+  sourceRefs: WikiSourceRef[];
+  provenance: Record<string, unknown>;
+  traceId: string;
+  fingerprint: string;
 }
 
 const loading = ref(false);
@@ -887,10 +1084,19 @@ const wikiErrorMessage = ref("");
 const wikiData = ref<StoryWikiData | null>(null);
 const wikiGraphQueryData = ref<StoryWikiGraphQueryResponse | null>(null);
 const wikiGraphLoading = ref(false);
+const wikiGraphHasMore = ref(false);
+const wikiGraphNextOffset = ref<number | null>(null);
 const wikiGraphSearchInput = ref("");
 const wikiGraphSearchQuery = ref("");
 const wikiKnowledgeStatusFilter = ref("all");
 const wikiSyncErrorMessage = ref("");
+const wikiReviewQueue = ref<WikiReviewCandidate[]>([]);
+const wikiReviewTotal = ref(0);
+const wikiReviewLoading = ref(false);
+const wikiReviewError = ref("");
+const wikiReviewOpen = ref(false);
+const wikiReviewActionId = ref("");
+const wikiReviewDrafts = ref<Record<string, WikiReviewDraft>>({});
 const selectedWikiCategory = ref<StoryWikiCategory>("characters");
 const selectedWikiEntryId = ref("");
 const selectedWikiNodeId = ref("");
@@ -969,7 +1175,6 @@ const WIKI_TONE_LABELS: Record<string, string> = {
   hub: "导航",
   misc: "其他",
 };
-const WIKI_ISOLATED_NODE_VISIBLE_LIMIT = 8;
 
 const panelLoading = computed(() => (
   props.relationshipOnly ? wikiLoading.value || wikiRebuilding.value || wikiAgentRunning.value : loading.value
@@ -1223,29 +1428,9 @@ const wikiIsolatedRawGraphNodes = computed<StoryWikiNodePayload[]>(() => {
   ));
 });
 
-const wikiShouldLimitIsolatedNodes = computed(() => (
-  wikiGraphQueryData.value?.mode === "category"
-  && wikiIsolatedRawGraphNodes.value.length > WIKI_ISOLATED_NODE_VISIBLE_LIMIT
-));
-
-const wikiHiddenIsolatedNodeCount = computed(() => (
-  wikiShouldLimitIsolatedNodes.value
-    ? wikiIsolatedRawGraphNodes.value.length - WIKI_ISOLATED_NODE_VISIBLE_LIMIT
-    : 0
-));
-
 const wikiVisibleRawGraphNodes = computed<StoryWikiNodePayload[]>(() => {
-  const rawNodes = (wikiGraphQueryData.value?.graph?.nodes ?? [])
+  return (wikiGraphQueryData.value?.graph?.nodes ?? [])
     .filter((node) => matchesWikiKnowledgeStatus(node.knowledgeStatus));
-  if (!wikiShouldLimitIsolatedNodes.value) {
-    return rawNodes;
-  }
-  const hiddenIds = new Set(
-    wikiIsolatedRawGraphNodes.value
-      .slice(WIKI_ISOLATED_NODE_VISIBLE_LIMIT)
-      .map((node) => node.id),
-  );
-  return rawNodes.filter((node) => !hiddenIds.has(node.id));
 });
 
 function wikiNodeRadius(node: StoryWikiNodePayload, degree: number): number {
@@ -1419,7 +1604,7 @@ const wikiGraphEdges = computed<WikiGraphEdge[]>(() => {
       labelX = (source.x + 2 * controlX + target.x) / 4;
       labelY = (source.y + 2 * controlY + target.y) / 4;
     }
-    const id = `${edge.source}-${edge.target}-${index}`;
+    const id = String(edge.id || edge.fingerprint || `${edge.source}-${edge.target}-${index}`);
     const coOccurrence = Boolean(edge.coOccurrence);
     return [{
       id,
@@ -1434,6 +1619,13 @@ const wikiGraphEdges = computed<WikiGraphEdge[]>(() => {
       realRelation: edge.type === "relationship" && !coOccurrence,
       level,
       dimension: edge.dimension || "",
+      reviewStatus: String(edge.reviewStatus || (edge.needsReview ? "review_required" : "confirmed")),
+      knowledgeStatus: String(edge.knowledgeStatus || "observed"),
+      confidence: edge.confidence ?? null,
+      sourceRefs: Array.isArray(edge.sourceRefs) ? edge.sourceRefs : [],
+      provenance: edge.provenance && typeof edge.provenance === "object" ? edge.provenance : {},
+      traceId: String(edge.traceId || ""),
+      fingerprint: String(edge.fingerprint || ""),
       source,
       target,
       pathD,
@@ -1549,7 +1741,68 @@ const wikiUpdatedAtLabel = computed(() => {
   return value ? `更新: ${formatTime(value)}` : "尚未生成";
 });
 
-const wikiNeedsReviewCount = computed(() => wikiEntries.value.filter((entry) => entry.needsReview).length);
+const wikiGraphStats = computed(() => {
+  const total = wikiGraphQueryData.value?.total ?? {
+    entryCount: 0,
+    nodeCount: 0,
+    edgeCount: 0,
+    confirmedEdgeCount: 0,
+    reviewRequiredEdgeCount: 0,
+    connectedNodeCount: 0,
+    isolatedNodeCount: 0,
+  };
+  const returnedNodeCount = wikiGraphQueryData.value?.returnedNodeCount
+    ?? wikiGraphQueryData.value?.pagination?.returnedNodeCount
+    ?? wikiGraphQueryData.value?.graph?.nodes?.length
+    ?? 0;
+  return {
+    entryCount: Number(total.entryCount || 0),
+    nodeCount: Number(total.nodeCount || 0),
+    edgeCount: Number(total.edgeCount || 0),
+    confirmedEdgeCount: Number(total.confirmedEdgeCount || 0),
+    reviewRequiredEdgeCount: Number(total.reviewRequiredEdgeCount || 0),
+    connectedNodeCount: Number(total.connectedNodeCount || 0),
+    isolatedNodeCount: Number(total.isolatedNodeCount || 0),
+    returnedNodeCount: Number(returnedNodeCount),
+    notLoadedNodeCount: Math.max(0, Number(total.nodeCount || 0) - Number(returnedNodeCount)),
+  };
+});
+
+const wikiNeedsReviewCount = computed(() => (
+  wikiReviewTotal.value || wikiGraphStats.value.reviewRequiredEdgeCount ||
+  wikiEntries.value.filter((entry) => entry.needsReview).length
+));
+
+const selectedWikiReviewCandidate = computed<WikiReviewCandidate | null>(() => {
+  const edge = selectedWikiRelationEdge.value;
+  if (!edge) {
+    return null;
+  }
+  return wikiReviewQueue.value.find((candidate) => (
+    (edge.fingerprint && candidate.fingerprint === edge.fingerprint)
+    || (edge.reviewStatus === "review_required"
+      && candidate.subjectId === edge.source.id
+      && candidate.objectId === edge.target.id
+      && candidate.predicate === edge.label)
+  )) ?? null;
+});
+
+function wikiReviewDraft(candidate: WikiReviewCandidate): WikiReviewDraft {
+  const existing = wikiReviewDrafts.value[candidate.id];
+  if (existing) {
+    return existing;
+  }
+  const draft: WikiReviewDraft = {
+    subjectId: String(candidate.subjectId || ""),
+    predicate: String(candidate.predicate || ""),
+    objectId: String(candidate.objectId || ""),
+    targetSourcePath: String(candidate.targetSourcePath || ""),
+    rejectReason: "incorrect",
+    rejectNote: "",
+  };
+  wikiReviewDrafts.value = { ...wikiReviewDrafts.value, [candidate.id]: draft };
+  return draft;
+}
 
 // 项目总览摘要：overview 分类不再是可见 tab，它的内容改在检查器头部常驻一行。
 const wikiProjectSummary = computed(() => {
@@ -1585,6 +1838,8 @@ interface WikiGraphQueryParams {
   entryId?: string;
   nodeId?: string;
   depth?: number;
+  offset?: number;
+  includeReview?: boolean;
 }
 
 const FIELD_LABELS: Record<string, string> = {
@@ -1864,20 +2119,71 @@ async function loadSnapshot() {
 
 function currentWikiGraphQueryParams(): WikiGraphQueryParams {
   if (wikiGraphSearchQuery.value.trim()) {
-    return { q: wikiGraphSearchQuery.value.trim() };
+    return { q: wikiGraphSearchQuery.value.trim(), includeReview: true };
   }
   if (selectedWikiNodeId.value) {
-    return { nodeId: selectedWikiNodeId.value };
+    return { nodeId: selectedWikiNodeId.value, includeReview: true };
   }
-  return { category: selectedWikiCategory.value };
+  return { category: selectedWikiCategory.value, includeReview: true };
 }
 
-async function loadWikiGraph(params: WikiGraphQueryParams = currentWikiGraphQueryParams()): Promise<void> {
+function mergeWikiGraphPage(
+  previous: StoryWikiGraphQueryResponse | null,
+  page: StoryWikiGraphQueryResponse,
+): StoryWikiGraphQueryResponse {
+  if (!previous) {
+    return page;
+  }
+  const nodesById = new Map<string, StoryWikiNodePayload>();
+  for (const node of [...(previous.graph?.nodes || []), ...(page.graph?.nodes || [])]) {
+    if (node?.id) {
+      nodesById.set(node.id, { ...nodesById.get(node.id), ...node });
+    }
+  }
+  const edgesByKey = new Map<string, StoryWikiEdgePayload>();
+  for (const edge of [...(previous.graph?.edges || []), ...(page.graph?.edges || [])]) {
+    if (!edge?.source || !edge?.target) {
+      continue;
+    }
+    const key = String(edge.id || `${edge.source}|${edge.target}|${edge.predicate || edge.label || edge.type}`);
+    edgesByKey.set(key, { ...edgesByKey.get(key), ...edge });
+  }
+  const entriesById = new Map<string, StoryWikiEntry>();
+  for (const entry of [...(previous.entries || []), ...(page.entries || [])]) {
+    if (entry?.id) {
+      entriesById.set(entry.id, { ...entriesById.get(entry.id), ...entry });
+    }
+  }
+  return {
+    ...previous,
+    ...page,
+    entries: Array.from(entriesById.values()),
+    graph: {
+      ...page.graph,
+      nodes: Array.from(nodesById.values()),
+      edges: Array.from(edgesByKey.values()),
+    },
+    total: page.total || previous.total,
+    offset: page.offset ?? previous.offset,
+    returnedNodeCount: Array.from(nodesById.values()).length,
+    hasMore: Boolean(page.hasMore),
+    nextOffset: page.nextOffset ?? null,
+    pagination: page.pagination,
+  };
+}
+
+async function loadWikiGraph(
+  params: WikiGraphQueryParams = currentWikiGraphQueryParams(),
+  options: { append?: boolean } = {},
+): Promise<void> {
+  const append = Boolean(options.append);
   const requestSeq = ++wikiGraphLoadSeq;
   wikiGraphLoading.value = true;
   const queryParams: Record<string, string | number> = {
     depth: params.depth ?? (params.nodeId ? 1 : 1),
     limit: 60,
+    offset: Math.max(0, Number(params.offset ?? 0)),
+    includeReview: params.includeReview === false ? 0 : 1,
   };
   if (params.nodeId) {
     queryParams.nodeId = params.nodeId;
@@ -1897,18 +2203,138 @@ async function loadWikiGraph(params: WikiGraphQueryParams = currentWikiGraphQuer
     if (requestSeq !== wikiGraphLoadSeq) {
       return;
     }
+    const page = data.data ?? null;
     wikiErrorMessage.value = "";
-    wikiGraphQueryData.value = data.data ?? null;
+    wikiGraphQueryData.value = append && page
+      ? mergeWikiGraphPage(wikiGraphQueryData.value, page)
+      : page;
+    wikiGraphHasMore.value = Boolean(page?.hasMore ?? page?.pagination?.hasMore);
+    wikiGraphNextOffset.value = page?.nextOffset
+      ?? page?.pagination?.nextOffset
+      ?? null;
     ensureWikiGraphSelection();
   } catch (error: unknown) {
     if (requestSeq === wikiGraphLoadSeq) {
       wikiErrorMessage.value = describeTransportError(error, "知识图谱查询失败。");
-      wikiGraphQueryData.value = null;
+      if (!append) {
+        wikiGraphQueryData.value = null;
+      }
     }
   } finally {
     if (requestSeq === wikiGraphLoadSeq) {
       wikiGraphLoading.value = false;
     }
+  }
+}
+
+async function loadMoreWikiGraph(): Promise<void> {
+  if (wikiGraphLoading.value || !wikiGraphHasMore.value || wikiGraphNextOffset.value === null) {
+    return;
+  }
+  await loadWikiGraph(
+    { ...currentWikiGraphQueryParams(), offset: wikiGraphNextOffset.value, includeReview: true },
+    { append: true },
+  );
+}
+
+async function loadWikiReviewQueue(): Promise<void> {
+  wikiReviewLoading.value = true;
+  wikiReviewError.value = "";
+  try {
+    const response = await apiClient.get<ApiEnvelope<{
+      relations: WikiReviewCandidate[];
+      total: number;
+      offset: number;
+      limit: number;
+      hasMore: boolean;
+      nextOffset?: number | null;
+    }>>("/story/wiki/relations/review", {
+      params: { status: "review_required", offset: 0, limit: 500 },
+    });
+    const data = unwrapEnvelope(response.data, "Story wiki relation review request failed.");
+    const payload = data.data;
+    wikiReviewQueue.value = Array.isArray(payload?.relations) ? payload.relations : [];
+    wikiReviewTotal.value = Number(payload?.total || wikiReviewQueue.value.length);
+    for (const candidate of wikiReviewQueue.value) {
+      wikiReviewDraft(candidate);
+    }
+  } catch (error: unknown) {
+    wikiReviewError.value = describeWikiAgentError(error, "无法读取关系待确认队列。");
+  } finally {
+    wikiReviewLoading.value = false;
+  }
+}
+
+function toggleWikiReviewQueue(): void {
+  wikiReviewOpen.value = !wikiReviewOpen.value;
+  if (wikiReviewOpen.value || wikiNeedsReviewCount.value > 0) {
+    void loadWikiReviewQueue();
+  }
+}
+
+async function openWikiSource(path: string): Promise<void> {
+  const normalized = String(path || "").trim().replace(/\\/g, "/");
+  if (!normalized) {
+    return;
+  }
+  try {
+    await workspaceStore.openFile(normalized);
+  } catch (error: unknown) {
+    wikiReviewError.value = describeTransportError(error, "无法打开来源文件。");
+  }
+}
+
+async function confirmWikiCandidate(candidate: WikiReviewCandidate): Promise<void> {
+  const draft = wikiReviewDraft(candidate);
+  if (!candidate.id || !candidate.fingerprint) {
+    wikiReviewError.value = "候选缺少 fingerprint，无法安全确认。";
+    return;
+  }
+  wikiReviewActionId.value = candidate.id;
+  wikiReviewError.value = "";
+  try {
+    const response = await apiClient.post<ApiEnvelope<unknown>>(
+      `/story/wiki/relations/${encodeURIComponent(candidate.id)}/confirm`,
+      {
+        expectedFingerprint: candidate.fingerprint,
+        subjectId: draft.subjectId,
+        predicate: draft.predicate,
+        objectId: draft.objectId,
+        targetSourcePath: draft.targetSourcePath,
+      },
+    );
+    unwrapEnvelope(response.data, "确认关系候选失败。");
+    await loadWiki();
+  } catch (error: unknown) {
+    wikiReviewError.value = describeWikiAgentError(error, "确认关系候选失败。");
+  } finally {
+    wikiReviewActionId.value = "";
+  }
+}
+
+async function rejectWikiCandidate(candidate: WikiReviewCandidate): Promise<void> {
+  const draft = wikiReviewDraft(candidate);
+  if (!candidate.id || !candidate.fingerprint) {
+    wikiReviewError.value = "候选缺少 fingerprint，无法安全驳回。";
+    return;
+  }
+  wikiReviewActionId.value = candidate.id;
+  wikiReviewError.value = "";
+  try {
+    const response = await apiClient.post<ApiEnvelope<unknown>>(
+      `/story/wiki/relations/${encodeURIComponent(candidate.id)}/reject`,
+      {
+        expectedFingerprint: candidate.fingerprint,
+        reason: draft.rejectReason || "other",
+        note: draft.rejectNote,
+      },
+    );
+    unwrapEnvelope(response.data, "驳回关系候选失败。");
+    await loadWiki();
+  } catch (error: unknown) {
+    wikiReviewError.value = describeWikiAgentError(error, "驳回关系候选失败。");
+  } finally {
+    wikiReviewActionId.value = "";
   }
 }
 
@@ -1920,7 +2346,10 @@ async function loadWiki(): Promise<void> {
     const data = unwrapEnvelope(response.data, "Story wiki request failed.");
     wikiData.value = data.data ?? null;
     ensureWikiSelection();
-    await loadWikiGraph({ category: selectedWikiCategory.value });
+    await Promise.all([
+      loadWikiGraph({ category: selectedWikiCategory.value, includeReview: true }),
+      loadWikiReviewQueue(),
+    ]);
   } catch (error: unknown) {
     wikiErrorMessage.value = describeTransportError(error, "无法读取知识图谱。");
   } finally {
@@ -1936,7 +2365,10 @@ async function rebuildWiki(): Promise<void> {
     const data = unwrapEnvelope(response.data, "Story wiki rebuild request failed.");
     wikiData.value = data.data ?? null;
     ensureWikiSelection();
-    await loadWikiGraph(currentWikiGraphQueryParams());
+    await Promise.all([
+      loadWikiGraph(currentWikiGraphQueryParams()),
+      loadWikiReviewQueue(),
+    ]);
   } catch (error: unknown) {
     wikiErrorMessage.value = describeTransportError(error, "知识图谱重新生成失败。");
   } finally {
@@ -1985,7 +2417,10 @@ async function applyWikiAgentWorkflowResult(payload: StoryWikiAgentWorkflowRespo
   if (payload.wiki) {
     wikiData.value = payload.wiki;
     ensureWikiSelection();
-    await loadWikiGraph(currentWikiGraphQueryParams());
+    await Promise.all([
+      loadWikiGraph(currentWikiGraphQueryParams()),
+      loadWikiReviewQueue(),
+    ]);
   }
   if (payload.fallbackUsed) {
     wikiAgentTone.value = "warning";
@@ -2063,7 +2498,10 @@ async function syncWiki(): Promise<void> {
     if (data.data) {
       wikiData.value = data.data;
       ensureWikiSelection();
-      await loadWikiGraph(currentWikiGraphQueryParams());
+      await Promise.all([
+        loadWikiGraph(currentWikiGraphQueryParams()),
+        loadWikiReviewQueue(),
+      ]);
     }
     if (previousSyncError && wikiAgentStatus.value === previousSyncError) {
       wikiAgentStatus.value = "";
@@ -2624,8 +3062,6 @@ defineExpose({
     selectedWikiRelationEdge,
     wikiGraphDegrees,
     wikiIsolatedRawGraphNodes,
-    wikiShouldLimitIsolatedNodes,
-    wikiHiddenIsolatedNodeCount,
     wikiVisibleRawGraphNodes,
     wikiGraphNodes,
     wikiGraphEdges,
@@ -2640,6 +3076,16 @@ defineExpose({
     wikiGenerationModeLabel,
     wikiUpdatedAtLabel,
     wikiNeedsReviewCount,
+    wikiGraphStats,
+    wikiGraphHasMore,
+    wikiGraphNextOffset,
+    wikiReviewQueue,
+    wikiReviewTotal,
+    wikiReviewLoading,
+    wikiReviewError,
+    wikiReviewOpen,
+    wikiReviewActionId,
+    wikiReviewDrafts,
     wikiProjectSummary,
     selectedWikiSourceLabel,
     wikiWorkflowLabel,
@@ -2698,6 +3144,13 @@ defineExpose({
     selectRelationshipNode,
     clampNumber,
     currentWikiGraphQueryParams,
+    loadWikiGraph,
+    loadMoreWikiGraph,
+    loadWikiReviewQueue,
+    toggleWikiReviewQueue,
+    openWikiSource,
+    confirmWikiCandidate,
+    rejectWikiCandidate,
     runWikiAgentWorkflow,
     pollWikiAgentJob,
     refreshPanel,
@@ -2982,6 +3435,31 @@ defineExpose({
   font-size: 11px;
   white-space: nowrap;
 }
+.ssp-wiki-load-more,
+.ssp-wiki-review-alert,
+.ssp-wiki-review-refresh {
+  border: 1px solid var(--border-ghost);
+  border-radius: 4px;
+  background: var(--bg-elevated, transparent);
+  color: var(--text-soft);
+  padding: 3px 7px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.ssp-wiki-load-more:hover,
+.ssp-wiki-review-alert:hover,
+.ssp-wiki-review-refresh:hover {
+  color: var(--accent-strong);
+  border-color: var(--accent-strong);
+}
+.ssp-wiki-load-more:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+.ssp-wiki-review-alert {
+  color: var(--warning, #c08020);
+  border-color: color-mix(in srgb, var(--warning, #c08020) 42%, transparent);
+}
 .ssp-wiki-review-alert {
   color: var(--warning);
   font-weight: 700;
@@ -3063,6 +3541,11 @@ defineExpose({
 .ssp-wiki-edge.edge-real-relation {
   stroke: color-mix(in srgb, var(--accent) 62%, transparent);
   stroke-width: 1.7;
+}
+.ssp-wiki-edge.edge-review-required {
+  stroke: var(--warning, #c08020);
+  stroke-dasharray: 6 5;
+  stroke-width: 1.8;
 }
 .ssp-wiki-edge.edge-co-occurrence {
   stroke-dasharray: 3 5;
@@ -3409,6 +3892,119 @@ defineExpose({
   margin: 0 0 8px;
   color: var(--text-muted);
   font-size: 11px;
+}
+.ssp-wiki-audit-grid {
+  display: grid;
+  grid-template-columns: minmax(84px, auto) minmax(0, 1fr);
+  gap: 4px 8px;
+  margin-top: 10px;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+.ssp-wiki-audit-grid strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-soft);
+  font-weight: 600;
+}
+.ssp-wiki-audit-grid.compact {
+  margin-top: 7px;
+}
+.ssp-wiki-source-ref-list,
+.ssp-wiki-source-ref {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+}
+.ssp-wiki-source-link {
+  justify-self: start;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--accent-strong);
+  font-size: 10px;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.ssp-wiki-source-ref blockquote {
+  margin: 0;
+  padding: 6px 8px;
+  border-left: 2px solid var(--border-subtle);
+  color: var(--text-soft);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+.ssp-wiki-review-inline-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 9px;
+}
+.ssp-wiki-review-queue {
+  padding: 10px 8px 12px;
+  border-bottom: 1px solid var(--border-ghost);
+}
+.ssp-wiki-review-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.ssp-wiki-review-refresh {
+  float: right;
+  padding: 1px 5px;
+}
+.ssp-wiki-review-card {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 9px;
+  border: 1px solid var(--border-ghost);
+  border-radius: 6px;
+  background: var(--bg-elevated, transparent);
+}
+.ssp-wiki-review-card-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-main);
+  overflow-wrap: anywhere;
+}
+.ssp-wiki-review-field {
+  display: grid;
+  gap: 3px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+.ssp-wiki-review-field input,
+.ssp-wiki-review-field select,
+.ssp-wiki-review-field textarea {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border-ghost);
+  border-radius: 4px;
+  background: var(--bg-card);
+  color: var(--text-main);
+  padding: 4px 6px;
+  font: inherit;
+}
+.ssp-wiki-review-field textarea {
+  resize: vertical;
+}
+.ssp-wiki-review-empty,
+.ssp-wiki-review-error {
+  padding: 8px 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.ssp-wiki-review-error {
+  color: var(--danger, #c53030);
+}
+.ssp-wiki-sidecar-note {
+  color: var(--text-faint);
+  font-size: 10px;
 }
 .ssp-wiki-entry-kicker {
   color: var(--accent-strong);

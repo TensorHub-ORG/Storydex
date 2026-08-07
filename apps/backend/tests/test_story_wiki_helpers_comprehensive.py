@@ -445,7 +445,21 @@ def test_relationship_snapshot_and_category_edge_cases(service, tmp_path):
     assert trust["weight"] == 1
     assert trust["evidence"] == "Alice和Bob约定互相信任"
     assert trust["sourcePath"] == "chapters/001.md"
-    assert {"level", "strength", "confidence", "polarity"}.isdisjoint(trust)
+    assert {"level", "strength", "polarity"}.isdisjoint(trust)
+    assert trust["reviewStatus"] == "confirmed"
+    assert trust["knowledgeStatus"] == "observed"
+    assert trust["confidence"] == "confirmed"
+    assert trust["sourceRefs"] == [{
+        "path": "chapters/001.md",
+        "quote": "Alice和Bob约定互相信任",
+        "role": "dynamic_relationship",
+    }]
+    assert trust["provenance"] == {
+        "origin": "dynamic_relationship_graph",
+        "extractorVersion": "storydex-relationship-graph-v1",
+    }
+    assert trust["id"].startswith("relationship:")
+    assert len(trust["fingerprint"]) == 64
 
     entries = [
         {"id": "alice", "category": "characters"},

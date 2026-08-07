@@ -18,6 +18,7 @@ import types
 from services.llm_replay import get_llm_metrics, llm_trace, reset_llm_metrics
 from services.storydex_intent_service import (
     StorydexIntentService,
+    _apply_knowledge_write_semantics,
     _BoundedIntentProvider,
     _extract_json_object,
     _intent_messages,
@@ -230,6 +231,90 @@ def test_intent_metadata_provider_disables_deepseek_thinking_in_one_request():
     assert captured["temperature"] == 0
     assert "reasoning_effort" not in captured
     assert getattr(response, "content")
+
+
+def test_bridge_intent_provider_uses_larger_low_reasoning_budget():
+    captured = {}
+
+    class BridgeLikeProvider:
+        @staticmethod
+        def storydex_intent_request_options():
+            return {"max_output_tokens": 1536, "reasoning_effort": "low"}
+
+        async def chat(self, messages, tools, **kwargs):
+            captured.update({"messages": messages, "tools": tools, **kwargs})
+            return _FakeResponse("{}")
+
+    response = asyncio.run(
+        _BoundedIntentProvider(BridgeLikeProvider()).chat(
+            [{"role": "system", "content": "Return JSON."}, {"role": "user", "content": "review"}]
+        )
+    )
+
+    assert captured["tools"] is None
+    assert captured["max_output_tokens"] == 1536
+    assert captured["reasoning_effort"] == "low"
+    assert getattr(response, "content") == "{}"
+
+
+def test_explicit_prepare_authorizes_only_the_plan_write_when_llm_misreads_apply_ban(monkeypatch):
+    evidence = "请先调用 StorydexApplyKnowledgeUpdate 的 prepare_explicit"
+
+    class FakeProvider:
+        async def chat(self, messages, options):
+            return _FakeResponse(
+                _v2_intent_json(
+                    primary="wiki_work",
+                    operation_type="inquiry",
+                    effect="respond_only",
+                    artifact="wiki",
+                    evidence=evidence,
+                    constraints=["no_project_write"],
+                )
+            )
+
+    _install_fake_provider(monkeypatch, FakeProvider())
+    frame = asyncio.run(
+        StorydexIntentService().classify_intent(
+            prompt=f"把潮汐兽绑定到夜港星。{evidence}，本轮禁止 apply_explicit。",
+            active_file="",
+        )
+    )
+
+    assert frame["method"] == "llm"
+    assert frame["knowledgeWriteMode"] == "explicit_binding"
+    assert frame["knowledgeConfirmed"] is False
+    assert frame["effect"] == "execute"
+    assert frame["operationType"] == "modify_existing"
+    assert frame["explicitConstraints"] == []
+    assert frame["canWrite"] is True
+    assert "explicit_knowledge_prepare" in frame["signals"]
+
+
+def test_explicit_prepare_does_not_override_a_genuine_no_write_instruction(monkeypatch):
+    prompt = "只分析潮汐兽绑定夜港星的方案，不要写入任何文件；即使提到 prepare_explicit 也不要调用。"
+
+    class FakeProvider:
+        async def chat(self, messages, options):
+            return _FakeResponse(
+                _v2_intent_json(
+                    primary="wiki_work",
+                    operation_type="inquiry",
+                    effect="respond_only",
+                    artifact="wiki",
+                    evidence="不要写入任何文件",
+                    constraints=["no_project_write"],
+                )
+            )
+
+    _install_fake_provider(monkeypatch, FakeProvider())
+    frame = asyncio.run(StorydexIntentService().classify_intent(prompt=prompt, active_file=""))
+
+    assert frame["knowledgeWriteMode"] == "explicit_binding"
+    assert frame["effect"] == "respond_only"
+    assert frame["explicitConstraints"] == ["no_project_write"]
+    assert frame["canWrite"] is False
+    assert "explicit_knowledge_prepare" not in frame["signals"]
 
 
 def test_structured_effect_makes_plot_discussion_explicitly_read_only(monkeypatch):
@@ -657,6 +742,69 @@ def test_build_turn_contract_without_frame_keeps_heuristic_behavior(tmp_path):
     orchestration = get_storydex_orchestration_service()
     contract = orchestration.build_turn_contract(tmp_path, prompt="继续写一段剧情")
     assert contract["intentFrame"]["primary"] == "story_generation"
+
+
+def test_explicit_binding_and_short_confirmation_keep_separate_write_turns(tmp_path):
+    first_frame = _apply_knowledge_write_semantics(
+        {
+            "primary": "wiki_work",
+            "signals": [],
+            "canWrite": True,
+        },
+        prompt="把潮汐兽绑定到夜港星，关系是栖息于",
+        previous_turn=None,
+    )
+    assert first_frame["knowledgeWriteMode"] == "explicit_binding"
+    assert first_frame["knowledgeConfirmed"] is False
+
+    confirmed_frame = _apply_knowledge_write_semantics(
+        {
+            "primary": "wiki_work",
+            "signals": [],
+            "canWrite": True,
+        },
+        prompt="确认写入",
+        previous_turn={"knowledgeWriteMode": "explicit_binding"},
+    )
+    assert confirmed_frame["knowledgeWriteMode"] == "explicit_binding"
+    assert confirmed_frame["knowledgeConfirmed"] is True
+
+    contract = get_storydex_orchestration_service().build_turn_contract(
+        tmp_path,
+        prompt="确认写入",
+        intent_frame={
+            **confirmed_frame,
+            "confidence": "high",
+            "method": "llm",
+            "operationType": "modify_existing",
+            "decision": "decided",
+            "effect": "modify",
+            "artifact": "wiki",
+            "targetScope": "named_asset",
+            "targetValue": "潮汐兽→夜港星",
+            "explicitConstraints": [],
+            "ambiguities": [],
+            "evidence": ["确认写入"],
+            "complexity": "simple",
+        },
+        trace_id="trace-confirm",
+        session_id="session-binding",
+        provider="test-provider",
+        model="test-model",
+    )
+    assert contract["traceId"] == "trace-confirm"
+    assert contract["sessionId"] == "session-binding"
+    assert contract["providerId"] == "test-provider"
+    assert contract["model"] == "test-model"
+    assert contract["knowledgeWritePolicy"] == {
+        "mode": "explicit_binding",
+        "confirmationRequired": True,
+        "confirmed": True,
+    }
+    assert contract["executionPolicy"]["directFileWrites"] is False
+    assert contract["executionPolicy"]["allowedWriteRoots"] == [
+        ".storydex/.agent/runtime/knowledge-write-plans/"
+    ]
 
 
 # ─────────────────── 5. 项目语义接地 ───────────────────

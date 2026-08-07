@@ -16,11 +16,16 @@ from core.exceptions import StorydexError
 from services.coomi_agent_service import get_storydex_coomi_agent_service
 from services.execution_coordinator import get_execution_coordinator
 from services.project_service import get_project_service
+from services.story_knowledge_relation_service import (
+    KnowledgeRelationError,
+    get_story_knowledge_relation_service,
+)
 from services.story_wiki_service import get_story_wiki_service
 
 router = APIRouter(tags=["story-wiki"])
 project_service = get_project_service()
 story_wiki_service = get_story_wiki_service()
+story_knowledge_relation_service = get_story_knowledge_relation_service()
 execution_coordinator = get_execution_coordinator()
 logger = logging.getLogger(__name__)
 
@@ -58,6 +63,8 @@ def query_story_wiki_graph(
     node_id: str = Query(default="", alias="nodeId"),
     depth: int = Query(default=1, ge=1, le=2),
     limit: int = Query(default=60, ge=1, le=120),
+    offset: int = Query(default=0, ge=0),
+    include_review: bool = Query(default=False, alias="includeReview"),
 ) -> ApiEnvelope:
     started = perf_counter()
     trace_id = str(uuid4())
@@ -69,11 +76,101 @@ def query_story_wiki_graph(
         node_id=node_id,
         depth=depth,
         limit=limit,
+        offset=offset,
+        include_review=include_review,
     )
     return success_response(
         data=data,
         trace=_build_trace(started=started, trace_id=trace_id),
         audit=[{"action": "query_story_wiki_graph", "ok": True, "mode": data.get("mode")}],
+    )
+
+
+@router.get("/story/wiki/relations/review", response_model=ApiEnvelope)
+def read_relation_review_queue(
+    status: str = Query(default="review_required"),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> ApiEnvelope:
+    started = perf_counter()
+    trace_id = str(uuid4())
+    data = story_knowledge_relation_service.list_review_relations(
+        project_service.workspace_root,
+        status=status,
+        offset=offset,
+        limit=limit,
+    )
+    return success_response(
+        data=data,
+        trace=_build_trace(started=started, trace_id=trace_id),
+        audit=[
+            {
+                "action": "read_story_wiki_relation_review",
+                "status": status,
+                "returned": len(data.get("relations") or []),
+            }
+        ],
+    )
+
+
+@router.post("/story/wiki/relations/{candidate_id}/confirm", response_model=ApiEnvelope)
+def confirm_relation_candidate(candidate_id: str, payload: Dict[str, Any]) -> ApiEnvelope:
+    started = perf_counter()
+    trace_id = str(uuid4())
+    try:
+        data = story_knowledge_relation_service.confirm_candidate(
+            project_service.workspace_root,
+            candidate_id,
+            expected_fingerprint=str(payload.get("expectedFingerprint") or ""),
+            subject_id=str(payload.get("subjectId") or ""),
+            predicate=str(payload.get("predicate") or ""),
+            object_id=str(payload.get("objectId") or ""),
+            target_source_path=str(payload.get("targetSourcePath") or ""),
+            trace_id=trace_id,
+        )
+    except KnowledgeRelationError as exc:
+        raise _relation_storydex_error(exc) from exc
+    return success_response(
+        data=data,
+        trace=_build_trace(started=started, trace_id=trace_id),
+        audit=[{"action": "confirm_story_wiki_relation", "candidateId": candidate_id, "ok": True}],
+    )
+
+
+@router.post("/story/wiki/relations/{candidate_id}/reject", response_model=ApiEnvelope)
+def reject_relation_candidate(candidate_id: str, payload: Dict[str, Any]) -> ApiEnvelope:
+    started = perf_counter()
+    trace_id = str(uuid4())
+    try:
+        data = story_knowledge_relation_service.reject_candidate(
+            project_service.workspace_root,
+            candidate_id,
+            expected_fingerprint=str(payload.get("expectedFingerprint") or ""),
+            reason=str(payload.get("reason") or ""),
+            note=str(payload.get("note") or ""),
+        )
+    except KnowledgeRelationError as exc:
+        raise _relation_storydex_error(exc) from exc
+    return success_response(
+        data=data,
+        trace=_build_trace(started=started, trace_id=trace_id),
+        audit=[
+            {
+                "action": "reject_story_wiki_relation",
+                "candidateId": candidate_id,
+                "reason": str(payload.get("reason") or ""),
+                "ok": True,
+            }
+        ],
+    )
+
+
+def _relation_storydex_error(exc: KnowledgeRelationError) -> StorydexError:
+    return StorydexError(
+        str(exc),
+        code=exc.code,
+        status_code=exc.status_code,
+        details=exc.details,
     )
 
 
@@ -343,19 +440,89 @@ async def _run_coomi_wiki_agent(
     events: List[Dict[str, Any]] = []
     completed = False
     error_message = ""
+    provider_id = ""
+    model = ""
+    usage: Dict[str, int] = {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+    }
+    tool_calls: List[Dict[str, Any]] = []
+
+    def safe_int(value: Any) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def merge_usage(raw: Any) -> None:
+        if not isinstance(raw, dict):
+            return
+        prompt_tokens = safe_int(raw.get("prompt_tokens") or raw.get("input_tokens") or raw.get("promptTokens"))
+        completion_tokens = safe_int(raw.get("completion_tokens") or raw.get("output_tokens") or raw.get("completionTokens"))
+        total_tokens = safe_int(raw.get("total_tokens") or raw.get("totalTokens") or prompt_tokens + completion_tokens)
+        usage["prompt_tokens"] = max(usage["prompt_tokens"], prompt_tokens)
+        usage["completion_tokens"] = max(usage["completion_tokens"], completion_tokens)
+        usage["total_tokens"] = max(usage["total_tokens"], total_tokens)
+        reasoning = raw.get("reasoning_tokens", raw.get("reasoningTokens"))
+        if reasoning is not None:
+            usage["reasoning_tokens"] = max(safe_int(usage.get("reasoning_tokens")), safe_int(reasoning))
+
     service = get_storydex_coomi_agent_service()
+    turn_contract = {
+        "_type": "TurnContract",
+        "_version": 1,
+        "traceId": trace_id,
+        "sessionId": session_id,
+        "intentFrame": {
+            "primary": "wiki_work",
+            "operationType": "modify_existing",
+            "decision": "decided",
+            "effect": "execute",
+            "canWrite": False,
+        },
+        "knowledgeWritePolicy": {
+            "mode": "candidate_extraction",
+            "confirmationRequired": True,
+            "confirmed": False,
+        },
+        "executionPolicy": {
+            "directFileWrites": False,
+            "allowedWriteRoots": [],
+            "remotePush": False,
+        },
+    }
     async for event_name, payload in service.stream_events(
         prompt=prompt,
         trace_id=trace_id,
         session_id=session_id,
         workspace_root=workspace_root,
         active_file="",
+        turn_contract=turn_contract,
         cancellation_token=None,
     ):
         packet = dict(payload)
         events.append({"event": event_name, "payload": packet})
         if event_name == "TextChunk":
             reply_chunks.append(str(packet.get("content") or ""))
+        elif event_name == "AgentStarted":
+            provider_id = str(packet.get("llmProvider") or packet.get("providerId") or "").strip()
+            model = str(packet.get("llmModel") or packet.get("model") or "").strip()
+        elif event_name == "ModelCompleted":
+            merge_usage(packet.get("usage"))
+            model = model or str(packet.get("responseModel") or "").strip()
+        elif event_name == "UsageUpdate":
+            merge_usage(packet.get("usage") or packet)
+        elif event_name == "ToolDone":
+            tool_call = {
+                "toolName": str(packet.get("tool_name") or packet.get("toolName") or ""),
+                "toolCallId": str(packet.get("tool_call_id") or packet.get("toolCallId") or ""),
+                "isError": bool(packet.get("is_error") or packet.get("isError")),
+                "durationMs": safe_int(packet.get("duration_ms") or packet.get("durationMs")),
+            }
+            tool_calls.append(tool_call)
+            if tool_call["isError"] and not error_message:
+                error_message = f"WIKI Agent tool failed: {tool_call['toolName'] or 'unknown tool'}"
         elif event_name == "PermissionRequest":
             approval_id = str(packet.get("approvalId") or packet.get("approval_id") or "")
             if approval_id:
@@ -363,6 +530,7 @@ async def _run_coomi_wiki_agent(
                 decision = "approve" if any(key in tool_name for key in ("read", "list", "search", "grep")) else "deny"
                 service.resolve_approval(approval_id, decision)
         elif event_name == "AgentCompleted":
+            merge_usage(packet)
             completed = True
         elif event_name == "AgentError":
             error_message = str(packet.get("message") or "Coomi Agent error")
@@ -373,4 +541,9 @@ async def _run_coomi_wiki_agent(
         "reply": "".join(reply_chunks),
         "events": events[-80:],
         "traceId": trace_id,
+        "providerId": provider_id,
+        "model": model,
+        "usage": usage,
+        "toolCalls": tool_calls,
+        "metadataRequired": True,
     }

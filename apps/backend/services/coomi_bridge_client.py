@@ -14,7 +14,25 @@ BRIDGE_PROTOCOL_VERSION = 1
 STORYDEX_COOMI_RUNTIME_VERSION = "2.0.0-storydex.2"
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 VENDORED_RUNTIME_ROOT = REPOSITORY_ROOT / "vendor" / "coomi-rs"
-STORYDEX_COOMI_HOME = Path.home() / ".storydex" / ".coomi"
+
+
+def _storydex_coomi_home_path() -> Path:
+    """Resolve the isolated Coomi home before runtime modules are imported.
+
+    Production keeps the existing user-level default. Acceptance and packaged
+    smoke runs can point a whole backend process at a temporary home without
+    changing the user's active provider or copying unrelated providers.
+    """
+
+    configured = str(os.getenv("STORYDEX_COOMI_HOME") or "").strip()
+    return (
+        Path(configured).expanduser().resolve()
+        if configured
+        else Path.home() / ".storydex" / ".coomi"
+    )
+
+
+STORYDEX_COOMI_HOME = _storydex_coomi_home_path()
 STORYDEX_COOMI_CONFIG = STORYDEX_COOMI_HOME / "config" / "providers.json"
 REASONING_EFFORTS = frozenset({"auto", "low", "medium", "high", "xhigh", "max"})
 
@@ -426,6 +444,22 @@ class BridgeProvider:
             "deadlineRatio": 1.25,
             "deadlineMinimumSeconds": 30,
             "deadlineMaximumSeconds": 60,
+        }
+
+    @staticmethod
+    def storydex_intent_request_options() -> Dict[str, Any]:
+        """Bound the one-shot Rust bridge metadata request.
+
+        Direct SDK providers use JSON mode with thinking disabled and finish
+        reliably within 384 output tokens.  The bridge protocol cannot yet
+        forward those provider-native fields; the pinned DeepSeek route needs
+        a larger cap to finish the same compact JSON object instead of
+        returning an empty, budget-exhausted completion.
+        """
+
+        return {
+            "max_output_tokens": 1536,
+            "reasoning_effort": "low",
         }
 
     async def chat(

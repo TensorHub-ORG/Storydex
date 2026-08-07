@@ -236,3 +236,64 @@ def test_scoped_write_turn_registry_exposes_only_relevant_mutators(
     if expected_domain_tool:
         assert expected_domain_tool in names
     assert forbidden_domain_tool not in names
+
+
+def test_candidate_extraction_registry_is_strictly_read_only(tmp_path):
+    from services.coomi_agent_service import _create_storydex_tool_registry
+    from services.storydex_tool_types import ToolAccess
+
+    registry = _create_storydex_tool_registry(
+        tmp_path,
+        turn_contract={
+            "intentFrame": {
+                "primary": "wiki_work",
+                "operationType": "modify_existing",
+                "decision": "decided",
+                "effect": "execute",
+                "canWrite": True,
+            },
+            "knowledgeWritePolicy": {
+                "mode": "candidate_extraction",
+                "confirmationRequired": True,
+                "confirmed": False,
+            },
+            "executionPolicy": {
+                "directFileWrites": False,
+                "allowedWriteRoots": [],
+            },
+        },
+    )
+
+    assert registry.list_tools()
+    assert all(tool.access == ToolAccess.READ_ONLY for tool in registry.list_tools())
+    assert "StorydexApplyKnowledgeUpdate" not in {tool.name for tool in registry.list_tools()}
+
+
+def test_explicit_binding_registry_exposes_only_the_domain_knowledge_mutator(tmp_path):
+    from services.coomi_agent_service import _create_storydex_tool_registry
+    from services.storydex_tool_types import ToolAccess
+
+    registry = _create_storydex_tool_registry(
+        tmp_path,
+        turn_contract={
+            "intentFrame": {
+                "primary": "wiki_work",
+                "operationType": "modify_existing",
+                "decision": "decided",
+                "effect": "modify",
+                "canWrite": True,
+            },
+            "knowledgeWritePolicy": {
+                "mode": "explicit_binding",
+                "confirmationRequired": True,
+                "confirmed": False,
+            },
+            "executionPolicy": {
+                "directFileWrites": False,
+                "allowedWriteRoots": [".storydex/.agent/runtime/knowledge-write-plans/"],
+            },
+        },
+    )
+    mutators = {tool.name for tool in registry.list_tools() if tool.access != ToolAccess.READ_ONLY}
+
+    assert mutators == {"StorydexApplyKnowledgeUpdate"}

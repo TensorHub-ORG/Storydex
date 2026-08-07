@@ -22,6 +22,7 @@ from services.storydex_intent_service import (
     _heuristic_operation_type,
     heuristic_intent_frame,
     intent_frame_allows_project_writes,
+    is_explicit_knowledge_binding_request,
     is_valid_intent_frame,
 )
 from services.story_project_service import (
@@ -78,6 +79,8 @@ class StorydexOrchestrationService:
         context_policy: ContextPolicy | None = None,
         provider: str = "",
         model: str = "",
+        trace_id: str = "",
+        session_id: str = "",
     ) -> Dict[str, Any]:
         root = Path(workspace_root).resolve()
         effective_context_policy = self._context_policy(context_policy)
@@ -511,16 +514,41 @@ class StorydexOrchestrationService:
             if can_write
             else []
         )
+        knowledge_write_mode = str(intent.get("knowledgeWriteMode") or "").strip()
+        if not knowledge_write_mode and is_explicit_knowledge_binding_request(prompt):
+            knowledge_write_mode = "explicit_binding"
+        knowledge_confirmed = bool(intent.get("knowledgeConfirmed"))
+        knowledge_write_policy = {
+            "mode": knowledge_write_mode or "standard",
+            "confirmationRequired": knowledge_write_mode == "explicit_binding",
+            "confirmed": knowledge_confirmed if knowledge_write_mode == "explicit_binding" else True,
+        }
+        direct_file_writes = can_write
+        if knowledge_write_mode == "explicit_binding":
+            # Native/generic file tools are confined to the ephemeral plan
+            # directory.  The domain tool owns all formal Markdown/facts/WIKI
+            # writes after the later confirmation turn.
+            allowed_write_roots = (
+                [".storydex/.agent/runtime/knowledge-write-plans/"]
+                if can_write
+                else []
+            )
+            direct_file_writes = False
 
         return {
             "_type": "TurnContract",
             "_version": 1,
+            "traceId": str(trace_id or ""),
+            "sessionId": str(session_id or ""),
+            "providerId": str(provider or ""),
+            "model": str(model or ""),
             "status": "needs_user_input" if requires_template else "ready",
             "intentFrame": intent,
+            "knowledgeWritePolicy": knowledge_write_policy,
             "executionPolicy": {
                 "coomiRole": "general_agent_runtime",
                 "storydexRole": "fiction_orchestration",
-                "directFileWrites": can_write,
+                "directFileWrites": direct_file_writes,
                 "pendingWriteApproval": False,
                 "localGitAutoCommit": can_write,
                 "allowedWriteRoots": allowed_write_roots,

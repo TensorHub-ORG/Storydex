@@ -504,9 +504,11 @@ class StorydexCoomiAgentService:
             )
 
         plan_mode = self._plan_modes.get(runtime_key, False)
-        # Plan mode is the only session-level read-only boundary. Intent routing
-        # metadata must never silently downgrade the runtime's permissions.
-        writes_allowed = True
+        # Normal chat stays writable unless /plan is active.  The dedicated
+        # WIKI extraction workflow is an explicit read-only contract because
+        # its model output is validated and submitted by the backend.
+        knowledge_policy = _dict_value(_dict_value(turn_contract).get("knowledgeWritePolicy"))
+        writes_allowed = str(knowledge_policy.get("mode") or "") != "candidate_extraction"
         registry = _create_storydex_tool_registry(
             workspace,
             policy=context_policy_from_turn_contract(turn_contract),
@@ -1590,6 +1592,7 @@ def _create_storydex_tool_registry(
     plan_mode: bool = False,
 ) -> StorydexToolRegistry:
     from services.storydex_agent_tools import (
+        StorydexApplyKnowledgeUpdateTool,
         StorydexApplyStoryIncrementTool,
         StorydexHelpGuideSearchTool,
         StorydexProjectSearchTool,
@@ -1616,6 +1619,7 @@ def _create_storydex_tool_registry(
     tools.extend(
         [
             StorydexSyncWikiTool(workspace_root=root),
+            StorydexApplyKnowledgeUpdateTool(workspace_root=root, turn_contract=turn_contract),
             StorydexStageStoryFragmentTool(workspace_root=root),
             StorydexApplyStoryIncrementTool(workspace_root=root, turn_contract=turn_contract),
         ]
@@ -1624,11 +1628,29 @@ def _create_storydex_tool_registry(
         tools = [tool for tool in tools if tool.access == ToolAccess.READ_ONLY]
     elif isinstance(turn_contract, dict):
         execution = _dict_value(turn_contract.get("executionPolicy"))
-        if execution.get("allowedWriteRoots"):
-            intent = _dict_value(turn_contract.get("intentFrame"))
+        knowledge_policy = _dict_value(turn_contract.get("knowledgeWritePolicy"))
+        knowledge_mode = str(knowledge_policy.get("mode") or "").strip().lower()
+        intent = _dict_value(turn_contract.get("intentFrame"))
+        if knowledge_mode == "candidate_extraction":
+            # Git/version inspection is unrelated to evidence extraction and
+            # is often unavailable in imported or isolated workspaces.
+            tools = [tool for tool in tools if tool.name != "StorydexVersionStatus"]
+            tools = [tool for tool in tools if tool.access == ToolAccess.READ_ONLY]
+        elif knowledge_mode == "explicit_binding":
+            allowed = (
+                {"StorydexApplyKnowledgeUpdate"}
+                if bool(intent.get("canWrite"))
+                else set()
+            )
+            tools = [
+                tool for tool in tools if tool.access == ToolAccess.READ_ONLY or tool.name in allowed
+            ]
+        elif execution.get("allowedWriteRoots"):
             allowed = set()
             if str(intent.get("primary") or "").lower() == "story_generation" and str(intent.get("operationType") or "").lower() == "create_new":
                 allowed.update({"StorydexStageStoryFragment", "StorydexApplyStoryIncrement"})
+            if str(intent.get("primary") or "").lower() in {"worldbook_work", "character_work", "wiki_work"}:
+                allowed.add("StorydexApplyKnowledgeUpdate")
             if str(intent.get("primary") or "").lower() == "wiki_work":
                 allowed.add("StorydexSyncWiki")
             tools = [
@@ -1670,6 +1692,11 @@ async def _build_coomi_system_prompt(
         f"Storydex workspace: {Path(workspace_root).resolve()}",
         "Inspect project evidence before acting. Preserve unrelated work and never push to a remote.",
         "Use Rust runtime tools for files, search, shell, MCP, skills, memory, planning, and sub-agents.",
+        "Only use read_skill for a Skill listed by list_skills as installed. Project-local skill documents under "
+        "`.storydex/.agent/skills/` are ordinary workspace files and must be read with read_file; if list_skills "
+        "reports no installed skills, do not call read_skill for a project skill name.",
+        "The canonical relationship graph file is `.storydex/memory/current/relationship_graph.json`; do not probe "
+        "the obsolete `.storydex/memory/relationship_graph.json` path.",
         f"Storydex domain tools available this turn: {names}.",
         "For Storydex usage questions, call StorydexHelpGuideSearch before answering.",
         "For continuity facts not present in assembled context, use StorydexProjectSearch or StorydexWikiQuery when available.",
@@ -1677,6 +1704,17 @@ async def _build_coomi_system_prompt(
             "For story creation, never write chapters with generic file tools. For any fragment longer than "
             f"{STORY_FRAGMENT_CHUNK_MAX_CHARS} characters, call StorydexStageStoryFragment once per consecutive "
             "chunk, then call StorydexApplyStoryIncrement with stagedFragmentId. Inline only shorter fragments."
+        ),
+        (
+            "For explicit knowledge bindings (绑定、关联、隶属、栖息于、位于、属于、拥有、服务于), "
+            "use StorydexApplyKnowledgeUpdate operation=prepare_explicit first. Report its exact target paths "
+            "and planId, then wait for a later user-confirmation turn before operation=apply_explicit. Never "
+            "apply in the same trace. For relation endpoints, never invent subjectId/objectId and never copy "
+            "a display name into an Id field: provide subject/object names plus their source paths when IDs are "
+            "unknown. targetSourcePath means the formal Markdown destination (normally the subject file), while "
+            "objectSourcePath means the object's source file. Relations extracted from free prose must use "
+            "submit_candidates with exact sourceRefs; they remain review_required and must not be written to "
+            "facts or formal Markdown."
         ),
         "Treat .storydex/memory as durable story state only, never as chat or execution-log storage.",
         (
@@ -1691,6 +1729,13 @@ async def _build_coomi_system_prompt(
         ),
         _render_turn_contract(turn_contract),
     ]
+    knowledge_policy = _dict_value(_dict_value(turn_contract).get("knowledgeWritePolicy"))
+    if str(knowledge_policy.get("mode") or "").strip().lower() == "candidate_extraction":
+        prompt_parts.append(
+            "This is a candidate-extraction turn: do not call shell, local_shell, apply_patch, write_file, "
+            "edit_file, or Git/version tools. Use read_file/list_dir/search for evidence and submit all relation "
+            "results only through StorydexApplyKnowledgeUpdate operation=submit_candidates."
+        )
     if plan_mode:
         prompt_parts.append(
             "Plan mode is active. Read and reason without modifying project files. "
@@ -1753,6 +1798,7 @@ def _render_turn_contract(value: Dict[str, Any] | None) -> str:
     skill_registry = _dict_value(contract.get("skillRegistry"))
     context_assembly = _dict_value(contract.get("contextAssembly"))
     update_policy = _dict_value(contract.get("updatePolicy"))
+    knowledge_write_policy = _dict_value(contract.get("knowledgeWritePolicy"))
 
     primary = str(intent.get("primary") or "general")
     confidence = str(intent.get("confidence") or "low")
@@ -1820,6 +1866,19 @@ def _render_turn_contract(value: Dict[str, Any] | None) -> str:
             f"remotePush={bool(execution.get('remotePush', False))}"
         ),
         "- permissionBoundary: only the user's /plan command activates read-only Plan mode; intent metadata cannot activate it.",
+        (
+            "- knowledgeWritePolicy: "
+            f"mode={str(knowledge_write_policy.get('mode') or 'standard')}, "
+            f"confirmationRequired={bool(knowledge_write_policy.get('confirmationRequired'))}, "
+            f"confirmed={bool(knowledge_write_policy.get('confirmed'))}; "
+            + (
+                "only apply_explicit is allowed in this later confirmation turn."
+                if bool(knowledge_write_policy.get("confirmed"))
+                else "only prepare_explicit is allowed; do not modify formal knowledge files."
+            )
+        )
+        if str(knowledge_write_policy.get("mode") or "") == "explicit_binding"
+        else "",
         f"- storyFragments: count={fragment_count}",
         f"- chapterContentMode: {chapter_content_mode}",
     ]

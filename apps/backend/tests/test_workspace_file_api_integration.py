@@ -311,7 +311,7 @@ def test_story_increment_snapshot_memory_wiki_and_sync(workspace_client):
 def test_story_wiki_projection_api_change_sequence_and_cold_rebuild(workspace_client):
     client, root, _ = workspace_client
     baseline = ok(client.get("/api/v1/story/wiki"))
-    assert baseline["schemaVersion"] == 2
+    assert baseline["schemaVersion"] == 3
     assert baseline["status"] == "ready"
 
     cards = root / ".storydex" / "characters"

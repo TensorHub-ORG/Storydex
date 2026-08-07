@@ -33,17 +33,19 @@ EXCLUDED_RELATIVE_PREFIXES = (
 ENTITY_SOURCE_PATH = ".storydex/memory/current/entities.json"
 FACT_SOURCE_PATH = ".storydex/memory/current/facts.json"
 
-WIKI_CATEGORY_SCHEMA_VERSION = "story-wiki-v6-three-lens"
-PROJECTION_SCHEMA_VERSION = 2
+WIKI_CATEGORY_SCHEMA_VERSION = "story-wiki-v7-auditable-relations"
+PROJECTION_SCHEMA_VERSION = 3
 EVIDENCE_GROUNDED_GRAPH_POLICY = {
     "mode": "evidence_grounded_local_v1",
     "agentGraphAccepted": False,
+    "agentCandidatesAccepted": True,
+    "explicitMarkdownRelationsAccepted": True,
     "coOccurrenceIsRelationship": False,
     "coOccurrenceEdgesAccepted": False,
     "unknownRelationTypesAccepted": False,
     "syntheticRelationshipMetricsAccepted": False,
 }
-KNOWLEDGE_STATUSES = {"planned", "observed", "inferred", "review_required"}
+KNOWLEDGE_STATUSES = {"planned", "observed", "inferred"}
 INTERNAL_LABEL_PREFIXES = ("entity:", "character:", "char:", "event:", "mention:", "rel:")
 PROJECTION_STATUSES = {"ready", "stale", "rebuilding", "error"}
 ALLOWED_RELATION_TYPES = {
@@ -230,6 +232,7 @@ class StoryWikiService:
 
     def read_or_build(self, workspace_root: Path, *, force: bool = False) -> Dict[str, Any]:
         root = workspace_root.resolve()
+        self._migrate_knowledge_relation_storage(root)
         self._reconcile_entity_registry(root)
         wiki_path = self.wiki_json_path(root)
         if not force and wiki_path.exists():
@@ -266,6 +269,7 @@ class StoryWikiService:
     ) -> Dict[str, Any]:
         root = workspace_root.resolve()
         self._backup_legacy_projection(root)
+        self._migrate_knowledge_relation_storage(root)
         if sources is None:
             # reconcile 可能改写 entities.json，而它本身也是被索引的来源，
             # 所以必须先归并再扫描。调用方复用扫描结果时同样要保证这个顺序。
@@ -524,6 +528,15 @@ class StoryWikiService:
             entities=entities,
             sources=sources,
         )
+        # 统一关系领域层是正式关系和候选关系的唯一适配入口。旧 facts/relationship
+        # snapshot 仍由上面的兼容路径读取；v2 关系、显式 Markdown 关联块和审阅
+        # 账本在这里补充可审计字段，避免模型返回的任意 graph 直接进入投影。
+        relation_projection_diagnostics = self._append_knowledge_relation_edges(
+            root,
+            graph_nodes,
+            graph_edges,
+            include_review=True,
+        )
 
         payload = {
             "version": 1,
@@ -548,6 +561,7 @@ class StoryWikiService:
                 "chapterFiles": len(chapter_sources),
                 "characters": len(character_names),
             },
+            "_inputDiagnostics": relation_projection_diagnostics,
         }
 
         return self._persist_payload(
@@ -566,6 +580,7 @@ class StoryWikiService:
         Agent 深度生成/更新仍由手动按钮走 run_agent_workflow，这里只保证图谱跟上文件变更。
         """
         root = workspace_root.resolve()
+        self._migrate_knowledge_relation_storage(root)
         self._reconcile_entity_registry(root)
         before = self._read_existing_payload(root)
         sources = self._collect_sources(root)
@@ -822,6 +837,8 @@ class StoryWikiService:
         }
         agent_payload: Dict[str, Any] | None = None
         deterministic_graph_refresh = normalized_workflow == "refresh_wiki_graph"
+        if not deterministic_graph_refresh and agent_runner is None:
+            raise RuntimeError("WIKI Agent workflow requires an available provider runner.")
         if agent_runner is not None and not deterministic_graph_refresh:
             try:
                 agent_result = await agent_runner(
@@ -834,19 +851,57 @@ class StoryWikiService:
                 agent_result.setdefault("traceId", trace_id)
                 agent_payload = self._extract_agent_payload(str(agent_result.get("reply") or ""))
             except Exception as exc:
-                agent_result = {
-                    "attempted": True,
-                    "completed": False,
-                    "errorMessage": str(exc),
-                    "reply": "",
-                    "events": [],
-                    "traceId": trace_id,
-                }
+                raise RuntimeError(f"WIKI Agent provider execution failed: {exc}") from exc
+
+            if not bool(agent_result.get("completed")):
+                reason = str(agent_result.get("errorMessage") or "provider did not complete the workflow")
+                raise RuntimeError(f"WIKI Agent provider execution failed: {reason}")
+            if agent_payload is None:
+                raise ValueError("WIKI Agent returned no valid structured JSON payload.")
+            self._validate_agent_candidate_payload(agent_payload, root=root)
+            if bool(agent_result.get("metadataRequired")):
+                if not str(agent_result.get("providerId") or "").strip():
+                    raise RuntimeError("WIKI Agent completed without provider metadata.")
+                if not str(agent_result.get("model") or "").strip():
+                    raise RuntimeError("WIKI Agent completed without model metadata.")
 
         before = self._read_existing_payload(root)
         status = "completed"
         fallback_used = False
         review_report: Dict[str, Any] | None = None
+        candidate_result: Dict[str, Any] | None = None
+        entity_candidate_result: Dict[str, Any] | None = None
+
+        entity_candidates = (
+            agent_payload.get("entityCandidates")
+            if isinstance(agent_payload, dict) and isinstance(agent_payload.get("entityCandidates"), list)
+            else []
+        )
+        if entity_candidates:
+            entity_candidate_result = {
+                "status": "review_required",
+                "submittedCount": len(entity_candidates),
+                "publishedCount": 0,
+                "reason": "entity_candidates_are_not_published_automatically",
+                "candidates": [dict(item) for item in entity_candidates if isinstance(item, dict)],
+            }
+
+        relation_candidates = (
+            agent_payload.get("relationCandidates")
+            if isinstance(agent_payload, dict) and isinstance(agent_payload.get("relationCandidates"), list)
+            else []
+        )
+        if relation_candidates:
+            from services.story_knowledge_relation_service import get_story_knowledge_relation_service
+
+            candidate_result = get_story_knowledge_relation_service().submit_candidates(
+                root,
+                relation_candidates,
+                trace_id=str(agent_result.get("traceId") or trace_id),
+                provider_id=str(agent_result.get("providerId") or ""),
+                model=str(agent_result.get("model") or ""),
+                extractor_version="storydex-wiki-agent-v1",
+            )
 
         if normalized_workflow == "review_wiki":
             payload = self.read_or_build(root)
@@ -877,22 +932,20 @@ class StoryWikiService:
             payload = self._annotate_payload(payload, workflow=normalized_workflow, agent_result=agent_result)
             if deterministic_graph_refresh:
                 payload["generationMode"] = "local evidence-grounded graph refresh"
-            elif incoming is None:
-                fallback_used = True
-                payload["generationMode"] = "local evidence-grounded"
 
-        if fallback_used and agent_result.get("attempted"):
-            status = "fallback"
-        elif not agent_result.get("attempted") and not deterministic_graph_refresh:
-            status = "fallback"
-
+        # Candidate submission and migration/reconciliation performed during
+        # rebuild may create authoritative memory files after the initial
+        # source scan. Persist against a fresh source set so the just-written
+        # projection is immediately current instead of forcing a spurious
+        # follow-up incremental revision on the next read.
+        projection_sources = self._collect_sources(root)
         payload = self._persist_payload(
             root,
             payload,
             workflow=normalized_workflow,
             status=status,
             agent_result=agent_result,
-            sources=sources,
+            sources=projection_sources,
             changed_paths=changed_paths,
         )
         result = {
@@ -900,6 +953,14 @@ class StoryWikiService:
             "workflow": normalized_workflow,
             "status": status,
             "traceId": agent_result.get("traceId") or trace_id,
+            "providerId": str(agent_result.get("providerId") or ""),
+            "model": str(agent_result.get("model") or ""),
+            "usage": dict(agent_result.get("usage") or {}) if isinstance(agent_result.get("usage"), dict) else {},
+            "toolCalls": [
+                dict(item)
+                for item in agent_result.get("toolCalls", [])
+                if isinstance(item, dict)
+            ],
             "agentAttempted": bool(agent_result.get("attempted")),
             "agentCompleted": bool(agent_result.get("completed")),
             "fallbackUsed": fallback_used,
@@ -914,10 +975,49 @@ class StoryWikiService:
             "errorMessage": str(agent_result.get("errorMessage") or ""),
             "wiki": payload,
         }
+        if candidate_result is not None:
+            result["candidateSubmission"] = candidate_result
+            result["writtenPaths"].extend(candidate_result.get("writtenPaths") or [])
+            result["writtenPaths"] = list(dict.fromkeys(result["writtenPaths"]))
+        if entity_candidate_result is not None:
+            result["entityCandidateSubmission"] = entity_candidate_result
         if review_report is not None:
             result["review"] = review_report
             result["writtenPaths"].append(self.review_report_path(root).relative_to(root).as_posix())
         return result
+
+    @staticmethod
+    def _validate_agent_candidate_payload(payload: Dict[str, Any], *, root: Path) -> None:
+        required_keys = {"entries", "entityCandidates", "relationCandidates", "review"}
+        missing = sorted(required_keys - set(payload))
+        if missing:
+            raise ValueError(f"WIKI Agent payload missing required field(s): {', '.join(missing)}.")
+        for key in ("entries", "entityCandidates", "relationCandidates"):
+            value = payload.get(key)
+            if not isinstance(value, list):
+                raise ValueError(f"WIKI Agent field {key} must be an array.")
+        if not isinstance(payload.get("review"), dict):
+            raise ValueError("WIKI Agent field review must be an object.")
+        graph = payload.get("graph") if isinstance(payload.get("graph"), dict) else {}
+        if graph.get("nodes") or graph.get("edges"):
+            raise ValueError("WIKI Agent must not return graph nodes or edges.")
+
+        resolved_root = root.resolve()
+        for entry in payload.get("entries", []):
+            if not isinstance(entry, dict):
+                raise ValueError("WIKI Agent entries must contain objects.")
+            source_paths = entry.get("sourcePaths") if isinstance(entry.get("sourcePaths"), list) else []
+            for raw_path in source_paths:
+                relative = str(raw_path or "").strip().replace("\\", "/").lstrip("/")
+                if not relative or ".." in Path(relative).parts:
+                    raise ValueError("WIKI Agent entry sourcePaths contains an invalid path.")
+                candidate = (resolved_root / relative).resolve()
+                try:
+                    candidate.relative_to(resolved_root)
+                except ValueError as exc:
+                    raise ValueError("WIKI Agent entry sourcePaths escapes the workspace.") from exc
+                if not candidate.is_file():
+                    raise ValueError(f"WIKI Agent entry source path does not exist: {relative}.")
 
     def wiki_root(self, workspace_root: Path) -> Path:
         return workspace_root / ".storydex" / "wiki"
@@ -1056,6 +1156,7 @@ class StoryWikiService:
                 "diagnostics",
                 "lastSuccessfulRevision",
                 "sourceStats",
+                "graphStats",
             )
             if key in payload
         }
@@ -1087,6 +1188,8 @@ class StoryWikiService:
         node_id: str = "",
         depth: int = 1,
         limit: int = 60,
+        offset: int = 0,
+        include_review: bool = False,
     ) -> Dict[str, Any]:
         root = workspace_root.resolve()
         payload = self.read_or_build(root)
@@ -1096,7 +1199,15 @@ class StoryWikiService:
         # 让缓存里旧的中文 type（如 "动机"/"定位"/"小说"）自动归一到 "character"，
         # 避免 category=characters 的节点因 type 不规范而漏出角色关系视图。
         nodes = [self._normalize_node(node) for node in graph.get("nodes", []) if isinstance(node, dict)]
-        edges = [self._normalize_graph_edge(edge) for edge in graph.get("edges", []) if isinstance(edge, dict)]
+        all_edges = [self._normalize_graph_edge(edge) for edge in graph.get("edges", []) if isinstance(edge, dict)]
+        edges = list(all_edges)
+        if not include_review:
+            edges = [
+                edge
+                for edge in edges
+                if str(edge.get("reviewStatus") or "confirmed") != "review_required"
+                and not bool(edge.get("needsReview"))
+            ]
         category_labels = payload.get("categoryLabels") if isinstance(payload.get("categoryLabels"), dict) else CATEGORY_LABELS
 
         entry_by_id = {
@@ -1109,12 +1220,24 @@ class StoryWikiService:
             for node in nodes
             if str(node.get("id") or "").strip()
         }
+        all_valid_edges = [
+            edge
+            for edge in all_edges
+            if str(edge.get("source") or "") in node_by_id
+            and str(edge.get("target") or "") in node_by_id
+            and str(edge.get("source") or "") != str(edge.get("target") or "")
+        ]
         valid_edges = [
             edge
             for edge in edges
             if str(edge.get("source") or "") in node_by_id
             and str(edge.get("target") or "") in node_by_id
             and str(edge.get("source") or "") != str(edge.get("target") or "")
+        ]
+        all_content_edges = [
+            edge
+            for edge in all_valid_edges
+            if not self._wiki_edge_touches_hub(edge, node_by_id)
         ]
         content_edges = [
             edge
@@ -1124,6 +1247,7 @@ class StoryWikiService:
 
         max_depth = max(1, min(2, self._safe_int(depth, fallback=1)))
         max_items = max(1, min(120, self._safe_int(limit, fallback=60)))
+        page_offset = max(0, self._safe_int(offset, fallback=0))
         normalized_q = str(q or "").strip()
         raw_category = str(category or "").strip()
         # 旧 URL 与旧缓存里的 relationships/chapters 等分类在这里归一到三视图。
@@ -1181,12 +1305,15 @@ class StoryWikiService:
                     normalized_node_id=normalized_node_id,
                     max_depth=max_depth,
                     max_items=max_items,
+                    offset=page_offset,
                     entries=entries,
                     entry_by_id=entry_by_id,
                     nodes=nodes,
                     valid_edges=content_edges,
+                    stats_edges=all_content_edges,
                     category_labels=category_labels,
                     allow_agent_relationship_aliases=self._allows_agent_relationship_aliases(payload),
+                    include_review=include_review,
                 ),
             )
         else:
@@ -1201,12 +1328,15 @@ class StoryWikiService:
                     normalized_node_id=normalized_node_id,
                     max_depth=max_depth,
                     max_items=max_items,
+                    offset=page_offset,
                     entries=entries,
                     entry_by_id=entry_by_id,
                     nodes=nodes,
                     valid_edges=content_edges,
+                    stats_edges=all_content_edges,
                     category_labels=category_labels,
                     allow_agent_relationship_aliases=self._allows_agent_relationship_aliases(payload),
+                    include_review=include_review,
                 ),
             )
 
@@ -1220,7 +1350,9 @@ class StoryWikiService:
             current_id
             for current_id in node_by_id
             if current_id in selected_node_ids and not self._is_wiki_hub_node(node_by_id[current_id])
-        ][:max_items]
+        ]
+        all_ordered_node_ids = list(ordered_node_ids)
+        ordered_node_ids = ordered_node_ids[page_offset : page_offset + max_items]
         visible_node_ids = set(ordered_node_ids)
         visible_edges = [
             edge
@@ -1230,7 +1362,7 @@ class StoryWikiService:
         ][:max_items]
 
         if matched_entry_ids:
-            visible_entry_ids = matched_entry_ids[:max_items]
+            visible_entry_ids = matched_entry_ids[page_offset : page_offset + max_items]
         else:
             visible_entry_ids = []
             for current_id in ordered_node_ids:
@@ -1240,6 +1372,11 @@ class StoryWikiService:
                 if len(visible_entry_ids) >= max_items:
                     break
 
+        stats = self._graph_stats(
+            [self._wiki_content_node(node_by_id[current_id]) for current_id in all_ordered_node_ids],
+            all_content_edges,
+            entry_count=len(matched_entry_ids) if matched_entry_ids else len(all_ordered_node_ids),
+        )
         return self._attach_projection_metadata(payload, {
             "mode": mode,
             "query": normalized_q,
@@ -1248,17 +1385,29 @@ class StoryWikiService:
             "nodeId": normalized_node_id,
             "depth": max_depth,
             "limit": max_items,
+            "offset": page_offset,
+            "includeReview": include_review,
+            "returnedNodeCount": len(ordered_node_ids),
+            "hasMore": page_offset + len(ordered_node_ids) < len(all_ordered_node_ids),
+            "nextOffset": (
+                page_offset + len(ordered_node_ids)
+                if page_offset + len(ordered_node_ids) < len(all_ordered_node_ids)
+                else None
+            ),
             "entries": [entry_by_id[entry_ref] for entry_ref in visible_entry_ids if entry_ref in entry_by_id],
             "graph": {
                 "nodes": [self._wiki_content_node(node_by_id[current_id]) for current_id in ordered_node_ids],
                 "edges": visible_edges,
             },
-            "matchedEntryIds": matched_entry_ids[:max_items],
-            "total": {
-                "entryCount": len(visible_entry_ids),
-                "nodeCount": len(ordered_node_ids),
-                "edgeCount": len(visible_edges),
-            },
+            "matchedEntryIds": matched_entry_ids[page_offset : page_offset + max_items],
+            "total": stats,
+            "graphStats": stats,
+            "pagination": self._pagination_payload(
+                offset=page_offset,
+                limit=max_items,
+                returned_count=len(ordered_node_ids),
+                total_count=len(all_ordered_node_ids),
+            ),
         })
 
     def changed_source_paths(
@@ -1921,11 +2070,7 @@ class StoryWikiService:
                         scope="edge",
                         index=index,
                     ))
-                unsupported_metrics = [
-                    key
-                    for key in ("level", "strength", "confidence", "polarity")
-                    if key in edge
-                ]
+                unsupported_metrics = self._unsupported_relationship_metrics(edge)
                 if unsupported_metrics:
                     diagnostics.append(self._graph_diagnostic(
                         "graph.edge.synthetic_relationship_metric",
@@ -1964,6 +2109,14 @@ class StoryWikiService:
                         index=index,
                     ))
             elif edge_type == "fact":
+                formal_grounded = bool(
+                    root is not None
+                    and self._formal_relation_edge_is_grounded(
+                        root,
+                        edge,
+                        nodes=nodes,
+                    )
+                )
                 grounded = bool(
                     self._grounded_evidence_source_path(
                         root,
@@ -1972,7 +2125,7 @@ class StoryWikiService:
                         sources=evidence_sources,
                     )
                 ) if root is not None else bool(edge.get("evidence") and edge.get("sourcePath"))
-                if not grounded:
+                if not grounded and not formal_grounded:
                     diagnostics.append(self._graph_diagnostic(
                         "graph.edge.ungrounded_fact",
                         f"事实边 {source} -> {target} 没有可核对证据。",
@@ -1980,7 +2133,7 @@ class StoryWikiService:
                         scope="edge",
                         index=index,
                     ))
-                elif not self._edge_evidence_anchors_endpoints(
+                elif not formal_grounded and not self._edge_evidence_anchors_endpoints(
                     root,
                     edge,
                     nodes=nodes,
@@ -2108,6 +2261,16 @@ class StoryWikiService:
             "lastSuccessfulRevision": revision,
         }
         payload["sourceStats"] = self._source_stats(payload, sources)
+        payload_graph = payload.get("graph") if isinstance(payload.get("graph"), dict) else {}
+        payload["graphStats"] = self._graph_stats(
+            [node for node in payload_graph.get("nodes", []) if isinstance(node, dict)],
+            [edge for edge in payload_graph.get("edges", []) if isinstance(edge, dict)],
+            entry_count=sum(
+                1
+                for entry in payload.get("entries", [])
+                if isinstance(entry, dict) and str(entry.get("category") or "") != "overview"
+            ),
+        )
         payload["graphChecksum"] = self._graph_checksum(payload)
         return payload
 
@@ -2162,6 +2325,14 @@ class StoryWikiService:
                 "attempted": bool(agent_result.get("attempted")),
                 "completed": bool(agent_result.get("completed")),
                 "traceId": str(agent_result.get("traceId") or ""),
+                "providerId": str(agent_result.get("providerId") or ""),
+                "model": str(agent_result.get("model") or ""),
+                "usage": dict(agent_result.get("usage") or {}) if isinstance(agent_result.get("usage"), dict) else {},
+                "toolCalls": [
+                    dict(item)
+                    for item in agent_result.get("toolCalls", [])
+                    if isinstance(item, dict)
+                ],
                 "errorMessage": str(agent_result.get("errorMessage") or ""),
                 "eventCount": len(agent_result.get("events") or []),
             }
@@ -2170,11 +2341,28 @@ class StoryWikiService:
             payload,
             self.validate_graph_invariants(payload, root=root, source_documents=sources),
         )
+        input_diagnostics = (
+            [dict(item) for item in payload.get("_inputDiagnostics", []) if isinstance(item, dict)]
+            if isinstance(payload.get("_inputDiagnostics"), list)
+            else []
+        )
+        payload.pop("_inputDiagnostics", None)
         diagnostics = [
             *self.validate_graph_invariants(payload, root=root, source_documents=sources),
             *quarantine_notes,
+            *input_diagnostics,
         ]
         payload["sourceStats"] = self._source_stats(payload, sources)
+        payload_graph = payload.get("graph") if isinstance(payload.get("graph"), dict) else {}
+        payload["graphStats"] = self._graph_stats(
+            [node for node in payload_graph.get("nodes", []) if isinstance(node, dict)],
+            [edge for edge in payload_graph.get("edges", []) if isinstance(edge, dict)],
+            entry_count=sum(
+                1
+                for entry in payload.get("entries", [])
+                if isinstance(entry, dict) and str(entry.get("category") or "") != "overview"
+            ),
+        )
         payload["graphChecksum"] = self._graph_checksum(payload)
         if self._has_blocking_diagnostics(diagnostics):
             last_successful_revision = previous_revision
@@ -2218,8 +2406,7 @@ class StoryWikiService:
             status=status,
             changed_paths=changed_paths,
         )
-        self._write_projection_bundle(root, payload=payload, index_payload=index_payload)
-        self._write_json_atomic(self.projection_status_path(root), {
+        projection_status = {
             "schemaVersion": PROJECTION_SCHEMA_VERSION,
             "status": "ready",
             "diagnostics": diagnostics,
@@ -2229,7 +2416,13 @@ class StoryWikiService:
             "sourceSetChecksum": source_checksum,
             "graphChecksum": payload["graphChecksum"],
             "updatedAt": datetime.now(timezone.utc).isoformat(),
-        })
+        }
+        self._write_projection_bundle(
+            root,
+            payload=payload,
+            index_payload=index_payload,
+            status_payload=projection_status,
+        )
         return payload
 
     def _write_projection_bundle(
@@ -2238,16 +2431,21 @@ class StoryWikiService:
         *,
         payload: Dict[str, Any],
         index_payload: Dict[str, Any],
+        status_payload: Dict[str, Any],
     ) -> None:
         targets = {
             self.wiki_json_path(root): json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
             self.wiki_markdown_path(root): self._render_markdown(payload),
             self.wiki_index_path(root): json.dumps(index_payload, ensure_ascii=False, indent=2) + "\n",
+            self.projection_status_path(root): json.dumps(status_payload, ensure_ascii=False, indent=2) + "\n",
         }
         temporary_paths: Dict[Path, Path] = {}
+        originals: Dict[Path, bytes | None] = {}
+        committed: List[Path] = []
         try:
             for target, content in targets.items():
                 target.parent.mkdir(parents=True, exist_ok=True)
+                originals[target] = target.read_bytes() if target.exists() else None
                 temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
                 with temporary.open("w", encoding="utf-8", newline="\n") as stream:
                     stream.write(content)
@@ -2256,6 +2454,29 @@ class StoryWikiService:
                 temporary_paths[target] = temporary
             for target, temporary in temporary_paths.items():
                 os.replace(temporary, target)
+                committed.append(target)
+        except Exception:
+            for target in reversed(committed):
+                original = originals.get(target)
+                try:
+                    if original is None:
+                        target.unlink(missing_ok=True)
+                        continue
+                    restore = target.with_name(f".{target.name}.{uuid4().hex}.restore")
+                    try:
+                        with restore.open("wb") as stream:
+                            stream.write(original)
+                            stream.flush()
+                            os.fsync(stream.fileno())
+                        os.replace(restore, target)
+                    finally:
+                        restore.unlink(missing_ok=True)
+                except Exception:
+                    if original is None:
+                        target.unlink(missing_ok=True)
+                    else:
+                        target.write_bytes(original)
+            raise
         finally:
             for temporary in temporary_paths.values():
                 try:
@@ -2353,6 +2574,18 @@ class StoryWikiService:
         except Exception:
             return None
 
+    @staticmethod
+    def _migrate_knowledge_relation_storage(root: Path) -> Dict[str, Any]:
+        """Upgrade legacy entity/fact memory before any projection reads it.
+
+        Migration is idempotent and owns its own pre-migration backup.  Errors
+        deliberately propagate so callers keep the previous WIKI bundle instead
+        of publishing a projection built from partially upgraded state.
+        """
+        from services.story_knowledge_relation_service import get_story_knowledge_relation_service
+
+        return get_story_knowledge_relation_service().migrate_v1(root)
+
     def _backup_legacy_projection(self, root: Path) -> None:
         previous = self._read_existing_payload(root)
         if previous is None or self._has_current_category_schema(previous):
@@ -2437,10 +2670,16 @@ class StoryWikiService:
             "category 只允许三类: characters(角色)、plot(剧情)、setting(设定)。"
             "章节/事件/时间线归入 plot；世界/地点/物品/势力/伏笔归入 setting；"
             "角色关系是角色图里的连线，不要单列 relationships 分类；不要输出其他 category。\n"
-            "图结构由后端从实体注册表、角色档案和逐字可核对证据中确定性生成；你不得新增节点或边，graph 必须返回空数组。\n"
+            "图结构由后端从实体注册表、正式 Markdown、facts 和审阅账本确定性生成；你不得返回 graph.nodes/edges。\n"
             "不要根据同章出现、常见剧情套路、姓氏、身份或语气推断人物关系。没有明示证据就保持沉默。\n"
-            "输出 JSON schema: {summary, entries:[{id,title,category,categoryLabel,summary,details,sourcePaths,confidence,needsReview}], "
-            "graph:{nodes:[],edges:[]}, review:{issues,recommendations}}。\n"
+            "正文中发现的关系只能放入 relationCandidates，绝不能作为 confirmed fact。每个关系候选必须包含"
+            " subjectId/subject、predicate、objectId/object、knowledgeStatus、confidence，以及逐字 sourceRefs"
+            "[{path,quote,lineStart?,lineEnd?,role}]。否定和假设不要输出；传闻最多输出 knowledgeStatus=inferred。\n"
+            "新实体只能放入 entityCandidates；后端不会自动发布实体候选，应说明来源与未发布原因。\n"
+            "输出必须是且只能是这个顶层 JSON 契约："
+            "{\"entries\":[],\"entityCandidates\":[],\"relationCandidates\":[],\"review\":{}}。"
+            "entries 项允许字段 {id,title,category,categoryLabel,summary,details,sourcePaths,confidence,needsReview}；"
+            "review 可包含 issues/recommendations。\n"
             "只返回 existingWiki 或源清单能够映射到的 entry id；sourcePaths 必须引用真实项目相对路径；不确定事实必须 needsReview=true。\n"
             "如果发现旧 WIKI 中有高质量内容且相关源文件未变化，应保留其 id 和摘要，只补充必要的新证据。\n"
             f"changedSourcePaths: {json.dumps(list(changed_paths), ensure_ascii=False)}\n"
@@ -2636,15 +2875,34 @@ class StoryWikiService:
 
     def _normalize_graph_edge(self, item: Dict[str, Any]) -> Dict[str, Any]:
         edge: Dict[str, Any] = {
+            "id": str(item.get("id") or ""),
             "source": str(item.get("source") or ""),
             "target": str(item.get("target") or ""),
             "label": str(item.get("label") or item.get("type") or "\u5173\u8054"),
+            "predicate": str(item.get("predicate") or item.get("label") or ""),
             "type": str(item.get("type") or "related"),
             "weight": int(item.get("weight") or 1),
             "evidence": str(item.get("evidence") or ""),
             "sourcePath": str(item.get("sourcePath") or item.get("source_path") or ""),
             "needsReview": bool(item.get("needsReview", False)),
         }
+        review_status = str(item.get("reviewStatus") or "").strip()
+        if review_status in {"confirmed", "review_required", "rejected", "superseded"}:
+            edge["reviewStatus"] = review_status
+            edge["needsReview"] = review_status == "review_required"
+        knowledge_status = str(item.get("knowledgeStatus") or "").strip()
+        if knowledge_status in KNOWLEDGE_STATUSES:
+            edge["knowledgeStatus"] = knowledge_status
+        source_refs = item.get("sourceRefs") if isinstance(item.get("sourceRefs"), list) else []
+        if source_refs:
+            edge["sourceRefs"] = [dict(ref) for ref in source_refs if isinstance(ref, dict)]
+        provenance = item.get("provenance") if isinstance(item.get("provenance"), dict) else {}
+        if provenance:
+            edge["provenance"] = dict(provenance)
+        for key in ("traceId", "fingerprint"):
+            value = str(item.get(key) or "").strip()
+            if value:
+                edge[key] = value
         if item.get("confidence") is not None:
             edge["confidence"] = self._confidence(item.get("confidence"))
         if item.get("coOccurrence"):
@@ -2735,6 +2993,86 @@ class StoryWikiService:
             return 0.68
         return max(0.0, min(1.0, number))
 
+    @staticmethod
+    def _pagination_payload(
+        *,
+        offset: int,
+        limit: int,
+        returned_count: int,
+        total_count: int,
+        consumed_count: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        normalized_offset = max(0, int(offset))
+        normalized_limit = max(1, int(limit))
+        normalized_total = max(0, int(total_count))
+        returned = max(0, int(returned_count))
+        consumed = max(0, int(consumed_count if consumed_count is not None else returned))
+        has_more = normalized_offset + consumed < normalized_total
+        return {
+            "offset": normalized_offset,
+            "limit": normalized_limit,
+            "returnedNodeCount": returned,
+            "hasMore": has_more,
+            "nextOffset": normalized_offset + consumed if has_more else None,
+        }
+
+    @staticmethod
+    def _graph_stats(
+        nodes: Sequence[Dict[str, Any]],
+        edges: Sequence[Dict[str, Any]],
+        *,
+        entry_count: Optional[int] = None,
+    ) -> Dict[str, int]:
+        content_nodes = [
+            node
+            for node in nodes
+            if isinstance(node, dict)
+            and str(node.get("id") or "")
+            and str(node.get("type") or "") != "project"
+            and not bool(node.get("synthetic"))
+        ]
+        node_ids = {str(node.get("id") or "") for node in content_nodes}
+        graph_edges = [
+            edge
+            for edge in edges
+            if isinstance(edge, dict)
+            and str(edge.get("source") or "")
+            and str(edge.get("target") or "")
+            and not bool(edge.get("coOccurrence"))
+            and not bool(edge.get("synthetic"))
+            and str(edge.get("source") or "") in node_ids
+            and str(edge.get("target") or "") in node_ids
+        ]
+        semantic_edges = [
+            edge
+            for edge in graph_edges
+            if str(edge.get("type") or "").strip().lower() in {"relationship", "fact"}
+        ]
+        confirmed_edges = [
+            edge
+            for edge in semantic_edges
+            if str(edge.get("reviewStatus") or "confirmed") == "confirmed"
+            and not bool(edge.get("needsReview"))
+        ]
+        connected = {
+            endpoint
+            for edge in confirmed_edges
+            for endpoint in (str(edge.get("source") or ""), str(edge.get("target") or ""))
+            if endpoint
+        }
+        isolated = [node for node in content_nodes if str(node.get("id") or "") not in connected]
+        return {
+            "entryCount": max(0, int(entry_count if entry_count is not None else len(content_nodes))),
+            "nodeCount": len(content_nodes),
+            "edgeCount": len(semantic_edges),
+            "confirmedEdgeCount": len(confirmed_edges),
+            "reviewRequiredEdgeCount": sum(
+                1 for edge in semantic_edges if str(edge.get("reviewStatus") or "") == "review_required" or bool(edge.get("needsReview"))
+            ),
+            "connectedNodeCount": len(connected & {str(node.get("id") or "") for node in content_nodes}),
+            "isolatedNodeCount": len(isolated),
+        }
+
     def _query_wiki_category_graph(
         self,
         category: str,
@@ -2745,12 +3083,15 @@ class StoryWikiService:
         normalized_node_id: str,
         max_depth: int,
         max_items: int,
+        offset: int = 0,
         entries: Sequence[Dict[str, Any]],
         entry_by_id: Dict[str, Dict[str, Any]],
         nodes: Sequence[Dict[str, Any]],
         valid_edges: Sequence[Dict[str, Any]],
+        stats_edges: Sequence[Dict[str, Any]] | None = None,
         category_labels: Dict[str, Any],
         allow_agent_relationship_aliases: bool = False,
+        include_review: bool = False,
     ) -> Dict[str, Any]:
         if category == "characters":
             return self._query_wiki_relationship_graph(
@@ -2761,19 +3102,23 @@ class StoryWikiService:
                 normalized_node_id=normalized_node_id,
                 max_depth=max_depth,
                 max_items=max_items,
+                offset=offset,
                 entries=entries,
                 entry_by_id=entry_by_id,
                 nodes=nodes,
                 valid_edges=valid_edges,
+                stats_edges=stats_edges,
                 category_labels=category_labels,
                 allow_agent_relationship_aliases=allow_agent_relationship_aliases,
+                include_review=include_review,
             )
         category_entries = [
             entry
             for entry in entries
             if str(entry.get("category") or "") == category and str(entry.get("id") or "")
         ]
-        matched_entry_ids = [str(entry.get("id") or "") for entry in category_entries][:max_items]
+        all_matched_entry_ids = [str(entry.get("id") or "") for entry in category_entries]
+        matched_entry_ids = all_matched_entry_ids[max(0, offset) : max(0, offset) + max_items]
 
         # \u5206\u7c7b\u4e3b\u4f53\u8282\u70b9\uff1acategory \u547d\u4e2d\u6216\u6240\u5c5e\u6761\u76ee category \u547d\u4e2d\uff0c\u4e0d\u518d\u6302\u5206\u7c7b hub\u3002
         primary_nodes: List[Dict[str, Any]] = []
@@ -2790,7 +3135,9 @@ class StoryWikiService:
                 continue
             primary_nodes.append(self._wiki_content_node(node))
             primary_ids.add(node_id)
-        primary_nodes = primary_nodes[:max_items]
+        all_primary_nodes = list(primary_nodes)
+        all_primary_ids = {str(node.get("id") or "") for node in all_primary_nodes}
+        primary_nodes = all_primary_nodes[max(0, offset) : max(0, offset) + max_items]
         primary_ids = {str(node.get("id") or "") for node in primary_nodes}
 
         # \u4e00\u8df3\u8de8\u7c7b\u90bb\u5c45\uff1a\u8865\u5168"\u7ae0\u8282\u91cc\u51fa\u573a\u4e86\u8c01 / \u8bbe\u5b9a\u5173\u8054\u4ec0\u4e48\u4e8b\u4ef6"\u8fd9\u7c7b\u8de8\u7c7b\u4e0a\u4e0b\u6587\uff0c
@@ -2828,13 +3175,34 @@ class StoryWikiService:
         visible_edges = [
             edge
             for edge in valid_edges
-            if str(edge.get("source") or "") in visible_node_ids
-            and str(edge.get("target") or "") in visible_node_ids
-            and (str(edge.get("source") or "") in primary_ids or str(edge.get("target") or "") in primary_ids)
+            if (
+                (
+                    str(edge.get("source") or "") in visible_node_ids
+                    and str(edge.get("target") or "") in visible_node_ids
+                )
+                or (
+                    str(edge.get("type") or "").strip().lower() in {"relationship", "fact"}
+                    and str(edge.get("source") or "") in all_primary_ids
+                    and str(edge.get("target") or "") in all_primary_ids
+                    and (
+                        str(edge.get("source") or "") in primary_ids
+                        or str(edge.get("target") or "") in primary_ids
+                    )
+                )
+            )
+            and (
+                str(edge.get("source") or "") in primary_ids
+                or str(edge.get("target") or "") in primary_ids
+            )
         ][:max_items * 2]
 
         graph_nodes = [*primary_nodes, *neighbor_nodes][:max_items]
 
+        stats = self._graph_stats(
+            [self._wiki_content_node(node) for node in all_primary_nodes],
+            stats_edges if stats_edges is not None else valid_edges,
+            entry_count=len(all_matched_entry_ids),
+        )
         return {
             "mode": "category",
             "query": normalized_q,
@@ -2843,17 +3211,30 @@ class StoryWikiService:
             "nodeId": normalized_node_id,
             "depth": max_depth,
             "limit": max_items,
+            "offset": max(0, offset),
+            "includeReview": include_review,
+            "returnedNodeCount": len(graph_nodes),
+            "hasMore": max(0, offset) + len(primary_nodes) < len(all_primary_nodes),
+            "nextOffset": (
+                max(0, offset) + len(primary_nodes)
+                if max(0, offset) + len(primary_nodes) < len(all_primary_nodes)
+                else None
+            ),
             "entries": [entry_by_id[entry_ref] for entry_ref in matched_entry_ids if entry_ref in entry_by_id],
             "graph": {
                 "nodes": graph_nodes,
                 "edges": visible_edges,
             },
             "matchedEntryIds": matched_entry_ids,
-            "total": {
-                "entryCount": len(matched_entry_ids),
-                "nodeCount": len(graph_nodes),
-                "edgeCount": len(visible_edges),
-            },
+            "total": stats,
+            "graphStats": stats,
+            "pagination": self._pagination_payload(
+                offset=max(0, offset),
+                limit=max_items,
+                returned_count=len(graph_nodes),
+                total_count=len(all_primary_nodes),
+                consumed_count=len(primary_nodes),
+            ),
         }
 
     def _query_wiki_relationship_graph(
@@ -2866,12 +3247,15 @@ class StoryWikiService:
         normalized_node_id: str,
         max_depth: int,
         max_items: int,
+        offset: int = 0,
         entries: Sequence[Dict[str, Any]],
         entry_by_id: Dict[str, Dict[str, Any]],
         nodes: Sequence[Dict[str, Any]],
         valid_edges: Sequence[Dict[str, Any]],
+        stats_edges: Sequence[Dict[str, Any]] | None = None,
         category_labels: Dict[str, Any],
         allow_agent_relationship_aliases: bool = False,
+        include_review: bool = False,
     ) -> Dict[str, Any]:
         """角色关系视图只发布已知角色之间、可逐字核对证据的显式关系。"""
         category_entries = [
@@ -2893,27 +3277,41 @@ class StoryWikiService:
         # 持久化的图已经过发布闸门，默认路径只读只过滤，不再为每次查询全量重扫项目。
         # 只有 Agent 别名归一分支才需要回读源文件做逐字核对。
         source_cache = self._collect_sources(root) if allow_agent_relationship_aliases else []
-        grounded_edges: List[Dict[str, Any]] = []
-        for edge in valid_edges:
-            if (
-                str(edge.get("source") or "") not in node_by_id
-                or str(edge.get("target") or "") not in node_by_id
-            ):
-                continue
-            if str(edge.get("type") or "").strip().lower() == "relationship":
-                if self._is_query_visible_relationship_edge(edge):
-                    grounded_edges.append(edge)
-                continue
-            if not allow_agent_relationship_aliases:
-                continue
-            normalized_edge = self._normalize_agent_relationship_alias(
-                root,
-                edge,
-                nodes=character_nodes,
-                sources=source_cache,
-            )
-            if normalized_edge is not None:
-                grounded_edges.append(normalized_edge)
+        def collect_grounded(source_edges: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            collected: List[Dict[str, Any]] = []
+            for edge in source_edges:
+                if (
+                    str(edge.get("source") or "") not in node_by_id
+                    or str(edge.get("target") or "") not in node_by_id
+                ):
+                    continue
+                if str(edge.get("type") or "").strip().lower() == "relationship":
+                    if self._is_query_visible_relationship_edge(edge):
+                        collected.append(edge)
+                    continue
+                # v3 的通用关系以 auditable fact edge 表示；候选是否显示由
+                # includeReview 控制，但完整统计始终基于未过滤集合。
+                if (
+                    str(edge.get("type") or "").strip().lower() == "fact"
+                    and str(edge.get("reviewStatus") or "") in {"confirmed", "review_required"}
+                    and str(edge.get("predicate") or edge.get("label") or "").strip()
+                ):
+                    collected.append(edge)
+                    continue
+                if not allow_agent_relationship_aliases:
+                    continue
+                normalized_edge = self._normalize_agent_relationship_alias(
+                    root,
+                    edge,
+                    nodes=character_nodes,
+                    sources=source_cache,
+                )
+                if normalized_edge is not None:
+                    collected.append(normalized_edge)
+            return collected
+
+        grounded_edges = collect_grounded(valid_edges)
+        stats_grounded_edges = collect_grounded(stats_edges if stats_edges is not None else valid_edges)
 
         if allow_agent_relationship_aliases:
             graph_edges = self._merge_relationship_snapshot_edges(
@@ -2922,38 +3320,59 @@ class StoryWikiService:
                 existing_edges=grounded_edges,
                 allow_new_nodes=False,
                 sources=source_cache,
-            )[: max_items * 2]
+            )
+            stats_grounded_edges = self._merge_relationship_snapshot_edges(
+                root,
+                nodes=character_nodes,
+                existing_edges=stats_grounded_edges,
+                allow_new_nodes=False,
+                sources=source_cache,
+            )
         else:
-            graph_edges = grounded_edges[: max_items * 2]
+            graph_edges = grounded_edges
 
         # 有关系的角色排前面，孤立角色殿后，超出预算的孤立角色裁掉。
         connected_ids: set[str] = set()
-        for edge in graph_edges:
+        for edge in stats_grounded_edges:
+            if str(edge.get("reviewStatus") or "confirmed") != "confirmed" or bool(edge.get("needsReview")):
+                continue
             connected_ids.add(str(edge.get("source") or ""))
             connected_ids.add(str(edge.get("target") or ""))
-        ordered_nodes = [
+        all_ordered_nodes = [
             *[node for node in character_nodes if str(node.get("id") or "") in connected_ids],
             *[node for node in character_nodes if str(node.get("id") or "") not in connected_ids],
-        ][:max_items]
+        ]
+        ordered_nodes = all_ordered_nodes[max(0, offset) : max(0, offset) + max_items]
         visible_ids = {str(node.get("id") or "") for node in ordered_nodes}
         graph_edges = [
             edge
             for edge in graph_edges
-            if str(edge.get("source") or "") in visible_ids
-            and str(edge.get("target") or "") in visible_ids
-        ]
+            if (
+                str(edge.get("source") or "") in visible_ids
+                and str(edge.get("target") or "") in visible_ids
+            )
+            or (
+                str(edge.get("type") or "").strip().lower() in {"relationship", "fact"}
+                and str(edge.get("source") or "") in node_by_id
+                and str(edge.get("target") or "") in node_by_id
+                and (
+                    str(edge.get("source") or "") in visible_ids
+                    or str(edge.get("target") or "") in visible_ids
+                )
+            )
+        ][: max_items * 2]
 
         matched_entry_ids: List[str] = []
-        for entry in category_entries:
-            entry_ref = str(entry.get("id") or "").strip()
-            if entry_ref and entry_ref not in matched_entry_ids:
-                matched_entry_ids.append(entry_ref)
         for node in ordered_nodes:
             entry_ref = str(node.get("entryId") or "").strip()
             if entry_ref in entry_by_id and entry_ref not in matched_entry_ids:
                 matched_entry_ids.append(entry_ref)
-        matched_entry_ids = matched_entry_ids[:max_items]
 
+        stats = self._graph_stats(
+            [self._wiki_content_node(node) for node in all_ordered_nodes],
+            stats_grounded_edges,
+            entry_count=len(category_entries),
+        )
         return {
             "mode": "category",
             "query": normalized_q,
@@ -2962,17 +3381,29 @@ class StoryWikiService:
             "nodeId": normalized_node_id,
             "depth": max_depth,
             "limit": max_items,
+            "offset": max(0, offset),
+            "includeReview": include_review,
+            "returnedNodeCount": len(ordered_nodes),
+            "hasMore": max(0, offset) + len(ordered_nodes) < len(all_ordered_nodes),
+            "nextOffset": (
+                max(0, offset) + len(ordered_nodes)
+                if max(0, offset) + len(ordered_nodes) < len(all_ordered_nodes)
+                else None
+            ),
             "entries": [entry_by_id[entry_ref] for entry_ref in matched_entry_ids if entry_ref in entry_by_id],
             "graph": {
                 "nodes": ordered_nodes,
                 "edges": graph_edges,
             },
             "matchedEntryIds": matched_entry_ids,
-            "total": {
-                "entryCount": len(matched_entry_ids),
-                "nodeCount": len(ordered_nodes),
-                "edgeCount": len(graph_edges),
-            },
+            "total": stats,
+            "graphStats": stats,
+            "pagination": self._pagination_payload(
+                offset=max(0, offset),
+                limit=max_items,
+                returned_count=len(ordered_nodes),
+                total_count=len(all_ordered_nodes),
+            ),
         }
 
     @staticmethod
@@ -3215,6 +3646,131 @@ class StoryWikiService:
                 return True
         return False
 
+    def _formal_relation_edge_is_grounded(
+        self,
+        root: Path,
+        edge: Dict[str, Any],
+        *,
+        nodes: Sequence[Dict[str, Any]],
+    ) -> bool:
+        """Validate one-direction formal Markdown evidence.
+
+        A canonical relation line lives only in the subject's file, so the
+        quote naturally names the predicate and object but not necessarily the
+        subject.  The subject is anchored by ownership of that source file (or
+        a JSON character card sidecar frontmatter binding).
+        """
+        source_id = str(edge.get("source") or "").strip()
+        target_id = str(edge.get("target") or "").strip()
+        predicate = str(edge.get("predicate") or edge.get("label") or "").strip()
+        if not source_id or not target_id or source_id == target_id or not predicate:
+            return False
+        refs = edge.get("sourceRefs") if isinstance(edge.get("sourceRefs"), list) else []
+        formal_refs = [
+            ref
+            for ref in refs
+            if isinstance(ref, dict) and str(ref.get("role") or "") == "formal_relation"
+        ]
+        if not formal_refs:
+            return False
+        try:
+            from services.story_knowledge_relation_service import (
+                FORMAL_RELATION_PREFIXES,
+                get_story_knowledge_relation_service,
+            )
+
+            relation_service = get_story_knowledge_relation_service()
+            entities = relation_service.load_entities(root).get("entities", [])
+        except Exception:
+            return False
+        entity_by_id = {
+            str(item.get("entityId") or ""): item
+            for item in entities
+            if isinstance(item, dict) and str(item.get("entityId") or "")
+        }
+        subject = entity_by_id.get(source_id)
+        obj = entity_by_id.get(target_id)
+        if not isinstance(subject, dict) or not isinstance(obj, dict):
+            return False
+        subject_paths = {
+            str(path).replace("\\", "/").lstrip("/")
+            for path in subject.get("sourcePaths", [])
+            if str(path).strip()
+        }
+        expanded_subject_paths = set(subject_paths)
+        expanded_subject_paths.update(
+            str(Path(path).with_suffix(".md")).replace("\\", "/")
+            for path in subject_paths
+            if Path(path).suffix.lower() == ".txt"
+        )
+        object_names = {
+            str(obj.get("canonical_name") or "").strip(),
+            *{
+                str(alias).strip()
+                for alias in obj.get("aliases", [])
+                if str(alias).strip()
+            },
+        }
+        node_label = next(
+            (
+                str(node.get("label") or "").strip()
+                for node in nodes
+                if str(node.get("id") or "").strip() == target_id
+            ),
+            "",
+        )
+        if node_label:
+            object_names.add(node_label)
+
+        resolved_root = root.resolve()
+        for ref in formal_refs:
+            relative = str(ref.get("path") or "").strip().replace("\\", "/").lstrip("/")
+            if not relative or not any(relative.startswith(prefix) for prefix in FORMAL_RELATION_PREFIXES):
+                continue
+            path = (resolved_root / relative).resolve()
+            try:
+                path.relative_to(resolved_root)
+            except ValueError:
+                continue
+            if not path.is_file():
+                continue
+            try:
+                content = path.read_text(encoding="utf-8-sig")
+            except (OSError, UnicodeError):
+                continue
+            quote = str(ref.get("quote") or "")
+            if not quote or quote not in content or predicate not in quote:
+                continue
+            owns_source = relative in expanded_subject_paths
+            if not owns_source and relative.lower().endswith(".relations.md"):
+                owns_source = relation_service._frontmatter_entity_id(content) == source_id  # noqa: SLF001
+            if not owns_source:
+                continue
+            if any(name and name in quote for name in object_names):
+                return True
+        return False
+
+    @staticmethod
+    def _unsupported_relationship_metrics(edge: Dict[str, Any]) -> List[str]:
+        """Separate forbidden social-strength metrics from v3 audit confidence."""
+
+        unsupported = [
+            key
+            for key in ("level", "strength", "polarity")
+            if key in edge
+        ]
+        review_status = str(edge.get("reviewStatus") or "").strip()
+        source_refs = edge.get("sourceRefs") if isinstance(edge.get("sourceRefs"), list) else []
+        if (
+            "confidence" in edge
+            and (
+                review_status not in {"confirmed", "review_required"}
+                or not any(isinstance(ref, dict) for ref in source_refs)
+            )
+        ):
+            unsupported.append("confidence")
+        return unsupported
+
     @staticmethod
     def _is_query_visible_relationship_edge(edge: Dict[str, Any]) -> bool:
         """查询路径上的关系边过滤：只做不读盘的结构判断。
@@ -3228,9 +3784,11 @@ class StoryWikiService:
         relation_type = str(edge.get("relationType") or "").strip()
         if relation_type not in ALLOWED_RELATION_TYPES or relation_type == "unknown":
             return False
+        if str(edge.get("reviewStatus") or "confirmed").strip() != "confirmed":
+            return False
         if str(edge.get("status") or "").strip() != "asserted" or bool(edge.get("needsReview")):
             return False
-        return not any(key in edge for key in ("level", "strength", "confidence", "polarity"))
+        return not StoryWikiService._unsupported_relationship_metrics(edge)
 
     def _is_publishable_relationship_edge(
         self,
@@ -3248,9 +3806,11 @@ class StoryWikiService:
         status = str(edge.get("status") or "").strip()
         if relation_type not in ALLOWED_RELATION_TYPES or relation_type == "unknown":
             return False
+        if str(edge.get("reviewStatus") or "confirmed").strip() != "confirmed":
+            return False
         if status != "asserted" or bool(edge.get("needsReview")):
             return False
-        if any(key in edge for key in ("level", "strength", "confidence", "polarity")):
+        if self._unsupported_relationship_metrics(edge):
             return False
         source_documents = list(sources) if sources is not None else self._collect_sources(root)
         return self._edge_evidence_anchors_endpoints(
@@ -3457,8 +4017,20 @@ class StoryWikiService:
         for raw_edge in raw_edges:
             if not isinstance(raw_edge, dict):
                 continue
-            source = resolve_endpoint(raw_edge.get("source"))
-            target = resolve_endpoint(raw_edge.get("target"))
+            history = raw_edge.get("history") if isinstance(raw_edge.get("history"), list) else []
+            latest = next((item for item in reversed(history) if isinstance(item, dict)), {})
+            review_status = str(
+                raw_edge.get("reviewStatus")
+                or latest.get("reviewStatus")
+                or "confirmed"
+            ).strip()
+            # Dynamic relationship snapshots are authoritative projection inputs
+            # only after confirmation. Review candidates live in the dedicated
+            # relation ledger, while rejected/superseded records remain audit-only.
+            if review_status != "confirmed":
+                continue
+            source = resolve_endpoint(raw_edge.get("sourceId") or raw_edge.get("source"))
+            target = resolve_endpoint(raw_edge.get("targetId") or raw_edge.get("target"))
             if not source or not target or source == target:
                 continue
             dimension = str(raw_edge.get("dimension") or "").strip().lower()
@@ -3468,42 +4040,129 @@ class StoryWikiService:
             raw_status = str(raw_edge.get("status") or "asserted").strip()
             if raw_status != "asserted":
                 continue
-            history = raw_edge.get("history") if isinstance(raw_edge.get("history"), list) else []
-            latest = next((item for item in reversed(history) if isinstance(item, dict)), {})
-            evidence = str(
-                latest.get("evidence")
-                or latest.get("detail")
-                or raw_edge.get("evidence")
-                or raw_edge.get("detail")
-                or ""
-            ).strip()
-            requested_path = str(
-                latest.get("last_updated_in")
-                or raw_edge.get("last_updated_in")
-                or ""
-            ).strip()
-            source_path = self._grounded_evidence_source_path(
-                root,
-                evidence=evidence,
-                requested_path=requested_path,
-                sources=all_sources,
+            raw_source_refs = (
+                latest.get("sourceRefs")
+                if isinstance(latest.get("sourceRefs"), list)
+                else raw_edge.get("sourceRefs")
+                if isinstance(raw_edge.get("sourceRefs"), list)
+                else []
             )
-            if not source_path:
-                continue
+            grounded_refs: List[Dict[str, Any]] = []
+            evidence = ""
+            source_path = ""
+            for raw_ref in raw_source_refs:
+                if not isinstance(raw_ref, dict):
+                    continue
+                quote = str(raw_ref.get("quote") or raw_ref.get("evidence") or "").strip()
+                requested_path = str(raw_ref.get("path") or raw_ref.get("sourcePath") or "").strip()
+                grounded_path = self._grounded_evidence_source_path(
+                    root,
+                    evidence=quote,
+                    requested_path=requested_path,
+                    sources=all_sources,
+                )
+                if not grounded_path:
+                    continue
+                candidate_edge = {
+                    "source": source,
+                    "target": target,
+                    "evidence": quote,
+                    "sourcePath": grounded_path,
+                }
+                if not self._edge_evidence_anchors_endpoints(
+                    root,
+                    candidate_edge,
+                    nodes=nodes,
+                    sources=all_sources,
+                ):
+                    continue
+                normalized_ref = dict(raw_ref)
+                normalized_ref["path"] = grounded_path
+                normalized_ref["quote"] = quote
+                normalized_ref.setdefault("role", "dynamic_relationship")
+                if normalized_ref not in grounded_refs:
+                    grounded_refs.append(normalized_ref)
+                if not evidence:
+                    evidence = quote
+                    source_path = grounded_path
+
+            if not evidence:
+                evidence = str(
+                    latest.get("evidence")
+                    or latest.get("detail")
+                    or raw_edge.get("evidence")
+                    or raw_edge.get("detail")
+                    or ""
+                ).strip()
+                requested_path = str(
+                    latest.get("last_updated_in")
+                    or raw_edge.get("last_updated_in")
+                    or ""
+                ).strip()
+                source_path = self._grounded_evidence_source_path(
+                    root,
+                    evidence=evidence,
+                    requested_path=requested_path,
+                    sources=all_sources,
+                )
+                if not source_path:
+                    continue
+                grounded_refs = [{
+                    "path": source_path,
+                    "quote": evidence,
+                    "role": "dynamic_relationship",
+                }]
             relation_type = semantics.relation_type
             key = (*sorted((source, target)), relation_type)
             if key in seen_keys:
                 continue
             seen_keys.add(key)
+            knowledge_status = str(raw_edge.get("knowledgeStatus") or "observed").strip()
+            if knowledge_status not in KNOWLEDGE_STATUSES:
+                knowledge_status = "observed"
+            provenance = (
+                dict(raw_edge.get("provenance"))
+                if isinstance(raw_edge.get("provenance"), dict)
+                else dict(latest.get("provenance"))
+                if isinstance(latest.get("provenance"), dict)
+                else {}
+            )
+            provenance.setdefault("origin", "dynamic_relationship_graph")
+            provenance.setdefault("extractorVersion", "storydex-relationship-graph-v1")
+            trace_id = str(raw_edge.get("traceId") or latest.get("traceId") or "").strip()
+            relation_key = f"{'|'.join(sorted((source, target)))}|{relation_type}"
+            fingerprint = str(raw_edge.get("fingerprint") or "").strip() or sha256(
+                json.dumps(
+                    {
+                        "relationKey": relation_key,
+                        "reviewStatus": review_status,
+                        "knowledgeStatus": knowledge_status,
+                        "sourceRefs": grounded_refs,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
             relationship_edge = {
+                "id": str(raw_edge.get("id") or "").strip()
+                or f"relationship:{sha256(relation_key.encode('utf-8')).hexdigest()[:24]}",
                 "source": source,
                 "target": target,
                 "label": RELATIONSHIP_DIMENSION_LABELS[dimension],
+                "predicate": relation_type,
                 "type": "relationship",
                 "weight": 1,
                 "dimension": dimension,
                 "relationType": relation_type,
                 "status": "asserted",
+                "reviewStatus": review_status,
+                "knowledgeStatus": knowledge_status,
+                "confidence": raw_edge.get("confidence", "confirmed"),
+                "sourceRefs": grounded_refs,
+                "provenance": provenance,
+                "traceId": trace_id,
+                "fingerprint": fingerprint,
                 "evidence": evidence,
                 "sourcePath": source_path,
                 "needsReview": False,
@@ -3711,6 +4370,11 @@ class StoryWikiService:
         normalized_lower = normalized.lower()
         if Path(normalized).name.lower() == "readme.md":
             return True
+        # JSON 角色卡的 .relations.md 是正式关系 sidecar，不是独立角色实体。
+        # 关系领域服务会按 frontmatter 的 entityId 读取它，WIKI 源扫描必须排除，
+        # 否则同一角色会被投影成重复节点。
+        if normalized_lower.endswith(".relations.md"):
+            return True
         return any(normalized_lower.startswith(prefix) for prefix in EXCLUDED_RELATIVE_PREFIXES)
 
     def _read_source_text(self, path: Path) -> str:
@@ -3753,7 +4417,10 @@ class StoryWikiService:
 
         白名单而非黑名单：characters/ 下将来新增的任何派生目录都不会被误当成角色卡。
         """
-        parts = [part for part in str(relative_path or "").replace("\\", "/").split("/") if part]
+        normalized = str(relative_path or "").replace("\\", "/")
+        if normalized.lower().endswith(".relations.md"):
+            return False
+        parts = [part for part in normalized.split("/") if part]
         if "characters" not in parts:
             return False
         tail = parts[parts.index("characters") + 1:]
@@ -4498,6 +5165,100 @@ class StoryWikiService:
             ):
                 continue
             graph_edges.append(edge)
+
+    def _append_knowledge_relation_edges(
+        self,
+        root: Path,
+        graph_nodes: List[Dict[str, Any]],
+        graph_edges: List[Dict[str, Any]],
+        *,
+        include_review: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """Merge v2 facts, formal Markdown relations and review candidates.
+
+        This adapter deliberately trusts only records already validated by
+        ``StoryKnowledgeRelationService``.  It never promotes free-form prose
+        or an Agent supplied ``graph.nodes/edges`` payload.
+        """
+        try:
+            from services.story_knowledge_relation_service import (
+                StoryKnowledgeRelationService,
+                get_story_knowledge_relation_service,
+            )
+
+            relation_service: StoryKnowledgeRelationService = get_story_knowledge_relation_service()
+            facts_payload = relation_service.load_facts(root)
+            formal_relations = relation_service.scan_formal_markdown_relations(root)
+            review_payload = relation_service.load_review_ledger(root)
+        except Exception as exc:
+            # Do not silently publish a relation-less graph over the last-good
+            # projection.  A blocking input diagnostic makes _persist_payload
+            # retain the previous bundle while exposing the concrete failure.
+            return [self._graph_diagnostic(
+                "graph.relation_source_error",
+                f"统一关系数据读取失败：{type(exc).__name__}: {exc}",
+                ".storydex/memory",
+                blocking=True,
+            )]
+
+        node_ids = {
+            str(node.get("id") or "").strip()
+            for node in graph_nodes
+            if str(node.get("id") or "").strip()
+        }
+        node_by_id = {
+            str(node.get("id") or "").strip(): node
+            for node in graph_nodes
+            if str(node.get("id") or "").strip()
+        }
+        existing_by_key: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+        for edge in graph_edges:
+            source = str(edge.get("source") or "").strip()
+            target = str(edge.get("target") or "").strip()
+            label = str(edge.get("predicate") or edge.get("label") or "").strip()
+            if source and target and label:
+                existing_by_key[(source, label, target)] = edge
+
+        def append_relation(relation: Dict[str, Any], *, review_allowed: bool) -> None:
+            review_status = str(relation.get("reviewStatus") or "review_required")
+            if review_status == "review_required" and not review_allowed:
+                return
+            if review_status in {"rejected", "superseded"}:
+                return
+            source = str(relation.get("subjectId") or "").strip()
+            target = str(relation.get("objectId") or "").strip()
+            predicate = str(relation.get("predicate") or "").strip()
+            if not source or not target or not predicate or source == target:
+                return
+            if source not in node_ids or target not in node_ids:
+                return
+            key = (source, predicate, target)
+            current = existing_by_key.get(key)
+            edge = relation_service.graph_edge_from_relation(relation)
+            # Confirmed facts always win over a review candidate with the same
+            # endpoints; otherwise keep the first deterministic record.
+            if current is not None:
+                current_status = str(current.get("reviewStatus") or "")
+                if current_status == "confirmed" or review_status != "confirmed":
+                    return
+                try:
+                    graph_edges.remove(current)
+                except ValueError:
+                    pass
+            existing_by_key[key] = edge
+            graph_edges.append(edge)
+
+        for raw_fact in facts_payload.get("facts", []):
+            if isinstance(raw_fact, dict):
+                append_relation(raw_fact, review_allowed=include_review)
+        for relation in formal_relations:
+            if isinstance(relation, dict):
+                append_relation(relation, review_allowed=False)
+        if include_review:
+            for candidate in review_payload.get("relations", []):
+                if isinstance(candidate, dict):
+                    append_relation(candidate, review_allowed=True)
+        return []
 
     def _edge(
         self,
