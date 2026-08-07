@@ -130,13 +130,23 @@ test("advisory mode reports regressions without failing standard CI", (t) => {
   assert.match(releaseResult.stderr, /Coverage gate failed for frontend \(release\)/);
 });
 
-test("standard CI has one canonical coverage job while full CI retains its compatibility matrix", () => {
+test("standard CI scopes quality jobs while full CI retains its compatibility matrix", () => {
   const workflow = fs.readFileSync(path.resolve(__dirname, "..", "..", ".github", "workflows", "quality-gate.yml"), "utf8");
+  assert.match(workflow, /changes:\s*[\s\S]*?resolve_ci_scope\.cjs/);
+  assert.match(workflow, /backend-tests:\s*[\s\S]*?needs:\s*changes\s+[\s\S]*?needs\.changes\.outputs\.backend/);
+  assert.match(workflow, /frontend-tests:\s*[\s\S]*?needs:\s*changes\s+[\s\S]*?needs\.changes\.outputs\.frontend/);
+  assert.match(workflow, /desktop-unit-tests:\s*[\s\S]*?needs:\s*changes\s+[\s\S]*?needs\.changes\.outputs\.desktop/);
   assert.match(workflow, /inputs\.full\s*&&/);
   assert.equal((workflow.match(/"coverage_ratchet":true/g) || []).length, 2);
   assert.equal((workflow.match(/"coverage_ratchet":false/g) || []).length, 2);
   assert.match(workflow, /if:\s*matrix\.coverage_ratchet/);
   assert.equal((workflow.match(/\|\| 'advisory'/g) || []).length, 2);
+  assert.match(workflow, /Swatinem\/rust-cache@v2/);
+  assert.match(workflow, /-m "not coomi_runtime"/);
+  assert.match(workflow, /backend-compatibility:\s*[\s\S]*?test_agent_stream_responsiveness\.py[\s\S]*?test_storydex_runtime_fixes\.py/);
+  assert.doesNotMatch(workflow, /^  integration-tests:/m);
+  assert.match(workflow, /BACKEND:\s*\$\{\{ needs\.changes\.outputs\.backend \}\}/);
+  assert.match(workflow, /if backend and not full:\s*required\.add\("backend-compatibility"\)/);
   assert.match(workflow, /desktop-package-smoke:\s*[\s\S]*?if:\s*inputs\.full/);
   assert.match(workflow, /electron-e2e:\s*[\s\S]*?if:\s*inputs\.full/);
 

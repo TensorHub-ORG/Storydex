@@ -16,6 +16,7 @@ from services.coomi_bridge_client import (
 from services.coomi_version_service import check_coomi_version, read_expected_coomi_version
 
 
+@pytest.mark.coomi_runtime
 def test_vendored_rust_bridge_version_contract() -> None:
     completed = subprocess.run(
         [*bridge_command(), "--version"],
