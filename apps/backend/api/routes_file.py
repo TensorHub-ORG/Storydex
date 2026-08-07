@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 from time import perf_counter
-from typing import Any, Dict, Literal, Optional, Union
+from typing import Any, Dict, Literal, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Query
@@ -658,6 +658,13 @@ def switch_workspace_git_branch(payload: WorkspaceGitBranchRequest) -> ApiEnvelo
 def commit_workspace_git_changes(payload: WorkspaceGitCommitRequest) -> ApiEnvelope:
     started = perf_counter()
     trace_id = str(uuid4())
+    # A local Git snapshot must include the Wiki projection generated from the
+    # same source catalog.  Settle the content pipeline before Git stages the
+    # worktree; otherwise a late watcher publication can leave generated Wiki
+    # files uncommitted and make the next worldline operation appear dirty.
+    from services.content_pipeline_service import sync_content_workspace
+
+    sync_content_workspace(project_service.workspace_root, reconcile=True)
     result = git_service.commit_all(project_service.workspace_root, message=payload.message)
     audit = [
         {

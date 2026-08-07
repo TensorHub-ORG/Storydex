@@ -4,7 +4,6 @@ import asyncio
 import json
 import threading
 import types
-from pathlib import Path
 
 import pytest
 
@@ -312,17 +311,16 @@ def test_trace_audit_history_tasks_and_ledger_helpers(monkeypatch, tmp_path):
     assert routes._turn_contract_waiting_packet(contract)["status"] == "needs_user_input"
 
 
-def test_task_planner_normalization_tracker_and_event_helpers(monkeypatch, tmp_path):
-    class Planner:
-        async def create_task_plan(self, **kwargs):
-            return [
-                "分析需求", {"title": "Inspect files", "description": "read"},
-                {"name": "Commit Git changes", "status": "success"}, None,
-            ]
-
-    monkeypatch.setattr(routes, "get_storydex_coomi_agent_service", lambda: Planner())
+def test_task_planner_normalization_tracker_and_event_helpers(tmp_path):
     # 清单只对复杂任务规划：intentFrame 需带 complexity=complex。
     complex_contract = {"intentFrame": {"primary": "story_generation", "complexity": "complex"}}
+    complex_contract["plan"] = {
+        "steps": [
+            {"step": "分析需求", "status": "pending"},
+            {"step": "Inspect files", "status": "pending"},
+            {"step": "Commit Git changes", "status": "completed"},
+        ]
+    }
     planned = asyncio.run(routes._create_agent_task_plan(
         prompt="p", trace_id="t", session_id="s", workspace_root=tmp_path,
         active_file="", story_generation={}, turn_contract=complex_contract
@@ -341,14 +339,11 @@ def test_task_planner_normalization_tracker_and_event_helpers(monkeypatch, tmp_p
         turn_contract={"intentFrame": {"primary": "general", "operationType": "greeting", "complexity": "complex"}}
     )) == []
 
-    class BrokenPlanner:
-        async def create_task_plan(self, **kwargs):
-            raise RuntimeError("bad")
-
-    monkeypatch.setattr(routes, "get_storydex_coomi_agent_service", lambda: BrokenPlanner())
     assert asyncio.run(routes._create_agent_task_plan(
         prompt="p", trace_id="t", session_id="s", workspace_root=tmp_path,
-        active_file="", story_generation={}, turn_contract=complex_contract
+        active_file="", story_generation={}, turn_contract={
+            "intentFrame": {"primary": "story_generation", "complexity": "complex"}
+        }
     )) == []
     assert routes._normalize_task_plan(None, trace_id="t") == []
     assert routes._is_generic_route_task_title("执行本轮请求") is True
@@ -378,6 +373,24 @@ def test_task_planner_normalization_tracker_and_event_helpers(monkeypatch, tmp_p
     skip_tracker = routes._TaskRunTracker([{"title": "One"}, {"title": "Two"}], trace_id="x", session_id="s")
     assert len(skip_tracker.skip_remaining_execution("stop")) == 2
     assert len(routes._yield_task_events([("TaskStarted", {"x": 1})])) == 1
+
+
+def test_live_task_plan_path_does_not_call_independent_provider(tmp_path):
+    contract = {
+        "intentFrame": {"primary": "story_generation", "complexity": "complex"},
+        "plan": {"steps": [{"step": "由主 Agent 执行", "status": "pending"}]},
+    }
+    tasks = asyncio.run(routes._create_agent_task_plan(
+        prompt="p",
+        trace_id="t",
+        session_id="s",
+        workspace_root=tmp_path,
+        active_file="",
+        story_generation={},
+        turn_contract=contract,
+    ))
+
+    assert [task["title"] for task in tasks] == ["由主 Agent 执行"]
     collected = []
     routes._append_task_events(collected, [("TaskStarted", {"title": "x"})])
     assert collected[0]["event"] == "TaskStarted"

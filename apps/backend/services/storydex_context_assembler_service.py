@@ -30,6 +30,23 @@ _WIKI_GRAPH_PATH = ".storydex/wiki/knowledge_graph.json"
 _CHAPTER_DIGITS = "零〇一二两三四五六七八九十百千万亿0123456789"
 _PROJECT_ORGANIZATION_SOURCE_PATH_LIMIT = 512
 _PROJECT_ORGANIZATION_MAX_CHARS = 12000
+_RETRIEVAL_QUERY_MAX_TERMS = 12
+_RETRIEVAL_QUERY_STOPWORDS = frozenset(
+    {
+        "请", "请你", "帮我", "希望", "需要", "继续", "续写", "写", "生成", "创作",
+        "修改", "更新", "整理", "检查", "阅读", "读取", "分析", "说明", "描述",
+        "相关", "内容", "项目", "故事", "章节", "文件", "当前", "这个", "那个",
+        "关于", "围绕", "一下", "并", "和", "与", "及", "的", "了", "在", "是",
+        "有", "为", "从", "到", "对", "把", "将", "中", "引发", "导致", "然后",
+        "please", "continue", "write", "generate", "create", "update", "review", "read",
+        "check", "about", "project", "story", "chapter", "file", "the", "and", "with",
+        "hello", "hi", "thanks", "thankyou", "你好", "您好", "嗨", "谢谢",
+    }
+)
+_RETRIEVAL_QUERY_SPLIT_RE = re.compile(
+    r"(?:请你|帮我|请|继续|续写|写|生成|创作|修改|更新|整理|检查|阅读|读取|分析|"
+    r"关于|围绕|相关|引发的|导致的|其中的|的|了|在|是|和|与|及|把|将|对|from|about|the|and)"
+)
 
 
 @dataclass(frozen=True)
@@ -726,15 +743,24 @@ class StorydexContextAssemblerService:
         bigram 后会把召回带偏向字面重叠多的无关文档。没有可用检索词时
         跳过本块。索引错误会显式进入上下文与 ContextTrace，不能伪装成零命中。
         """
-        query = " ".join(self._related_passage_query_terms(prompt, active_entities)).strip()
+        query_plan = self._plan_related_passage_query(prompt, active_entities)
+        query = str(query_plan.get("query") or "").strip()
         if not query:
-            return "", [], {"status": "skipped", "resultState": "no_query"}
+            return "", [], {
+                "status": "skipped",
+                "resultState": "no_query",
+                "queryPlan": query_plan,
+            }
         service = None
         try:
             from core.feature_flags import get_flags
 
             if not get_flags().get_bool("CONTEXT_PIPELINE_FTS5"):
-                return "", [], {"status": "disabled", "resultState": "unavailable"}
+                return "", [], {
+                    "status": "disabled",
+                    "resultState": "unavailable",
+                    "queryPlan": query_plan,
+                }
             from services.retrieval_service import RECALL_CANDIDATE_LIMIT, get_retrieval_service
 
             service = get_retrieval_service(root)
@@ -763,10 +789,14 @@ class StorydexContextAssemblerService:
         diagnostic = {
             "status": status,
             "resultState": result_state,
+            "query": str(outcome.get("query") or query),
+            "queryPlan": query_plan,
+            "queryTerms": list(query_plan.get("terms") or []),
             "schemaVersion": int(index.get("schemaVersion") or 0),
             "generation": str(index.get("generation") or ""),
             "coverage": index.get("coverage") if isinstance(index.get("coverage"), dict) else {},
             "error": str(outcome.get("error") or ""),
+            "candidateSpans": [],
         }
         if status != "ok":
             message = (
@@ -819,6 +849,20 @@ class StorydexContextAssemblerService:
             selected.append((normalized, snippet.strip(), span, str(hit.get("revision") or "")))
             if len(selected) >= 3:
                 break
+        diagnostic["candidateSpans"] = [
+            {
+                "path": path,
+                "revision": revision,
+                "span": dict(span) if isinstance(span, dict) else {},
+                "score": hit.get("score"),
+            }
+            for hit in hits[: max(0, min(8, len(hits)))]
+            if isinstance(hit, dict)
+            for path in [str(hit.get("path") or "").replace("\\", "/")]
+            for revision in [str(hit.get("revision") or "")]
+            for span in [hit.get("snippetSpan") if isinstance(hit.get("snippetSpan"), dict) else {}]
+            if path
+        ]
         if not normalized_candidates:
             return "", [], diagnostic
         lines = [
@@ -864,16 +908,49 @@ class StorydexContextAssemblerService:
 
     @classmethod
     def _related_passage_query_terms(cls, prompt: str, active_entities: Sequence[str]) -> List[str]:
-        """被动检索的查询词：活跃实体、引号短语和 prompt 中的章节范围。"""
-        terms = [str(item).strip() for item in active_entities if str(item).strip()]
-        for match in cls._QUOTED_TERM_RE.finditer(str(prompt or "")):
-            value = match.group(1).strip()
-            if value:
-                terms.append(value)
-        for match in cls._CHAPTER_REF_RE.finditer(str(prompt or "")):
+        return list(cls._plan_related_passage_query(prompt, active_entities).get("terms") or [])
+
+    @classmethod
+    def _plan_related_passage_query(
+        cls,
+        prompt: str,
+        active_entities: Sequence[str],
+    ) -> Dict[str, Any]:
+        """Build a deterministic, explainable passive-retrieval query plan.
+
+        Entity names, quoted phrases and chapter references are high-confidence
+        anchors. Natural-language topic fragments are added only after common
+        operation/function words are removed; this planner never calls an LLM.
+        """
+        raw_prompt = str(prompt or "").strip()
+        terms: List[str] = []
+        explicit_terms: List[str] = []
+        excluded_terms: List[str] = []
+
+        def add(value: Any, *, explicit: bool = False) -> None:
+            normalized = re.sub(r"\s+", " ", str(value or "")).strip(
+                " \t\r\n,，。.!！?？:：;；()（）[]【】\"'“”‘’"
+            )
+            if not normalized or normalized.casefold() in _RETRIEVAL_QUERY_STOPWORDS:
+                if normalized:
+                    excluded_terms.append(normalized)
+                return
+            if len(normalized) < 2 and not re.fullmatch(r"\d+", normalized):
+                excluded_terms.append(normalized)
+                return
+            bucket = explicit_terms if explicit else terms
+            if normalized not in bucket:
+                bucket.append(normalized)
+
+        for item in active_entities:
+            add(item, explicit=True)
+        for match in cls._QUOTED_TERM_RE.finditer(raw_prompt):
+            add(match.group(1), explicit=True)
+
+        for match in cls._CHAPTER_REF_RE.finditer(raw_prompt):
             end = str(match.group("end") or "").strip()
             if not end:
-                terms.append(match.group(0))
+                add(match.group(0), explicit=True)
                 continue
             start = str(match.group("start") or "").strip()
             common_prefix = ""
@@ -882,10 +959,36 @@ class StorydexContextAssemblerService:
                     break
                 common_prefix += left
             if common_prefix:
-                terms.append(f"第{common_prefix}")
+                add(f"第{common_prefix}", explicit=True)
             else:
-                terms.extend((f"第{start}", f"第{end}"))
-        return list(dict.fromkeys(terms))
+                add(f"第{start}", explicit=True)
+                add(f"第{end}", explicit=True)
+
+        topic_text = cls._QUOTED_TERM_RE.sub(" ", raw_prompt)
+        topic_text = cls._CHAPTER_REF_RE.sub(" ", topic_text)
+        for fragment in re.findall(r"[A-Za-z][A-Za-z0-9_-]{1,}|[\u4e00-\u9fff]{2,}", topic_text):
+            pieces = [piece for piece in _RETRIEVAL_QUERY_SPLIT_RE.split(fragment) if piece]
+            for piece in pieces:
+                compact = piece.strip()
+                if not compact:
+                    continue
+                if compact.casefold() in _RETRIEVAL_QUERY_STOPWORDS:
+                    excluded_terms.append(compact)
+                    continue
+                add(compact)
+
+        ordered = list(dict.fromkeys([*explicit_terms, *terms]))[:_RETRIEVAL_QUERY_MAX_TERMS]
+        return {
+            "version": 1,
+            "triggered": bool(ordered),
+            "reason": "topic_or_anchor_terms" if ordered else "no_content_terms",
+            "terms": ordered,
+            "query": " ".join(ordered),
+            "explicitTerms": list(dict.fromkeys(explicit_terms)),
+            "topicTerms": [term for term in terms if term not in explicit_terms],
+            "excludedTerms": list(dict.fromkeys(excluded_terms))[:24],
+            "maxTerms": _RETRIEVAL_QUERY_MAX_TERMS,
+        }
 
     @staticmethod
     def _render_wiki_reference(root: Path, *, active_entities: Sequence[str]) -> Tuple[str, int]:

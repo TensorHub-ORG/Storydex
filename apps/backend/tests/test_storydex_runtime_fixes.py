@@ -30,6 +30,29 @@ from services.storydex_context_assembler_service import StorydexContextAssembler
 from services.trace_history_service import TraceHistoryService
 
 
+def test_passive_retrieval_query_planner_uses_natural_topic_and_explains_trigger() -> None:
+    planner = StorydexContextAssemblerService._plan_related_passage_query(
+        "请续写星核密钥引发的冲突",
+        ["林舟"],
+    )
+
+    assert planner["triggered"] is True
+    assert "星核密钥" in planner["terms"]
+    assert "冲突" in planner["terms"]
+    assert "续写" not in planner["terms"]
+    assert planner["reason"] == "topic_or_anchor_terms"
+
+
+def test_passive_retrieval_query_planner_distinguishes_greeting_and_chapter_reference() -> None:
+    greeting = StorydexContextAssemblerService._plan_related_passage_query("你好", [])
+    chapter = StorydexContextAssemblerService._plan_related_passage_query("检查第3章", [])
+
+    assert greeting["triggered"] is False
+    assert greeting["reason"] == "no_content_terms"
+    assert chapter["triggered"] is True
+    assert "第3章" in chapter["terms"]
+
+
 def _write_providers_config(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -386,6 +409,9 @@ def test_related_passage_snippets_precede_long_candidate_path_list(tmp_path, mon
 
     assert returned_paths == candidate_paths
     assert diagnostic["status"] == "ok"
+    assert diagnostic["queryPlan"]["triggered"] is True
+    assert diagnostic["queryPlan"]["explicitTerms"]
+    assert diagnostic["candidateSpans"][0]["path"] == candidate_paths[0]
     assert block.index("关键命中证据") < block.index("Additional candidate paths:")
     assert "关键命中证据" in block[:1600]
 

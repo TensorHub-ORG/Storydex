@@ -66,7 +66,6 @@ from services.story_length_precision_controller import (
     get_story_length_precision_controller,
 )
 from services.story_word_count_service import (
-    DEFAULT_CHAPTER_LENGTH_TIER,
     STORY_OVER_BUDGET_KEEP_MESSAGE,
     STORY_UNDER_BUDGET_KEEP_MESSAGE,
     STORY_WORD_COUNT_RULE,
@@ -112,7 +111,6 @@ _COMMIT_MESSAGE_TIMEOUT_SECONDS = 2.0
 # above the service-level 20-second bound instead of forcing every real turn
 # into the fail-closed read-only fallback.
 _INTENT_STAGE_TIMEOUT_SECONDS = 22.0
-_PLANNER_TIMEOUT_SECONDS = 3.0
 # Legacy contracts only. Current chapter-scoped word-count contracts run the
 # bounded path, which resolves length before the single write instead of using a
 # write-then-append correction continuation.
@@ -3162,27 +3160,22 @@ async def _create_agent_task_plan(
     # 重构、再更新变量/WIKI、清理等）才建清单。简单任务/闲聊不建清单。
     if not _should_create_task_checklist(intent_frame):
         return []
-    planner = getattr(get_storydex_coomi_agent_service(), "create_task_plan", None)
-    if callable(planner):
-        try:
-            tasks = await asyncio.wait_for(
-                planner(
-                    prompt=prompt,
-                    trace_id=trace_id,
-                    session_id=session_id,
-                    workspace_root=workspace_root,
-                    active_file=active_file,
-                    story_generation=story_generation,
-                    turn_contract=turn_contract,
-                ),
-                timeout=_PLANNER_TIMEOUT_SECONDS,
-            )
-            normalized = _normalize_task_plan(tasks, trace_id=trace_id)
-            if normalized:
-                return normalized
-        except Exception:
-            pass
-    return []
+    del prompt, session_id, workspace_root, active_file
+    candidates: Any = None
+    for container in (turn_contract, story_generation):
+        if not isinstance(container, dict):
+            continue
+        if isinstance(container.get("tasks"), list):
+            candidates = container.get("tasks")
+            break
+        plan = container.get("plan") if isinstance(container.get("plan"), dict) else {}
+        if isinstance(plan.get("tasks"), list):
+            candidates = plan.get("tasks")
+            break
+        if isinstance(plan.get("steps"), list):
+            candidates = plan.get("steps")
+            break
+    return _normalize_task_plan(candidates, trace_id=trace_id)
 
 
 def _normalize_task_plan(value: Any, *, trace_id: str) -> List[Dict[str, Any]]:
@@ -3191,7 +3184,13 @@ def _normalize_task_plan(value: Any, *, trace_id: str) -> List[Dict[str, Any]]:
     tasks: List[Dict[str, Any]] = []
     for index, item in enumerate(raw_tasks[:10]):
         record = item if isinstance(item, dict) else {"title": str(item or "")}
-        title = str(record.get("title") or record.get("name") or record.get("task") or "").strip()
+        title = str(
+            record.get("title")
+            or record.get("name")
+            or record.get("task")
+            or record.get("step")
+            or ""
+        ).strip()
         if not title or _is_generic_route_task_title(title):
             continue
         tasks.append(

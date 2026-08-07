@@ -8,35 +8,44 @@
 
 关联文档：[Wiki 与 Agent 读取/检索硬缺陷分析](../Wiki与Agent读取检索硬缺陷分析.md)
 
-实施状态更新：2026-08-07
+实施状态更新：2026-08-08
 
 | 变更包 | 状态 | 说明 |
 |---|---|---|
-| P0-1 会话握手与恢复 | 已完成 | 严格恢复、首次落盘后绑定、session schema 校验、原子保存及失败关闭均已落地 |
+| P0-1 会话握手与恢复 | 已完成 | 严格恢复、首次落盘后绑定、session schema 校验、原子保存、失败关闭及 P0-1F canonical workspace 隔离均已落地 |
 | P0-2 有界读取完整性协议 | 已完成 | revision/span/总量/继续游标、长单行续读、UTF-8 安全截断及完整 prompt 约束均已落地 |
 | P0-3 全文分块检索 | 已完成 | v3 全文 chunk 索引、revision/span、原子发布、状态区分及真实 Agent 验收均已落地 |
-| P1 / P2 | 未实施 | 保留本文后续计划，供新对话继续处理 |
+| P1-0 基线与指标 | 已完成 | 已建立扫描、耗时、bridge 分阶段初始化及 logical/transmitted/cached token 基线 |
+| P1-1 Source 契约与 Content Catalog | 核心已完成 | immutable snapshot、generation、dirty queue 和进程内写入事件已落地；生产级外部文件事件来源仍是 P1-2c 删除扫描前的必要前置 |
+| P1-2a TurnContract | 已完成 | 每轮复用单份 catalog snapshot 和 ChapterState snapshot，固定夹具 median 降至 189.946 ms |
+| P1-2c FTS | 已完成 | 生产 watcher、后台 reconciliation、查询零扫描和增量发布已落地；聚焦门禁、OPENCODE 真实验收、提交 `0d4c611`、pre-push 与 Actions run `31208027587` 均通过 |
+| P1-2b Wiki | 已完成 | catalog diff、dirty projection/published snapshot、首次全量/暖态单文件更新、rename/delete 和 stale/unavailable 语义已落地；300 文件暖态查询不读 workspace source |
+| P1-3 | 已完成 | 独立规划 LLM Provider 调用与兼容外部 Provider 分支均删除，由主 Agent 的 Plan/Loop 作为唯一执行计划来源；聚焦回归 73 passed |
+| P1-4 | 已完成 | deterministic query planner、自然语言主题触发、功能词过滤和错误状态/候选 span Trace 已落地；聚焦回归 40 passed，OPENCODE 真实验收通过 |
+| P1-5 至 P1-7 | 实施中 | Evidence Ledger、结构化 compaction checkpoint、真实 token 预算/LRU/JIT 已实现，正在完成最终回归、全量门禁和真实主链路验收 |
+| P2 | 阻塞 | Evidence Ledger、compaction checkpoint 和真实 token 基线稳定前不得启动 |
 
-三个 P0 变更包均已完成。性能治理专项尚未完成：重复目录扫描、跨回合证据复用、bridge 生命周期和 Provider 增量协议仍属于 P1/P2。
+P0 已全部完成；P0-1F、P1-0、P1-1 核心和 P1-2a 已由提交 `5cfabbd` 推送，P1-2c 已由提交 `0d4c611` 推送，两个 SHA 的 pre-push 门禁及 GitHub Actions 均为 `success`。P1-2b、P1-3、P1-4 已在当前工作区完成并通过聚焦验证；当前剩余收口项是 P1-5～P1-7。P2 仍由 Evidence Ledger、compaction checkpoint 和真实 token 基线共同阻塞。
 
 ## 1. 结论
 
 当前 Agent **不是每轮完全失忆**：只要 runtime session 能被正确加载，用户消息、assistant 消息、工具消息、Plan、Loop 和累计 usage 会跨回合保存在 Coomi session 中。
 
-修复前，系统存在三组需要优先处理的 P0 信息完整性问题；当前实现已按本文第 9 节完成对应治理：
+修复前，系统存在三组需要优先处理的 P0 信息完整性问题；当前实现已按本文第 9 节完成全部治理，第 9.3 节发现的 workspace 隔离问题也已由 P0-1F 关闭：
 
 1. **P0-1：会话握手和恢复不可靠。** 已绑定 session 加载失败时会静默创建空 session；首次 session 尚未落盘就发送 `session_bound`。这会造成无感知断档或 binding 指向不存在的历史文件。
 2. **P0-2：有界读取没有完整性协议。** `read_file` 默认只给 500 行、最多 2,000 行且可能再被 48,000 字节截断，却不告诉模型总量、剩余范围和下一页位置；长中文单行还存在 UTF-8 非字符边界截断风险。意图控制层另只读取用户请求前 2,000 字符，可能漏掉尾部权限约束。
 3. **P0-3：FTS 把长文件中部永久排除在索引外。** 当前 120,000 字符限制使用头尾拼接，不是全文分块。中部事实不是“排名低”，而是根本不存在于索引中。
 
-性能下降主要来自四处：
+P1-2a 完成后，当前剩余性能与证据链问题主要来自五处：
 
-- 每回合 TurnContract/Wiki/FTS 重复遍历目录并 `stat` 大量文件。
-- 每回合启动并关闭 Rust bridge，重新加载 MCP、Hooks、Memory、Tools 和系统提示。
-- 每个模型工具轮都重发系统提示、完整活动 history 和全部工具 schema。
+- FTS 查询前先执行 `watch_files()`，随后 `search_detailed()` 又通过 `index_status(check_stale=True)` 全树扫描；无变化夹具仍为 `4,411/4,412 stat`。
+- Wiki 的 `query_graph()` 经 `read_or_build()` 收集并读取全部来源，尚未建立独立 dirty projection 基线。
+- 每个模型工具轮仍重发系统提示、完整活动 history 和全部工具 schema；真实首轮 6 个模型轮的 logical/transmitted input 为 `71,775/291,771` token。
+- 每回合仍启动并关闭 Rust bridge，但当前实测 bridge 启动和组件初始化约 `51.257/5.500 ms`，不是先于 FTS、Evidence Ledger 和 compaction checkpoint 改造的主瓶颈。
 - 缺少跨回合 Evidence Ledger；文件未变化时，模型仍可能重复读取相同范围。
 
-建议严格按 `P0 -> P1 -> P2` 推进。P0 先消除无感知信息丢失；P1 再消除重复扫描、重复读取和无效 Provider 调用；P2 最后改造长生命周期 runtime 和增量模型协议。
+继续严格按 `P1-2c -> P1-2b -> P1-3 删除独立规划 LLM -> P1-4 -> P1-5 -> P1-6 -> P1-7 -> P2` 推进。P2 仍由 Evidence Ledger、compaction checkpoint 和真实 token 基线共同阻塞。
 
 ## 2. 优先级定义
 
@@ -48,7 +57,7 @@
 
 本文把 P0 收敛为三个可独立评审、按顺序实施的变更包。意图控制层的 2,000 字符截断并入 `P0-2`，因为它与 `read_file` 属于同一根因：调用方使用了有界文本，但没有显式完整性和拒绝协议。
 
-## 3. 当前实际运行链路
+## 3. P0 修复前的运行链路（历史基线）
 
 ```text
 前端 POST /agent/chat + SSE
@@ -160,17 +169,18 @@ StorydexVersionStatus: 9 次，输出约 25,693 字符
 | S-01 | P0 | session 加载错误被 `unwrap_or_else` 吞掉 | 历史无感知归零 | P0-1 |
 | S-02 | P0 | 首次保存前发送 `session_bound` | binding 指向不存在文件 | P0-1 |
 | S-03 | P0 | SessionStore 直接覆盖目标 JSON | 进程中断可能产生部分文件 | P0-1 |
+| S-04 | P0 | 已有 session 的 cwd 与请求 workspace 不一致时被自动改写 | 跨项目历史和可变状态可能串用 | P0-1F |
 | R-01 | P0 | `read_file` 无总量、范围、下一页和 revision | 模型不知道是否读完，无法可靠续读 | P0-2 |
 | R-02 | P0 | 48,000 字节直接截断 Rust String | UTF-8 边界风险；返回内容完整性未知 | P0-2 |
 | R-03 | P0 | 意图控制层只看 prompt 前 2,000 字符 | 尾部权限/目标约束不参与路由 | P0-2 |
 | F-01 | P0 | FTS 长文件只索引头尾 120,000 字符 | 中部证据永久不可召回 | P0-3 |
 | F-02 | P0 | 检索异常与零命中均可表现为空块 | 模型误把系统失败当“项目没有证据” | P0-3 |
-| P-01 | P1 | TurnContract 重复章节遍历 | 模型调用前出现秒级固定延迟 | P1-1 |
-| P-02 | P1 | Wiki/FTS 查询前重复全树扫描 | 无变化查询仍为 O(文件数) | P1-1 |
-| P-03 | P1 | 缺少跨回合 Evidence Ledger | 文件未变仍重复读相同范围 | P1-2 |
-| P-04 | P1 | 被动 FTS 查询词过窄 | 普通主题请求可能完全不检索 | P1-3 |
-| P-05 | P1 | 复杂任务独立规划 LLM 不参与主 Agent 决策 | 额外 Provider 调用，质量收益不确定 | P1-4 |
-| P-06 | P1 | Token/LRU/JIT 策略开关未启用 | 字符预算与真实模型预算脱节 | P1-5 |
+| P-01 | P1 | TurnContract 重复章节遍历 | 模型调用前出现秒级固定延迟 | P1-2a |
+| P-02 | P1 | Wiki/FTS 查询前重复全树扫描 | 无变化查询仍为 O(文件数) | P1-2b/P1-2c |
+| P-03 | P1 | 缺少跨回合 Evidence Ledger | 文件未变仍重复读相同范围 | P1-5 |
+| P-04 | P1 | 被动 FTS 查询词过窄 | 普通主题请求可能完全不检索 | P1-4 |
+| P-05 | P1 | 复杂任务独立规划 LLM 不参与主 Agent 决策 | 额外 Provider 调用，质量收益不确定 | P1-3 |
+| P-06 | P1 | Token/LRU/JIT 开关只有默认配置、没有生产消费者 | 字符预算与真实模型预算脱节 | P1-7 |
 | P-07 | P1 | 压缩只保留最多 20,000 token 用户消息，其余依赖摘要 | assistant/tool 的精确证据可能丢失 | P1-6 |
 | P-08 | P1 | 早期工具结果会被统一截断文本替换 | 摘要模型也可能看不到原始证据 | P1-6 |
 | A-01 | P2 | 每回合重启 bridge 并重载运行时组件 | 冷启动、连接和缓存成本重复 | P2-1 |
@@ -274,7 +284,7 @@ store.load(id).unwrap_or_else(|_| Session::new(...))
 - 模拟保存中断后，目标路径要么是旧完整 JSON，要么是新完整 JSON，不能是半个 JSON。
 - Storydex 会话删除、清空、回滚和 workspace 隔离测试继续通过。
 
-P0-1 完成定义：任何 binding 都只能指向已成功落盘且可加载的 session；任何恢复失败都不能被解释为“空历史的新 session”。
+P0-1 完成定义：任何 binding 都只能指向已成功落盘、可加载且属于同一 canonical workspace 的 session；任何恢复失败或 workspace mismatch 都不能被解释为“空历史的新 session”，也不能通过改写 cwd 继续。
 
 ## 7. P0-2：有界读取完整性协议
 
@@ -435,7 +445,7 @@ index_error               构建或查询失败
 2. 在临时数据库完整构建 v3；通过完整性检查后原子发布，不让查询看到半个索引。
 3. v3 未就绪时，可以继续提供 v2 的命中作为 `partial/legacy` 结果，但必须明确标记覆盖不完整，不能报告“全文无命中”。
 4. 发布成功后，新查询只走 v3；稳定一个版本后再清理 v2 缓存。
-5. 首个 PR 先保证全文覆盖和 span 正确；dirty queue/保存事件增量优化放在 P1-1，避免把正确性修复和事件架构改造绑成一个大提交。
+5. 首个 PR 先保证全文覆盖和 span 正确；dirty queue/保存事件增量优化放在 P1-1/P1-2c，避免把正确性修复和事件架构改造绑成一个大提交。
 
 ### 8.4 改动规模和兼容性
 
@@ -490,7 +500,7 @@ SourceSpan:
 
 ### 9.1 P0-1 与 P0-2 实施结果
 
-P0-1 已完成的生产改动：
+P0-1 已完成的主体生产改动：
 
 - 删除已绑定 session 加载失败后创建空 session 的静默 fallback。缺失、损坏、ID 不匹配或 schema 不兼容现在均明确失败。
 - 新 session 先持久化成功，再发送 `session_bound`；事件携带 `persisted=true`、`sessionSchemaVersion=1` 和实际 `sessionPath`。
@@ -572,110 +582,162 @@ status: passed
 第二回合复用同一 runtime session
 ```
 
-P0-3 没有修改作品文件格式、前端会话 ID、Provider 配置格式、Agent 推理循环或 P1/P2 架构。首次 v3 构建时间和缓存体积会增加，这是全文覆盖的必要成本；暖态仍会扫描文件元数据，后续由 P1-1 Content Catalog/dirty queue 继续消除。
+P0-3 没有修改作品文件格式、前端会话 ID、Provider 配置格式、Agent 推理循环或 P1/P2 架构。首次 v3 构建时间和缓存体积会增加，这是全文覆盖的必要成本；暖态仍会扫描文件元数据，后续由 P1-1 Content Catalog 和 P1-2c FTS 迁移继续消除。
 
-## 10. P1 计划：消除重复工作并保护证据链
+### 9.3 2026-08-07 复核结论与 P0 收尾
 
-### 10.1 P1-1 Content Catalog 与 dirty queue
+本次复核基于 `8bac23b`、当前本地源码、聚焦回归和该 HEAD 的远端 CI，不仅依据提交说明。
 
-目标：TurnContract、Wiki、FTS、资源浏览器共用一个版本化文件清单，不在每个查询中重新 `rglob + stat + read`。
+- P0-2/P0-3 的生产协议、错误状态和聚焦回归均成立，没有发现阻断优化的正确性缺陷。
+- P0-1 的严格恢复、首次持久化、schema/id 校验和原子保存已成立，但 `prepare_session()` 对已有 session 的 `cwd` 不做隔离校验，而是直接改成当前 workspace 后保存。若 binding 串错或被破坏，可能把另一个 workspace 的历史迁入当前项目。
+- P0-1F 收尾要求：已有 session 的 canonical `cwd` 必须与请求 workspace 一致；不一致时返回 `session_restore_failed(workspace_mismatch)`，不得改写 session 或 binding。增加 Rust 单测和 Python binding/Trace 回归。
+- FTS 暖态仍按 `mtime_ns + size` 扫描全部候选文件；主动/被动查询都先 `watch_files()`，随后 `search_detailed()` 又通过 `index_status(check_stale=True)` 扫描一次。这是已确认的 P1 性能问题，不应回改 P0-3 的全文正确性协议。
+- 同 size/mtime 的外部改写目前只能依赖文件系统时间戳被识别。P1 Content Catalog 启动校验和 watcher dirty 事件必须以内容 revision 为最终依据，不能把元数据签名当成权威 revision。
 
-实施要点：
-
-- 文件保存、创建、删除、重命名事件更新 catalog 和 dirty set。
-- 外部编辑通过 watcher 进入同一队列；启动时做一次校验扫描。
-- 每个文件记录 path、kind、revision、size、mtime_ns、可选 hash 和派生状态。
-- Wiki/FTS 消费 dirty set，成功后按 revision 确认；失败不丢 dirty 项。
-- 按 workspace 建 single-flight，避免并发请求重复刷新相同 revision。
-- 查询链路只读已发布 snapshot；刷新和重建不嵌在 `query()` 中。
-
-验收：300 章节暖态 TurnContract 不再多次调用 `list_chapter_states()`；无变化 Wiki/FTS 查询不做全树遍历；单文件保存只处理该文件及必要派生项。
-
-### 10.2 P1-2 Evidence Ledger
-
-目标：跨工具轮和跨回合记录“Agent 已读过哪个 revision 的哪些范围”，文件未变化时复用证据，变化时精确失效。
-
-建议记录：
+复核验证：
 
 ```text
-session_id
-path
-revision
-read spans
-retrieval hit spans
-first/last observed turn
-source tool
-content hash or result hash
+Backend P0 聚焦回归: 79 passed
+coomi-engine + coomi-tools: 28 passed
+storydex-coomi-bridge: 9 passed
+GitHub Actions HEAD 8bac23b: success
 ```
 
-实施要点：
+## 10. P1 调整后计划：先量化，再消除重复工作并保护证据链
 
-- `read_file` 和 ProjectSearch 成功后自动写 ledger，不依赖模型自报。
-- 相邻/重叠 span 合并，避免账本膨胀。
-- 新回合只向模型注入紧凑 evidence 摘要；需要原文时可按 ledger 引用重新取回。
-- 文件 revision 不变时，重复读取相同 span 返回缓存或明确 `already_read` 提示。
-- 文件 revision 变化时只失效该文件旧 evidence，不清空整个 session。
-- 对“检查全部候选文件”类任务建立 coverage gate，未覆盖时不能声称“全部检查完成”。
+已完成顺序：`P0-1F -> P1-0 -> P1-1 核心 -> P1-2a`。剩余顺序：`P1-2c -> P1-2b -> P1-3 删除独立规划 LLM -> P1-4 -> P1-5 -> P1-6 -> P1-7`。P1-3 已由产品决定删除无人消费的额外规划调用。
 
-验收：真实 session 中相同 revision+span 的重复 `read_file` 显著下降；Trace 能回答“结论来自哪个文件版本的哪一段”。
+### 10.1 P1-0 基线、指标和回归夹具
 
-### 10.3 P1-3 检索触发和错误可观察性
+目标：先把优化对象变成可重复测量的指标，避免只看主观响应速度。
+
+- 固定 300 章节、2,000 文件、连续 10 回合和多工具轮夹具。
+- 将 `contract_build_ms/directory_scan_count/stat_count`、`wiki_refresh_ms/fts_refresh_ms`、`bridge_start_ms/component_init_ms` 和 logical/transmitted/cached token 写入结构化 Trace。
+- 记录 `read_file` 的 `revision+span` 重复率，但此阶段不改变工具返回行为。
+- 基线脚本必须可在 CI 或本地门禁中独立运行；性能阈值使用相对回退门槛，避免把单机绝对时间当跨机器 SLA。
+
+验收：每项后续优化都有修改前/后的同夹具结果；Trace 能区分扫描、索引刷新、bridge 初始化、Provider 等待和工具执行时间。
+
+### 10.2 P1-1 统一 Source 协议与 Backend Content Catalog
+
+目标：先固定一个规范，再建立按 workspace 发布的只读文件快照；不得在 Python、Rust、Wiki 和 FTS 中继续发明不同 revision/span 语义。
+
+- 规范字段固定为 path、kind、SHA-256 revision、size、mtime_ns、char/byte/line 总量、freshness 和派生状态。
+- Rust `read_file` 与 Python retrieval 可以保留各自实现，但必须通过契约测试证明同一文件的 revision/span 一致。
+- Backend catalog 使用 immutable published snapshot；刷新在后台或保存事件中完成，查询只读已发布版本。
+- Storydex 保存/创建/删除/重命名和外部 watcher 事件应统一写入 dirty queue；成功发布后才确认 dirty revision，失败保留 dirty 项。当前已完成 dirty 入口和进程内写入接入，但尚无生产级外部文件 watcher，不能把测试中的显式 `notify_external_changes()` 误写为 watcher 已部署。
+- 启动时做一次全量内容 revision 校验，暖态只消费 dirty 事件；按 workspace single-flight，避免并发重复刷新。
+- 第一版不强行让前端资源浏览器或 Rust bridge 共享同一个数据库；先稳定 Backend 契约和所有权边界。
+
+验收：catalog snapshot 有单调 generation；同 size/mtime 内容替换仍能在启动校验或 watcher 事件后得到新 revision；暖态查询期间不隐式全树扫描或重建。
+
+### 10.3 P1-2 按消费者迁移，禁止一个大 PR 同时改完
+
+- P1-2a TurnContract/StoryProject：一次获取章节 snapshot，并把它显式传给目标解析、模板规划、诊断和上下文装配；暖态构建不再多次调用 `list_chapter_states()`。
+- P1-2b Wiki：先独立测量 `query_graph() -> read_or_build() -> _collect_sources()` 的 scan/stat/read/耗时，再用 catalog dirty set 更新受影响来源和必要派生关系；无变化查询只读已发布 Wiki snapshot，不运行 migration、reconcile 或写盘。
+- P1-2c FTS：先补生产级 workspace 文件事件来源及后台低频 reconciliation，再用 catalog revision 精确增删改 chunk；移除 `watch_files()` 加 `index_status(check_stale=True)` 的查询前双重全树扫描，查询只读已发布 v3 generation。watcher 丢事件时由后台 reconciliation 收敛，不能把全树扫描挪到另一个同步查询函数中。
+- 资源浏览器只有在 P1-0 证明它是同一瓶颈时再迁移，不能扩大首个优化包。
+
+验收：300 章节暖态 TurnContract 的全树扫描为 0；无变化 Wiki/FTS 查询的 `rglob/stat/read` 为 0；单文件变更只更新该文件和被声明的派生项；任意外部创建、修改、删除和重命名都能进入生产 dirty queue。若 published catalog 与 FTS/Wiki generation 不一致，查询必须显式返回 stale/unavailable，不能返回旧数据并伪装成 `no_hits`。
+
+### 10.3.1 2026-08-08 P0-1F、P1-0、P1-1、P1-2a 执行结果
+
+提交 `5cfabbd` 已完成、推送并实际验证以下四块：
+
+- P0-1F：恢复已有 runtime session 时校验 canonical workspace；workspace 不一致返回 `session_restore_failed(workspace_mismatch)`，workspace 不可用返回 `session_restore_failed(workspace_unavailable)`，均不得改写 session、binding 或历史。Rust 回归和最终真实链路都覆盖两种隔离失败；最终报告：`output/agent-integrity-live/95897505f9/acceptance-report.json`。
+- P1-0：新增固定性能基线、TurnContract 扫描/耗时指标、bridge 初始化分阶段指标，以及 logical/transmitted/cached token 指标。修改前报告：`output/agent-performance-baseline/e9d5b9e1a3/baseline-report.json`；真实链路报告：`output/agent-integrity-live/454ecd547b/acceptance-report.json`。
+- P1-1：统一 `sha256:<64 lowercase hex>` SourceRevision 和 char/byte/line exclusive-end SourceSpan；Backend Content Catalog 按 canonical workspace 发布 immutable snapshot，使用单调 generation 和 dirty revision 确认。保存、重命名、删除、StoryProject 写入、active-file 外部变化和 Coomi 写工具进入同一 dirty queue；catalog 根外路径不会污染 snapshot。同 size/mtime 替换在显式 dirty 事件后、刷新失败保留旧 snapshot、单文件精确重读和长工具结果 provenance 均有回归。最终真实报告：`output/agent-integrity-live/95897505f9/acceptance-report.json`。
+- P1-2a：Orchestration 每轮只获取一份 catalog snapshot、只构建一份 ChapterState 列表，并显式传给章节动作、目标规划、generation context、recent segments、scripts 和 next path。catalog 分支保持旧排序和输出等价；冷启动或 dirty 时保留章节目录规范化，暖态不重复执行。首次全量门禁发现 StoryProject 直接落盘未标 dirty 导致 8 个续写/章节规划回归，修复后 Backend 全量 `1027 passed`。
+- P1-2c：Content Catalog 的生产 watcher、后台低频 reconciliation 和 FTS v3 增量发布已接通；查询不再同步执行 `watch_files()` 加 `index_status(check_stale=True)` 双扫。300 文件夹具冷构建/暖态刷新/查询指标为 `9,629 ms / 77.84 ms / 77.4 ms`，真实 `OPENCODE / deepseek-v4-flash` 连续验收通过，报告：`output/agent-performance-baseline/p1-2c-current/baseline-report.json`、`output/agent-retrieval-live/p1-2c-current-2/acceptance-report.json`；提交 `0d4c6117e381b78a13e44e8525243c1ec36bd966` 的 Actions run `31208027587` 为 `success`。
+- P1-2b：Wiki 复用 catalog snapshot diff，排除 `.storydex/wiki/` 生成目录，发布 `source_snapshot.json` 与 catalog generation/revision；首次全量发布、暖态单文件精确更新、rename/delete、publish 失败保留 last-good 和 stale/unavailable 语义均有回归。300 文件夹具 catalog bootstrap 为 `199.080 ms`，暖态 query 为 `11.052 ms` / 第二次 `11.071 ms`，查询不调用 `_collect_sources`、migration、reconcile；报告：`output/agent-performance-baseline/p1-2b-current/baseline-report.json`；聚焦回归 `86 passed`。
+- P1-3：删除 `StorydexCoomiAgentService.create_task_plan()`、routes 的独立 planner Provider 分支和 `allow_external_provider` 兼容参数；复杂任务进入主 Agent 前的独立规划 Provider 调用数为 0，主 Agent Plan/Loop 与 UI/Trace 回归 `73 passed`。
+- P1-4：加入 deterministic query planner，覆盖 active entities、引号、章节引用和自然语言主题词，并过滤功能词；Trace 显式记录 query/queryPlan/queryTerms/candidateSpans 及 `no_query/no_hits/index_error/disabled`。聚焦回归 `40 passed`；真实 `OPENCODE / deepseek-v4-flash` 报告：`output/agent-retrieval-live/p1-4-current/acceptance-report.json`，status `passed`。
+
+固定 300 章节、2,000 文件、10 次 TurnContract 对比：
+
+| 指标 | P1-0 修改前 | P1-2a 完成后 | 变化 |
+|---|---:|---:|---:|
+| median | 3,451.095 ms | 189.946 ms | -94.5% |
+| p95 | 3,618.835 ms | 247.297 ms | -93.2% |
+| 暖态 Path.stat | 约 26,537 | 203 | -99.2% |
+| 暖态目录枚举 | 2,860 | 20 | -99.3% |
+| chapter snapshot build | 7 | 1 | -85.7% |
+| catalog-backed 章节 scan/stat/read | 未隔离 | 0 / 0 / 0 | 达标 |
+
+最终固定报告：`output/agent-performance-baseline/3689226673/baseline-report.json`。正式 TurnContract + Coomi + `OPENCODE / deepseek-v4-flash` 报告：`output/agent-integrity-live/95897505f9/acceptance-report.json`；真实三轮 contract 为 `92.573 ms`、`65.582 ms` 和 `74.181 ms`，复用同一 catalog generation/revision。首轮 6 个模型轮、8 个工具调用的 logical/transmitted/cached input token 分别为 `71,775 / 291,771 / 220,416`；bridge 启动和组件初始化分别为 `51.257 ms / 5.500 ms`。
+
+最终仓库门禁 `scripts/run_full_test_suite.ps1 -Mode Fast` 通过：Backend `1027 passed`，Backend coverage lines/branches 为 `85.33% / 71.95%`；Frontend `302 passed` 且 production build 通过；Desktop `40 passed`；Rust workspace、release runtime、编码和 whitespace 检查全部通过。
+
+推送复核：`5cfabbddd5a5d7357d220316837c532f4d4240ee` 的 pre-push 认证为 `mode: Fast`；GitHub Actions run `31198092846` 已于 2026-08-08（Asia/Shanghai）完成且结论为 `success`。
+
+本次交接 review 发现一个不能被遗漏的集成缺口：仓库当前只有 `ContentCatalogService.notify_external_changes()` 接口和测试调用，没有常驻文件系统 watcher。FTS 的 `watch_files()` 目前既刷新索引，也承担发现非 Storydex/Coomi 写入的外部变化。P1-2c 删除全树扫描前必须先补真实事件生产者和 watcher 丢事件后的后台 reconciliation；否则同 size/mtime 外部改写、删除或重命名可能静默留在旧索引中。该缺口不推翻 Source/Catalog 核心契约，但阻止 FTS/Wiki 消费者宣称已经完成零扫描迁移。
+
+剩余顺序按 P1-0 数据调整为：
+
+1. P1-2c FTS：无变化刷新仍执行 `4,411 stat`，stale check 为 `4,412 stat`；最终同夹具本机耗时分别为 `559.598 ms / 601.022 ms`。先补生产 dirty 事件和后台 reconciliation，再迁移 FTS 并删除查询前双扫；这是当前最明确的固定 I/O 成本。
+2. P1-2b Wiki：复用已经稳定的变更事件入口，补齐独立 dirty projection 基线后迁移到 published snapshot；不能与 FTS 合并为一个大改动。
+3. P1-3：删除独立规划 LLM 的额外 Provider 调用；保留主 Agent 自身的 Plan/Loop 规划能力。
+4. P1-4 至 P1-7：检索触发、Evidence Ledger、结构化压缩检查点和真实 token/JIT 预算仍然正确，按依赖顺序执行。
+5. P2：Evidence Ledger 和 compaction checkpoint 未稳定前继续阻塞；不能因 bridge 初始化已量化就直接改常驻 worker。
+
+### 10.4 P1-3 删除独立规划 LLM
+
+当前复杂任务会并行调用独立规划 LLM；主 Agent 不等待、不把结果注入 `turn_contract`，结果仅生成 UI/Trace 任务条，因此每轮额外增加一次 Provider 请求、Token、延迟和失败点，却没有可验证的执行消费者。
+
+产品决定：删除该独立调用及仅依赖其产生的无效任务条；不删除主 Agent、自身 Plan/Loop、TurnContract、Provider 配置或正常推理能力。主 Agent 的 Plan/Loop 作为唯一执行计划来源。
+
+验收：复杂任务进入主 Agent 前的独立规划 Provider 调用数为 0；主 Agent 的正常 Plan/Loop、工具执行、UI 和 Trace 回归通过。
+
+### 10.5 P1-4 检索触发和错误可观察性
 
 目标：普通自然语言主题请求也能形成受控查询，同时不把功能词噪声送入 FTS。
 
-实施要点：
-
 - 增加内容词/实体/query planner，不再只依赖活动实体和引号短语。
-- 对检索词、索引 revision、候选数、选中 span、错误状态写结构化 Trace。
+- 对检索词、catalog/index generation、候选数、选中 span、错误状态写结构化 Trace。
 - “无查询词”“零命中”“索引不可用”“预算丢弃”必须分开。
-- 相关证据正文优先进入预算，candidate paths 留在 metadata。
+- 相关证据正文优先进入预算，candidate paths 只留在 metadata。
 
 验收：`请续写星核密钥引发的冲突` 与带引号版本都触发可解释检索；索引失败时 Agent 不得断言项目没有相关内容。
 
-### 10.4 P1-4 规划 LLM 去重或真正接入
+### 10.6 P1-5 Evidence Ledger：先记录，后复用
 
-当前复杂任务会并行调用独立规划 LLM，但主 Agent 不等待且不消费规划结果。规划多用于事后 UI/Trace，可能形成纯额外 Provider 调用。
+目标：跨工具轮和跨回合记录 Agent 已观察的 `path+revision+span`，先获得真实重复率和证据来源，再启用缓存行为。
 
-二选一，需产品决定：
+建议记录：session_id、path、revision、read/retrieval spans、first/last observed turn、source tool、result hash 和 coverage goal。
 
-- 删除独立规划 LLM，由主 Agent 的 Plan/Loop 作为唯一执行计划来源。
-- 保留规划 LLM，但在主 Agent 开始前把结构化计划注入 TurnContract，并让执行/Trace 都引用同一个 task id。
+- v1 只自动记录、合并相邻 span、写 Trace 和精确失效，不改变 `read_file`/ProjectSearch 返回。
+- 文件 revision 变化时只失效该文件旧 evidence，不清空整个 session。
+- 对“检查全部候选文件”建立 coverage gate，未覆盖时不能声称全部检查完成。
+- v2 只有在 P1-0 数据证明收益后才缓存相同 revision+span 的结果；缓存命中仍返回调用方本轮需要的正文和 provenance。
+- 禁止只返回裸 `already_read`：压缩或新回合后，模型可能已没有原文，这种提示会把可读取证据变成隐式缺失。
 
-禁止维持“付出一次模型调用，但执行不受其约束”的中间状态。
+验收：Trace 能回答结论来自哪个文件版本的哪一段；v1 不改变 Agent 语义；v2 的重复读取下降且 revision 变更后不会命中旧内容。
 
-验收：每次规划调用都有可验证的执行消费者；否则调用数为零。
+### 10.7 P1-6 结构化压缩检查点
 
-### 10.5 P1-5 真实 Token 预算、LRU 和 JIT 上下文
+当前压缩会把早期工具结果替换为截断文本、最多保留 20,000 token 真实用户消息，并让 assistant/tool 细节主要依赖一次自然语言摘要。
 
-实施要点：
-
-- 用 Provider tokenizer/估算器统一计算 system、history、tools、TurnContract 和预留输出预算。
-- 启用前先让 `CONTEXT_TOKEN_BUDGET_REAL` 在 shadow 模式记录差异。
-- LRU 以 `workspace + source revision + context block config` 为 key。
-- JIT 只注入任务必需摘要和证据索引，需要原文时再调用工具。
-- 预算删除任何块时，模型和 Trace 都必须看到 `omitted/truncated` 状态。
-
-验收：相同输入的预算结果可复现；不会因字符数适配而超过模型窗口；缓存命中不复用旧 revision。
-
-### 10.6 P1-6 结构化压缩检查点
-
-当前压缩会：
-
-- 先把较早工具结果替换为统一的截断文本。
-- 最多保留 20,000 token 的真实用户消息。
-- assistant/tool 的细节主要依赖一次 LLM 摘要。
-
-改进方向：
-
-- Plan、Loop、未完成动作、用户约束、文件 revision、Evidence Ledger 独立持久化，不只放在自然语言摘要中。
+- Plan、Loop、未完成动作、用户约束、文件 revision 和 Evidence Ledger 独立持久化。
 - 压缩前生成机器可校验 checkpoint；摘要只承担叙述性上下文。
 - 保留最近完整工具调用链和所有未完成 tool call 配对。
-- 对关键用户约束建立不可压缩字段或结构化引用。
-- 压缩后运行一致性检查：目标、权限、未完成任务、evidence revision 均存在。
+- 压缩后校验目标、权限、未完成任务和 evidence revision；失败时保留原 session。
 
-验收：构造超窗口会话并压缩后，用户权限约束、目标文件、未完成计划和证据引用不丢；缺字段时压缩失败并保留原 session。
+验收：构造超窗口会话并压缩后，用户权限约束、目标文件、未完成计划和证据引用不丢。
+
+### 10.8 P1-7 真实 Token 预算、LRU 和 JIT 上下文
+
+`CONTEXT_LRU_ENABLED`、`CONTEXT_TOKEN_BUDGET_REAL`、`JIT_CONTEXT_LOADING_ENABLED` 当前仅存在于默认配置，没有生产消费者；不能通过简单打开开关宣称功能已启用。
+
+- 先实现 shadow token accounting，统一计算 system、history、tools、TurnContract 和预留输出预算。
+- LRU 以 `workspace + catalog generation/source revision + block config` 为 key；命中不得复用旧 revision。
+- JIT 必须在结构化 checkpoint 和 Evidence Ledger 稳定后启用，只注入任务必需摘要和证据索引。
+- 预算删除任何块时，模型和 Trace 都必须看到 `omitted/truncated` 状态。
+
+验收：相同输入的预算结果可复现；不因字符估算超过模型窗口；关闭/开启各阶段开关都有等价与失效测试。
 
 ## 11. P2 计划：运行时与 Provider 架构优化
+
+P2 入口门槛：P0-1F 已关闭；Content Catalog/Source 协议、Evidence Ledger 和 compaction checkpoint 已稳定；P1-0 指标能够证明固定成本主要位于 bridge 初始化或 Provider 重传。未满足门槛时不得直接改为常驻进程或远端权威会话。
 
 ### 11.1 P2-1 长生命周期 bridge/session worker
 
@@ -707,11 +769,11 @@ content hash or result hash
 
 ### 11.3 P2-3 统一内容与检索内核
 
-目标：Wiki、FTS、TurnContract、ProjectSearch、read_file 共用 SourceRevision/SourceSpan/Content Catalog，不再各自定义截断、错误和新鲜度规则。
+目标：在 P1 已统一契约和 Backend catalog 的基础上，按测量结果收敛仍然重复的跨 runtime 读取/检索实现。P1-1 的契约统一是前置项，本阶段不是再定义第二套格式。
 
 实施要点：
 
-- 查询 API 纯读 published snapshot。
+- 查询 API 纯读 published snapshot；是否物理共用数据库由进程边界和基准决定，不以“统一”为名强行耦合 Python/Rust 生命周期。
 - 索引/投影生成是独立后台任务。
 - 所有返回都带 revision、span、coverage 和 freshness。
 - 旧的重复检索路径在等价测试通过后删除。
@@ -726,6 +788,7 @@ content hash or result hash
 intent_input_chars / intent_input_complete
 contract_build_ms / directory_scan_count / stat_count
 catalog_revision / dirty_file_count
+catalog_event_lag_ms / reconciliation_scan_count / reconciliation_changed_count
 wiki_refresh_ms / fts_refresh_ms / fts_coverage
 bridge_start_ms / component_init_ms
 model_rounds / tool_calls / duplicate_tool_calls_same_revision
@@ -737,9 +800,11 @@ session_load_status / session_save_status
 
 建议的阶段性门槛：
 
-- P0：所有 session 恢复失败、读取截断、索引不完整都有显式状态；硬损失复现全部转为通过。
-- P1：300 章节暖态 TurnContract 的目录扫描归并为一次 snapshot 读取；无变化 Wiki/FTS 查询不全树扫描。
+- P0：所有 session 恢复失败、workspace mismatch、读取截断、索引不完整都有显式状态；硬损失复现全部转为通过。
+- P1-0：同一夹具可重复输出扫描、刷新、bridge 初始化和 token 传输指标；指标缺失时不开始对应优化。
+- P1：300 章节暖态 TurnContract 只读已发布 snapshot；无变化 Wiki/FTS 查询的全树扫描、`stat` 和源文件读取均为 0；外部变更事件在定义的时间内发布，丢事件由非查询路径 reconciliation 收敛。
 - P1：相同 revision+span 的重复读取率可测并显著下降，目标值在收集一周真实样本后确定。
+- P1：独立 planner 调用为 0，或其结果在主 Agent 启动前进入 TurnContract 并被执行引用。
 - P2：连续回合 bridge 初始化次数从每回合 1 次降到每 worker 生命周期 1 次。
 - P2：工具轮 transmitted input 不再重复发送可复用前缀；按 Provider 能力分别设定基线。
 
@@ -756,7 +821,7 @@ session_load_status / session_save_status
 | Compaction | 权限/目标/计划/evidence checkpoint 保留、tool call 配对 |
 | 性能 | 300 章节 TurnContract、2,000 文件 catalog/FTS、长 session 多工具轮 |
 
-P0 全项实施后的验证结果：
+P0 三个原始变更包实施后的验证结果（P0-1F 复核收尾另见第 9.3 节）：
 
 ```text
 Python 聚焦组合: 106 passed
@@ -786,15 +851,16 @@ P0-3 OpenCode 真实 Agent 验收: 2 次 passed
 
 ## 14. 工作区与交付注意事项
 
-P0-1/P0-2/P0-3 当前以未提交工作区改动存在。继续工作前必须执行 `git status` 和 `git diff`，不得回退用户或其他任务的并发改动。
+P0-1/P0-2/P0-3 已分别提交为 `b0dd6cf`、`151ca45`、`785a46f`；P0-1F、P1-0、P1-1 核心和 P1-2a 已提交为 `5cfabbd`。当前 `main` 与 `origin/main` 均位于 `5cfabbddd5a5d7357d220316837c532f4d4240ee`，对应 GitHub Actions run `31198092846` 为 `success`。
 
-`apps/backend/tests/test_graph_live_acceptance_script.py` 当前有一处不属于 P0-1/P0-2 的并发测试改动：它把固定 Provider/Model 常量替换为测试局部值。该改动应保留，但不能计入本轮变更或被一并回退。
+当前唯一已知 tracked 未提交修改应为本文档，且这是按用户要求保留给新对话参考的本地计划文档，不得混入下一笔代码提交。`stash@{0}: codex-docs-between-split-pushes` 是本文档恢复前的旧备份，当前工作区版本更新，下一轮不得再次 apply 或删除；`stash@{1}`、`stash@{2}` 属于用户或其他会话，同样不得修改或删除。新提交应显式 `git add` 代码和正式测试路径，并重新运行 pre-push 门禁；旧 SHA 的认证不能复用于新 SHA。
 
 真实验收通过临时目录复制单个 Provider 配置，结束后自动删除临时配置和密钥副本。`output/` 下的验收报告被 Git 忽略；提交前仍应检查暂存差异中没有 API key、Authorization header 值或临时 Provider 配置。
 
 ## 15. 明确禁止的修复方式
 
 - 不得在 session 恢复失败时创建新 session 后继续。
+- 不得把已绑定 session 的 cwd 改写为另一个 workspace 后继续。
 - 不得删除损坏 session 或 binding 后假装恢复成功。
 - 不得只把 500 行、2,000 行、48,000 字节或 120,000 字符调大。
 - 不得用无意义重试掩盖确定性初始化/持久化错误。
@@ -808,11 +874,8 @@ P0-1/P0-2/P0-3 当前以未提交工作区改动存在。继续工作前必须�
 ### 新对话处理 P1
 
 ```text
-请读取 docs/Agent运行链路信息完整性与性能治理.md 的第 10、12、13、14 节。
-P0-1/P0-2/P0-3 已完成；先复核现有 SourceRevision/SourceSpan 和 v3 retrieval 状态协议，禁止另造不兼容格式。
-本轮优先设计并实施 P1-1 Content Catalog，不同时改 planner 或长生命周期 bridge。
-先复跑 300 章节 TurnContract 和无变化 Wiki/FTS 的扫描基线，
-以“暖态不全树扫描、单文件变更只精确失效”为验收标准。
+继续执行 docs/Agent运行链路信息完整性与性能治理.md。先检查并保留当前工作区，完成已有 P1-2c，再严格按 P1-2b -> P1-3 -> P1-4 -> P1-5 -> P1-6 -> P1-7 推进；P1-3 已决定删除独立规划 LLM，P2 按文档继续阻塞。
+按文档基线和验收标准实施最小完整改动；真实主链路验证使用本机 OPENCODE API 配置，凭证不得输出或提交。使用中文 commit，分 2～3 次 push；每个新 HEAD 通过 pre-push，推送后监控 GitHub Actions 到 success。
 ```
 
 ### 新对话处理 P2
@@ -829,7 +892,7 @@ P0-1/P0-2/P0-3 已完成；先复核现有 SourceRevision/SourceSpan 和 v3 retr
 
 只有同时满足以下条件，才能认为本专项完成：
 
-1. session 历史不会因缺失、损坏、初始化失败或保存中断而静默归零。
+1. session 历史不会因缺失、损坏、初始化失败或保存中断而静默归零，也不能跨 workspace 被重新绑定。
 2. 任何有界读取都带 revision、span、总量、截断原因和继续方式。
 3. 所有可检索项目文本都有全文 chunk 覆盖，零命中与系统错误可区分。
 4. 暖态 TurnContract/Wiki/FTS 不重复全树扫描。

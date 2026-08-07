@@ -7,12 +7,167 @@ import pytest
 
 from services.story_project_service import StoryProjectService
 from services.story_knowledge_relation_service import StoryKnowledgeRelationService
+from services.content_catalog_service import ContentCatalogService, get_content_catalog_service, reset_content_catalog_services
 from services.story_wiki_service import WIKI_CATEGORY_SCHEMA_VERSION, StoryWikiService
 
 
 def _write_json(path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def test_catalog_backed_wiki_bootstrap_and_warm_query_do_not_collect_sources(
+    tmp_path,
+    monkeypatch,
+):
+    chapter = tmp_path / "chapters" / "001.md"
+    chapter.parent.mkdir(parents=True)
+    chapter.write_text("星核密钥位于北塔。\n", encoding="utf-8")
+    reset_content_catalog_services()
+    catalog = get_content_catalog_service(tmp_path)
+    snapshot = catalog.snapshot()
+    service = StoryWikiService()
+
+    published = service.refresh_from_catalog(
+        tmp_path,
+        snapshot,
+        changed_paths=tuple(snapshot.entries),
+    )
+    assert published["status"] == "ready"
+    assert published["catalogGeneration"] == snapshot.generation
+
+    monkeypatch.setattr(service, "_collect_sources", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("warm catalog query collected workspace sources")
+    ))
+    monkeypatch.setattr(service, "_migrate_knowledge_relation_storage", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("warm catalog query migrated storage")
+    ))
+    monkeypatch.setattr(service, "_reconcile_entity_registry", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("warm catalog query reconciled entities")
+    ))
+
+    result = service.query_graph(tmp_path, q="星核密钥")
+    assert result["status"] == "ready"
+    assert result["queryStatus"] if "queryStatus" in result else True
+    assert any("星核密钥" in str(entry) for entry in result["entries"])
+
+
+def test_catalog_wiki_incremental_update_reads_only_changed_file_and_handles_rename_delete(
+    tmp_path,
+    monkeypatch,
+):
+    first = tmp_path / "chapters" / "001.md"
+    second = tmp_path / "chapters" / "002.md"
+    first.parent.mkdir(parents=True)
+    first.write_text("stable-alpha\n", encoding="utf-8")
+    second.write_text("stable-beta\n", encoding="utf-8")
+    catalog = ContentCatalogService(tmp_path)
+    initial = catalog.snapshot()
+    service = StoryWikiService()
+    service.refresh_from_catalog(tmp_path, initial, changed_paths=tuple(initial.entries))
+
+    first.write_text("changed-alpha\n", encoding="utf-8")
+    catalog.notify_external_changes([first])
+    updated_snapshot = catalog.refresh_dirty()
+    changed = catalog.changed_paths(initial, updated_snapshot)
+    reads = []
+    original = service._source_from_path
+
+    def tracked(root, path):
+        reads.append(path.relative_to(root).as_posix())
+        return original(root, path)
+
+    monkeypatch.setattr(service, "_source_from_path", tracked)
+    service.refresh_from_catalog(tmp_path, updated_snapshot, changed_paths=changed)
+    assert reads == ["chapters/001.md"]
+    assert service.query_graph(tmp_path, q="changed-alpha")["status"] == "ready"
+    assert service.query_graph(tmp_path, q="stable-beta")["status"] == "ready"
+
+    renamed = first.with_name("renamed.md")
+    first.rename(renamed)
+    catalog.notify_external_changes([first, renamed])
+    renamed_snapshot = catalog.refresh_dirty()
+    service.refresh_from_catalog(
+        tmp_path,
+        renamed_snapshot,
+        changed_paths=catalog.changed_paths(updated_snapshot, renamed_snapshot),
+    )
+    assert service.query_graph(tmp_path, q="changed-alpha")["status"] == "ready"
+    assert "chapters/001.md" not in {
+        path
+        for source in service._read_source_snapshot(tmp_path).values()
+        for path in [str(source.get("relativePath") or "")]
+    }
+
+    renamed.unlink()
+    catalog.notify_external_changes([renamed])
+    deleted_snapshot = catalog.refresh_dirty()
+    service.refresh_from_catalog(
+        tmp_path,
+        deleted_snapshot,
+        changed_paths=catalog.changed_paths(renamed_snapshot, deleted_snapshot),
+    )
+    assert service.query_graph(tmp_path, q="changed-alpha")["status"] == "ready"
+    assert service.query_graph(tmp_path, q="stable-beta")["status"] == "ready"
+
+
+def test_catalog_generation_mismatch_is_explicitly_unavailable(tmp_path):
+    chapter = tmp_path / "chapters" / "001.md"
+    chapter.parent.mkdir(parents=True)
+    chapter.write_text("generation-one\n", encoding="utf-8")
+    reset_content_catalog_services()
+    catalog = get_content_catalog_service(tmp_path)
+    first = catalog.snapshot()
+    service = StoryWikiService()
+    service.refresh_from_catalog(tmp_path, first, changed_paths=tuple(first.entries))
+
+    chapter.write_text("generation-two\n", encoding="utf-8")
+    catalog.notify_external_changes([chapter])
+    second = catalog.refresh_dirty()
+    result = service.query_graph(tmp_path, q="generation-one")
+
+    assert result["status"] == "stale"
+    assert result["queryStatus"] == "unavailable"
+    assert result["entries"] == []
+    assert result["catalogGeneration"] == second.generation
+
+
+def test_catalog_wiki_blocking_publish_keeps_last_good_projection(tmp_path, monkeypatch):
+    chapter = tmp_path / "chapters" / "001.md"
+    chapter.parent.mkdir(parents=True)
+    chapter.write_text("last-good\n", encoding="utf-8")
+    catalog = ContentCatalogService(tmp_path)
+    first = catalog.snapshot()
+    service = StoryWikiService()
+    service.refresh_from_catalog(tmp_path, first, changed_paths=tuple(first.entries))
+    old_bytes = service.wiki_json_path(tmp_path).read_bytes()
+
+    chapter.write_text("broken-publish\n", encoding="utf-8")
+    catalog.notify_external_changes([chapter])
+    second = catalog.refresh_dirty()
+    original_validate = service.validate_graph_invariants
+
+    def blocking(*args, **kwargs):
+        return [
+            {
+                "code": "test.catalog.publish_failure",
+                "message": "forced catalog publish failure",
+                "path": "graph",
+                "blocking": True,
+            }
+        ]
+
+    monkeypatch.setattr(service, "validate_graph_invariants", blocking)
+    rejected = service.refresh_from_catalog(
+        tmp_path,
+        second,
+        changed_paths=catalog.changed_paths(first, second),
+    )
+    assert rejected["status"] == "error"
+    assert service.wiki_json_path(tmp_path).read_bytes() == old_bytes
+    assert service._read_projection_status(tmp_path)["status"] == "error"
+    assert service.query_graph(tmp_path, q="last-good")["queryStatus"] == "unavailable"
+    monkeypatch.setattr(service, "validate_graph_invariants", original_validate)
 
 
 def test_rebuild_ignores_framework_files_and_keeps_empty_project_minimal(tmp_path):
@@ -1199,6 +1354,7 @@ def test_projection_bundle_restores_all_files_when_commit_fails(tmp_path, monkey
     } == targets
     assert not list(service.wiki_root(tmp_path).glob(".*.tmp"))
     assert not list(service.wiki_root(tmp_path).glob(".*.restore"))
+    assert not list((tmp_path / ".storydex/.agent/temp/wiki-atomic").glob("*"))
 
 
 def test_invalid_previous_projection_is_never_served_as_is(tmp_path):

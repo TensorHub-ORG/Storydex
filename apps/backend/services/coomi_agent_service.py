@@ -486,38 +486,6 @@ class StorydexCoomiAgentService:
     def request_steer(self, *, session_id: str, workspace_root: Path) -> bool:
         return self._signal_bridge(session_id=session_id, workspace_root=workspace_root, steer=True)
 
-    async def create_task_plan(
-        self,
-        *,
-        prompt: str,
-        trace_id: str,
-        session_id: str,
-        workspace_root: Path,
-        active_file: str = "",
-        story_generation: Dict[str, Any] | None = None,
-        turn_contract: Dict[str, Any] | None = None,
-    ) -> list[Dict[str, Any]]:
-        del session_id
-        from services.llm_replay import get_replayable_llm_provider, llm_purpose, llm_trace
-
-        try:
-            provider = get_replayable_llm_provider(get_bridge_provider(fast=True))
-            with llm_trace(trace_id), llm_purpose("plan"):
-                response = await _call_provider_chat(
-                    provider,
-                    _task_planner_messages(
-                        prompt=prompt,
-                        workspace_root=workspace_root,
-                        active_file=active_file,
-                        story_generation=story_generation,
-                        turn_contract=turn_contract,
-                    ),
-                    None,
-                )
-            return _parse_task_plan_content(str(getattr(response, "content", "") or ""), trace_id=trace_id)
-        except Exception:
-            return []
-
     async def generate_commit_message(
         self,
         *,
@@ -3119,16 +3087,6 @@ def _extract_model_ids(payload: Any) -> list[str]:
         if model.strip():
             models.add(model.strip())
     return sorted(models, key=str.casefold)
-
-
-def _task_planner_messages(**values: Any) -> list[Dict[str, str]]:
-    return [
-        {
-            "role": "system",
-            "content": "Return only a JSON array of 2-10 concrete tasks. Each item has title and detail. Avoid generic analysis or completion steps.",
-        },
-        {"role": "user", "content": json.dumps(values, ensure_ascii=False, default=str)},
-    ]
 
 
 def _parse_task_plan_content(content: str, *, trace_id: str) -> list[Dict[str, Any]]:

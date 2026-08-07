@@ -39,6 +39,16 @@ def _worktree_lock(workspace_root: Path) -> threading.RLock:
         return lock
 
 
+def workspace_git_lock(workspace_root: Path) -> threading.RLock:
+    """Expose the per-worktree lock to projection publishers.
+
+    Local Git staging and atomic generated-file replacement both require
+    stable Windows file handles. Sharing this lock prevents ``git add`` from
+    reading a projection while its publisher replaces the same path.
+    """
+    return _worktree_lock(Path(workspace_root))
+
+
 def _serialized(method: Callable[..., _T]) -> Callable[..., _T]:
     """Serialize a GitService method on the worktree it operates on."""
 

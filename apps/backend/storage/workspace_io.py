@@ -451,6 +451,16 @@ class WorkspaceIO:
         )
 
     def _include_child(self, path: Path) -> bool:
+        # Agent atomic publishers use this directory for short-lived
+        # temporary files.  It is runtime state rather than user content, and
+        # traversing it while os.replace is in progress can expose a path that
+        # disappears before its stat() call (especially on Windows).
+        try:
+            relative = path.relative_to(self.workspace_root).as_posix().strip("/")
+        except ValueError:
+            relative = ""
+        if relative == ".storydex/.agent/temp" or relative.startswith(".storydex/.agent/temp/"):
+            return False
         if path.is_dir():
             return path.name not in {"__pycache__", ".pytest_cache", "node_modules", ".git"}
         return self._include_file(path)

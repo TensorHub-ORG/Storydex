@@ -8,7 +8,7 @@ from hashlib import sha256
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
 from uuid import uuid4
 
 from services.entity_registry import EntityRecord, EntityRegistry
@@ -25,6 +25,7 @@ EXCLUDED_PARTS = {".git", "__pycache__", ".cache", "traces", "sessions"}
 EXCLUDED_RELATIVE_PREFIXES = (
     ".storydex/wiki/",
     ".storydex/.agent/",
+    ".storydex/memory/backups/",
     ".storydex/templates/",
     ".storydex/presets/",
     ".storydex/config/",
@@ -32,6 +33,7 @@ EXCLUDED_RELATIVE_PREFIXES = (
 )
 ENTITY_SOURCE_PATH = ".storydex/memory/current/entities.json"
 FACT_SOURCE_PATH = ".storydex/memory/current/facts.json"
+WIKI_SOURCE_SNAPSHOT_NAME = "source_snapshot.json"
 
 WIKI_CATEGORY_SCHEMA_VERSION = "story-wiki-v7-auditable-relations"
 PROJECTION_SCHEMA_VERSION = 3
@@ -230,8 +232,58 @@ AgentWikiRunner = Callable[..., Awaitable[Dict[str, Any]]]
 class StoryWikiService:
     """Builds a deterministic project WIKI when no LLM wiki artifact exists."""
 
+    def prepare_catalog_sources(
+        self,
+        workspace_root: Path,
+        *,
+        reconcile_entities: bool = False,
+    ) -> Dict[str, Any]:
+        """Finish source migrations before the catalog snapshot is published.
+
+        Catalog-driven Wiki publication must be a one-way projection. Any
+        migration or evidence invalidation that changes canonical memory is
+        therefore completed first and reported as exact dirty paths for the
+        content pipeline to include in the same immutable snapshot.
+        """
+        result = self._migrate_knowledge_relation_storage(workspace_root.resolve())
+        migration = result.get("migration") if isinstance(result.get("migration"), dict) else {}
+        invalidation = (
+            result.get("candidateInvalidation")
+            if isinstance(result.get("candidateInvalidation"), dict)
+            else {}
+        )
+        written_paths: List[str] = []
+        if bool(migration.get("migrated")):
+            written_paths.extend(
+                (
+                    ENTITY_SOURCE_PATH,
+                    FACT_SOURCE_PATH,
+                    ".storydex/memory/review/relations.json",
+                )
+            )
+        written_paths.extend(
+            str(path).replace("\\", "/").strip("/")
+            for path in invalidation.get("writtenPaths", [])
+            if str(path).strip()
+        )
+        if reconcile_entities:
+            entity_path = workspace_root.resolve() / ENTITY_SOURCE_PATH
+            before_entities = entity_path.read_bytes() if entity_path.exists() else None
+            self._reconcile_entity_registry(workspace_root.resolve())
+            after_entities = entity_path.read_bytes() if entity_path.exists() else None
+            if before_entities != after_entities:
+                written_paths.append(ENTITY_SOURCE_PATH)
+        return {
+            **result,
+            "writtenPaths": list(dict.fromkeys(written_paths)),
+        }
+
     def read_or_build(self, workspace_root: Path, *, force: bool = False) -> Dict[str, Any]:
         root = workspace_root.resolve()
+        if not force:
+            catalog_fast_path = self._read_published_catalog_projection(root)
+            if catalog_fast_path is not None:
+                return catalog_fast_path
         self._migrate_knowledge_relation_storage(root)
         self._reconcile_entity_registry(root)
         wiki_path = self.wiki_json_path(root)
@@ -259,6 +311,200 @@ class StoryWikiService:
                 pass
         return self.rebuild(root)
 
+    def _read_published_catalog_projection(self, root: Path) -> Dict[str, Any] | None:
+        """Read the last published graph without touching workspace sources.
+
+        A Content Catalog snapshot is created by the background content
+        pipeline.  Once present, a Wiki query must never fall back to the
+        legacy ``rglob -> read_or_build`` path: a missing or mismatched
+        projection is returned explicitly as stale/unavailable until the
+        publisher catches up.
+        """
+        try:
+            from services.content_catalog_service import get_content_catalog_service
+
+            catalog = get_content_catalog_service(root)
+            snapshot = catalog.peek_snapshot()
+        except Exception:
+            return None
+        if snapshot is None:
+            # Unit callers and legacy workspaces which have not bootstrapped a
+            # catalog retain the old cold-build behavior.
+            return None
+        payload = self._read_existing_payload(root)
+        if payload is None:
+            return self._stale_projection_payload(
+                root,
+                payload=None,
+                snapshot=snapshot,
+                reason="wiki projection has not been published",
+            )
+        if (
+            str(payload.get("catalogRevision") or "") == snapshot.catalog_revision
+            and int(payload.get("catalogGeneration") or 0) == int(snapshot.generation)
+            and str(payload.get("status") or "ready") == "ready"
+            and int(snapshot.dirty_file_count) == 0
+        ):
+            return self._with_projection_status(root, payload)
+        return self._stale_projection_payload(
+            root,
+            payload=payload,
+            snapshot=snapshot,
+            reason=(
+                "wiki projection has unpublished catalog changes"
+                if snapshot.dirty_file_count
+                else "wiki projection generation does not match the published content catalog"
+            ),
+        )
+
+    def _stale_projection_payload(
+        self,
+        root: Path,
+        *,
+        payload: Dict[str, Any] | None,
+        snapshot: Any,
+        reason: str,
+    ) -> Dict[str, Any]:
+        base = dict(payload or {})
+        base.setdefault("projectName", root.name)
+        base.setdefault("workspaceRoot", root.as_posix())
+        base.setdefault("entries", [])
+        base.setdefault("graph", {"nodes": [], "edges": []})
+        base["status"] = "stale"
+        base["projectionFreshness"] = "stale"
+        base["catalogGeneration"] = int(snapshot.generation)
+        base["catalogRevision"] = str(snapshot.catalog_revision)
+        base["catalogDirtyFileCount"] = int(snapshot.dirty_file_count)
+        base["error"] = reason
+        base["diagnostics"] = [
+            *[
+                dict(item)
+                for item in base.get("diagnostics", [])
+                if isinstance(item, dict)
+            ],
+            {
+                "code": "wiki.catalog.stale",
+                "severity": "warning",
+                "message": reason,
+            },
+        ]
+        return base
+
+    def refresh_from_catalog(
+        self,
+        workspace_root: Path,
+        catalog_snapshot: Any,
+        *,
+        changed_paths: Sequence[str] | None = None,
+    ) -> Dict[str, Any]:
+        """Publish Wiki from one immutable Content Catalog snapshot.
+
+        The first publication reads all sources once and stores a local source
+        snapshot.  Warm dirty updates read only revisions named by the catalog
+        dirty set; unchanged source text is reused from that published cache.
+        Query code never invokes this method.
+        """
+        root = workspace_root.resolve()
+        snapshot = catalog_snapshot
+        if snapshot is None:
+            raise ValueError("catalog snapshot is required for Wiki publication")
+        existing = self._read_existing_payload(root)
+        source_cache = self._read_source_snapshot(root)
+        catalog_entries = {
+            str(path): entry
+            for path, entry in snapshot.entries.items()
+            if self._catalog_entry_is_wiki_source(str(path), entry)
+        }
+        dirty = {
+            str(path).replace("\\", "/").strip("/")
+            for path in (changed_paths or ())
+            if str(path).strip()
+        }
+        cache_revisions = {
+            str(path): str(
+                item.get("_catalogRevision")
+                or item.get("catalogRevision")
+                or item.get("sha256")
+                or ""
+            )
+            for path, item in source_cache.items()
+            if isinstance(item, dict)
+        }
+        needs_full = (
+            existing is None
+            or not self._has_current_category_schema(existing)
+            or not self.source_snapshot_path(root).is_file()
+        )
+        changed_by_revision = {
+            path
+            for path, entry in catalog_entries.items()
+            if cache_revisions.get(path) != str(entry.revision)
+        }
+        changed_by_membership = set(cache_revisions) ^ set(catalog_entries)
+        effective_changed = sorted(
+            dirty | changed_by_revision | changed_by_membership,
+            key=self._source_sort_key,
+        )
+        if needs_full:
+            sources = self._sources_from_catalog(root, catalog_entries)
+            workflow = "catalog_bootstrap"
+        else:
+            sources_by_path = {
+                path: dict(value)
+                for path, value in source_cache.items()
+                if path in catalog_entries
+            }
+            for path in effective_changed:
+                entry = catalog_entries.get(path)
+                if entry is None:
+                    sources_by_path.pop(path, None)
+                    continue
+                source = self._source_from_catalog_entry(root, entry)
+                if source is None:
+                    sources_by_path.pop(path, None)
+                else:
+                    sources_by_path[path] = source
+            sources = [
+                sources_by_path[path]
+                for path in sorted(sources_by_path, key=lambda value: self._source_sort_key(value))
+            ]
+            workflow = "sync_catalog"
+            if not effective_changed and existing is not None:
+                # The catalog may have advanced because only an ignored/generated
+                # path changed.  Keep the graph but publish the new generation.
+                effective_changed = []
+        if not effective_changed and existing is not None and not needs_full:
+            # If the projection already names this exact catalog snapshot,
+            # there is nothing to write.  In particular, do not refresh
+            # volatile timestamps on every pipeline wake-up: that would make
+            # an otherwise clean workspace look Git-dirty forever.
+            if (
+                str(existing.get("catalogRevision") or "") == str(snapshot.catalog_revision)
+                and int(existing.get("catalogGeneration") or 0) == int(snapshot.generation)
+                and str(existing.get("status") or "ready") == "ready"
+            ):
+                return self._with_projection_status(root, existing)
+            # Publish catalog metadata together with the existing projection;
+            # this is the only write needed when the catalog advanced for a
+            # path Wiki intentionally ignores.
+            return self._persist_payload(
+                root,
+                existing,
+                workflow="sync_catalog",
+                status="completed",
+                agent_result=None,
+                sources=[dict(value) for value in source_cache.values()],
+                changed_paths=[],
+                catalog_snapshot=snapshot,
+            )
+        return self.rebuild(
+            root,
+            workflow=workflow,
+            changed_paths=effective_changed,
+            sources=sources,
+            catalog_snapshot=snapshot,
+        )
+
     def rebuild(
         self,
         workspace_root: Path,
@@ -266,10 +512,12 @@ class StoryWikiService:
         workflow: str = "generate_wiki",
         changed_paths: Sequence[str] | None = None,
         sources: Sequence[Dict[str, Any]] | None = None,
+        catalog_snapshot: Any | None = None,
     ) -> Dict[str, Any]:
         root = workspace_root.resolve()
         self._backup_legacy_projection(root)
-        self._migrate_knowledge_relation_storage(root)
+        if catalog_snapshot is None:
+            self._migrate_knowledge_relation_storage(root)
         if sources is None:
             # reconcile 可能改写 entities.json，而它本身也是被索引的来源，
             # 所以必须先归并再扫描。调用方复用扫描结果时同样要保证这个顺序。
@@ -350,6 +598,7 @@ class StoryWikiService:
                 agent_result=None,
                 sources=sources,
                 changed_paths=persisted_changed_paths,
+                catalog_snapshot=catalog_snapshot,
             )
 
         overview_summary = self._overview_summary(root, sources, chapter_sources, character_names)
@@ -572,6 +821,7 @@ class StoryWikiService:
             agent_result=None,
             sources=sources,
             changed_paths=persisted_changed_paths,
+            catalog_snapshot=catalog_snapshot,
         )
 
     def sync_local_incremental(self, workspace_root: Path) -> Dict[str, Any]:
@@ -580,6 +830,17 @@ class StoryWikiService:
         Agent 深度生成/更新仍由手动按钮走 run_agent_workflow，这里只保证图谱跟上文件变更。
         """
         root = workspace_root.resolve()
+        try:
+            from services.content_catalog_service import get_content_catalog_service
+
+            catalog_snapshot = get_content_catalog_service(root).peek_snapshot()
+        except Exception:
+            catalog_snapshot = None
+        if catalog_snapshot is not None:
+            from services.content_pipeline_service import sync_content_workspace
+
+            sync_content_workspace(root, reconcile=True)
+            return self.read_or_build(root)
         self._migrate_knowledge_relation_storage(root)
         self._reconcile_entity_registry(root)
         before = self._read_existing_payload(root)
@@ -1031,6 +1292,78 @@ class StoryWikiService:
     def wiki_index_path(self, workspace_root: Path) -> Path:
         return self.wiki_root(workspace_root) / "index.json"
 
+    def source_snapshot_path(self, workspace_root: Path) -> Path:
+        return self.wiki_root(workspace_root) / WIKI_SOURCE_SNAPSHOT_NAME
+
+    def _read_source_snapshot(self, root: Path) -> Dict[str, Dict[str, Any]]:
+        path = self.source_snapshot_path(root)
+        if not path.is_file():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        raw_sources = payload.get("sources") if isinstance(payload, dict) else None
+        if not isinstance(raw_sources, dict):
+            return {}
+        return {
+            str(relative): dict(source)
+            for relative, source in raw_sources.items()
+            if isinstance(source, dict) and str(relative).strip()
+        }
+
+    def _catalog_entry_is_wiki_source(self, relative: str, entry: Any) -> bool:
+        normalized = str(relative or "").replace("\\", "/").strip("/")
+        suffix = Path(normalized).suffix.lower()
+        if suffix not in SCAN_SUFFIXES:
+            return False
+        if any(part in EXCLUDED_PARTS for part in Path(normalized).parts):
+            return False
+        if self._should_skip_source_path(normalized):
+            return False
+        # The catalog can contain unreadable bytes so that freshness remains
+        # observable.  Wiki cannot build a source from those bytes and must
+        # leave the path out of the projection until it becomes readable.
+        if str(getattr(entry, "freshness", "fresh") or "fresh") != "fresh":
+            return False
+        # Empty files are deliberately omitted by the legacy Wiki source
+        # contract; keeping the same rule makes a catalog rebuild equivalent
+        # to a cold filesystem rebuild.
+        return int(getattr(entry, "total_chars", 0) or 0) > 0
+
+    def _sources_from_catalog(
+        self,
+        root: Path,
+        catalog_entries: Mapping[str, Any],
+    ) -> List[Dict[str, Any]]:
+        sources: List[Dict[str, Any]] = []
+        for relative in sorted(catalog_entries, key=self._source_sort_key):
+            source = self._source_from_catalog_entry(root, catalog_entries[relative])
+            if source is not None:
+                sources.append(source)
+        return sources
+
+    def _source_from_catalog_entry(self, root: Path, entry: Any) -> Dict[str, Any] | None:
+        relative = str(getattr(entry, "path", "") or "").replace("\\", "/").strip("/")
+        if not relative:
+            return None
+        source = self._source_from_path(root, root / relative)
+        if source is not None:
+            source["_catalogRevision"] = str(getattr(entry, "revision", "") or "")
+        return source
+
+    @staticmethod
+    def _source_snapshot_payload(sources: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+        return {
+            "version": 1,
+            "updatedAt": datetime.now(timezone.utc).isoformat(),
+            "sources": {
+                str(source.get("relativePath") or ""): dict(source)
+                for source in sources
+                if str(source.get("relativePath") or "").strip()
+            },
+        }
+
     def review_report_path(self, workspace_root: Path) -> Path:
         return self.wiki_root(workspace_root) / "review_report.json"
 
@@ -1140,6 +1473,13 @@ class StoryWikiService:
             attempted_checksum = str(sidecar.get("attemptedSourceSetChecksum") or "").strip()
             if attempted_checksum:
                 result["attemptedSourceSetChecksum"] = attempted_checksum
+        for key in (
+            "catalogGeneration",
+            "catalogRevision",
+            "projectionFreshness",
+        ):
+            if key in sidecar:
+                result[key] = sidecar[key]
         return result
 
     @staticmethod
@@ -1157,8 +1497,44 @@ class StoryWikiService:
                 "lastSuccessfulRevision",
                 "sourceStats",
                 "graphStats",
+                "catalogGeneration",
+                "catalogRevision",
+                "catalogDirtyFileCount",
+                "projectionFreshness",
             )
             if key in payload
+        }
+
+    def _projection_unavailable_result(
+        self,
+        payload: Dict[str, Any],
+        *,
+        reason: str | None = None,
+    ) -> Dict[str, Any]:
+        status = str(payload.get("status") or "stale").strip().lower()
+        if status not in {"stale", "error", "rebuilding"}:
+            status = "stale"
+        message = str(reason or payload.get("error") or "wiki projection is not available")
+        metadata = self._projection_metadata({**payload, "status": status})
+        metadata["status"] = status
+        metadata["projectionFreshness"] = str(
+            payload.get("projectionFreshness") or ("stale" if status != "error" else "error")
+        )
+        return {
+            **metadata,
+            "mode": "unavailable",
+            "queryStatus": "unavailable",
+            "error": message,
+            "entries": [],
+            "graph": {"nodes": [], "edges": []},
+            "total": {"nodes": 0, "edges": 0, "entries": 0},
+            "graphStats": {"nodes": 0, "edges": 0, "entries": 0},
+            "pagination": self._pagination_payload(
+                offset=0,
+                limit=0,
+                returned_count=0,
+                total_count=0,
+            ),
         }
 
     def _attach_projection_metadata(
@@ -1193,6 +1569,13 @@ class StoryWikiService:
     ) -> Dict[str, Any]:
         root = workspace_root.resolve()
         payload = self.read_or_build(root)
+        projection_status = str(payload.get("status") or "ready").strip().lower()
+        projection_freshness = str(payload.get("projectionFreshness") or "").strip().lower()
+        if projection_status in {"stale", "error", "rebuilding"} or projection_freshness in {
+            "stale",
+            "error",
+        }:
+            return self._projection_unavailable_result(payload)
         entries = [entry for entry in payload.get("entries", []) if isinstance(entry, dict)]
         graph = payload.get("graph") if isinstance(payload.get("graph"), dict) else {}
         # 在 query 时对节点和边跑一次规范化兜底，
@@ -2284,6 +2667,7 @@ class StoryWikiService:
         agent_result: Dict[str, Any] | None,
         sources: Sequence[Dict[str, Any]],
         changed_paths: Sequence[str],
+        catalog_snapshot: Any | None = None,
     ) -> Dict[str, Any]:
         wiki_root = self.wiki_root(root)
         wiki_root.mkdir(parents=True, exist_ok=True)
@@ -2320,6 +2704,11 @@ class StoryWikiService:
         payload["builtFromRevision"] = knowledge_revision
         payload["sourceSetChecksum"] = source_checksum
         payload["lastSuccessfulRevision"] = knowledge_revision
+        if catalog_snapshot is not None:
+            payload["catalogGeneration"] = int(catalog_snapshot.generation)
+            payload["catalogRevision"] = str(catalog_snapshot.catalog_revision)
+            payload["catalogDirtyFileCount"] = int(catalog_snapshot.dirty_file_count)
+            payload["projectionFreshness"] = "fresh"
         if agent_result is not None:
             payload["agent"] = {
                 "attempted": bool(agent_result.get("attempted")),
@@ -2376,6 +2765,9 @@ class StoryWikiService:
                 "sourceSetChecksum": previous_checksum,
                 "attemptedSourceSetChecksum": source_checksum,
                 "graphChecksum": str((previous or {}).get("graphChecksum") or ""),
+                "catalogGeneration": int(getattr(catalog_snapshot, "generation", 0) or 0),
+                "catalogRevision": str(getattr(catalog_snapshot, "catalog_revision", "") or ""),
+                "projectionFreshness": "stale",
                 "updatedAt": datetime.now(timezone.utc).isoformat(),
             }
             self._write_json_atomic(self.projection_status_path(root), failure_status)
@@ -2415,6 +2807,9 @@ class StoryWikiService:
             "lastSuccessfulRevision": knowledge_revision,
             "sourceSetChecksum": source_checksum,
             "graphChecksum": payload["graphChecksum"],
+            "catalogGeneration": int(getattr(catalog_snapshot, "generation", 0) or 0),
+            "catalogRevision": str(getattr(catalog_snapshot, "catalog_revision", "") or ""),
+            "projectionFreshness": "fresh",
             "updatedAt": datetime.now(timezone.utc).isoformat(),
         }
         self._write_projection_bundle(
@@ -2422,6 +2817,7 @@ class StoryWikiService:
             payload=payload,
             index_payload=index_payload,
             status_payload=projection_status,
+            source_snapshot=self._source_snapshot_payload(sources),
         )
         return payload
 
@@ -2432,6 +2828,27 @@ class StoryWikiService:
         payload: Dict[str, Any],
         index_payload: Dict[str, Any],
         status_payload: Dict[str, Any],
+        source_snapshot: Dict[str, Any] | None = None,
+    ) -> None:
+        from services.git_service import workspace_git_lock
+
+        with workspace_git_lock(root):
+            self._write_projection_bundle_unlocked(
+                root,
+                payload=payload,
+                index_payload=index_payload,
+                status_payload=status_payload,
+                source_snapshot=source_snapshot,
+            )
+
+    def _write_projection_bundle_unlocked(
+        self,
+        root: Path,
+        *,
+        payload: Dict[str, Any],
+        index_payload: Dict[str, Any],
+        status_payload: Dict[str, Any],
+        source_snapshot: Dict[str, Any] | None = None,
     ) -> None:
         targets = {
             self.wiki_json_path(root): json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
@@ -2439,6 +2856,10 @@ class StoryWikiService:
             self.wiki_index_path(root): json.dumps(index_payload, ensure_ascii=False, indent=2) + "\n",
             self.projection_status_path(root): json.dumps(status_payload, ensure_ascii=False, indent=2) + "\n",
         }
+        if source_snapshot is not None:
+            targets[self.source_snapshot_path(root)] = (
+                json.dumps(source_snapshot, ensure_ascii=False, indent=2) + "\n"
+            )
         temporary_paths: Dict[Path, Path] = {}
         originals: Dict[Path, bytes | None] = {}
         committed: List[Path] = []
@@ -2446,7 +2867,7 @@ class StoryWikiService:
             for target, content in targets.items():
                 target.parent.mkdir(parents=True, exist_ok=True)
                 originals[target] = target.read_bytes() if target.exists() else None
-                temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+                temporary = self._atomic_temporary_path(target, suffix=".tmp")
                 with temporary.open("w", encoding="utf-8", newline="\n") as stream:
                     stream.write(content)
                     stream.flush()
@@ -2462,7 +2883,7 @@ class StoryWikiService:
                     if original is None:
                         target.unlink(missing_ok=True)
                         continue
-                    restore = target.with_name(f".{target.name}.{uuid4().hex}.restore")
+                    restore = self._atomic_temporary_path(target, suffix=".restore")
                     try:
                         with restore.open("wb") as stream:
                             stream.write(original)
@@ -2553,6 +2974,9 @@ class StoryWikiService:
             "lastSuccessfulRevision": payload.get("lastSuccessfulRevision"),
             "sourceSetChecksum": payload.get("sourceSetChecksum"),
             "graphChecksum": payload.get("graphChecksum"),
+            "catalogGeneration": payload.get("catalogGeneration"),
+            "catalogRevision": payload.get("catalogRevision"),
+            "catalogDirtyFileCount": payload.get("catalogDirtyFileCount", 0),
             "workflowDefinitions": WIKI_WORKFLOW_DEFINITIONS,
             "categorySchemaVersion": WIKI_CATEGORY_SCHEMA_VERSION,
             "allowedCategories": list(CATEGORY_LABELS),
@@ -2610,7 +3034,7 @@ class StoryWikiService:
             if target.exists():
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
-            temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+            temporary = self._atomic_temporary_path(target, suffix=".tmp")
             try:
                 shutil.copy2(source, temporary)
                 os.replace(temporary, target)
@@ -4715,7 +5139,7 @@ class StoryWikiService:
     @staticmethod
     def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        temporary = StoryWikiService._atomic_temporary_path(path, suffix=".tmp")
         try:
             with temporary.open("w", encoding="utf-8", newline="\n") as stream:
                 json.dump(payload, stream, ensure_ascii=False, indent=2)
@@ -4728,6 +5152,30 @@ class StoryWikiService:
                 temporary.unlink()
             except FileNotFoundError:
                 pass
+
+    @staticmethod
+    def _atomic_temporary_path(path: Path, *, suffix: str) -> Path:
+        """Stage atomic Wiki writes under ignored Agent runtime storage.
+
+        Keeping short-lived files beside published Wiki artifacts lets a
+        concurrent ``git add -A`` discover a path that disappears before Git
+        opens it on Windows. ``.storydex/.agent/`` is already excluded from
+        catalog, context, and workspace Git, while remaining on the same
+        volume so ``os.replace`` stays atomic.
+        """
+        target = Path(path)
+        storydex_root = next(
+            (parent for parent in target.parents if parent.name == ".storydex"),
+            None,
+        )
+        if storydex_root is None:
+            temporary_root = target.parent
+            prefix = f".{target.name}"
+        else:
+            temporary_root = storydex_root / ".agent" / "temp" / "wiki-atomic"
+            prefix = target.name
+        temporary_root.mkdir(parents=True, exist_ok=True)
+        return temporary_root / f"{prefix}.{uuid4().hex}{suffix}"
 
     def _collect_entities(self, root: Path, sources: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
         entities_by_name: Dict[str, Dict[str, Any]] = {}

@@ -164,6 +164,18 @@ def test_dirty_refresh_reads_only_the_affected_file(
     assert reads == ["chapters/Chapter 1/001.md"]
 
 
+def test_external_same_revision_event_does_not_advance_catalog_generation(
+    tmp_path: Path,
+) -> None:
+    path = _write_source(tmp_path, "chapters/001.md", "stable")
+    service = ContentCatalogService(tmp_path)
+    first = service.snapshot()
+
+    assert service.notify_external_changes([path]) == 0
+    assert service.refresh_dirty() is first
+    assert service.peek_snapshot().generation == first.generation
+
+
 def test_dirty_new_file_publishes_missing_parent_directories(tmp_path: Path) -> None:
     (tmp_path / "chapters").mkdir()
     service = ContentCatalogService(tmp_path)
@@ -220,6 +232,21 @@ def test_catalog_dirty_queue_ignores_paths_outside_declared_roots(tmp_path: Path
     assert service.refresh_dirty() is initial
     assert initial.get("README.md") is None
     assert initial.get(".storydex/memory/file-history/ignored.md") is None
+
+
+def test_catalog_excludes_generated_wiki_projection_tree(tmp_path: Path) -> None:
+    _write_source(tmp_path, "chapters/001.md", "chapter")
+    _write_source(tmp_path, ".storydex/wiki/knowledge_graph.json", "{}")
+    _write_source(tmp_path, ".storydex/wiki/source_snapshot.json", "{}")
+    _write_source(tmp_path, ".storydex/memory/backups/legacy/entities.json", "{}")
+
+    service = ContentCatalogService(tmp_path)
+    snapshot = service.snapshot()
+
+    assert ".storydex/wiki/knowledge_graph.json" not in snapshot.entries
+    assert ".storydex/wiki/source_snapshot.json" not in snapshot.entries
+    assert ".storydex/memory/backups/legacy/entities.json" not in snapshot.entries
+    assert service.mark_dirty([tmp_path / ".storydex/wiki/knowledge_graph.json"]) == 0
 
 
 def test_catalog_dirty_parent_targets_unified_storydex_root(tmp_path: Path) -> None:

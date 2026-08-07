@@ -37,6 +37,10 @@ CATALOG_EXCLUDED_DIRECTORY_NAMES = frozenset(
         "__pycache__",
     }
 )
+CATALOG_EXCLUDED_RELATIVE_PREFIXES = (
+    ".storydex/wiki",
+    ".storydex/memory/backups",
+)
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +174,7 @@ class ContentCatalogService:
         paths: Iterable[str | Path],
         *,
         source: str = "workspace_write",
+        notify_background: bool = True,
     ) -> int:
         normalized = {
             target
@@ -185,11 +190,41 @@ class ContentCatalogService:
                 self._dirty[relative] = self._next_dirty_revision
                 self._dirty_enqueued_at[relative] = enqueued_at
             dirty_count = len(self._dirty)
-        self._notify_background(source=source)
+        if notify_background:
+            self._notify_background(source=source)
         return dirty_count
 
     def notify_external_changes(self, paths: Iterable[str | Path]) -> int:
-        return self.mark_dirty(paths, source="external_watcher")
+        candidates: list[str | Path] = []
+        with self._state_lock:
+            current = self._snapshot
+            already_dirty = set(self._dirty)
+        for raw_path in paths:
+            relative = self._normalize_relative_path(raw_path)
+            targets = self._catalog_dirty_targets(relative)
+            if not targets:
+                continue
+            for target in targets:
+                if current is None or target in already_dirty:
+                    candidates.append(target)
+                    continue
+                entry = current.entries.get(target)
+                if entry is None:
+                    candidates.append(target)
+                    continue
+                # Watchdog also reports the replace event emitted by our own
+                # atomic publisher. If the published revision already equals
+                # the on-disk revision, the event carries no new catalog data.
+                try:
+                    observed = self._read_catalog_entry(
+                        self.workspace_root / target,
+                        target,
+                    )
+                except Exception:
+                    observed = None
+                if observed is None or observed.revision != entry.revision:
+                    candidates.append(target)
+        return self.mark_dirty(candidates, source="external_watcher")
 
     @property
     def dirty_file_count(self) -> int:
@@ -266,6 +301,8 @@ class ContentCatalogService:
 
             with self._state_lock:
                 generation = current.generation + 1
+                entries_unchanged = entries == dict(current.entries)
+                directories_unchanged = directories == dict(current.directories)
                 for relative, dirty_revision in pending.items():
                     if self._dirty.get(relative) == dirty_revision:
                         self._dirty.pop(relative, None)
@@ -275,17 +312,20 @@ class ContentCatalogService:
                                 self._last_event_lag_ms,
                                 (time.monotonic() - enqueued_at) * 1000,
                             )
-                snapshot = self._publish(
-                    generation=generation,
-                    entries=entries,
-                    directories=directories,
-                    dirty_file_count=len(self._dirty),
-                )
+                if entries_unchanged and directories_unchanged:
+                    snapshot = self._with_dirty_count(current, len(self._dirty))
+                else:
+                    snapshot = self._publish(
+                        generation=generation,
+                        entries=entries,
+                        directories=directories,
+                        dirty_file_count=len(self._dirty),
+                    )
                 self._snapshot = snapshot
             self._record_snapshot(snapshot, (time.perf_counter() - started) * 1000)
             return snapshot
 
-    def reconcile(self) -> int:
+    def reconcile(self, *, notify_background: bool = True) -> int:
         """Discover missed filesystem events without publishing on the query path."""
         with self._state_lock:
             current = self._snapshot
@@ -310,8 +350,32 @@ class ContentCatalogService:
         record_counter("reconciliationScanCount")
         record_value("reconciliationChangedCount", len(changed))
         if changed:
-            self.mark_dirty(changed, source="reconciliation")
+            self.mark_dirty(
+                changed,
+                source="reconciliation",
+                notify_background=notify_background,
+            )
         return len(changed)
+
+    @staticmethod
+    def changed_paths(
+        previous: ContentCatalogSnapshot | None,
+        current: ContentCatalogSnapshot,
+    ) -> tuple[str, ...]:
+        """Return source paths whose published catalog entry changed.
+
+        The diff is calculated from immutable snapshots, so consumers can pass
+        one exact change set to multiple projections without rescanning the
+        workspace or relying on a watcher event payload.
+        """
+        if previous is None:
+            return tuple(sorted(current.entries))
+        changed = {
+            path
+            for path in set(previous.entries) | set(current.entries)
+            if previous.entries.get(path) != current.entries.get(path)
+        }
+        return tuple(sorted(changed))
 
     def _scan_roots(self) -> tuple[Dict[str, CatalogEntry], Dict[str, int]]:
         entries: Dict[str, CatalogEntry] = {}
@@ -330,23 +394,34 @@ class ContentCatalogService:
         entries: Dict[str, CatalogEntry],
         directories: Dict[str, int],
     ) -> None:
+        try:
+            relative_root = root.relative_to(self.workspace_root).as_posix()
+        except ValueError:
+            return
+        if self._is_excluded_relative(relative_root):
+            return
         if root.is_file():
             self._add_file(root, entries)
             return
         for directory, child_directories, file_names in os.walk(root):
             record_counter("directoryScanCount")
+            directory_path = Path(directory)
+            relative_directory = directory_path.relative_to(self.workspace_root).as_posix()
             child_directories[:] = [
                 name
                 for name in child_directories
                 if name not in CATALOG_EXCLUDED_DIRECTORY_NAMES
+                and not self._is_excluded_relative(
+                    f"{relative_directory}/{name}" if relative_directory else name
+                )
             ]
-            directory_path = Path(directory)
-            relative_directory = directory_path.relative_to(self.workspace_root).as_posix()
             record_counter("statCount")
             directories[relative_directory] = int(directory_path.stat().st_mtime_ns)
             for file_name in file_names:
                 path = directory_path / file_name
                 if path.suffix.lower() not in CATALOG_TEXT_SUFFIXES:
+                    continue
+                if self._is_excluded_relative(path.relative_to(self.workspace_root).as_posix()):
                     continue
                 self._add_file(path, entries)
 
@@ -397,6 +472,8 @@ class ContentCatalogService:
         entries: Dict[str, CatalogEntry],
         directories: Dict[str, int],
     ) -> None:
+        if self._is_excluded_relative(relative):
+            return
         prefix = relative.rstrip("/") + "/"
         for existing in [path for path in entries if path == relative or path.startswith(prefix)]:
             entries.pop(existing, None)
@@ -443,6 +520,8 @@ class ContentCatalogService:
         normalized = self._normalize_relative_path(value)
         if not normalized:
             return ()
+        if self._is_excluded_relative(normalized):
+            return ()
         parts = Path(normalized).parts
         if any(part in CATALOG_EXCLUDED_DIRECTORY_NAMES for part in parts):
             return ()
@@ -455,6 +534,14 @@ class ContentCatalogService:
             root
             for root in CATALOG_ROOTS
             if root.startswith(normalized + "/")
+        )
+
+    @staticmethod
+    def _is_excluded_relative(relative: str) -> bool:
+        normalized = str(relative or "").replace("\\", "/").strip("/").lower()
+        return any(
+            normalized == prefix or normalized.startswith(prefix + "/")
+            for prefix in CATALOG_EXCLUDED_RELATIVE_PREFIXES
         )
 
     def _normalize_relative_path(self, value: str | Path) -> str:

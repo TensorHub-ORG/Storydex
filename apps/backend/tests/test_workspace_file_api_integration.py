@@ -119,8 +119,24 @@ def test_workspace_git_endpoints_use_local_only_repository(workspace_client):
     second_id = second["commit"]["id"]
 
     commit_diff = ok(client.get("/api/v1/workspace/git/commit-diff", params={"commitId": second_id}))
-    assert commit_diff["totals"]["files"] == 1
-    assert commit_diff["files"][0]["relativePath"] == "chapters/001.md"
+    committed_paths = {
+        str(item.get("relativePath") or "").replace("\\", "/")
+        for item in commit_diff["files"]
+    }
+    generated_projection_paths = {
+        ".storydex/wiki/WIKI.md",
+        ".storydex/wiki/index.json",
+        ".storydex/wiki/knowledge_graph.json",
+        ".storydex/wiki/projection_status.json",
+        ".storydex/wiki/source_snapshot.json",
+    }
+    # Wiki projection is a versioned Storydex project asset.  A source edit
+    # may therefore commit the exact projection files regenerated from the
+    # same catalog snapshot; runtime temp/session paths must never leak into
+    # the local-only commit.
+    assert "chapters/001.md" in committed_paths
+    assert committed_paths <= {"chapters/001.md", *generated_projection_paths}
+    assert commit_diff["totals"]["files"] == len(committed_paths)
 
     initial_timeline = ok(client.get("/api/v1/workspace/git/timeline"))
     assert initial_timeline["currentBranch"] == "develop"
@@ -308,7 +324,7 @@ def test_story_increment_snapshot_memory_wiki_and_sync(workspace_client):
     assert graph.get("mode")
 
 
-def test_story_wiki_projection_api_change_sequence_and_cold_rebuild(workspace_client):
+def test_story_wiki_projection_api_change_sequence_and_explicit_cold_rebuild(workspace_client):
     client, root, _ = workspace_client
     baseline = ok(client.get("/api/v1/story/wiki"))
     assert baseline["schemaVersion"] == 3
@@ -402,7 +418,13 @@ def test_story_wiki_projection_api_change_sequence_and_cold_rebuild(workspace_cl
     wiki_root = root / ".storydex" / "wiki"
     for name in ("knowledge_graph.json", "index.json", "WIKI.md"):
         wiki_root.joinpath(name).unlink()
-    cold = ok(client.get("/api/v1/story/wiki"))
+    unavailable = ok(client.get("/api/v1/story/wiki"))
+
+    assert unavailable["status"] == "stale"
+    assert unavailable["projectionFreshness"] == "stale"
+    assert not (wiki_root / "knowledge_graph.json").exists()
+
+    cold = ok(client.post("/api/v1/story/wiki/sync"))
 
     assert cold["graphChecksum"] == incremental_checksum
     assert cold["sourceSetChecksum"] == deleted["sourceSetChecksum"]
