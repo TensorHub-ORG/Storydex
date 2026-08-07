@@ -112,6 +112,47 @@ def test_classify_intent_uses_llm_structured_output(monkeypatch):
     assert get_llm_metrics("intent-test")["llmCalls"][0]["purpose"] == "intent"
 
 
+def test_intent_model_receives_complete_api_validated_prompt():
+    prompt = "开头" + ("甲" * 2_500) + "尾部约束：不要修改任何项目文件"
+
+    messages = _intent_messages(
+        prompt=prompt,
+        active_file="chapters/chapter-001/content.md",
+        catalog=build_intent_catalog(),
+        previous_turn=None,
+    )
+
+    request = json.loads(messages[1]["content"])
+    assert request["prompt"] == prompt
+    assert request["prompt"].endswith("不要修改任何项目文件")
+
+
+def test_full_prompt_no_write_guard_overrides_model_write_decision(monkeypatch):
+    prompt = "请修改第一章" + ("甲" * 2_500) + "最终约束：不要修改任何项目文件"
+
+    class FakeProvider:
+        async def chat(self, messages, options):
+            assert prompt in messages[1]["content"]
+            return _FakeResponse(
+                _v2_intent_json(
+                    primary="story_generation",
+                    operation_type="modify_existing",
+                    effect="modify",
+                    artifact="chapter_prose",
+                    evidence="请修改第一章",
+                    target_scope="chapter_number",
+                )
+            )
+
+    _install_fake_provider(monkeypatch, FakeProvider())
+    frame = asyncio.run(StorydexIntentService().classify_intent(prompt=prompt))
+
+    assert frame["canWrite"] is False
+    assert frame["effect"] == "respond_only"
+    assert "no_project_write" in frame["explicitConstraints"]
+    assert "full_prompt_no_project_write" in frame["signals"]
+
+
 def test_intent_metadata_provider_uses_short_low_reasoning_chat_request():
     captured = {}
 
@@ -1076,7 +1117,7 @@ def test_heuristics_validation_json_and_message_helpers_cover_edge_cases():
         previous_turn={"intent": "general"},
     )
     request = json.loads(messages[1]["content"])
-    assert len(request["prompt"]) == 2000
+    assert request["prompt"] == "x" * 3000
     assert request["activeFileIsChapter"] is True
 
 

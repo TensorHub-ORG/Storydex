@@ -29,6 +29,7 @@ use regex::Regex;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -42,6 +43,113 @@ use crate::processes::ProcessManager;
 
 const DEFAULT_MAX_OUTPUT: usize = 48_000;
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+const READ_FILE_PROTOCOL_VERSION: u32 = 2;
+
+fn source_revision(content: &[u8]) -> String {
+    format!("sha256:{:x}", Sha256::digest(content))
+}
+
+fn floor_char_boundary(content: &str, mut offset: usize) -> usize {
+    offset = offset.min(content.len());
+    while offset > 0 && !content.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
+}
+
+fn total_text_lines(content: &str) -> usize {
+    if content.is_empty() {
+        0
+    } else {
+        content
+            .as_bytes()
+            .iter()
+            .filter(|byte| **byte == b'\n')
+            .count()
+            + usize::from(!content.ends_with('\n'))
+    }
+}
+
+fn line_number_at_byte(content: &str, offset: usize) -> usize {
+    if content.is_empty() {
+        return 0;
+    }
+    content.as_bytes()[..offset.min(content.len())]
+        .iter()
+        .filter(|byte| **byte == b'\n')
+        .count()
+        + 1
+}
+
+fn byte_offset_for_line(content: &str, requested_line: usize) -> Option<usize> {
+    if requested_line == 0 {
+        return None;
+    }
+    if requested_line == 1 {
+        return Some(0);
+    }
+    let mut line = 1;
+    for (index, byte) in content.as_bytes().iter().enumerate() {
+        if *byte == b'\n' {
+            line += 1;
+            if line == requested_line {
+                return Some(index + 1);
+            }
+        }
+    }
+    None
+}
+
+fn line_limited_end(content: &str, start: usize, limit: usize) -> usize {
+    let mut lines = 0;
+    for (relative, byte) in content.as_bytes()[start..].iter().enumerate() {
+        if *byte == b'\n' {
+            lines += 1;
+            if lines >= limit {
+                return start + relative + 1;
+            }
+        }
+    }
+    content.len()
+}
+
+fn render_numbered_content(content: &str, start: usize, end: usize) -> String {
+    if start >= end {
+        return String::new();
+    }
+    let slice = &content[start..end];
+    let mut rendered = String::new();
+    let mut line_number = line_number_at_byte(content, start);
+    let mut segment_start = 0;
+    for (index, character) in slice.char_indices() {
+        if character != '\n' {
+            continue;
+        }
+        let line = slice[segment_start..index]
+            .strip_suffix('\r')
+            .unwrap_or(&slice[segment_start..index]);
+        rendered.push_str(&format!("{line_number:>6}  {line}\n"));
+        line_number += 1;
+        segment_start = index + character.len_utf8();
+    }
+    if segment_start < slice.len() {
+        let line = slice[segment_start..]
+            .strip_suffix('\r')
+            .unwrap_or(&slice[segment_start..]);
+        rendered.push_str(&format!("{line_number:>6}  {line}"));
+    }
+    rendered
+}
+
+fn read_file_error(kind: &str, message: impl Into<String>, revision: Option<&str>) -> String {
+    json!({
+        "protocolVersion": READ_FILE_PROTOCOL_VERSION,
+        "error": kind,
+        "message": message.into(),
+        "revision": revision,
+    })
+    .to_string()
+}
 
 pub struct CoreTools {
     cwd: PathBuf,
@@ -785,30 +893,134 @@ impl CoreTools {
     }
 
     async fn read_file(&self, arguments: &Value) -> ToolResult {
-        let Some(path) = string_arg(arguments, "path") else {
+        let Some(requested_path) = string_arg(arguments, "path") else {
             return ToolResult::error("missing string argument: path");
         };
-        let path = match self.checked_path(path, false) {
+        let path = match self.checked_path(requested_path, false) {
             Ok(path) => path,
             Err(error) => return ToolResult::error(error),
         };
-        let content = match tokio::fs::read_to_string(&path).await {
+        let bytes = match tokio::fs::read(&path).await {
             Ok(content) => content,
             Err(error) => {
                 return ToolResult::error(format!("failed to read {}: {error}", path.display()));
             }
         };
+        let revision = source_revision(&bytes);
         let offset = usize_arg(arguments, "offset").unwrap_or(1).max(1);
+        let byte_offset = usize_arg(arguments, "byte_offset");
+        let continuing = byte_offset.is_some_and(|value| value > 0) || offset > 1;
+        if continuing && string_arg(arguments, "expected_revision").is_none() {
+            return ToolResult::error(read_file_error(
+                "expected_revision_required",
+                "continuation reads require expected_revision from the previous page",
+                Some(&revision),
+            ));
+        }
+        if let Some(expected) = string_arg(arguments, "expected_revision")
+            && expected != revision
+        {
+            return ToolResult::error(read_file_error(
+                "revision_conflict",
+                "file changed after the previous page; restart from the beginning",
+                Some(&revision),
+            ));
+        }
+        let content = match String::from_utf8(bytes) {
+            Ok(content) => content,
+            Err(error) => {
+                return ToolResult::error(read_file_error(
+                    "invalid_utf8",
+                    format!("failed to decode {} as UTF-8: {error}", path.display()),
+                    Some(&revision),
+                ));
+            }
+        };
         let limit = usize_arg(arguments, "limit").unwrap_or(500).clamp(1, 2_000);
-        let lines = content
-            .lines()
-            .enumerate()
-            .skip(offset - 1)
-            .take(limit)
-            .map(|(index, line)| format!("{:>6}  {line}", index + 1))
-            .collect::<Vec<_>>()
-            .join("\n");
-        ToolResult::success(self.truncate(lines))
+        let total_lines = total_text_lines(&content);
+        let start = if let Some(byte_offset) = byte_offset {
+            if byte_offset > content.len() || !content.is_char_boundary(byte_offset) {
+                return ToolResult::error(read_file_error(
+                    "invalid_byte_offset",
+                    "byte_offset must be within the file and on a UTF-8 character boundary",
+                    Some(&revision),
+                ));
+            }
+            byte_offset
+        } else if content.is_empty() && offset == 1 {
+            0
+        } else {
+            let Some(byte_offset) = byte_offset_for_line(&content, offset) else {
+                return ToolResult::error(read_file_error(
+                    "invalid_line_offset",
+                    format!("offset {offset} is beyond totalLines {total_lines}"),
+                    Some(&revision),
+                ));
+            };
+            byte_offset
+        };
+        let requested_end = line_limited_end(&content, start, limit);
+        let display_path = path
+            .strip_prefix(&self.cwd)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let mut end = requested_end;
+        loop {
+            let start_line = line_number_at_byte(&content, start);
+            let end_line = if end > start {
+                line_number_at_byte(&content, end - 1)
+            } else {
+                start_line
+            };
+            let has_more = end < content.len();
+            let mut truncation_reasons = Vec::new();
+            if end < requested_end {
+                truncation_reasons.push("max_output_bytes");
+            }
+            if requested_end < content.len() {
+                truncation_reasons.push("line_limit");
+            }
+            let payload = json!({
+                "protocolVersion": READ_FILE_PROTOCOL_VERSION,
+                "path": display_path,
+                "revision": revision,
+                "span": {
+                    "startLine": start_line,
+                    "endLine": end_line,
+                    "startByte": start,
+                    "endByte": end,
+                    "endByteExclusive": true,
+                },
+                "totalLines": total_lines,
+                "totalBytes": content.len(),
+                "hasMore": has_more,
+                "nextOffset": line_number_at_byte(&content, end),
+                "nextByteOffset": end,
+                "truncated": has_more,
+                "truncationReasons": truncation_reasons,
+                "content": render_numbered_content(&content, start, end),
+            })
+            .to_string();
+            if payload.len() <= self.max_output {
+                return ToolResult::success(payload);
+            }
+            if end == start {
+                return ToolResult::error(read_file_error(
+                    "output_budget_too_small",
+                    "read_file metadata exceeds the configured output budget",
+                    Some(&revision),
+                ));
+            }
+            let overflow = payload.len().saturating_sub(self.max_output).max(1);
+            let reduced = end.saturating_sub(overflow.min(end - start));
+            let next_end = floor_char_boundary(&content, reduced);
+            end = if next_end < end {
+                next_end.max(start)
+            } else {
+                floor_char_boundary(&content, end - 1).max(start)
+            };
+        }
     }
 
     async fn write_file(&self, arguments: &Value) -> ToolResult {
@@ -999,7 +1211,8 @@ impl CoreTools {
         if output.len() <= self.max_output {
             return output;
         }
-        output.truncate(self.max_output);
+        let end = floor_char_boundary(&output, self.max_output);
+        output.truncate(end);
         output.push_str("\n[output truncated]");
         output
     }
@@ -1011,13 +1224,15 @@ impl ToolRuntime for CoreTools {
         let mut specs = vec![
             ToolSpec {
                 name: "read_file".into(),
-                description: "Read a UTF-8 text file with stable line numbers.".into(),
+                description: "Read a versioned UTF-8 file page with stable line numbers. The JSON result reports revision, exact source span, total size, truncation reasons, and continuation offsets. When hasMore is true, continue with byte_offset=nextByteOffset and expected_revision=revision; this also works for one very long line.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "path": {"type": "string"},
                         "offset": {"type": "integer", "minimum": 1},
-                        "limit": {"type": "integer", "minimum": 1, "maximum": 2000}
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 2000},
+                        "byte_offset": {"type": "integer", "minimum": 0},
+                        "expected_revision": {"type": "string", "description": "Required for continuation reads (offset > 1 or byte_offset > 0); must equal the previous page revision."}
                     },
                     "required": ["path"],
                     "additionalProperties": false
@@ -1658,6 +1873,225 @@ mod tests {
             )
             .await;
         assert!(!result.success);
+    }
+
+    #[tokio::test]
+    async fn read_file_reports_revision_span_and_next_page() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        let file = workspace.path().join("many-lines.txt");
+        let content = (1..=2_001)
+            .map(|line| format!("line-{line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&file, content).expect("write many-line fixture");
+        let policy =
+            SecurityPolicy::new(workspace.path(), AccessMode::ReadOnly).expect("security policy");
+        let tools = CoreTools::new(workspace.path().to_path_buf(), policy);
+
+        let first = tools
+            .call(
+                &ToolCall {
+                    id: "read-1".into(),
+                    name: "read_file".into(),
+                    arguments: json!({"path": "many-lines.txt", "limit": 500}),
+                },
+                &Deny,
+            )
+            .await;
+        assert!(first.success);
+        let first_payload: Value = serde_json::from_str(&first.output).expect("read envelope");
+        assert_eq!(first_payload["totalLines"], 2_001);
+        assert_eq!(first_payload["span"]["startLine"], 1);
+        assert_eq!(first_payload["span"]["endLine"], 500);
+        assert_eq!(first_payload["hasMore"], true);
+        assert_eq!(first_payload["nextOffset"], 501);
+        assert!(first_payload["nextByteOffset"].as_u64().unwrap_or(0) > 0);
+        assert!(
+            first_payload["revision"]
+                .as_str()
+                .is_some_and(|revision| revision.starts_with("sha256:"))
+        );
+
+        let second = tools
+            .call(
+                &ToolCall {
+                    id: "read-2".into(),
+                    name: "read_file".into(),
+                    arguments: json!({
+                        "path": "many-lines.txt",
+                        "byte_offset": first_payload["nextByteOffset"],
+                        "expected_revision": first_payload["revision"],
+                        "limit": 500
+                    }),
+                },
+                &Deny,
+            )
+            .await;
+        assert!(second.success);
+        let second_payload: Value = serde_json::from_str(&second.output).expect("second envelope");
+        assert_eq!(second_payload["span"]["startLine"], 501);
+        assert_eq!(second_payload["revision"], first_payload["revision"]);
+    }
+
+    #[tokio::test]
+    async fn read_file_can_page_through_one_long_unicode_line() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        let file = workspace.path().join("long-line.txt");
+        let content = "界".repeat(40_000);
+        std::fs::write(&file, &content).expect("write long-line fixture");
+        let policy =
+            SecurityPolicy::new(workspace.path(), AccessMode::ReadOnly).expect("security policy");
+        let tools = CoreTools::new(workspace.path().to_path_buf(), policy);
+        let mut byte_offset = 0_u64;
+        let mut revision = None::<String>;
+        let mut pages = 0;
+
+        loop {
+            let mut arguments = json!({
+                "path": "long-line.txt",
+                "byte_offset": byte_offset,
+                "limit": 1
+            });
+            if let Some(expected) = &revision {
+                arguments["expected_revision"] = json!(expected);
+            }
+            let result = tools
+                .call(
+                    &ToolCall {
+                        id: format!("long-{pages}"),
+                        name: "read_file".into(),
+                        arguments,
+                    },
+                    &Deny,
+                )
+                .await;
+            assert!(result.success);
+            assert!(result.output.len() <= DEFAULT_MAX_OUTPUT);
+            let payload: Value = serde_json::from_str(&result.output).expect("long-line envelope");
+            revision.get_or_insert_with(|| payload["revision"].as_str().unwrap_or_default().into());
+            assert_eq!(payload["span"]["startByte"], byte_offset);
+            assert_eq!(payload["span"]["startLine"], 1);
+            let next = payload["nextByteOffset"]
+                .as_u64()
+                .expect("next byte offset");
+            assert!(next > byte_offset || payload["hasMore"] == false);
+            byte_offset = next;
+            pages += 1;
+            if payload["hasMore"] == false {
+                assert_eq!(byte_offset, content.len() as u64);
+                break;
+            }
+            assert!(
+                pages < 20,
+                "long line pagination must make bounded progress"
+            );
+        }
+        assert!(pages > 1);
+    }
+
+    #[tokio::test]
+    async fn read_file_rejects_revision_mismatch_between_pages() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        let file = workspace.path().join("revision.txt");
+        std::fs::write(&file, "first\nsecond\n").expect("write revision fixture");
+        let policy =
+            SecurityPolicy::new(workspace.path(), AccessMode::ReadOnly).expect("security policy");
+        let tools = CoreTools::new(workspace.path().to_path_buf(), policy);
+        let first = tools
+            .call(
+                &ToolCall {
+                    id: "revision-1".into(),
+                    name: "read_file".into(),
+                    arguments: json!({"path": "revision.txt", "limit": 1}),
+                },
+                &Deny,
+            )
+            .await;
+        let payload: Value = serde_json::from_str(&first.output).expect("revision envelope");
+        std::fs::write(&file, "changed\nsecond\n").expect("change revision fixture");
+
+        let second = tools
+            .call(
+                &ToolCall {
+                    id: "revision-2".into(),
+                    name: "read_file".into(),
+                    arguments: json!({
+                        "path": "revision.txt",
+                        "byte_offset": payload["nextByteOffset"],
+                        "expected_revision": payload["revision"]
+                    }),
+                },
+                &Deny,
+            )
+            .await;
+
+        assert!(!second.success);
+        let error: Value = serde_json::from_str(&second.output).expect("revision error envelope");
+        assert_eq!(error["error"], "revision_conflict");
+    }
+
+    #[tokio::test]
+    async fn read_file_requires_revision_for_continuation() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        let file = workspace.path().join("continuation.txt");
+        std::fs::write(&file, "first\nsecond\n").expect("write continuation fixture");
+        let policy =
+            SecurityPolicy::new(workspace.path(), AccessMode::ReadOnly).expect("security policy");
+        let tools = CoreTools::new(workspace.path().to_path_buf(), policy);
+
+        let result = tools
+            .call(
+                &ToolCall {
+                    id: "continuation".into(),
+                    name: "read_file".into(),
+                    arguments: json!({"path": "continuation.txt", "offset": 2}),
+                },
+                &Deny,
+            )
+            .await;
+
+        assert!(!result.success);
+        let error: Value = serde_json::from_str(&result.output).expect("continuation error");
+        assert_eq!(error["error"], "expected_revision_required");
+    }
+
+    #[tokio::test]
+    async fn read_file_does_not_report_a_phantom_line_after_trailing_newline() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        let file = workspace.path().join("trailing-newline.txt");
+        std::fs::write(&file, "first\nsecond\n").expect("write trailing-newline fixture");
+        let policy =
+            SecurityPolicy::new(workspace.path(), AccessMode::ReadOnly).expect("security policy");
+        let tools = CoreTools::new(workspace.path().to_path_buf(), policy);
+
+        let result = tools
+            .call(
+                &ToolCall {
+                    id: "trailing-newline".into(),
+                    name: "read_file".into(),
+                    arguments: json!({"path": "trailing-newline.txt"}),
+                },
+                &Deny,
+            )
+            .await;
+
+        let payload: Value = serde_json::from_str(&result.output).expect("read envelope");
+        assert_eq!(payload["totalLines"], 2);
+        assert_eq!(payload["span"]["endLine"], 2);
+        assert_eq!(payload["hasMore"], false);
+    }
+
+    #[test]
+    fn generic_output_truncation_preserves_utf8_boundaries() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        let policy =
+            SecurityPolicy::new(workspace.path(), AccessMode::ReadOnly).expect("security policy");
+        let tools = CoreTools::new(workspace.path().to_path_buf(), policy);
+
+        let truncated = tools.truncate(format!("a{}", "界".repeat(40_000)));
+
+        assert!(truncated.ends_with("[output truncated]"));
+        assert!(truncated.is_char_boundary(truncated.len()));
     }
 
     #[tokio::test]

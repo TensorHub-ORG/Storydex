@@ -76,7 +76,6 @@ _DEFAULT_OPERATION_TYPE = "other"
 _DEFAULT_COMPLEXITY = "simple"
 _INTENT_SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 DEFAULT_LLM_TIMEOUT_SECONDS = 20.0
-_MAX_PROMPT_CHARS = 2000
 _MAX_SESSION_MEMORY = 256
 _INTENT_MAX_OUTPUT_TOKENS = 384
 _ADVISORY_RE = re.compile(
@@ -988,7 +987,7 @@ def _intent_messages(
         '"complexity":"simple|complex","confidence":"high|medium|low","reason":"<short>"}'
     )
     request: Dict[str, Any] = {
-        "prompt": str(prompt or "")[:_MAX_PROMPT_CHARS],
+        "prompt": str(prompt or ""),
         "activeFile": str(active_file or ""),
         "activeFileIsChapter": str(active_file or "").startswith("chapters/"),
         "previousTurn": previous_turn or None,
@@ -1069,6 +1068,33 @@ def _apply_knowledge_write_semantics(
     return frame
 
 
+def _apply_full_prompt_constraints(frame: Dict[str, Any], *, prompt: str) -> Dict[str, Any]:
+    match = _BROAD_NO_PROJECT_WRITE_RE.search(str(prompt or ""))
+    if match is None:
+        return frame
+    constraints = (
+        list(frame.get("explicitConstraints"))
+        if isinstance(frame.get("explicitConstraints"), list)
+        else []
+    )
+    if _NO_PROJECT_WRITE not in constraints:
+        constraints.append(_NO_PROJECT_WRITE)
+    frame["explicitConstraints"] = constraints[:3]
+    frame["effect"] = "respond_only"
+    frame["operationType"] = "inquiry"
+    frame["canWrite"] = False
+    signals = list(frame.get("signals")) if isinstance(frame.get("signals"), list) else []
+    if "full_prompt_no_project_write" not in signals:
+        signals.append("full_prompt_no_project_write")
+    frame["signals"] = signals
+    evidence = list(frame.get("evidence")) if isinstance(frame.get("evidence"), list) else []
+    exact_constraint = match.group(0).strip()
+    if exact_constraint and exact_constraint not in evidence:
+        evidence.append(exact_constraint[:80])
+    frame["evidence"] = evidence[:3]
+    return frame
+
+
 class StorydexIntentService:
     def __init__(
         self,
@@ -1102,6 +1128,7 @@ class StorydexIntentService:
                 prompt=normalized_prompt,
                 previous_turn=None,
             )
+            frame = _apply_full_prompt_constraints(frame, prompt=normalized_prompt)
             _enrich_frame(frame, catalog)
             self._remember(
                 session_key=session_key,
@@ -1139,6 +1166,7 @@ class StorydexIntentService:
             prompt=normalized_prompt,
             previous_turn=previous_turn,
         )
+        frame = _apply_full_prompt_constraints(frame, prompt=normalized_prompt)
         _enrich_frame(frame, catalog)
         self._remember(
             session_key=session_key,

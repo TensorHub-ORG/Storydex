@@ -13,16 +13,18 @@ def test_live_acceptance_removes_isolated_provider_copy_after_setup_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    provider_id = "test-provider"
+    model = "test-model"
     source = tmp_path / "source-providers.json"
     source.write_text(
         json.dumps(
             {
                 "version": 1,
-                "active": acceptance.REQUIRED_PROVIDER,
+                "active": provider_id,
                 "providers": {
-                    acceptance.REQUIRED_PROVIDER: {
+                    provider_id: {
                         "type": "openai_compatible",
-                        "model": acceptance.REQUIRED_MODEL,
+                        "model": model,
                         "api_key": "test-secret-that-must-not-survive",
                     }
                 },
@@ -37,8 +39,8 @@ def test_live_acceptance_removes_isolated_provider_copy_after_setup_failure(
 
     monkeypatch.setattr(acceptance, "prepare_workspace", fail_workspace_setup)
     args = argparse.Namespace(
-        provider_id=acceptance.REQUIRED_PROVIDER,
-        model=acceptance.REQUIRED_MODEL,
+        provider_id=provider_id,
+        model=model,
         reasoning_effort="high",
         config=str(source),
         output_dir=str(output_root),
