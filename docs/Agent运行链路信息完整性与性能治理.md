@@ -22,10 +22,10 @@
 | P1-2b Wiki | 已完成 | catalog diff、dirty projection/published snapshot、首次全量/暖态单文件更新、rename/delete 和 stale/unavailable 语义已落地；300 文件暖态查询不读 workspace source |
 | P1-3 | 已完成 | 独立规划 LLM Provider 调用与兼容外部 Provider 分支均删除，由主 Agent 的 Plan/Loop 作为唯一执行计划来源；聚焦回归 73 passed |
 | P1-4 | 已完成 | deterministic query planner、自然语言主题触发、功能词过滤和错误状态/候选 span Trace 已落地；聚焦回归 40 passed，OPENCODE 真实验收通过 |
-| P1-5 至 P1-7 | 实施中 | Evidence Ledger、结构化 compaction checkpoint、真实 token 预算/LRU/JIT 已实现，正在完成最终回归、全量门禁和真实主链路验收 |
-| P2 | 阻塞 | Evidence Ledger、compaction checkpoint 和真实 token 基线稳定前不得启动 |
+| P1-5 至 P1-7 | 已完成 | Evidence Ledger、结构化 compaction checkpoint、shadow/真实 token 预算、LRU/JIT 上下文及对应 Trace/失效语义已落地并通过聚焦、全量和真实主链路验收 |
+| P2 | 阻塞 | P1-5～P1-7 已完成但仍需积累稳定真实 token/证据样本；在 Evidence Ledger、checkpoint 和 token baseline 稳定前不得启动 P2 |
 
-P0 已全部完成；P0-1F、P1-0、P1-1 核心和 P1-2a 已由提交 `5cfabbd` 推送，P1-2c 已由提交 `0d4c611` 推送，两个 SHA 的 pre-push 门禁及 GitHub Actions 均为 `success`。P1-2b、P1-3、P1-4 已在当前工作区完成并通过聚焦验证；当前剩余收口项是 P1-5～P1-7。P2 仍由 Evidence Ledger、compaction checkpoint 和真实 token 基线共同阻塞。
+P0 已全部完成；P0-1F、P1-0、P1-1 核心和 P1-2a 已由提交 `5cfabbd` 推送，P1-2c 已由提交 `0d4c611` 推送。第二批（P1-2b、P1-3、P1-4）代码收口提交为 `858c990c16978c40369c2d6eb60b1ff57c1823c5`，第三批（P1-5、P1-6、P1-7）为 `327eeb4b9521d1d450558db05b0d6b4f4ed23ad0`；两个 SHA 均通过 pre-push，GitHub Actions run `31225798801`、`31227503047` 均为 `success`。P1-5～P1-7 已完成最终回归和真实主链路验收；P2 仍按门槛阻塞。
 
 ## 1. 结论
 
@@ -37,15 +37,9 @@ P0 已全部完成；P0-1F、P1-0、P1-1 核心和 P1-2a 已由提交 `5cfabbd` 
 2. **P0-2：有界读取没有完整性协议。** `read_file` 默认只给 500 行、最多 2,000 行且可能再被 48,000 字节截断，却不告诉模型总量、剩余范围和下一页位置；长中文单行还存在 UTF-8 非字符边界截断风险。意图控制层另只读取用户请求前 2,000 字符，可能漏掉尾部权限约束。
 3. **P0-3：FTS 把长文件中部永久排除在索引外。** 当前 120,000 字符限制使用头尾拼接，不是全文分块。中部事实不是“排名低”，而是根本不存在于索引中。
 
-P1-2a 完成后，当前剩余性能与证据链问题主要来自五处：
+P1-2a 完成后曾确认的五类固定成本，已在本轮 P1 收口中分别治理：FTS/Wiki 查询改为 published snapshot 与 dirty 增量；独立规划 LLM 已删除；自然语言检索触发和错误状态已结构化；Evidence Ledger 已记录 revision/span 并精确失效；compaction checkpoint 与 token/LRU/JIT 观测已接入。真实主链路仍显示每回合 bridge 会初始化，但这属于 P2 入口问题，不应在 P1 证据协议尚未积累稳定样本前提前改为常驻 worker。
 
-- FTS 查询前先执行 `watch_files()`，随后 `search_detailed()` 又通过 `index_status(check_stale=True)` 全树扫描；无变化夹具仍为 `4,411/4,412 stat`。
-- Wiki 的 `query_graph()` 经 `read_or_build()` 收集并读取全部来源，尚未建立独立 dirty projection 基线。
-- 每个模型工具轮仍重发系统提示、完整活动 history 和全部工具 schema；真实首轮 6 个模型轮的 logical/transmitted input 为 `71,775/291,771` token。
-- 每回合仍启动并关闭 Rust bridge，但当前实测 bridge 启动和组件初始化约 `51.257/5.500 ms`，不是先于 FTS、Evidence Ledger 和 compaction checkpoint 改造的主瓶颈。
-- 缺少跨回合 Evidence Ledger；文件未变化时，模型仍可能重复读取相同范围。
-
-继续严格按 `P1-2c -> P1-2b -> P1-3 删除独立规划 LLM -> P1-4 -> P1-5 -> P1-6 -> P1-7 -> P2` 推进。P2 仍由 Evidence Ledger、compaction checkpoint 和真实 token 基线共同阻塞。
+本轮真实主链路首轮 6 个模型轮的 logical/transmitted/cached input 为 `71,908/292,452/221,056` token；Evidence Ledger、checkpoint 和 shadow accounting 已可观测，但真实样本量尚不足以定义 P2 的稳定 SLA。因此继续按 `P2` 入口门槛阻塞推进，不把已完成的 P1 开关默认宣称为全量启用。
 
 ## 2. 优先级定义
 
@@ -605,7 +599,7 @@ GitHub Actions HEAD 8bac23b: success
 
 ## 10. P1 调整后计划：先量化，再消除重复工作并保护证据链
 
-已完成顺序：`P0-1F -> P1-0 -> P1-1 核心 -> P1-2a`。剩余顺序：`P1-2c -> P1-2b -> P1-3 删除独立规划 LLM -> P1-4 -> P1-5 -> P1-6 -> P1-7`。P1-3 已由产品决定删除无人消费的额外规划调用。
+已完成顺序：`P0-1F -> P1-0 -> P1-1 核心 -> P1-2a -> P1-2c -> P1-2b -> P1-3 删除独立规划 LLM -> P1-4 -> P1-5 -> P1-6 -> P1-7`。P1-3 已由产品决定删除无人消费的额外规划调用；当前 P1 全部完成，P2 按第 11 节入口门槛继续阻塞。
 
 ### 10.1 P1-0 基线、指标和回归夹具
 
@@ -640,9 +634,9 @@ GitHub Actions HEAD 8bac23b: success
 
 验收：300 章节暖态 TurnContract 的全树扫描为 0；无变化 Wiki/FTS 查询的 `rglob/stat/read` 为 0；单文件变更只更新该文件和被声明的派生项；任意外部创建、修改、删除和重命名都能进入生产 dirty queue。若 published catalog 与 FTS/Wiki generation 不一致，查询必须显式返回 stale/unavailable，不能返回旧数据并伪装成 `no_hits`。
 
-### 10.3.1 2026-08-08 P0-1F、P1-0、P1-1、P1-2a 执行结果
+### 10.3.1 2026-08-08 P0-1F、P1-0、P1-1、P1-2a 至 P1-4 执行结果
 
-提交 `5cfabbd` 已完成、推送并实际验证以下四块：
+基础四块由提交 `5cfabbd` 完成并推送；随后 P1-2c 至 P1-4 在后续提交中完成并实际验证：
 
 - P0-1F：恢复已有 runtime session 时校验 canonical workspace；workspace 不一致返回 `session_restore_failed(workspace_mismatch)`，workspace 不可用返回 `session_restore_failed(workspace_unavailable)`，均不得改写 session、binding 或历史。Rust 回归和最终真实链路都覆盖两种隔离失败；最终报告：`output/agent-integrity-live/95897505f9/acceptance-report.json`。
 - P1-0：新增固定性能基线、TurnContract 扫描/耗时指标、bridge 初始化分阶段指标，以及 logical/transmitted/cached token 指标。修改前报告：`output/agent-performance-baseline/e9d5b9e1a3/baseline-report.json`；真实链路报告：`output/agent-integrity-live/454ecd547b/acceptance-report.json`。
@@ -652,6 +646,8 @@ GitHub Actions HEAD 8bac23b: success
 - P1-2b：Wiki 复用 catalog snapshot diff，排除 `.storydex/wiki/` 生成目录，发布 `source_snapshot.json` 与 catalog generation/revision；首次全量发布、暖态单文件精确更新、rename/delete、publish 失败保留 last-good 和 stale/unavailable 语义均有回归。300 文件夹具 catalog bootstrap 为 `199.080 ms`，暖态 query 为 `11.052 ms` / 第二次 `11.071 ms`，查询不调用 `_collect_sources`、migration、reconcile；报告：`output/agent-performance-baseline/p1-2b-current/baseline-report.json`；聚焦回归 `86 passed`。
 - P1-3：删除 `StorydexCoomiAgentService.create_task_plan()`、routes 的独立 planner Provider 分支和 `allow_external_provider` 兼容参数；复杂任务进入主 Agent 前的独立规划 Provider 调用数为 0，主 Agent Plan/Loop 与 UI/Trace 回归 `73 passed`。
 - P1-4：加入 deterministic query planner，覆盖 active entities、引号、章节引用和自然语言主题词，并过滤功能词；Trace 显式记录 query/queryPlan/queryTerms/candidateSpans 及 `no_query/no_hits/index_error/disabled`。聚焦回归 `40 passed`；真实 `OPENCODE / deepseek-v4-flash` 报告：`output/agent-retrieval-live/p1-4-current/acceptance-report.json`，status `passed`。
+
+第二批代码最终收口为提交 `858c990c16978c40369c2d6eb60b1ff57c1823c5`。该 SHA 的本地 `scripts/run_pre_push_ci.ps1` 通过 Backend `1045 passed`、Frontend `302 passed`、Desktop `40 passed`、Rust workspace/build、编码和 whitespace 检查；GitHub Actions run `31225798801` 于 2026-08-08（Asia/Shanghai）最终为 `success`。
 
 固定 300 章节、2,000 文件、10 次 TurnContract 对比：
 
@@ -670,15 +666,21 @@ GitHub Actions HEAD 8bac23b: success
 
 推送复核：`5cfabbddd5a5d7357d220316837c532f4d4240ee` 的 pre-push 认证为 `mode: Fast`；GitHub Actions run `31198092846` 已于 2026-08-08（Asia/Shanghai）完成且结论为 `success`。
 
-本次交接 review 发现一个不能被遗漏的集成缺口：仓库当前只有 `ContentCatalogService.notify_external_changes()` 接口和测试调用，没有常驻文件系统 watcher。FTS 的 `watch_files()` 目前既刷新索引，也承担发现非 Storydex/Coomi 写入的外部变化。P1-2c 删除全树扫描前必须先补真实事件生产者和 watcher 丢事件后的后台 reconciliation；否则同 size/mtime 外部改写、删除或重命名可能静默留在旧索引中。该缺口不推翻 Source/Catalog 核心契约，但阻止 FTS/Wiki 消费者宣称已经完成零扫描迁移。
+交接 review 中发现的“只有显式 `notify_external_changes()`、没有生产 watcher”的缺口已在 P1-2c 收口：`ContentPipelineService` 现在注册 watchdog 事件源，并以后台低频 reconciliation 兜底；`RetrievalService.watch_files()` 仅保留为兼容/修复入口，不再由查询链路调用。300 文件夹具的无变化 warm refresh、stale check 和查询均为零 `stat/read`，同 size/mtime 外部替换由内容 revision 校验识别。
 
-剩余顺序按 P1-0 数据调整为：
+P1 顺序已全部完成。下一阶段只保留 P2 入口门槛：先收集 Evidence Ledger、compaction checkpoint 和真实 token baseline 的稳定样本，再评估长生命周期 bridge、Provider 增量协议和正文证据复用。
 
-1. P1-2c FTS：无变化刷新仍执行 `4,411 stat`，stale check 为 `4,412 stat`；最终同夹具本机耗时分别为 `559.598 ms / 601.022 ms`。先补生产 dirty 事件和后台 reconciliation，再迁移 FTS 并删除查询前双扫；这是当前最明确的固定 I/O 成本。
-2. P1-2b Wiki：复用已经稳定的变更事件入口，补齐独立 dirty projection 基线后迁移到 published snapshot；不能与 FTS 合并为一个大改动。
-3. P1-3：删除独立规划 LLM 的额外 Provider 调用；保留主 Agent 自身的 Plan/Loop 规划能力。
-4. P1-4 至 P1-7：检索触发、Evidence Ledger、结构化压缩检查点和真实 token/JIT 预算仍然正确，按依赖顺序执行。
-5. P2：Evidence Ledger 和 compaction checkpoint 未稳定前继续阻塞；不能因 bridge 初始化已量化就直接改常驻 worker。
+### 10.3.2 2026-08-08 P1-5、P1-6、P1-7 执行结果
+
+第三批代码最终收口为提交 `327eeb4b9521d1d450558db05b0d6b4f4ed23ad0`，提交信息为中文 `feat(agent): 完成证据账本与上下文检查点治理`。实现和验证结果如下：
+
+- P1-5 Evidence Ledger：按 `session + workspace` 原子持久化 `path/revision/span`、来源工具、turn、结果 hash 和 coverage goal；相同 revision 的相邻 span 合并，单文件 revision 变化只失效该文件旧记录；ProjectSearch/read_file 结果均保留原始正文，Trace 额外记录 observation、invalidations、coverage 和 unique evidence bytes。`test_evidence_ledger_service.py` 与相关 Agent 回归通过。
+- P1-6 结构化 compaction checkpoint：Rust checkpoint schema v1 在压缩前校验 Plan、Loop、权限模式、目标、Evidence revisions 和 tool-call/result 配对，先原子保存再调用 Provider；非法配对 fail-closed 且保留原 session，压缩历史保留最近完整 tool chain。Python bridge/Trace 传递 `checkpointValid/checkpointHash/toolCallCount/evidenceRevisionCount`。
+- P1-7 真实 Token 预算、LRU 和 JIT：新增 system/history/tools/TurnContract/输出预留的 deterministic shadow accounting；真实预算和 JIT 仅在显式 feature flag 开启时裁剪，并将 `omitted/truncated/dropReason` 同步到模型渲染和 ContextTrace；LRU key 包含 canonical workspace、catalog generation/source revisions、policy、prompt 和 block config，revision/generation 变化自动失效。默认开关仍关闭，避免未经基线证明就改变既有语义。
+- P1-5～P1-7 聚焦验证：Backend 新增/受影响聚焦组合 `66 passed`；Rust `coomi-engine` 与 `storydex-coomi-bridge` 相关测试 `30 passed`；Ruff、compileall、`git diff --check` 通过。第三批完整 pre-push 的 Backend 为 `1059 passed, 0 failed`，Frontend `302 passed`，Desktop `40 passed`。
+- 固定 P1-7 基线报告：`output/agent-performance-baseline/p1-7-current/baseline-report.json`；300 章节/2,000 文件夹具暖态 TurnContract median `118.064 ms`、p95 `129.337 ms`，FTS warm refresh `22.505 ms`、stale check `1.412 ms`、warm query `13.716 ms`，warm 查询的 path stat/directory scan/read 均为 `0`。
+- 真实主链路报告：`output/agent-integrity-live/p1-5-7-current/acceptance-report.json`，使用本机 `OPENCODE / deepseek-v4-flash` 配置的隔离副本，凭证未写入报告。status `passed`；第一回合 `27,076 ms`、6 个模型轮/8 次工具调用、logical/transmitted/cached input 为 `71,908 / 292,452 / 221,056` token；2,001 行文件 5 页、72,027 bytes，中文超长单行 3 页、120,022 bytes；第二回合复用同一 runtime session（messages `15 -> 17`），恢复回合和缺失/损坏/跨 workspace 失败模式均通过。
+- 第三批 SHA 的本地 pre-push 已认证为 `mode: Fast`，GitHub Actions run `31227503047` 于 2026-08-08（Asia/Shanghai）最终为 `success`。
 
 ### 10.4 P1-3 删除独立规划 LLM
 
@@ -703,6 +705,8 @@ GitHub Actions HEAD 8bac23b: success
 
 目标：跨工具轮和跨回合记录 Agent 已观察的 `path+revision+span`，先获得真实重复率和证据来源，再启用缓存行为。
 
+实施状态：**已完成 v1 记录协议**。当前只记录、合并和精确失效，不改变工具返回语义；正文结果缓存（v2）继续以真实重复率和稳定 token baseline 为入口门槛，属于后续受控启用项。
+
 建议记录：session_id、path、revision、read/retrieval spans、first/last observed turn、source tool、result hash 和 coverage goal。
 
 - v1 只自动记录、合并相邻 span、写 Trace 和精确失效，不改变 `read_file`/ProjectSearch 返回。
@@ -717,6 +721,8 @@ GitHub Actions HEAD 8bac23b: success
 
 当前压缩会把早期工具结果替换为截断文本、最多保留 20,000 token 真实用户消息，并让 assistant/tool 细节主要依赖一次自然语言摘要。
 
+实施状态：**已完成**。压缩前 checkpoint 已机器校验并原子落盘；摘要不再是 Plan、权限、目标、tool-call 配对和 evidence revision 的唯一副本，校验失败时不调用 Provider 且保留原 session。
+
 - Plan、Loop、未完成动作、用户约束、文件 revision 和 Evidence Ledger 独立持久化。
 - 压缩前生成机器可校验 checkpoint；摘要只承担叙述性上下文。
 - 保留最近完整工具调用链和所有未完成 tool call 配对。
@@ -726,7 +732,9 @@ GitHub Actions HEAD 8bac23b: success
 
 ### 10.8 P1-7 真实 Token 预算、LRU 和 JIT 上下文
 
-`CONTEXT_LRU_ENABLED`、`CONTEXT_TOKEN_BUDGET_REAL`、`JIT_CONTEXT_LOADING_ENABLED` 当前仅存在于默认配置，没有生产消费者；不能通过简单打开开关宣称功能已启用。
+此前 `CONTEXT_LRU_ENABLED`、`CONTEXT_TOKEN_BUDGET_REAL`、`JIT_CONTEXT_LOADING_ENABLED` 仅存在于默认配置，没有生产消费者；本批已补齐消费者，但仍不能把默认关闭的开关误写为全量启用。
+
+实施状态：**已完成**。三个开关已有生产消费者和等价/失效测试，默认仍关闭；shadow accounting 始终记录，真实预算/JIT/LRU 只有显式启用并携带可观察裁剪状态时才生效。
 
 - 先实现 shadow token accounting，统一计算 system、history、tools、TurnContract 和预留输出预算。
 - LRU 以 `workspace + catalog generation/source revision + block config` 为 key；命中不得复用旧 revision。
@@ -793,7 +801,10 @@ wiki_refresh_ms / fts_refresh_ms / fts_coverage
 bridge_start_ms / component_init_ms
 model_rounds / tool_calls / duplicate_tool_calls_same_revision
 logical_input_tokens / transmitted_input_tokens / cached_input_tokens
+shadow_logical_input_tokens / shadow_transmitted_input_tokens / shadow_output_reserve_tokens
+logical_context_tokens / transmitted_context_tokens / context_omitted_block_count / context_truncated_block_count
 read_bytes / unique_evidence_bytes / evidence_coverage
+evidence_observations / evidence_invalidations / compaction_checkpoint_hash
 compaction_count / compaction_checkpoint_valid
 session_load_status / session_save_status
 ```
@@ -803,7 +814,7 @@ session_load_status / session_save_status
 - P0：所有 session 恢复失败、workspace mismatch、读取截断、索引不完整都有显式状态；硬损失复现全部转为通过。
 - P1-0：同一夹具可重复输出扫描、刷新、bridge 初始化和 token 传输指标；指标缺失时不开始对应优化。
 - P1：300 章节暖态 TurnContract 只读已发布 snapshot；无变化 Wiki/FTS 查询的全树扫描、`stat` 和源文件读取均为 0；外部变更事件在定义的时间内发布，丢事件由非查询路径 reconciliation 收敛。
-- P1：相同 revision+span 的重复读取率可测并显著下降，目标值在收集一周真实样本后确定。
+- P1：相同 revision+span 的重复读取率已可测；正文结果复用和显著下降目标在收集稳定真实样本后作为 P1-5 v2/P2 受控门槛确定。
 - P1：独立 planner 调用为 0，或其结果在主 Agent 启动前进入 TurnContract 并被执行引用。
 - P2：连续回合 bridge 初始化次数从每回合 1 次降到每 worker 生命周期 1 次。
 - P2：工具轮 transmitted input 不再重复发送可复用前缀；按 Provider 能力分别设定基线。
@@ -845,17 +856,30 @@ Python Ruff（P0-3 生产、测试和验收脚本）: passed
 P0-3 OpenCode 真实 Agent 验收: 2 次 passed
 ```
 
+P1-2b 至 P1-7 收口验证：
+
+```text
+第二批聚焦回归（P1-2b/P1-3/P1-4 及并发修复）: 71 passed
+第三批聚焦组合（Evidence Ledger、checkpoint、token/LRU/JIT 及受影响 Agent）: 66 passed
+coomi-engine + storydex-coomi-bridge 相关回归: 30 passed
+第三批 pre-push Fast: Backend 1059 passed, Frontend 302 passed, Desktop 40 passed
+Python Ruff、compileall、git diff --check: passed
+OPENCODE / deepseek-v4-flash 真实主链路（隔离 Provider 配置副本）: passed
+第二批 HEAD 858c990c16978c40369c2d6eb60b1ff57c1823c5: Actions 31225798801 success
+第三批 HEAD 327eeb4b9521d1d450558db05b0d6b4f4ed23ad0: Actions 31227503047 success
+```
+
 完整 workspace Clippy 仍会被 `vendor/coomi-rs/ui/src/terminal_ui/mod.rs:999` 的 `clippy::large_enum_variant` 阻断；告警位于未被 P0 修改的 TUI `RuntimeEvent` 枚举。P0 涉及的三个 Rust crate 已单独在 `-D warnings` 下通过，不应为完成 P0 扩大修改 TUI 架构。
 
-后续每个 P1/P2 变更包仍应运行对应聚焦测试、受影响 crate 测试和至少一条真实 Agent 链路。
+P1 变更包已完成；P2 仍必须等 Evidence Ledger、compaction checkpoint 和真实 token baseline 累积稳定样本后，才进入设计和实现。
 
 ## 14. 工作区与交付注意事项
 
-P0-1/P0-2/P0-3 已分别提交为 `b0dd6cf`、`151ca45`、`785a46f`；P0-1F、P1-0、P1-1 核心和 P1-2a 已提交为 `5cfabbd`。当前 `main` 与 `origin/main` 均位于 `5cfabbddd5a5d7357d220316837c532f4d4240ee`，对应 GitHub Actions run `31198092846` 为 `success`。
+P0-1/P0-2/P0-3 已分别提交为 `b0dd6cf`、`151ca45`、`785a46f`；P0-1F、P1-0、P1-1 核心和 P1-2a 已提交为 `5cfabbd`；P1-2c 为 `0d4c6117e381b78a13e44e8525243c1ec36bd966`。本轮第二批代码为 `858c990c16978c40369c2d6eb60b1ff57c1823c5`，第三批代码为 `327eeb4b9521d1d450558db05b0d6b4f4ed23ad0`；对应 Actions run `31225798801`、`31227503047` 均为 `success`，每个新 HEAD 均有独立 `mode: Fast` pre-push 认证。
 
-当前唯一已知 tracked 未提交修改应为本文档，且这是按用户要求保留给新对话参考的本地计划文档，不得混入下一笔代码提交。`stash@{0}: codex-docs-between-split-pushes` 是本文档恢复前的旧备份，当前工作区版本更新，下一轮不得再次 apply 或删除；`stash@{1}`、`stash@{2}` 属于用户或其他会话，同样不得修改或删除。新提交应显式 `git add` 代码和正式测试路径，并重新运行 pre-push 门禁；旧 SHA 的认证不能复用于新 SHA。
+当前工作区只保留本文档的收口修改；`stash@{0}: codex-p1-5-7-between-split-pushes` 已用 `apply` 恢复但未删除，`stash@{1}: codex-docs-between-split-pushes`、`stash@{2}`、`stash@{3}` 均保持原样。不得 pop、删除或覆盖任何 stash；文档修改不得混入已推送代码提交。
 
-真实验收通过临时目录复制单个 Provider 配置，结束后自动删除临时配置和密钥副本。`output/` 下的验收报告被 Git 忽略；提交前仍应检查暂存差异中没有 API key、Authorization header 值或临时 Provider 配置。
+真实验收使用临时目录复制单个 Provider 配置，结束后自动删除临时配置和密钥副本。`output/` 下的验收报告被 Git 忽略；每次提交前仍检查暂存差异没有 API key、Authorization header 值或临时 Provider 配置。本文档明确记录的是本机 `OPENCODE / deepseek-v4-flash` 配置的使用事实，不包含凭证。
 
 ## 15. 明确禁止的修复方式
 
@@ -900,3 +924,5 @@ P0-1/P0-2/P0-3 已分别提交为 `b0dd6cf`、`151ca45`、`785a46f`；P0-1F、P1
 6. 压缩后结构化权限、目标、计划和证据引用仍可验证。
 7. bridge 和 Provider 的重复成本被量化，并在 P2 后显著下降。
 8. 所有结论都由回归测试、Trace 指标和复现基线支持，而不是仅依据实现意图。
+
+当前交付已满足 P1 的记录、失效、checkpoint、预算可观察性和回归门槛；P1-5 的正文结果复用 v2、长生命周期 bridge、Provider 增量协议及跨回合固定成本下降仍属于 P2 或受控后续项。P2 继续阻塞，直到 Evidence Ledger、compaction checkpoint 和真实 token baseline 在持续真实样本中稳定。
