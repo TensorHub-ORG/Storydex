@@ -16,7 +16,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, Iterator
 from urllib.parse import urlsplit, urlunsplit
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 
@@ -63,6 +63,10 @@ class StorydexCoomiUnavailable(RuntimeError):
 
 
 class StorydexCoomiEmptyResponse(RuntimeError):
+    pass
+
+
+class StorydexCoomiSessionRestoreError(RuntimeError):
     pass
 
 
@@ -138,6 +142,95 @@ def _read_coomi_session_binding(*, workspace_root: Path, storydex_session_id: st
     if value.get("workspaceRoot") != workspace or value.get("storydexSessionId") != session_id:
         return {}
     return value
+
+
+def _read_coomi_session_binding_for_execution(
+    *, workspace_root: Path, storydex_session_id: str
+) -> Dict[str, Any]:
+    path = _coomi_binding_path(workspace_root, storydex_session_id)
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise StorydexCoomiSessionRestoreError(
+            f"Coomi session binding contains invalid JSON: {path}"
+        ) from exc
+    except OSError as exc:
+        raise StorydexCoomiSessionRestoreError(
+            f"Coomi session binding could not be read: {path}"
+        ) from exc
+    if not isinstance(value, dict):
+        raise StorydexCoomiSessionRestoreError(
+            f"Coomi session binding must be a JSON object: {path}"
+        )
+    workspace = str(Path(workspace_root).resolve())
+    session_id = str(storydex_session_id or "default").strip() or "default"
+    if value.get("workspaceRoot") != workspace or value.get("storydexSessionId") != session_id:
+        raise StorydexCoomiSessionRestoreError(
+            "Coomi session binding does not belong to the active workspace/session"
+        )
+    runtime_id = str(value.get("runtimeSessionId") or value.get("coomiSessionId") or "").strip()
+    try:
+        UUID(runtime_id)
+    except (ValueError, AttributeError) as exc:
+        raise StorydexCoomiSessionRestoreError(
+            "Coomi session binding has an invalid runtime session id"
+        ) from exc
+    expected_path = (STORYDEX_COOMI_SESSIONS / f"{runtime_id}.json").resolve()
+    try:
+        bound_path = _validated_session_path(value) or expected_path
+    except ValueError as exc:
+        raise StorydexCoomiSessionRestoreError(
+            "Coomi session binding points outside the runtime session directory"
+        ) from exc
+    if bound_path != expected_path:
+        raise StorydexCoomiSessionRestoreError(
+            "Coomi session binding points to a different runtime session file"
+        )
+    if not bound_path.is_file():
+        raise StorydexCoomiSessionRestoreError(
+            f"Bound Coomi session history is missing: {bound_path}"
+        )
+    return value
+
+
+def _validated_persisted_session_bound(data: Dict[str, Any]) -> str:
+    runtime_id = str(data.get("runtimeSessionId") or "").strip()
+    try:
+        UUID(runtime_id)
+    except (ValueError, AttributeError) as exc:
+        raise StorydexCoomiSessionRestoreError(
+            "Coomi session_bound event has an invalid runtime session id"
+        ) from exc
+    if data.get("persisted") is not True:
+        raise StorydexCoomiSessionRestoreError(
+            "Coomi session_bound event was not persisted"
+        )
+    if int(data.get("sessionSchemaVersion") or 0) != 1:
+        raise StorydexCoomiSessionRestoreError(
+            "Coomi session_bound event has an unsupported session schema version"
+        )
+    raw_path = str(data.get("sessionPath") or "").strip()
+    if not raw_path:
+        raise StorydexCoomiSessionRestoreError(
+            "Coomi session_bound event is missing the persisted session path"
+        )
+    session_path = Path(raw_path).expanduser().resolve()
+    expected_path = (STORYDEX_COOMI_SESSIONS / f"{runtime_id}.json").resolve()
+    if not session_path.is_file():
+        raise StorydexCoomiSessionRestoreError(
+            f"Coomi session_bound history does not exist: {session_path}"
+        )
+    try:
+        same_session_file = session_path.samefile(expected_path)
+    except OSError:
+        same_session_file = False
+    if not same_session_file:
+        raise StorydexCoomiSessionRestoreError(
+            "Coomi session_bound event points outside the expected session path"
+        )
+    return runtime_id
 
 
 def _write_coomi_session_binding(
@@ -517,9 +610,18 @@ class StorydexCoomiAgentService:
             turn_contract=turn_contract,
             plan_mode=plan_mode,
         )
-        binding = _read_coomi_session_binding(
-            workspace_root=workspace, storydex_session_id=normalized_session
-        )
+        try:
+            binding = _read_coomi_session_binding_for_execution(
+                workspace_root=workspace, storydex_session_id=normalized_session
+            )
+        except StorydexCoomiSessionRestoreError as exc:
+            yield "AgentError", _agent_error(
+                trace_id,
+                exc,
+                stage="session_restore",
+                session_id=normalized_session,
+            )
+            return
         system_prompt = await _build_coomi_system_prompt(
             workspace_root=workspace,
             prompt=prompt,
@@ -610,15 +712,14 @@ class StorydexCoomiAgentService:
                 packet_type = str(packet.get("type") or "")
                 data = packet.get("data") if isinstance(packet.get("data"), dict) else {}
                 if packet_type == "session_bound":
-                    runtime_id = str(data.get("runtimeSessionId") or "")
-                    if runtime_id:
-                        if runtime_id != bound_runtime_id:
-                            translator.reset_usage_baseline()
-                        _write_coomi_session_binding(
-                            workspace_root=workspace,
-                            storydex_session_id=normalized_session,
-                            runtime_session_id=runtime_id,
-                        )
+                    runtime_id = _validated_persisted_session_bound(data)
+                    if runtime_id != bound_runtime_id:
+                        translator.reset_usage_baseline()
+                    _write_coomi_session_binding(
+                        workspace_root=workspace,
+                        storydex_session_id=normalized_session,
+                        runtime_session_id=runtime_id,
+                    )
                     continue
                 if packet_type == "tool_request":
                     await self._dispatch_tool_request(bridge, registry, data)

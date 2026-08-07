@@ -2,12 +2,28 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
 
 from services import coomi_agent_service as coomi
 from services.storydex_tool_types import ToolResult
+
+
+def _persisted_session_bound(monkeypatch, tmp_path) -> dict[str, object]:
+    runtime_id = "11111111-1111-4111-8111-111111111111"
+    sessions = tmp_path / "coomi-home" / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    session_path = sessions / f"{runtime_id}.json"
+    session_path.write_text('{"schema_version": 1, "messages": []}', encoding="utf-8")
+    monkeypatch.setattr(coomi, "STORYDEX_COOMI_SESSIONS", sessions)
+    return {
+        "runtimeSessionId": runtime_id,
+        "sessionPath": str(session_path),
+        "sessionSchemaVersion": 1,
+        "persisted": True,
+    }
 
 
 def test_rust_session_binding_round_trip_and_delete(monkeypatch, tmp_path) -> None:
@@ -45,6 +61,115 @@ def test_binding_rejects_session_path_outside_runtime(monkeypatch, tmp_path) -> 
     monkeypatch.setattr(coomi, "STORYDEX_COOMI_SESSIONS", tmp_path / "sessions")
     with pytest.raises(ValueError, match="outside"):
         coomi._validated_session_path({"sessionPath": str(tmp_path / "escape.json")})
+
+
+def test_execution_binding_rejects_malformed_json(tmp_path) -> None:
+    binding_path = coomi._coomi_binding_path(tmp_path, "session-a")
+    binding_path.parent.mkdir(parents=True)
+    binding_path.write_text("{broken", encoding="utf-8")
+
+    with pytest.raises(coomi.StorydexCoomiSessionRestoreError, match="invalid JSON"):
+        coomi._read_coomi_session_binding_for_execution(
+            workspace_root=tmp_path,
+            storydex_session_id="session-a",
+        )
+
+
+def test_execution_binding_rejects_session_path_outside_runtime(monkeypatch, tmp_path) -> None:
+    sessions = tmp_path / "coomi-home" / "sessions"
+    runtime_id = "11111111-1111-4111-8111-111111111111"
+    sessions.mkdir(parents=True)
+    (sessions / f"{runtime_id}.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(coomi, "STORYDEX_COOMI_SESSIONS", sessions)
+    binding_path = coomi._coomi_binding_path(tmp_path, "session-a")
+    binding_path.parent.mkdir(parents=True)
+    binding_path.write_text(
+        json.dumps(
+            {
+                "workspaceRoot": str(tmp_path.resolve()),
+                "storydexSessionId": "session-a",
+                "runtimeSessionId": runtime_id,
+                "sessionPath": str(tmp_path / "outside.json"),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(coomi.StorydexCoomiSessionRestoreError, match="outside"):
+        coomi._read_coomi_session_binding_for_execution(
+            workspace_root=tmp_path,
+            storydex_session_id="session-a",
+        )
+
+
+@pytest.mark.asyncio
+async def test_stream_rejects_unpersisted_session_bound_event(monkeypatch, tmp_path) -> None:
+    sessions = tmp_path / "coomi-home" / "sessions"
+    monkeypatch.setattr(coomi, "STORYDEX_COOMI_SESSIONS", sessions)
+
+    class Bridge:
+        async def events(self):
+            yield {
+                "type": "session_bound",
+                "data": {
+                    "runtimeSessionId": "11111111-1111-4111-8111-111111111111",
+                    "sessionPath": str(sessions / "11111111-1111-4111-8111-111111111111.json"),
+                    "persisted": False,
+                },
+            }
+
+        async def close(self):
+            return None
+
+        async def cancel(self, *, steer=False):
+            return None
+
+    async def start(_payload):
+        return Bridge()
+
+    monkeypatch.setattr(coomi.LiveBridgeProcess, "start", start)
+    monkeypatch.setattr(
+        coomi.StorydexCoomiAgentService,
+        "get_status",
+        lambda self, **_kwargs: {"model": "model", "providerId": "provider"},
+    )
+
+    events = [
+        event
+        async for event in coomi.StorydexCoomiAgentService().stream_events(
+            prompt="hello",
+            trace_id="trace",
+            session_id="session-a",
+            workspace_root=tmp_path,
+        )
+    ]
+
+    assert [name for name, _payload in events] == ["AgentStarted", "AgentError"]
+    assert "not persisted" in events[-1][1]["message"]
+    assert not coomi._coomi_binding_path(tmp_path, "session-a").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows extended paths are platform-specific")
+def test_persisted_session_bound_accepts_windows_extended_path(monkeypatch, tmp_path) -> None:
+    sessions = tmp_path / "coomi-home" / "sessions"
+    runtime_id = "11111111-1111-4111-8111-111111111111"
+    session_path = sessions / f"{runtime_id}.json"
+    session_path.parent.mkdir(parents=True)
+    session_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(coomi, "STORYDEX_COOMI_SESSIONS", sessions)
+    extended_path = "\\\\?\\" + str(session_path.resolve())
+
+    assert (
+        coomi._validated_persisted_session_bound(
+            {
+                "runtimeSessionId": runtime_id,
+                "sessionPath": extended_path,
+                "sessionSchemaVersion": 1,
+                "persisted": True,
+            }
+        )
+        == runtime_id
+    )
 
 
 def test_translator_reports_turn_usage_instead_of_runtime_cumulative_usage() -> None:
@@ -359,10 +484,11 @@ def test_user_input_answer_prefers_free_text_and_never_uses_control_decision() -
 @pytest.mark.asyncio
 async def test_stream_events_preserves_storydex_event_contract(monkeypatch, tmp_path) -> None:
     started_payload = {}
+    session_bound = _persisted_session_bound(monkeypatch, tmp_path)
 
     class Bridge:
         async def events(self):
-            yield {"type": "session_bound", "data": {"runtimeSessionId": "runtime-1"}}
+            yield {"type": "session_bound", "data": session_bound}
             yield {"type": "text_delta", "data": {"text": "hello"}}
             yield {"type": "completed", "data": {"usage": {"input_tokens": 2, "output_tokens": 3}}}
 
@@ -382,7 +508,6 @@ async def test_stream_events_preserves_storydex_event_contract(monkeypatch, tmp_
         "get_status",
         lambda self, **_kwargs: {"model": "model", "providerId": "provider"},
     )
-    monkeypatch.setattr(coomi, "STORYDEX_COOMI_SESSIONS", tmp_path / "sessions")
     events = [
         event
         async for event in coomi.StorydexCoomiAgentService().stream_events(
@@ -401,7 +526,7 @@ async def test_stream_events_preserves_storydex_event_contract(monkeypatch, tmp_
         workspace_root=tmp_path,
         storydex_session_id="story-session",
     )
-    assert binding["runtimeSessionId"] == "runtime-1"
+    assert binding["runtimeSessionId"] == session_bound["runtimeSessionId"]
     assert started_payload["permissionMode"] == "full_access"
     assert started_payload["reasoningEffort"] == "medium"
     assert started_payload["writesAllowed"] is True
@@ -490,9 +615,11 @@ async def test_explicit_binding_blocks_core_writes_but_keeps_guarded_domain_muta
 
 @pytest.mark.asyncio
 async def test_stream_forwards_provider_retry_as_connection_retry(monkeypatch, tmp_path) -> None:
+    session_bound = _persisted_session_bound(monkeypatch, tmp_path)
+
     class Bridge:
         async def events(self):
-            yield {"type": "session_bound", "data": {"runtimeSessionId": "runtime-1"}}
+            yield {"type": "session_bound", "data": session_bound}
             yield {"type": "text_delta", "data": {"text": "partial"}}
             yield {
                 "type": "provider_retry",

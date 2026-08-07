@@ -17,6 +17,7 @@ pub use context::retained_user_history;
 pub use context::trim_history_to_fit;
 pub use input_queue::InputQueue;
 pub use instructions::discover_project_instructions;
+pub use session::SESSION_SCHEMA_VERSION;
 pub use session::Session;
 pub use session::SessionStore;
 pub use session::SessionSummary;

@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use coomi_engine::{
     Agent, AgentEvent, AgentObserver, ApprovalHandler, ChatMessage, ModelProvider, ModelRequest,
-    ReasoningEffort, Role, Session, SessionStore, ToolCall, ToolResult, ToolRuntime, ToolSpec,
-    UserInputRequest, UserInputResponse,
+    ReasoningEffort, Role, SESSION_SCHEMA_VERSION, Session, SessionStore, ToolCall, ToolResult,
+    ToolRuntime, ToolSpec, UserInputRequest, UserInputResponse,
 };
 use coomi_security::{AccessMode, HookRunner, SecurityPolicy};
 use coomi_services::{
@@ -586,6 +586,46 @@ fn save_session_after_run(
     }
 }
 
+fn prepare_session(
+    store: &SessionStore,
+    runtime_session_id: Option<Uuid>,
+    provider_id: &str,
+    model: &str,
+    cwd: &Path,
+) -> Result<Session> {
+    let (mut session, is_new) = match runtime_session_id {
+        Some(id) => (
+            store
+                .load(id)
+                .with_context(|| format!("failed to restore bound runtime session {id}"))?,
+            false,
+        ),
+        None => (Session::new(provider_id, model, cwd.to_path_buf()), true),
+    };
+    let cwd_changed = session.cwd != cwd;
+    let model_changed = session.provider_id != provider_id || session.model != model;
+    session.cwd = cwd.to_path_buf();
+    if model_changed {
+        session.switch_model(provider_id, model);
+    }
+    if is_new || cwd_changed || model_changed {
+        store.save(&session).with_context(|| {
+            if is_new {
+                format!(
+                    "failed to persist new runtime session {} before binding",
+                    session.id
+                )
+            } else {
+                format!(
+                    "failed to checkpoint runtime session {} before binding",
+                    session.id
+                )
+            }
+        })?;
+    }
+    Ok(session)
+}
+
 async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
     let cwd = canonical_directory(&request.cwd, "workspace")?;
     std::fs::create_dir_all(&request.home)?;
@@ -604,23 +644,21 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
     );
     emit_reasoning_plan(&emitter, &provider_config, &reasoning_plan);
     let store = SessionStore::new(&home);
-    let mut session = if let Some(id) = request.runtime_session_id {
-        store.load(id).unwrap_or_else(|_| {
-            Session::new(&provider_config.id, &provider_config.model, cwd.clone())
-        })
-    } else {
-        Session::new(&provider_config.id, &provider_config.model, cwd.clone())
-    };
-    session.cwd = cwd.clone();
-    if session.provider_id != provider_config.id || session.model != provider_config.model {
-        session.switch_model(&provider_config.id, &provider_config.model);
-    }
+    let mut session = prepare_session(
+        &store,
+        request.runtime_session_id,
+        &provider_config.id,
+        &provider_config.model,
+        &cwd,
+    )?;
     emitter.event(
         "session_bound",
         json!({
             "storydexSessionId": request.storydex_session_id,
             "runtimeSessionId": session.id,
-            "sessionPath": home.join("sessions").join(format!("{}.json", session.id)),
+            "sessionPath": store.path(session.id),
+            "sessionSchemaVersion": SESSION_SCHEMA_VERSION,
+            "persisted": true,
         }),
     );
 
@@ -1086,6 +1124,55 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&directory).expect("remove failed-run test directory");
+    }
+
+    #[test]
+    fn missing_bound_session_fails_without_creating_a_replacement() {
+        let directory = std::env::temp_dir().join(format!(
+            "storydex-coomi-bridge-missing-session-test-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).expect("create missing-session test directory");
+        let store = SessionStore::new(&directory);
+        let missing_id = Uuid::new_v4();
+
+        let error = prepare_session(
+            &store,
+            Some(missing_id),
+            "mock",
+            "deepseek-v4-flash",
+            &directory,
+        )
+        .expect_err("missing bound session must fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("failed to restore bound runtime session")
+        );
+        assert!(!store.path(missing_id).exists());
+        assert!(!directory.join("sessions").exists());
+        std::fs::remove_dir_all(&directory).expect("remove missing-session test directory");
+    }
+
+    #[test]
+    fn new_session_is_persisted_before_it_can_be_bound() {
+        let directory = std::env::temp_dir().join(format!(
+            "storydex-coomi-bridge-new-session-test-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).expect("create new-session test directory");
+        let store = SessionStore::new(&directory);
+
+        let session = prepare_session(&store, None, "mock", "deepseek-v4-flash", &directory)
+            .expect("prepare new session");
+
+        assert!(store.path(session.id).is_file());
+        assert_eq!(
+            store.load(session.id).expect("load initial checkpoint").id,
+            session.id
+        );
+        std::fs::remove_dir_all(&directory).expect("remove new-session test directory");
     }
 
     #[test]
