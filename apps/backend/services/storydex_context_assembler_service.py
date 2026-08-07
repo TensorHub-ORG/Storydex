@@ -394,7 +394,7 @@ class StorydexContextAssemblerService:
         )
 
         source_started = time.perf_counter()
-        related_passages, related_paths = (
+        related_passages, related_paths, related_retrieval = (
             self._render_related_passages(
                 root,
                 prompt=prompt,
@@ -403,17 +403,21 @@ class StorydexContextAssemblerService:
                 exclude_paths={*recent_segment_paths, *rolling_paths, str(active_file or "").replace("\\", "/")},
             )
             if effective_policy.passive_fts
-            else ("", [])
+            else ("", [], {"status": "disabled", "resultState": "unavailable"})
         )
-        sources.append(
-            self._source(
-                "related_passages",
-                related_paths,
-                candidate=related_passages,
-                policy="fts5_bm25_top_hits",
-                elapsed_ms=(time.perf_counter() - source_started) * 1000,
-            )
+        related_source = self._source(
+            "related_passages",
+            related_paths,
+            candidate=related_passages,
+            policy="fts5_v3_chunk_bm25",
+            elapsed_ms=(time.perf_counter() - source_started) * 1000,
         )
+        related_source["retrieval"] = related_retrieval
+        sources.append(related_source)
+        retrieval_status = str(related_retrieval.get("status") or "")
+        if retrieval_status not in {"", "ok", "disabled", "skipped"}:
+            retrieval_error = str(related_retrieval.get("error") or retrieval_status)
+            notes.append(f"related_passages_{retrieval_status}: {retrieval_error[:240]}")
         self._append_policy_block(
             blocks,
             enabled=effective_policy.passive_fts,
@@ -699,34 +703,79 @@ class StorydexContextAssemblerService:
         prompt: str,
         active_entities: Sequence[str],
         exclude_paths: Set[str],
-    ) -> Tuple[str, List[str]]:
-        """FTS5/BM25 检索与本轮请求相关的项目段落（中文 bigram 索引）。
+    ) -> Tuple[str, List[str], Dict[str, Any]]:
+        """Retrieve versioned project chunks related to the current turn.
 
         查询只取高置信度信号：活跃实体 + prompt 中被引号括起的专有名词。
         prompt 全文不进查询——续写指令里的功能词（"继续写这一段"等）切成
         bigram 后会把召回带偏向字面重叠多的无关文档。没有可用检索词时
-        跳过本块。受 CONTEXT_PIPELINE_FTS5 Flag 控制，索引失败时静默降级
-        为空块，不影响本轮生成。
+        跳过本块。索引错误会显式进入上下文与 ContextTrace，不能伪装成零命中。
         """
         query = " ".join(self._related_passage_query_terms(prompt, active_entities)).strip()
         if not query:
-            return "", []
+            return "", [], {"status": "skipped", "resultState": "no_query"}
+        service = None
         try:
             from core.feature_flags import get_flags
 
             if not get_flags().get_bool("CONTEXT_PIPELINE_FTS5"):
-                return "", []
+                return "", [], {"status": "disabled", "resultState": "unavailable"}
             from services.retrieval_service import RECALL_CANDIDATE_LIMIT, get_retrieval_service
 
             service = get_retrieval_service(root)
             service.watch_files()
-            hits, candidate_paths = service.search_with_candidates(
+            outcome = service.search_detailed(
                 query,
                 top_k=8,
                 candidate_limit=RECALL_CANDIDATE_LIMIT,
             )
-        except Exception:
-            return "", []
+        except Exception as exc:
+            try:
+                index = service.index_status(check_stale=False) if service is not None else {}
+            except Exception:
+                index = {}
+            outcome = {
+                "status": "index_error",
+                "resultState": "unavailable",
+                "hits": [],
+                "candidatePaths": [],
+                "index": index,
+                "error": str(exc),
+            }
+
+        status = str(outcome.get("status") or "index_error")
+        result_state = str(outcome.get("resultState") or "unavailable")
+        index = outcome.get("index") if isinstance(outcome.get("index"), dict) else {}
+        diagnostic = {
+            "status": status,
+            "resultState": result_state,
+            "schemaVersion": int(index.get("schemaVersion") or 0),
+            "generation": str(index.get("generation") or ""),
+            "coverage": index.get("coverage") if isinstance(index.get("coverage"), dict) else {},
+            "error": str(outcome.get("error") or ""),
+        }
+        if status != "ok":
+            message = (
+                "[Related Project Passages]\n"
+                f"Retrieval status: {status}. The index is unavailable; do not interpret this "
+                "as evidence being absent."
+            )
+            return message, [], diagnostic
+
+        hits = outcome.get("hits") if isinstance(outcome.get("hits"), list) else []
+        candidate_paths = (
+            outcome.get("candidatePaths")
+            if isinstance(outcome.get("candidatePaths"), list)
+            else []
+        )
+        if result_state == "no_hits":
+            return (
+                "[Related Project Passages]\n"
+                "Retrieval status: ok/no_hits. The complete published index returned no matches "
+                "for this query.",
+                [],
+                diagnostic,
+            )
 
         normalized_excludes = {str(path).replace("\\", "/") for path in exclude_paths if str(path).strip()}
         normalized_candidates: List[str] = []
@@ -739,8 +788,12 @@ class StorydexContextAssemblerService:
             normalized_candidates.append(normalized)
         normalized_candidates = list(dict.fromkeys(normalized_candidates))
 
-        selected: List[Tuple[str, str]] = []
-        for path, _score, snippet in hits:
+        selected: List[Tuple[str, str, Dict[str, Any], str]] = []
+        for hit in hits:
+            if not isinstance(hit, dict):
+                continue
+            path = str(hit.get("path") or "")
+            snippet = str(hit.get("snippet") or "")
             normalized = str(path).replace("\\", "/")
             if normalized in normalized_excludes:
                 continue
@@ -748,17 +801,28 @@ class StorydexContextAssemblerService:
                 continue
             if not snippet.strip():
                 continue
-            selected.append((normalized, snippet.strip()))
+            span = hit.get("snippetSpan") if isinstance(hit.get("snippetSpan"), dict) else {}
+            selected.append((normalized, snippet.strip(), span, str(hit.get("revision") or "")))
             if len(selected) >= 3:
                 break
         if not normalized_candidates:
-            return "", []
+            return "", [], diagnostic
         lines = [
             "[Related Project Passages]",
-            "Retrieval hits for this turn only; treat as reference excerpts, not full documents.",
+            "Retrieval status: ok/hits. Excerpts identify an exact indexed revision and source span.",
         ]
-        for path, snippet in selected:
-            lines.extend(["", f"### {path}", snippet])
+        for path, snippet, span, revision in selected:
+            lines.extend(
+                [
+                    "",
+                    (
+                        f"### {path} lines {span.get('startLine', 0)}-{span.get('endLine', 0)} "
+                        f"chars {span.get('startChar', 0)}-{span.get('endChar', 0)} "
+                        f"revision {revision}"
+                    ),
+                    snippet,
+                ]
+            )
         lines.extend(
             [
                 "",
@@ -767,7 +831,7 @@ class StorydexContextAssemblerService:
                 ", ".join(normalized_candidates),
             ]
         )
-        return "\n".join(lines).strip(), normalized_candidates
+        return "\n".join(lines).strip(), normalized_candidates, diagnostic
 
     _RETRIEVABLE_CONTENT_PREFIXES = (
         "chapters/",

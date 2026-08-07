@@ -340,10 +340,31 @@ def test_related_passage_snippets_precede_long_candidate_path_list(tmp_path, mon
     ]
     fake_service = SimpleNamespace(
         watch_files=lambda: 0,
-        search_with_candidates=lambda *_args, **_kwargs: (
-            [(candidate_paths[0], -1.0, "关键命中证据位于这里。")],
-            candidate_paths,
-        ),
+        search_detailed=lambda *_args, **_kwargs: {
+            "status": "ok",
+            "resultState": "hits",
+            "hits": [
+                {
+                    "path": candidate_paths[0],
+                    "score": -1.0,
+                    "revision": "sha256:test",
+                    "snippet": "关键命中证据位于这里。",
+                    "snippetSpan": {
+                        "startLine": 10,
+                        "endLine": 10,
+                        "startChar": 100,
+                        "endChar": 111,
+                    },
+                }
+            ],
+            "candidatePaths": candidate_paths,
+            "index": {
+                "schemaVersion": 3,
+                "generation": "sha256:index",
+                "coverage": {"documentCount": 30, "chunkCount": 30},
+            },
+            "error": "",
+        },
     )
     monkeypatch.setattr(
         feature_flags,
@@ -353,7 +374,7 @@ def test_related_passage_snippets_precede_long_candidate_path_list(tmp_path, mon
     monkeypatch.setattr(retrieval_service, "get_retrieval_service", lambda _root: fake_service)
     assembler = StorydexContextAssemblerService(get_story_project_service())
 
-    block, returned_paths = assembler._render_related_passages(
+    block, returned_paths, diagnostic = assembler._render_related_passages(
         tmp_path,
         prompt="『暮色钥印』",
         active_entities=(),
@@ -361,6 +382,7 @@ def test_related_passage_snippets_precede_long_candidate_path_list(tmp_path, mon
     )
 
     assert returned_paths == candidate_paths
+    assert diagnostic["status"] == "ok"
     assert block.index("关键命中证据") < block.index("Additional candidate paths:")
     assert "关键命中证据" in block[:1600]
 

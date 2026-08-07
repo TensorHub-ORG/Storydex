@@ -296,31 +296,65 @@ class StorydexProjectSearchTool(_StorydexWorkspaceToolMixin, BaseTool):
         from services.retrieval_service import RECALL_CANDIDATE_LIMIT, get_retrieval_service
 
         service = get_retrieval_service(workspace_root)
-        service.watch_files()
-        hits, candidate_paths = service.search_with_candidates(
-            query,
-            top_k=max_results,
-            candidate_limit=RECALL_CANDIDATE_LIMIT,
-            path_prefix=path_prefix,
+        try:
+            service.watch_files()
+        except Exception as exc:
+            try:
+                index = service.index_status(check_stale=False)
+            except Exception:
+                index = {}
+            outcome = {
+                "status": "index_error",
+                "resultState": "unavailable",
+                "hits": [],
+                "candidatePaths": [],
+                "index": index,
+                "error": str(exc),
+            }
+        else:
+            outcome = service.search_detailed(
+                query,
+                top_k=max_results,
+                candidate_limit=RECALL_CANDIDATE_LIMIT,
+                path_prefix=path_prefix,
+            )
+        status = str(outcome.get("status") or "index_error")
+        result_state = str(outcome.get("resultState") or "unavailable")
+        hits = outcome.get("hits") if isinstance(outcome.get("hits"), list) else []
+        candidate_paths = (
+            outcome.get("candidatePaths")
+            if isinstance(outcome.get("candidatePaths"), list)
+            else []
         )
         result = {
-            "ok": True,
+            "ok": status == "ok",
+            "status": status,
+            "resultState": result_state,
             "workspaceRoot": workspace_root.as_posix(),
             "query": query,
             "resultCount": len(hits),
             "candidateCount": len(candidate_paths),
             "candidatePaths": candidate_paths,
-            "results": [
-                {"path": path, "score": round(float(score), 4), "snippet": snippet}
-                for path, score, snippet in hits
-            ],
+            "results": hits,
+            "index": outcome.get("index") if isinstance(outcome.get("index"), dict) else {},
+            "error": str(outcome.get("error") or ""),
             "note": (
-                "Snippets are short excerpts around the first match; read the file for full context. "
-                "Lower score = more relevant (FTS5 bm25). Candidate paths include lower-ranked matches "
-                "without excerpts; read selectively before concluding evidence is absent."
+                "Each result identifies an exact source revision and span. Read the file for wider "
+                "context. A no_hits result is authoritative only when status=ok; index_building, "
+                "index_stale, and index_error must not be interpreted as absent evidence."
             ),
         }
-        return ToolResult(success=True, output=json.dumps(result, ensure_ascii=False, indent=2), error=None)
+        encoded = json.dumps(result, ensure_ascii=False, indent=2)
+        if status != "ok":
+            return ToolResult(
+                success=False,
+                output=encoded,
+                # The bridge forwards error before output for failed tools.
+                # Keep the diagnostic in the JSON envelope so the model sees
+                # status/resultState/index instead of an unstructured string.
+                error=None,
+            )
+        return ToolResult(success=True, output=encoded, error=None)
 
 
 class StorydexWikiQueryTool(_StorydexWorkspaceToolMixin, BaseTool):
