@@ -18,6 +18,7 @@ use std::io::{BufRead, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tokio::sync::{Notify, oneshot};
 use uuid::Uuid;
 
@@ -602,13 +603,28 @@ fn prepare_session(
         ),
         None => (Session::new(provider_id, model, cwd.to_path_buf()), true),
     };
-    let cwd_changed = session.cwd != cwd;
+    if !is_new {
+        let persisted_cwd = session.cwd.canonicalize().with_context(|| {
+            format!(
+                "session_restore_failed(workspace_unavailable): runtime session {} workspace {} cannot be resolved",
+                session.id,
+                session.cwd.display()
+            )
+        })?;
+        anyhow::ensure!(
+            persisted_cwd == cwd,
+            "session_restore_failed(workspace_mismatch): runtime session {} belongs to {}, not {}",
+            session.id,
+            persisted_cwd.display(),
+            cwd.display()
+        );
+    }
     let model_changed = session.provider_id != provider_id || session.model != model;
     session.cwd = cwd.to_path_buf();
     if model_changed {
         session.switch_model(provider_id, model);
     }
-    if is_new || cwd_changed || model_changed {
+    if is_new || model_changed {
         store.save(&session).with_context(|| {
             if is_new {
                 format!(
@@ -627,15 +643,18 @@ fn prepare_session(
 }
 
 async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
+    let component_started = Instant::now();
     let cwd = canonical_directory(&request.cwd, "workspace")?;
     std::fs::create_dir_all(&request.home)?;
     let home = canonical_directory(&request.home, "runtime home")?;
+    let provider_config_started = Instant::now();
     let registry = provider_registry(&home)?;
     let provider_config = resolve_provider(
         &registry,
         request.provider.as_deref(),
         request.use_fast_model,
     )?;
+    let provider_config_ms = provider_config_started.elapsed().as_secs_f64() * 1000.0;
     let reasoning_plan = reasoning_request_plan_best_effort(
         &provider_config,
         &provider_config.model,
@@ -643,6 +662,7 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
         None,
     );
     emit_reasoning_plan(&emitter, &provider_config, &reasoning_plan);
+    let session_started = Instant::now();
     let store = SessionStore::new(&home);
     let mut session = prepare_session(
         &store,
@@ -651,6 +671,7 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
         &provider_config.model,
         &cwd,
     )?;
+    let session_init_ms = session_started.elapsed().as_secs_f64() * 1000.0;
     emitter.event(
         "session_bound",
         json!({
@@ -680,17 +701,22 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
     } else {
         request.system_prompt
     };
+    let instructions_started = Instant::now();
     let instructions = coomi_engine::discover_project_instructions(&cwd)?;
     if !instructions.trim().is_empty() {
         system_prompt.push_str("\n\nProject instructions:\n");
         system_prompt.push_str(&instructions);
     }
+    let instructions_init_ms = instructions_started.elapsed().as_secs_f64() * 1000.0;
+    let memory_started = Instant::now();
     let memory = Arc::new(MemoryManager::new(&home, &cwd));
     let memory_context = memory.prompt_context();
     if !memory_context.trim().is_empty() {
         system_prompt.push_str("\n\nPersistent Storydex Coomi memory:\n");
         system_prompt.push_str(&memory_context);
     }
+    let memory_init_ms = memory_started.elapsed().as_secs_f64() * 1000.0;
+    let security_started = Instant::now();
     let policy = SecurityPolicy::new(&cwd, access_mode)?;
     let scheduler = AgentScheduler::new(
         cwd.clone(),
@@ -699,13 +725,21 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
         access_mode,
         system_prompt.clone(),
     );
+    let security_init_ms = security_started.elapsed().as_secs_f64() * 1000.0;
+    let mcp_started = Instant::now();
+    let mcp_runtime = Arc::new(McpRuntime::load(&home).await);
+    let mcp_init_ms = mcp_started.elapsed().as_secs_f64() * 1000.0;
+    let hooks_started = Instant::now();
+    let hooks = Arc::new(HookRunner::load(&home)?);
+    let hooks_init_ms = hooks_started.elapsed().as_secs_f64() * 1000.0;
+    let tools_started = Instant::now();
     let core = CoreTools::new(cwd.clone(), policy)
         .with_skills_directory(home.join("skills"))
         .with_config_home(home.clone())
         .with_session_state(session.plan.clone(), session.loop_state.clone())
-        .with_mcp_runtime(Arc::new(McpRuntime::load(&home).await))
+        .with_mcp_runtime(mcp_runtime)
         .with_memory(memory)
-        .with_hooks(Arc::new(HookRunner::load(&home)?))
+        .with_hooks(hooks)
         .with_agent_scheduler(scheduler, session.messages.clone());
     let custom_names = request
         .tool_specs
@@ -732,6 +766,7 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
         emitter: emitter.clone(),
         controls: Arc::clone(&controls),
     };
+    let tools_init_ms = tools_started.elapsed().as_secs_f64() * 1000.0;
     let approval = StorydexApproval {
         base_mode: base_permission_mode,
         plan_mode_active,
@@ -741,8 +776,25 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
     let observer = StorydexObserver {
         emitter: emitter.clone(),
     };
+    let provider_started = Instant::now();
     let provider = HttpModelProvider::new(provider_config)?;
+    let provider_init_ms = provider_started.elapsed().as_secs_f64() * 1000.0;
     let agent = Agent::new(system_prompt).with_reasoning_effort(request.reasoning_effort);
+    emitter.event(
+        "runtime_initialized",
+        json!({
+            "componentInitMs": component_started.elapsed().as_secs_f64() * 1000.0,
+            "providerConfigMs": provider_config_ms,
+            "sessionInitMs": session_init_ms,
+            "projectInstructionsMs": instructions_init_ms,
+            "memoryInitMs": memory_init_ms,
+            "securityInitMs": security_init_ms,
+            "mcpInitMs": mcp_init_ms,
+            "hooksInitMs": hooks_init_ms,
+            "toolsInitMs": tools_init_ms,
+            "providerInitMs": provider_init_ms,
+        }),
+    );
     let run_outcome: Result<bool, coomi_engine::AgentError> = {
         let run = async {
             agent
@@ -1173,6 +1225,98 @@ mod tests {
             session.id
         );
         std::fs::remove_dir_all(&directory).expect("remove new-session test directory");
+    }
+
+    #[test]
+    fn bound_session_from_another_workspace_fails_without_mutating_history() {
+        let directory = std::env::temp_dir().join(format!(
+            "storydex-coomi-bridge-workspace-isolation-test-{}",
+            Uuid::new_v4()
+        ));
+        let first_workspace = directory.join("first");
+        let second_workspace = directory.join("second");
+        std::fs::create_dir_all(&first_workspace).expect("create first workspace");
+        std::fs::create_dir_all(&second_workspace).expect("create second workspace");
+        let first_workspace = first_workspace
+            .canonicalize()
+            .expect("canonicalize first workspace");
+        let second_workspace = second_workspace
+            .canonicalize()
+            .expect("canonicalize second workspace");
+        let store = SessionStore::new(&directory);
+        let mut session = Session::new("mock", "deepseek-v4-flash", first_workspace.clone());
+        session
+            .messages
+            .push(ChatMessage::user("workspace-isolation-marker"));
+        store.save(&session).expect("save bound session");
+        let before = std::fs::read(store.path(session.id)).expect("read session before mismatch");
+
+        let error = prepare_session(
+            &store,
+            Some(session.id),
+            "mock",
+            "deepseek-v4-flash",
+            &second_workspace,
+        )
+        .expect_err("cross-workspace restore must fail closed");
+
+        assert!(
+            format!("{error:#}").contains("session_restore_failed(workspace_mismatch)"),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(
+            std::fs::read(store.path(session.id)).expect("read session after mismatch"),
+            before
+        );
+        let restored = store.load(session.id).expect("restore original session");
+        assert_eq!(restored.cwd, first_workspace);
+        assert_eq!(restored.messages[0].content, "workspace-isolation-marker");
+        std::fs::remove_dir_all(&directory).expect("remove isolation test directory");
+    }
+
+    #[test]
+    fn bound_session_with_missing_workspace_fails_without_mutating_history() {
+        let directory = std::env::temp_dir().join(format!(
+            "storydex-coomi-bridge-missing-workspace-test-{}",
+            Uuid::new_v4()
+        ));
+        let missing_workspace = directory.join("removed");
+        std::fs::create_dir_all(&missing_workspace).expect("create session workspace");
+        let canonical_workspace = missing_workspace
+            .canonicalize()
+            .expect("canonicalize session workspace");
+        let request_workspace = directory.join("request");
+        std::fs::create_dir_all(&request_workspace).expect("create request workspace");
+        let request_workspace = request_workspace
+            .canonicalize()
+            .expect("canonicalize request workspace");
+        let store = SessionStore::new(&directory);
+        let mut session = Session::new("mock", "deepseek-v4-flash", canonical_workspace);
+        session
+            .messages
+            .push(ChatMessage::user("workspace-unavailable-marker"));
+        store.save(&session).expect("save bound session");
+        let before = std::fs::read(store.path(session.id)).expect("read session before removal");
+        std::fs::remove_dir_all(&missing_workspace).expect("remove session workspace");
+
+        let error = prepare_session(
+            &store,
+            Some(session.id),
+            "mock",
+            "deepseek-v4-flash",
+            &request_workspace,
+        )
+        .expect_err("missing session workspace must fail closed");
+
+        assert!(
+            format!("{error:#}").contains("session_restore_failed(workspace_unavailable)"),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(
+            std::fs::read(store.path(session.id)).expect("read session after failure"),
+            before
+        );
+        std::fs::remove_dir_all(&directory).expect("remove missing-workspace test directory");
     }
 
     #[test]

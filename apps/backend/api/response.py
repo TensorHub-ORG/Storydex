@@ -23,8 +23,27 @@ class ApiTrace(BaseModel):
     cache_creation_input_tokens: int = Field(alias="cacheCreationInputTokens", default=0)
     cache_hit_ratio: float = Field(alias="cacheHitRatio", default=0.0)
     cache_savings: float = Field(alias="cacheSavings", default=0.0)
+    bridge_start_ms: float = Field(alias="bridgeStartMs", default=0.0)
+    component_init_ms: float = Field(alias="componentInitMs", default=0.0)
+    provider_config_ms: float = Field(alias="providerConfigMs", default=0.0)
+    session_init_ms: float = Field(alias="sessionInitMs", default=0.0)
+    project_instructions_ms: float = Field(alias="projectInstructionsMs", default=0.0)
+    memory_init_ms: float = Field(alias="memoryInitMs", default=0.0)
+    security_init_ms: float = Field(alias="securityInitMs", default=0.0)
+    mcp_init_ms: float = Field(alias="mcpInitMs", default=0.0)
+    hooks_init_ms: float = Field(alias="hooksInitMs", default=0.0)
+    tools_init_ms: float = Field(alias="toolsInitMs", default=0.0)
+    provider_init_ms: float = Field(alias="providerInitMs", default=0.0)
+    model_rounds: int = Field(alias="modelRounds", default=0)
+    duplicate_tool_calls_same_revision: int = Field(
+        alias="duplicateToolCallsSameRevision",
+        default=0,
+    )
+    logical_input_tokens: int = Field(alias="logicalInputTokens", default=0)
+    transmitted_input_tokens: int = Field(alias="transmittedInputTokens", default=0)
+    cached_input_tokens: int = Field(alias="cachedInputTokens", default=0)
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, protected_namespaces=())
 
 
 class ApiEnvelope(BaseModel):

@@ -51,6 +51,62 @@ def prepare_integrity_sources(workspace: Path) -> None:
     )
 
 
+def exercise_content_catalog(workspace: Path) -> dict[str, Any]:
+    from services.content_catalog_service import get_content_catalog_service
+
+    probe = workspace / "chapters" / "catalog-revision-probe.txt"
+    write_text(probe, "catalog probe alpha\n")
+    service = get_content_catalog_service(workspace)
+
+    initial_started = time.perf_counter()
+    initial = service.snapshot()
+    initial_ms = (time.perf_counter() - initial_started) * 1000
+    initial_entry = initial.get("chapters/catalog-revision-probe.txt")
+    if initial_entry is None:
+        raise AcceptanceError("content catalog omitted the revision probe")
+
+    warm_started = time.perf_counter()
+    warm = service.snapshot()
+    warm_ms = (time.perf_counter() - warm_started) * 1000
+    if warm is not initial:
+        raise AcceptanceError("warm content catalog lookup did not reuse the published snapshot")
+
+    original_stat = probe.stat()
+    write_text(probe, "catalog probe bravo\n")
+    os.utime(probe, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    service.notify_external_changes([probe])
+    if service.dirty_file_count != 1:
+        raise AcceptanceError("content catalog did not enqueue the external source change")
+
+    refresh_started = time.perf_counter()
+    refreshed = service.refresh_dirty()
+    refresh_ms = (time.perf_counter() - refresh_started) * 1000
+    refreshed_entry = refreshed.get("chapters/catalog-revision-probe.txt")
+    if refreshed_entry is None:
+        raise AcceptanceError("content catalog lost the refreshed revision probe")
+    if refreshed.generation != initial.generation + 1:
+        raise AcceptanceError("content catalog generation did not advance exactly once")
+    if refreshed_entry.revision == initial_entry.revision:
+        raise AcceptanceError("content catalog missed a same-size same-mtime content replacement")
+    if refreshed_entry.mtime_ns != original_stat.st_mtime_ns:
+        raise AcceptanceError("content catalog probe did not preserve its test mtime")
+    if service.dirty_file_count:
+        raise AcceptanceError("content catalog retained acknowledged dirty paths")
+
+    return {
+        "initialSnapshotMs": round(initial_ms, 3),
+        "warmSnapshotMs": round(warm_ms, 3),
+        "dirtyRefreshMs": round(refresh_ms, 3),
+        "initialGeneration": initial.generation,
+        "refreshedGeneration": refreshed.generation,
+        "initialRevision": initial.catalog_revision,
+        "refreshedRevision": refreshed.catalog_revision,
+        "sourceRevisionChanged": True,
+        "sameSizeSameMtimeDetected": True,
+        "dirtyFileCount": service.dirty_file_count,
+    }
+
+
 async def collect_turn(
     service: Any,
     *,
@@ -58,24 +114,46 @@ async def collect_turn(
     session_id: str,
     prompt: str,
     reasoning_effort: str = "low",
+    contract_observations: dict[str, Any] | None = None,
+    observation_label: str = "",
 ) -> list[tuple[str, dict[str, Any]]]:
     events: list[tuple[str, dict[str, Any]]] = []
-    turn_contract = {
-        "intentFrame": {
+    from services.context_policy import ContextPolicy
+    from services.storydex_orchestration_service import get_storydex_orchestration_service
+
+    trace_id = f"live-{uuid.uuid4().hex[:12]}"
+    turn_contract = get_storydex_orchestration_service().build_turn_contract(
+        workspace,
+        prompt=prompt,
+        intent_frame={
             "primary": "general",
             "effect": "respond_only",
             "operationType": "inquiry",
             "canWrite": False,
+            "assetTargets": [],
+            "matchedSkills": [],
         },
-        "executionPolicy": {
-            "directFileWrites": False,
-            "allowedWriteRoots": [],
-        },
-        "reasoningEffort": reasoning_effort,
-    }
+        context_policy=ContextPolicy(
+            story_structured_memory=False,
+            passive_fts=False,
+            wiki_context=False,
+            coomi_memory=False,
+            active_retrieval_tools=False,
+        ),
+        provider="OPENCODE",
+        model="deepseek-v4-flash",
+        trace_id=trace_id,
+        session_id=session_id,
+    )
+    turn_contract["reasoningEffort"] = reasoning_effort
+    if contract_observations is not None and observation_label:
+        contract_observations[observation_label] = {
+            "contentCatalog": turn_contract.get("contentCatalog") or {},
+            "performanceTrace": turn_contract.get("performanceTrace") or {},
+        }
     async for name, payload in service.stream_events(
         prompt=prompt,
-        trace_id=f"live-{uuid.uuid4().hex[:12]}",
+        trace_id=trace_id,
         session_id=session_id,
         workspace_root=workspace,
         turn_contract=turn_contract,
@@ -98,6 +176,31 @@ def response_text(events: list[tuple[str, dict[str, Any]]]) -> str:
         for name, payload in events
         if name == "TextChunk"
     )
+
+
+def turn_performance(events: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
+    model_events = [payload for name, payload in events if name == "ModelCompleted"]
+    inputs = [
+        int((payload.get("usage") or {}).get("input_tokens") or 0)
+        for payload in model_events
+    ]
+    cached = [
+        int((payload.get("usage") or {}).get("cached_input_tokens") or 0)
+        for payload in model_events
+    ]
+    runtime: dict[str, Any] = {}
+    for payload in model_events:
+        metrics = payload.get("runtimeMetrics")
+        if isinstance(metrics, dict):
+            runtime.update(metrics)
+    return {
+        **runtime,
+        "modelRounds": len(model_events),
+        "toolCalls": sum(1 for name, _payload in events if name == "ToolDone"),
+        "logicalInputTokens": max(inputs, default=0),
+        "transmittedInputTokens": sum(inputs),
+        "cachedInputTokens": sum(cached),
+    }
 
 
 def read_file_transcript(session: dict[str, Any]) -> list[dict[str, Any]]:
@@ -150,33 +253,50 @@ def assert_complete_file_reads(transcript: list[dict[str, Any]]) -> dict[str, An
         ]
         if not pages:
             raise AcceptanceError(f"Agent never read {expected_path}")
-        expected_start = 0
+        expected_start_byte = 0
+        expected_start_char = 0
         revision = str(pages[0]["output"].get("revision") or "")
         for index, page in enumerate(pages):
             output = page["output"]
             span = output.get("span") if isinstance(output.get("span"), dict) else {}
-            start = int(span.get("startByte") or 0)
-            end = int(span.get("endByte") or 0)
-            if start != expected_start or end <= start:
+            start_byte = int(span.get("startByte") or 0)
+            end_byte = int(span.get("endByte") or 0)
+            start_char = int(span.get("startChar") or 0)
+            end_char = int(span.get("endChar") or 0)
+            if start_byte != expected_start_byte or end_byte <= start_byte:
                 raise AcceptanceError(
-                    f"{expected_path} has a gap or non-progressing span: {start}..{end}, expected {expected_start}"
+                    f"{expected_path} has a gap or non-progressing byte span: "
+                    f"{start_byte}..{end_byte}, expected {expected_start_byte}"
+                )
+            if start_char != expected_start_char or end_char <= start_char:
+                raise AcceptanceError(
+                    f"{expected_path} has a gap or non-progressing char span: "
+                    f"{start_char}..{end_char}, expected {expected_start_char}"
                 )
             if str(output.get("revision") or "") != revision:
                 raise AcceptanceError(f"{expected_path} changed revision within one read sequence")
+            if str(span.get("revision") or "") != revision or span.get("endExclusive") is not True:
+                raise AcceptanceError(f"{expected_path} span does not carry the source revision contract")
             if index > 0:
                 arguments = page["arguments"]
                 if arguments.get("expected_revision") != revision:
                     raise AcceptanceError(f"{expected_path} continuation omitted expected_revision")
-                if int(arguments.get("byte_offset") or -1) != start:
+                if int(arguments.get("byte_offset") or -1) != start_byte:
                     raise AcceptanceError(f"{expected_path} continuation used the wrong byte_offset")
-            expected_start = end
+            expected_start_byte = end_byte
+            expected_start_char = end_char
         final = pages[-1]["output"]
-        if final.get("hasMore") is not False or expected_start != int(final.get("totalBytes") or -1):
+        if (
+            final.get("hasMore") is not False
+            or expected_start_byte != int(final.get("totalBytes") or -1)
+            or expected_start_char != int(final.get("totalChars") or -1)
+        ):
             raise AcceptanceError(f"Agent stopped before reaching the end of {expected_path}")
         summary[expected_path] = {
             "pages": len(pages),
             "revision": revision,
             "totalBytes": int(final.get("totalBytes") or 0),
+            "totalChars": int(final.get("totalChars") or 0),
             "totalLines": int(final.get("totalLines") or 0),
         }
     return summary
@@ -192,6 +312,8 @@ async def run_live(args: argparse.Namespace, *, workspace: Path, coomi_home: Pat
     from services import coomi_agent_service as coomi
     from services.storydex_intent_service import StorydexIntentService
 
+    catalog = exercise_content_catalog(workspace)
+
     intent_prompt = "请修改第一章" + ("背景资料" * 750) + "。最终约束：不要修改任何项目文件"
     intent_started = time.perf_counter()
     intent = await StorydexIntentService().classify_intent(
@@ -206,6 +328,7 @@ async def run_live(args: argparse.Namespace, *, workspace: Path, coomi_home: Pat
         raise AcceptanceError("full prompt no-write constraint was not enforced")
 
     service = coomi.StorydexCoomiAgentService()
+    contract_observations: dict[str, Any] = {}
     session_id = f"opencode-integrity-{uuid.uuid4().hex[:10]}"
     service.set_plan_mode(session_id=session_id, workspace_root=workspace, active=True)
     first_prompt = (
@@ -218,7 +341,14 @@ async def run_live(args: argparse.Namespace, *, workspace: Path, coomi_home: Pat
     )
     first_started = time.perf_counter()
     first_events = await asyncio.wait_for(
-        collect_turn(service, workspace=workspace, session_id=session_id, prompt=first_prompt),
+        collect_turn(
+            service,
+            workspace=workspace,
+            session_id=session_id,
+            prompt=first_prompt,
+            contract_observations=contract_observations,
+            observation_label="firstTurn",
+        ),
         timeout=args.turn_timeout,
     )
     require_completed(first_events, "first live turn")
@@ -238,6 +368,21 @@ async def run_live(args: argparse.Namespace, *, workspace: Path, coomi_home: Pat
     session = json.loads(session_path.read_text(encoding="utf-8"))
     transcript = read_file_transcript(session)
     coverage = assert_complete_file_reads(transcript)
+    read_events = [
+        payload
+        for name, payload in first_events
+        if name == "ToolDone"
+        and str(payload.get("tool_name") or "") == "read_file"
+        and not bool(payload.get("is_error"))
+    ]
+    if len(read_events) != len([item for item in transcript if item["success"]]):
+        raise AcceptanceError("translated read_file events do not match persisted tool results")
+    if any(
+        not str(payload.get("source_revision") or "")
+        or not isinstance(payload.get("source_span"), dict)
+        for payload in read_events
+    ):
+        raise AcceptanceError("translated read_file event omitted revision/span provenance")
     first_message_count = len(session.get("messages") or [])
 
     second_prompt = (
@@ -246,7 +391,14 @@ async def run_live(args: argparse.Namespace, *, workspace: Path, coomi_home: Pat
     )
     second_started = time.perf_counter()
     second_events = await asyncio.wait_for(
-        collect_turn(service, workspace=workspace, session_id=session_id, prompt=second_prompt),
+        collect_turn(
+            service,
+            workspace=workspace,
+            session_id=session_id,
+            prompt=second_prompt,
+            contract_observations=contract_observations,
+            observation_label="secondTurn",
+        ),
         timeout=args.turn_timeout,
     )
     require_completed(second_events, "second live turn")
@@ -296,6 +448,8 @@ async def run_live(args: argparse.Namespace, *, workspace: Path, coomi_home: Pat
                 "The previous request failed before a model round. Do not call any tool. "
                 "Using the intact prior conversation, return the exact three acceptance markers."
             ),
+            contract_observations=contract_observations,
+            observation_label="recoveryTurn",
         ),
         timeout=args.turn_timeout,
     )
@@ -352,10 +506,69 @@ async def run_live(args: argparse.Namespace, *, workspace: Path, coomi_home: Pat
     if corrupt_path.read_text(encoding="utf-8") != "{corrupt":
         raise AcceptanceError("corrupt bound history was overwritten")
 
+    isolated_workspace = workspace.parent / "other-workspace"
+    prepare_workspace(isolated_workspace)
+    original_session_bytes = session_path.read_bytes()
+    coomi._write_coomi_session_binding(
+        workspace_root=isolated_workspace,
+        storydex_session_id="workspace-mismatch",
+        runtime_session_id=runtime_id,
+    )
+    mismatch_events = await collect_turn(
+        service,
+        workspace=isolated_workspace,
+        session_id="workspace-mismatch",
+        prompt="This cross-workspace binding must fail before contacting the model.",
+    )
+    mismatch_names = [name for name, _payload in mismatch_events]
+    mismatch_errors = [payload for name, payload in mismatch_events if name == "AgentError"]
+    if "AgentError" not in mismatch_names or "AgentCompleted" in mismatch_names:
+        raise AcceptanceError("cross-workspace binding did not fail closed")
+    if not mismatch_errors or "session_restore_failed(workspace_mismatch)" not in str(
+        mismatch_errors[-1].get("message") or ""
+    ):
+        raise AcceptanceError("cross-workspace binding did not preserve the stable error code")
+    if session_path.read_bytes() != original_session_bytes:
+        raise AcceptanceError("cross-workspace binding mutated the original runtime session")
+
+    unavailable_id = str(uuid.uuid4())
+    unavailable_path = coomi.STORYDEX_COOMI_SESSIONS / f"{unavailable_id}.json"
+    unavailable_workspace = workspace.parent / "removed-session-workspace"
+    unavailable_session = dict(recovered_session)
+    unavailable_session["id"] = unavailable_id
+    unavailable_session["cwd"] = unavailable_workspace.as_posix()
+    write_json(unavailable_path, unavailable_session)
+    unavailable_before = unavailable_path.read_bytes()
+    coomi._write_coomi_session_binding(
+        workspace_root=workspace,
+        storydex_session_id="workspace-unavailable",
+        runtime_session_id=unavailable_id,
+    )
+    unavailable_events = await collect_turn(
+        service,
+        workspace=workspace,
+        session_id="workspace-unavailable",
+        prompt="This missing persisted workspace must fail before contacting the model.",
+    )
+    unavailable_names = [name for name, _payload in unavailable_events]
+    unavailable_errors = [
+        payload for name, payload in unavailable_events if name == "AgentError"
+    ]
+    if "AgentError" not in unavailable_names or "AgentCompleted" in unavailable_names:
+        raise AcceptanceError("missing persisted workspace did not fail closed")
+    if not unavailable_errors or "session_restore_failed(workspace_unavailable)" not in str(
+        unavailable_errors[-1].get("message") or ""
+    ):
+        raise AcceptanceError("missing persisted workspace did not preserve the stable error code")
+    if unavailable_path.read_bytes() != unavailable_before:
+        raise AcceptanceError("missing persisted workspace mutated the runtime session")
+
     return {
         "status": "passed",
         "provider": args.provider_id,
         "model": args.model,
+        "contentCatalog": catalog,
+        "turnContracts": contract_observations,
         "intent": {
             "durationMs": round((first_started - intent_started) * 1000),
             "method": intent.get("method"),
@@ -367,6 +580,7 @@ async def run_live(args: argparse.Namespace, *, workspace: Path, coomi_home: Pat
             "eventNames": [name for name, _payload in first_events],
             "readCalls": len(transcript),
             "coverage": coverage,
+            "performance": turn_performance(first_events),
         },
         "secondTurn": {
             "durationMs": round((second_finished - second_started) * 1000),
@@ -374,6 +588,7 @@ async def run_live(args: argparse.Namespace, *, workspace: Path, coomi_home: Pat
             "sameRuntimeSession": True,
             "messagesBefore": first_message_count,
             "messagesAfter": len(restored_session.get("messages") or []),
+            "performance": turn_performance(second_events),
         },
         "recoveryAfterError": {
             "durationMs": round((recovery_finished - recovery_started) * 1000),
@@ -382,10 +597,13 @@ async def run_live(args: argparse.Namespace, *, workspace: Path, coomi_home: Pat
             "sameRuntimeSession": True,
             "messagesAfterError": messages_after_error,
             "messagesAfterRecovery": len(recovered_session.get("messages") or []),
+            "performance": turn_performance(recovery_events),
         },
         "failureModes": {
             "missingHistoryEvents": [name for name, _payload in missing_events],
             "corruptHistoryEvents": corrupt_names,
+            "workspaceMismatchEvents": mismatch_names,
+            "workspaceUnavailableEvents": unavailable_names,
             "silentReplacement": False,
         },
     }

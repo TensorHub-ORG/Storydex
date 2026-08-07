@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import stat
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -7,8 +8,10 @@ from typing import Any, Dict, List
 
 from core.config import FEATURE_FLAG_DEFAULTS
 from core.feature_flags import FeatureFlags
+from services.content_catalog_service import get_content_catalog_service
 from services.context_policy import ContextPolicy
 from services.global_config_service import GlobalConfigService, get_global_config_service
+from services.performance_trace_service import record_counter, trace_turn_contract
 from services.story_chapter_action_service import (
     CHAPTER_ACTION_CONTINUE_CHAPTER,
     CHAPTER_ACTION_CONTINUE_FRAGMENT,
@@ -68,6 +71,7 @@ class StorydexOrchestrationService:
     length_calibration_service: StoryLengthCalibrationService | None = None
     length_tier_calibration_service: StoryLengthTierCalibrationService | None = None
 
+    @trace_turn_contract
     def build_turn_contract(
         self,
         workspace_root: Path,
@@ -86,15 +90,42 @@ class StorydexOrchestrationService:
         effective_context_policy = self._context_policy(context_policy)
         self.story_project_service.ensure_project_structure(root)
         story_generation = story_generation if isinstance(story_generation, dict) else {}
-        settings = self.story_project_service.read_project_settings(root)
-        chapters = self.story_project_service.list_chapter_states(root)
+        settings = self.story_project_service.read_project_settings(
+            root,
+            ensure_structure=False,
+        )
+        catalog_service = get_content_catalog_service(root)
+        catalog_snapshot = catalog_service.peek_snapshot()
+        self._mark_changed_active_source(
+            root,
+            active_file=active_file,
+            catalog_service=catalog_service,
+            catalog_snapshot=catalog_snapshot,
+        )
+        chapter_path_mapping: Dict[str, str] = {}
+        if catalog_snapshot is None or catalog_service.dirty_file_count:
+            chapter_path_mapping = self.story_project_service._normalize_chapter_directories(  # noqa: SLF001
+                root
+            )
+        content_catalog = (
+            catalog_service.refresh_all()
+            if chapter_path_mapping
+            else catalog_service.refresh_dirty()
+        )
+        chapters = self.story_project_service.list_chapter_states(
+            root,
+            catalog_snapshot=content_catalog,
+        )
         intent = self._intent_frame(
             prompt=prompt,
             active_file=active_file,
             chapter_count=len(chapters),
             intent_frame=intent_frame,
         )
-        chapter_templates = self._list_chapter_templates(root)
+        chapter_templates = self._list_chapter_templates(
+            root,
+            ensure_structure=False,
+        )
         requested_template = self._selected_chapter_template(story_generation) or str(
             settings.get("storyChapterTemplateId") or DEFAULT_CHAPTER_TEMPLATE_ID
         ).strip()
@@ -250,6 +281,7 @@ class StorydexOrchestrationService:
                 active_file=active_file,
                 content_mode=chapter_content_mode,
                 is_new_story=is_new_story,
+                chapter_states=chapters,
             )
             fragment_targets = self.story_project_service.plan_story_generation_targets(
                 root,
@@ -259,6 +291,8 @@ class StorydexOrchestrationService:
                 prompt=prompt,
                 is_new_story=is_new_story,
                 chapter_action=chapter_action,
+                chapter_states=chapters,
+                catalog_snapshot=content_catalog,
             )
             next_segment_path = str(fragment_targets[0].get("path") or "") if fragment_targets else ""
             # The authoritative paths are read back off the planned targets rather
@@ -507,6 +541,8 @@ class StorydexOrchestrationService:
             intent_primary=str(intent.get("primary") or ""),
             turn_plan=turn_plan,
             policy=effective_context_policy,
+            chapter_states=chapters,
+            catalog_snapshot=content_catalog,
         )
         skill_registry = self._skill_registry(root)
         allowed_write_roots = (
@@ -542,6 +578,7 @@ class StorydexOrchestrationService:
             "sessionId": str(session_id or ""),
             "providerId": str(provider or ""),
             "model": str(model or ""),
+            "contentCatalog": content_catalog.to_trace(),
             "status": "needs_user_input" if requires_template else "ready",
             "intentFrame": intent,
             "knowledgeWritePolicy": knowledge_write_policy,
@@ -630,8 +667,65 @@ class StorydexOrchestrationService:
         frame["existingChapterCount"] = chapter_count
         return frame
 
-    def _list_chapter_templates(self, workspace_root: Path) -> List[Dict[str, Any]]:
-        return self.story_project_service.list_chapter_templates(workspace_root)
+    def _list_chapter_templates(
+        self,
+        workspace_root: Path,
+        *,
+        ensure_structure: bool = True,
+    ) -> List[Dict[str, Any]]:
+        return self.story_project_service.list_chapter_templates(
+            workspace_root,
+            ensure_structure=ensure_structure,
+        )
+
+    @staticmethod
+    def _mark_changed_active_source(
+        workspace_root: Path,
+        *,
+        active_file: str,
+        catalog_service: Any,
+        catalog_snapshot: Any,
+    ) -> None:
+        if catalog_snapshot is None:
+            return
+        normalized = str(active_file or "").strip().replace("\\", "/").strip("/")
+        parts = Path(normalized).parts
+        if (
+            len(parts) < 2
+            or parts[0] != "chapters"
+            or any(part in {"", ".", ".."} for part in parts)
+        ):
+            return
+        root = Path(workspace_root).resolve()
+        candidate = (root / normalized).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            return
+        entry = catalog_snapshot.get(normalized)
+        record_counter("statCount")
+        try:
+            source_stat = candidate.stat()
+            is_file = stat.S_ISREG(source_stat.st_mode)
+        except OSError:
+            source_stat = None
+            is_file = False
+        if entry is None and is_file:
+            catalog_service.mark_dirty(
+                [Path(normalized).parent.as_posix()],
+                source="active_file_probe",
+            )
+            return
+        if entry is not None and (
+            not is_file
+            or source_stat is None
+            or int(source_stat.st_size) != entry.size_bytes
+            or int(source_stat.st_mtime_ns) != entry.mtime_ns
+        ):
+            catalog_service.mark_dirty(
+                [normalized],
+                source="active_file_probe",
+            )
 
     @staticmethod
     def _selected_chapter_template(story_generation: Dict[str, Any]) -> str:

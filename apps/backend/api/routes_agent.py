@@ -1205,7 +1205,14 @@ def _phase_for_event(event_name: str) -> str:
         return "orchestration"
     if event_name.startswith("SemanticBudget"):
         return "model"
-    if event_name in {"RunAccepted", "UsageUpdate", "CompressionEvent", "TurnPhase", "ReasoningPlan"}:
+    if event_name in {
+        "RunAccepted",
+        "UsageUpdate",
+        "CompressionEvent",
+        "TurnPhase",
+        "ReasoningPlan",
+        "RuntimeMetrics",
+    }:
         return "runtime"
     if event_name.startswith("Agent"):
         return "agent"
@@ -1479,6 +1486,70 @@ def _extract_trace_metrics(
     llm_metrics: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     tool_calls = len([item for item in events if item.get("event") == "ToolDone"])
+    tool_arguments = {
+        str(data.get("tool_call_id") or ""): data.get("arguments") or {}
+        for item in events
+        if item.get("event") == "ToolStart"
+        for data in [item.get("data") if isinstance(item.get("data"), dict) else {}]
+        if str(data.get("tool_call_id") or "")
+    }
+    observed_tool_signatures: set[str] = set()
+    duplicate_tool_calls_same_revision = 0
+    for item in events:
+        if item.get("event") != "ToolDone":
+            continue
+        data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        revision = str(data.get("source_revision") or "").strip()
+        if not revision:
+            continue
+        call_id = str(data.get("tool_call_id") or "")
+        signature = json.dumps(
+            {
+                "tool": str(data.get("tool_name") or ""),
+                "arguments": data.get("arguments") or tool_arguments.get(call_id, {}),
+                "path": str(data.get("source_path") or ""),
+                "revision": revision,
+                "span": data.get("source_span") or {},
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if signature in observed_tool_signatures:
+            duplicate_tool_calls_same_revision += 1
+        observed_tool_signatures.add(signature)
+
+    model_usages: List[Dict[str, Any]] = []
+    for item in events:
+        if item.get("event") != "ModelCompleted":
+            continue
+        data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        model_usages.append(usage)
+    input_tokens_by_round = [
+        max(0, int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0))
+        for usage in model_usages
+    ]
+    cached_tokens_by_round = [
+        max(0, int(usage.get("cached_input_tokens") or usage.get("cache_read_input_tokens") or 0))
+        for usage in model_usages
+    ]
+    runtime_metrics: Dict[str, Any] = {}
+    for item in events:
+        data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        if item.get("event") == "ModelCompleted":
+            candidate = (
+                data.get("runtimeMetrics")
+                if isinstance(data.get("runtimeMetrics"), dict)
+                else {}
+            )
+        elif item.get("event") == "RuntimeMetrics":
+            candidate = data
+        else:
+            continue
+        for key, value in candidate.items():
+            if str(key).endswith("Ms"):
+                runtime_metrics[str(key)] = round(max(0.0, float(value or 0.0)), 3)
     total_tokens = 0
     for item in reversed(events):
         if item.get("event") != "AgentCompleted":
@@ -1536,11 +1607,55 @@ def _extract_trace_metrics(
         "traceId": trace_id,
         "durationMs": duration_ms,
         "toolCalls": tool_calls,
-        "llmCalls": observed_calls or (1 if total_tokens else 0),
+        "llmCalls": observed_calls or len(model_usages) or (1 if total_tokens else 0),
         "promptTokens": prompt_tokens,
         "completionTokens": completion_tokens,
         "estimatedCost": 0.0,
+        "modelRounds": len(model_usages),
+        "duplicateToolCallsSameRevision": duplicate_tool_calls_same_revision,
+        # The largest request is the turn's logical active context; transmitted
+        # input is the sum actually sent across all model/tool rounds.
+        "logicalInputTokens": max(input_tokens_by_round, default=0),
+        "transmittedInputTokens": sum(input_tokens_by_round),
+        "cachedInputTokens": sum(cached_tokens_by_round),
+        **runtime_metrics,
     }
+
+
+def _merge_runtime_trace_metrics(
+    context_trace: Dict[str, Any],
+    trace: Dict[str, Any],
+) -> Dict[str, Any]:
+    runtime_keys = (
+        "bridgeStartMs",
+        "componentInitMs",
+        "providerConfigMs",
+        "sessionInitMs",
+        "projectInstructionsMs",
+        "memoryInitMs",
+        "securityInitMs",
+        "mcpInitMs",
+        "hooksInitMs",
+        "toolsInitMs",
+        "providerInitMs",
+        "modelRounds",
+        "toolCalls",
+        "duplicateToolCallsSameRevision",
+        "logicalInputTokens",
+        "transmittedInputTokens",
+        "cachedInputTokens",
+    )
+    totals = context_trace.get("totals") if isinstance(context_trace.get("totals"), dict) else {}
+    totals.update({key: trace.get(key, 0) for key in runtime_keys})
+    context_trace["totals"] = totals
+    performance = (
+        context_trace.get("performance")
+        if isinstance(context_trace.get("performance"), dict)
+        else {"_type": "TurnPerformanceTrace", "_version": 1}
+    )
+    performance.update({key: trace.get(key, 0) for key in runtime_keys})
+    context_trace["performance"] = performance
+    return context_trace
 
 
 def _extract_context_trace(events: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1668,7 +1783,10 @@ def _build_chat_payload(
     duration_ms = int((time.perf_counter() - started) * 1000)
     llm_metrics = get_llm_metrics(trace_id)
     trace = _extract_trace_metrics(events, trace_id, duration_ms, llm_metrics)
-    context_trace = merge_llm_metrics(_extract_context_trace(events), llm_metrics)
+    context_trace = _merge_runtime_trace_metrics(
+        merge_llm_metrics(_extract_context_trace(events), llm_metrics),
+        trace,
+    )
     audit = _build_audit(events)
     data = AgentChatData(
         route="coomi",

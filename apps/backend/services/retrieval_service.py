@@ -12,6 +12,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
+from services.performance_trace_service import record_counter
+from services.source_contract import source_line_count, source_revision_id
 from services.storydex_retrieval import tokenize
 
 logger = logging.getLogger(__name__)
@@ -172,7 +174,9 @@ class RetrievalService:
         for root in roots:
             if not root.exists():
                 continue
+            record_counter("directoryScanCount")
             for path in root.rglob("*"):
+                record_counter("statCount")
                 if not path.is_file() or path.suffix.lower() not in INDEXABLE_SUFFIXES:
                     continue
                 relative_parts = path.relative_to(self.project_root).parts
@@ -187,7 +191,7 @@ class RetrievalService:
 
     @staticmethod
     def _source_revision(raw: bytes) -> str:
-        return f"sha256:{hashlib.sha256(raw).hexdigest()}"
+        return source_revision_id(raw)
 
     @staticmethod
     def _read_source(path: Path, *, stat: os.stat_result | None = None) -> Dict[str, Any]:
@@ -211,7 +215,7 @@ class RetrievalService:
             "sizeBytes": len(raw),
             "mtimeNs": after_signature[1],
             "totalChars": len(text),
-            "totalLines": len(text.splitlines()),
+            "totalLines": source_line_count(text),
         }
 
     @staticmethod
@@ -465,6 +469,7 @@ class RetrievalService:
                         relative = path.relative_to(self.project_root).as_posix()
                         seen_paths.add(relative)
                         try:
+                            record_counter("statCount")
                             stat = path.stat()
                         except OSError as exc:
                             raise RetrievalIndexError(
@@ -474,6 +479,14 @@ class RetrievalService:
                         if existing.get(relative) != signature:
                             pending.append((path, relative, stat))
                     removed_paths = sorted(set(existing) - seen_paths)
+                    watcher_changes = [relative for _path, relative, _stat in pending]
+                    watcher_changes.extend(removed_paths)
+                    if watcher_changes:
+                        from services.content_catalog_service import get_content_catalog_service
+
+                        get_content_catalog_service(self.project_root).notify_external_changes(
+                            watcher_changes
+                        )
                     state_row = conn.execute(
                         "SELECT state FROM index_state WHERE singleton=1"
                     ).fetchone()
@@ -582,6 +595,7 @@ class RetrievalService:
             relative = path.relative_to(self.project_root).as_posix()
             seen.add(relative)
             try:
+                record_counter("statCount")
                 stat = path.stat()
             except OSError:
                 stale.append(relative)
@@ -747,6 +761,8 @@ class RetrievalService:
                 "endByte": int(row["end_byte"]),
                 "startLine": chunk_start_line,
                 "endLine": int(row["end_line"]),
+                "revision": str(row["revision"] or ""),
+                "endExclusive": True,
             },
             "snippet": snippet,
             "snippetSpan": {
@@ -756,6 +772,8 @@ class RetrievalService:
                 "endByte": snippet_end_byte,
                 "startLine": snippet_start_line,
                 "endLine": snippet_end_line,
+                "revision": str(row["revision"] or ""),
+                "endExclusive": True,
             },
         }
 

@@ -938,6 +938,7 @@ impl CoreTools {
         };
         let limit = usize_arg(arguments, "limit").unwrap_or(500).clamp(1, 2_000);
         let total_lines = total_text_lines(&content);
+        let total_chars = content.chars().count();
         let start = if let Some(byte_offset) = byte_offset {
             if byte_offset > content.len() || !content.is_char_boundary(byte_offset) {
                 return ToolResult::error(read_file_error(
@@ -966,7 +967,9 @@ impl CoreTools {
             .to_string_lossy()
             .replace('\\', "/");
         let mut end = requested_end;
+        let start_char = content[..start].chars().count();
         loop {
+            let end_char = start_char + content[start..end].chars().count();
             let start_line = line_number_at_byte(&content, start);
             let end_line = if end > start {
                 line_number_at_byte(&content, end - 1)
@@ -984,15 +987,20 @@ impl CoreTools {
             let payload = json!({
                 "protocolVersion": READ_FILE_PROTOCOL_VERSION,
                 "path": display_path,
-                "revision": revision,
+                "revision": &revision,
                 "span": {
                     "startLine": start_line,
                     "endLine": end_line,
+                    "startChar": start_char,
+                    "endChar": end_char,
                     "startByte": start,
                     "endByte": end,
                     "endByteExclusive": true,
+                    "endExclusive": true,
+                    "revision": &revision,
                 },
                 "totalLines": total_lines,
+                "totalChars": total_chars,
                 "totalBytes": content.len(),
                 "hasMore": has_more,
                 "nextOffset": line_number_at_byte(&content, end),
@@ -1970,10 +1978,14 @@ mod tests {
             let payload: Value = serde_json::from_str(&result.output).expect("long-line envelope");
             revision.get_or_insert_with(|| payload["revision"].as_str().unwrap_or_default().into());
             assert_eq!(payload["span"]["startByte"], byte_offset);
+            assert_eq!(payload["span"]["startChar"], byte_offset / 3);
             assert_eq!(payload["span"]["startLine"], 1);
             let next = payload["nextByteOffset"]
                 .as_u64()
                 .expect("next byte offset");
+            assert_eq!(payload["span"]["endByte"], next);
+            assert_eq!(payload["span"]["endChar"], next / 3);
+            assert_eq!(payload["totalChars"], 40_000);
             assert!(next > byte_offset || payload["hasMore"] == false);
             byte_offset = next;
             pages += 1;

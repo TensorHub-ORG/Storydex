@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Sequence, Set, Tuple
 
 from core.bounded_text_io import read_text_limited as read_bounded_text_limited
 from core.bounded_text_io import read_text_preview as read_bounded_text_preview
+from services.content_catalog_service import ContentCatalogSnapshot
 from services.context_trace_service import (
     MAX_CONTEXT_SOURCE_PATHS,
     build_context_trace,
@@ -18,8 +19,9 @@ from services.context_trace_service import (
 from services.context_policy import ContextPolicy
 from services.entity_registry import EntityRegistry
 from services.fact_memory_store import FactMemoryStore
+from services.performance_trace_service import record_duration
 from services.relationship_memory_store import RelationshipMemoryStore
-from services.story_project_service import StoryProjectService, get_story_project_service
+from services.story_project_service import ChapterState, StoryProjectService, get_story_project_service
 
 
 _HEADER_RE = re.compile(r"^###\s+(.+?)\s*$", re.MULTILINE)
@@ -43,15 +45,20 @@ class StorydexContextAssemblerService:
         intent_primary: str = "",
         turn_plan: Dict[str, Any] | None = None,
         policy: ContextPolicy | None = None,
+        chapter_states: List[ChapterState] | None = None,
+        catalog_snapshot: ContentCatalogSnapshot | None = None,
     ) -> Dict[str, Any]:
         assemble_started = time.perf_counter()
         root = Path(workspace_root).resolve()
         effective_policy = policy if isinstance(policy, ContextPolicy) else ContextPolicy()
-        self.story_project_service.ensure_project_structure(root)
+        if catalog_snapshot is None:
+            self.story_project_service.ensure_project_structure(root)
         generation_context = self.story_project_service.build_generation_context(
             root,
             active_file=active_file,
             prompt=prompt,
+            chapter_states=chapter_states,
+            catalog_snapshot=catalog_snapshot,
         )
         active_entities = self._infer_active_entities(root, prompt=prompt, active_file=active_file)
         is_project_organization = str(intent_primary or "").strip() == "project_organization"
@@ -155,7 +162,13 @@ class StorydexContextAssemblerService:
         # 不能被后续硬约束/记忆块把预算挤占殆尽。
         source_started = time.perf_counter()
         recent_segments = (
-            self._recent_segments(root, generation_context=generation_context, active_file=active_file)
+            self._recent_segments(
+                root,
+                generation_context=generation_context,
+                active_file=active_file,
+                chapter_states=chapter_states,
+                catalog_snapshot=catalog_snapshot,
+            )
             if effective_policy.base_story_context
             else []
         )
@@ -472,6 +485,8 @@ class StorydexContextAssemblerService:
                 limit=3,
                 include_content=True,
                 max_chars=700,
+                chapter_states=chapter_states,
+                catalog_snapshot=catalog_snapshot,
             )
             if effective_policy.base_story_context
             else []
@@ -723,7 +738,9 @@ class StorydexContextAssemblerService:
             from services.retrieval_service import RECALL_CANDIDATE_LIMIT, get_retrieval_service
 
             service = get_retrieval_service(root)
+            refresh_started = time.perf_counter()
             service.watch_files()
+            record_duration("ftsRefreshMs", (time.perf_counter() - refresh_started) * 1000)
             outcome = service.search_detailed(
                 query,
                 top_k=8,
@@ -995,6 +1012,8 @@ class StorydexContextAssemblerService:
         *,
         generation_context: Dict[str, Any],
         active_file: str,
+        chapter_states: List[ChapterState] | None = None,
+        catalog_snapshot: ContentCatalogSnapshot | None = None,
     ) -> List[Dict[str, Any]]:
         focus = generation_context.get("focusChapter") if isinstance(generation_context.get("focusChapter"), dict) else {}
         focus_relative = str(focus.get("relativePath") or "").strip()
@@ -1005,6 +1024,8 @@ class StorydexContextAssemblerService:
             include_content=True,
             max_chars=700,
             read_from_tail=True,
+            chapter_states=chapter_states,
+            catalog_snapshot=catalog_snapshot,
         )
         if recent:
             return recent
@@ -1015,6 +1036,8 @@ class StorydexContextAssemblerService:
             include_content=True,
             max_chars=700,
             read_from_tail=True,
+            chapter_states=chapter_states,
+            catalog_snapshot=catalog_snapshot,
         )
 
     def _infer_active_entities(self, root: Path, *, prompt: str, active_file: str) -> Sequence[str]:

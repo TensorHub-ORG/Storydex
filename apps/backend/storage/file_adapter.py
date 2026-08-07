@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import shutil
 from datetime import datetime, timezone
@@ -9,6 +10,9 @@ from tempfile import NamedTemporaryFile
 from typing import Dict, List, Optional, Tuple
 
 from core.exceptions import AtomicWriteError, InvalidWorkspacePathError
+
+
+logger = logging.getLogger(__name__)
 
 
 PROTECTED_STORYDEX_DIRECTORIES = frozenset(
@@ -112,6 +116,7 @@ class FileAdapter:
         path = self.resolve_path(relative_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
+        self._mark_catalog_dirty([relative_path])
 
     def write_bytes(self, relative_path: str, content: bytes) -> Dict[str, object]:
         normalized_relative_path = self._normalize_relative_path(relative_path)
@@ -130,6 +135,7 @@ class FileAdapter:
             )
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
+        self._mark_catalog_dirty([normalized_relative_path])
         return self.file_metadata(normalized_relative_path)
 
     def import_file_bytes(self, target_directory: str, file_name: str, content: bytes) -> Dict[str, object]:
@@ -165,6 +171,7 @@ class FileAdapter:
             )
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
+        self._mark_catalog_dirty([normalized_relative_path])
         return self.file_metadata(normalized_relative_path)
 
     @staticmethod
@@ -206,6 +213,7 @@ class FileAdapter:
                 details={"relativePath": normalized_relative_path},
             )
         path.mkdir(parents=True, exist_ok=False)
+        self._mark_catalog_dirty([normalized_relative_path])
         return self.file_metadata(normalized_relative_path)
 
     def rename_path(self, from_relative_path: str, to_relative_path: str) -> Dict[str, object]:
@@ -237,6 +245,9 @@ class FileAdapter:
             )
         target_path.parent.mkdir(parents=True, exist_ok=True)
         source_path.rename(target_path)
+        self._mark_catalog_dirty(
+            [normalized_from_relative_path, normalized_to_relative_path]
+        )
         return self.file_metadata(normalized_to_relative_path)
 
     def delete_path(self, relative_path: str) -> None:
@@ -256,8 +267,10 @@ class FileAdapter:
             )
         if path.is_dir():
             shutil.rmtree(path)
+            self._mark_catalog_dirty([normalized_relative_path])
             return
         path.unlink()
+        self._mark_catalog_dirty([normalized_relative_path])
 
     def copy_path(self, from_relative_path: str, to_relative_path: str) -> Dict[str, object]:
         normalized_from_relative_path = self._normalize_relative_path(from_relative_path)
@@ -292,6 +305,7 @@ class FileAdapter:
             shutil.copytree(source_path, target_path)
         else:
             shutil.copy2(source_path, target_path)
+        self._mark_catalog_dirty([normalized_to_relative_path])
         return self.file_metadata(normalized_to_relative_path)
 
     def move_path(self, from_relative_path: str, to_relative_path: str) -> Dict[str, object]:
@@ -347,6 +361,7 @@ class FileAdapter:
                         temp_path.unlink()
                 except OSError:
                     pass
+        self._mark_catalog_dirty(resolved_paths)
 
     def _create_temp_file(self, *, path: Path, content: str) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -566,6 +581,18 @@ class FileAdapter:
                         temp_path.unlink()
                 except OSError:
                     pass
+        self._mark_catalog_dirty(touched_paths)
+
+    def _mark_catalog_dirty(self, paths: List[str | Path]) -> None:
+        try:
+            from services.content_catalog_service import get_content_catalog_service
+
+            get_content_catalog_service(self.workspace_root).mark_dirty(
+                paths,
+                source="workspace_write",
+            )
+        except Exception as exc:
+            logger.warning("Unable to enqueue content catalog dirty paths: %s", exc)
 
     def _ensure_editable_file(self, *, relative_path: str, path: Path) -> None:
         normalized_relative_path = self._normalize_relative_path(relative_path)

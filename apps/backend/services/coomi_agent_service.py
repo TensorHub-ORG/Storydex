@@ -4,6 +4,7 @@ import asyncio
 import copy
 import inspect
 import json
+import logging
 import math
 import os
 import re
@@ -24,7 +25,6 @@ from services.coomi_bridge_client import (
     STORYDEX_COOMI_CONFIG,
     STORYDEX_COOMI_HOME,
     STORYDEX_COOMI_RUNTIME_VERSION,
-    BridgeProvider,
     CoomiBridgeError,
     LiveBridgeProcess,
     bridge_command,
@@ -37,7 +37,11 @@ from services.story_word_count_service import (
     chapter_length_tier_prompt,
     normalize_chapter_length_tier,
 )
-from services.storydex_tool_types import StorydexToolRegistry, ToolAccess, ToolResult
+from services.source_contract import normalize_source_path, validate_source_revision
+from services.storydex_tool_types import StorydexToolRegistry, ToolAccess
+
+
+logger = logging.getLogger(__name__)
 
 
 STORYDEX_COOMI_SESSIONS = STORYDEX_COOMI_HOME / "sessions"
@@ -651,6 +655,7 @@ class StorydexCoomiAgentService:
         reasoning_effort = str(
             _dict_value(turn_contract).get("reasoningEffort") or "auto"
         ).strip().lower()
+        bridge_started = time.perf_counter()
         try:
             bridge = await LiveBridgeProcess.start(
                 {
@@ -684,6 +689,7 @@ class StorydexCoomiAgentService:
                 model=str(failure_status.get("model") or ""),
             )
             return
+        bridge_start_ms = (time.perf_counter() - bridge_started) * 1000
 
         key = self._register_bridge(
             session_id=normalized_session, workspace_root=workspace, bridge=bridge
@@ -701,6 +707,7 @@ class StorydexCoomiAgentService:
         translator = _CoomiEventTranslator(
             session_id=normalized_session,
             usage_baseline=_runtime_session_usage(binding),
+            bridge_start_ms=bridge_start_ms,
         )
         resolution_tasks: set[asyncio.Task[Any]] = set()
         terminal_seen = False
@@ -787,6 +794,8 @@ class StorydexCoomiAgentService:
                     )
                 if packet_type == "model_started":
                     attempt_text_characters = 0
+                if packet_type == "tool_finished":
+                    _mark_catalog_from_tool_result(workspace, data)
                 translated = translator.translate(packet)
                 if translated is not None:
                     if translated[0] == "TextChunk":
@@ -1450,18 +1459,94 @@ class CoomiStoryGenerationAdapter:
         )
 
 
+def _tool_result_provenance(preview: str) -> Dict[str, Any]:
+    try:
+        payload = json.loads(str(preview or ""))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    try:
+        revision = validate_source_revision(str(payload.get("revision") or ""))
+    except ValueError:
+        revision = ""
+    span = payload.get("span") if isinstance(payload.get("span"), dict) else {}
+    try:
+        path = normalize_source_path(str(payload.get("path") or ""))
+    except ValueError:
+        path = ""
+    if span and revision:
+        span_revision = str(span.get("revision") or revision)
+        try:
+            if validate_source_revision(span_revision) != revision:
+                span = {}
+        except ValueError:
+            span = {}
+    result: Dict[str, Any] = {}
+    if revision:
+        result["source_revision"] = revision
+    if span:
+        result["source_span"] = dict(span)
+    if path:
+        result["source_path"] = path
+    return result
+
+
+def _mark_catalog_from_tool_result(workspace_root: Path, data: Dict[str, Any]) -> None:
+    result = data.get("result") if isinstance(data.get("result"), dict) else {}
+    if not bool(result.get("success")):
+        return
+    call = data.get("call") if isinstance(data.get("call"), dict) else {}
+    name = str(call.get("name") or "").strip().lower()
+    if name not in {
+        "write_file",
+        "edit_file",
+        "apply_patch",
+        "storydexapplyworkspaceoperations",
+        "storydexapplystoryincrement",
+        "storydexsyncwiki",
+    }:
+        return
+    arguments = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
+    paths: list[str] = []
+    for key in (
+        "path",
+        "relativePath",
+        "relative_path",
+        "fromRelativePath",
+        "toRelativePath",
+        "segmentRelativePath",
+        "snapshotRelativePath",
+    ):
+        value = str(arguments.get(key) or "").strip()
+        if value:
+            paths.append(value)
+    if name == "apply_patch" or not paths:
+        paths.extend(["chapters", ".storydex/characters", ".storydex/worldbook", ".storydex/memory"])
+    try:
+        from services.content_catalog_service import get_content_catalog_service
+
+        get_content_catalog_service(workspace_root).mark_dirty(paths, source="coomi_tool")
+    except Exception:
+        logger.exception("Unable to enqueue content catalog updates for %s", name)
+
+
 class _CoomiEventTranslator:
     def __init__(
         self,
         *,
         session_id: str,
         usage_baseline: Dict[str, Any] | None = None,
+        bridge_start_ms: float = 0.0,
     ) -> None:
         self.session_id = session_id
         self.started_tools: dict[str, float] = {}
         self.usage_baseline = dict(usage_baseline or {})
         self.turn_usage: Dict[str, Any] | None = None
         self.reasoning_plan: Dict[str, Any] | None = None
+        self.runtime_metrics: Dict[str, float] = {
+            "bridgeStartMs": round(max(0.0, float(bridge_start_ms or 0.0)), 3)
+        }
 
     def reset_usage_baseline(self) -> None:
         self.usage_baseline = {}
@@ -1565,7 +1650,21 @@ class _CoomiEventTranslator:
                 packet["reasoningTokens"] = int(usage.get("reasoning_tokens") or 0)
             if self.reasoning_plan is not None:
                 packet["reasoningRequestPlan"] = dict(self.reasoning_plan)
+            packet["runtimeMetrics"] = dict(self.runtime_metrics)
             return "ModelCompleted", packet
+        if name == "runtime_initialized":
+            self.runtime_metrics.update(
+                {
+                    key: round(max(0.0, float(value or 0.0)), 3)
+                    for key, value in data.items()
+                    if str(key).endswith("Ms")
+                }
+            )
+            return "RuntimeMetrics", {
+                "_type": "RuntimeMetrics",
+                "_version": 1,
+                **self.runtime_metrics,
+            }
         if name == "tool_started":
             call = data.get("call") if isinstance(data.get("call"), dict) else {}
             call_id = str(call.get("id") or f"coomi-{uuid4().hex[:12]}")
@@ -1582,7 +1681,8 @@ class _CoomiEventTranslator:
             result = data.get("result") if isinstance(data.get("result"), dict) else {}
             call_id = str(call.get("id") or "")
             duration = int((time.perf_counter() - self.started_tools.pop(call_id, time.perf_counter())) * 1000)
-            preview = str(result.get("output") or "")[:4000]
+            raw_output = str(result.get("output") or "")
+            preview = raw_output[:4000]
             payload = {
                 "_type": "ToolDone",
                 "_version": 1,
@@ -1592,7 +1692,9 @@ class _CoomiEventTranslator:
                 "result_preview": preview,
                 "duration_ms": duration,
                 "metrics": {"durationMs": duration},
+                "arguments": call.get("arguments") or {},
             }
+            payload.update(_tool_result_provenance(raw_output))
             review = _knowledge_review_from_tool_preview(str(call.get("name") or ""), preview)
             if review:
                 payload["knowledge_review"] = review

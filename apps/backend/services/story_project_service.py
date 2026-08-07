@@ -21,6 +21,12 @@ from core.bounded_text_io import read_text_tail as read_bounded_text_tail
 from core.config import FEATURE_FLAG_DEFAULTS, get_settings
 from core.exceptions import StorydexError
 from core.feature_flags import FeatureFlags
+from services.content_catalog_service import (
+    CatalogEntry,
+    ContentCatalogSnapshot,
+    get_content_catalog_service,
+)
+from services.performance_trace_service import record_counter
 from services.preset_schema import (
     PresetDocument,
     find_sidecar_path,
@@ -1178,9 +1184,15 @@ class StoryProjectService:
     def single_file_chapter_template_json_path(self, workspace_root: Path) -> Path:
         return self.chapter_templates_root(workspace_root) / _SINGLE_FILE_CHAPTER_TEMPLATE_JSON
 
-    def list_chapter_templates(self, workspace_root: Path) -> List[Dict[str, Any]]:
+    def list_chapter_templates(
+        self,
+        workspace_root: Path,
+        *,
+        ensure_structure: bool = True,
+    ) -> List[Dict[str, Any]]:
         root = Path(workspace_root).resolve()
-        self.ensure_project_structure(root)
+        if ensure_structure:
+            self.ensure_project_structure(root)
         template_root = self.chapter_templates_root(root)
         templates: List[Dict[str, Any]] = []
         if not template_root.exists():
@@ -1251,6 +1263,7 @@ class StoryProjectService:
         active_file: str,
         content_mode: str,
         is_new_story: bool = False,
+        chapter_states: List[ChapterState] | None = None,
     ) -> Dict[str, Any]:
         """Decide which chapter this turn writes into, before any prose call."""
 
@@ -1259,7 +1272,12 @@ class StoryProjectService:
             prompt=prompt,
             active_file=active_file,
             chapter_numbers=tuple(
-                state.chapter_number for state in self.list_chapter_states(root)
+                state.chapter_number
+                for state in (
+                    chapter_states
+                    if chapter_states is not None
+                    else self.list_chapter_states(root)
+                )
             ),
             content_mode=content_mode,
             is_new_story=is_new_story,
@@ -1275,6 +1293,8 @@ class StoryProjectService:
         prompt: str = "",
         is_new_story: bool = False,
         chapter_action: Dict[str, Any] | None = None,
+        chapter_states: List[ChapterState] | None = None,
+        catalog_snapshot: ContentCatalogSnapshot | None = None,
     ) -> List[Dict[str, Any]]:
         """Build authoritative chapter paths without relying on model guesses.
 
@@ -1285,8 +1305,12 @@ class StoryProjectService:
         """
 
         root = Path(workspace_root).resolve()
-        self.ensure_project_structure(root)
-        settings = self.read_project_settings(root)
+        if catalog_snapshot is None:
+            self.ensure_project_structure(root)
+        settings = self.read_project_settings(
+            root,
+            ensure_structure=catalog_snapshot is None,
+        )
         extension = "." + self._normalize_story_segment_format(settings.get("storySegmentFormat"))
         content_mode = self._normalize_chapter_content_mode(template.get("contentMode"))
         action = (
@@ -1298,6 +1322,7 @@ class StoryProjectService:
                 active_file=active_file,
                 content_mode=content_mode,
                 is_new_story=is_new_story,
+                chapter_states=chapter_states,
             )
         )
 
@@ -1310,6 +1335,8 @@ class StoryProjectService:
                 extension=extension,
                 is_new_story=is_new_story,
                 chapter_action=action,
+                chapter_states=chapter_states,
+                catalog_snapshot=catalog_snapshot,
             )
             absolute = root / target_path
             # A rewrite replaces the chapter in place; a continuation appends to
@@ -1335,6 +1362,8 @@ class StoryProjectService:
             extension=extension,
             is_new_story=is_new_story,
             chapter_action=action,
+            chapter_states=chapter_states,
+            catalog_snapshot=catalog_snapshot,
         )
         paths = self._expand_multi_fragment_paths(
             root,
@@ -1514,12 +1543,19 @@ class StoryProjectService:
         extension: str,
         is_new_story: bool,
         chapter_action: Dict[str, Any],
+        chapter_states: List[ChapterState] | None,
+        catalog_snapshot: ContentCatalogSnapshot | None,
     ) -> str:
         action = str(chapter_action.get("action") or "")
         target_number = int(chapter_action.get("targetChapterNumber") or 0)
 
         if action == CHAPTER_ACTION_REWRITE_EXISTING and target_number:
-            existing = self.resolve_existing_chapter_by_number(root, target_number)
+            existing = self.resolve_existing_chapter_by_number(
+                root,
+                target_number,
+                chapter_states=chapter_states,
+                catalog_snapshot=catalog_snapshot,
+            )
             if existing:
                 return existing
         # A request naming a chapter that does not exist yet must get its own new
@@ -1534,13 +1570,19 @@ class StoryProjectService:
                 extension=extension,
                 prompt=prompt,
                 chapter_number=target_number or None,
+                chapter_states=chapter_states,
             )
         if is_new_story:
             return self.initial_segment_path_from_chapter_template(template)
         # Continuing a chapter the request named by number: that chapter wins over
         # whatever file happens to be open.
         if target_number:
-            existing = self.resolve_existing_chapter_by_number(root, target_number)
+            existing = self.resolve_existing_chapter_by_number(
+                root,
+                target_number,
+                chapter_states=chapter_states,
+                catalog_snapshot=catalog_snapshot,
+            )
             if existing:
                 return existing
 
@@ -1555,13 +1597,24 @@ class StoryProjectService:
             if candidate.is_dir():
                 chapter_dir = candidate
         if chapter_dir is None:
-            for state in reversed(self.list_chapter_states(root)):
+            states = (
+                chapter_states
+                if chapter_states is not None
+                else self.list_chapter_states(root)
+            )
+            for state in reversed(states):
                 candidate = root / state.relative_path
-                if not state.completed and candidate.is_dir():
+                if not state.completed and self._path_is_directory(
+                    candidate,
+                    catalog_snapshot=catalog_snapshot,
+                ):
                     chapter_dir = candidate
                     break
         if chapter_dir is not None:
-            files = self._sorted_segment_files(chapter_dir)
+            files = self._sorted_segment_files(
+                chapter_dir,
+                catalog_snapshot=catalog_snapshot,
+            )
             if files:
                 return files[0].relative_to(root).as_posix()
             name = self._safe_template_path_part(str(template.get("segmentNaming") or f"正文{extension}"), fallback=f"正文{extension}")
@@ -1569,7 +1622,13 @@ class StoryProjectService:
                 name += extension
             return (chapter_dir / name).relative_to(root).as_posix()
 
-        return self._new_chapter_first_path(root, template=template, extension=extension, prompt=prompt)
+        return self._new_chapter_first_path(
+            root,
+            template=template,
+            extension=extension,
+            prompt=prompt,
+            chapter_states=chapter_states,
+        )
 
     def _multi_fragment_start_path(
         self,
@@ -1581,12 +1640,19 @@ class StoryProjectService:
         extension: str,
         is_new_story: bool,
         chapter_action: Dict[str, Any],
+        chapter_states: List[ChapterState] | None,
+        catalog_snapshot: ContentCatalogSnapshot | None,
     ) -> str:
         action = str(chapter_action.get("action") or "")
         target_number = int(chapter_action.get("targetChapterNumber") or 0)
 
         if action == CHAPTER_ACTION_REWRITE_EXISTING and target_number:
-            existing = self.resolve_existing_chapter_by_number(root, target_number)
+            existing = self.resolve_existing_chapter_by_number(
+                root,
+                target_number,
+                chapter_states=chapter_states,
+                catalog_snapshot=catalog_snapshot,
+            )
             if existing:
                 return existing
         # A named chapter that does not exist yet gets its own directory. The old
@@ -1601,12 +1667,18 @@ class StoryProjectService:
                 extension=extension,
                 prompt=prompt,
                 chapter_number=target_number or None,
+                chapter_states=chapter_states,
             )
         if is_new_story:
             return self.initial_segment_path_from_chapter_template(template)
         # An existing chapter named by number outranks whatever file is open.
         if target_number:
-            existing = self.resolve_existing_chapter_by_number(root, target_number)
+            existing = self.resolve_existing_chapter_by_number(
+                root,
+                target_number,
+                chapter_states=chapter_states,
+                catalog_snapshot=catalog_snapshot,
+            )
             if existing:
                 chapter_dir = root / Path(existing).parent
                 if chapter_dir.is_dir() and chapter_dir != root / "chapters":
@@ -1614,6 +1686,7 @@ class StoryProjectService:
                         chapter_dir=chapter_dir,
                         workspace_root=root,
                         extension=extension,
+                        catalog_snapshot=catalog_snapshot,
                     )
 
         active = self._normalize_relative_path(active_file)
@@ -1625,16 +1698,32 @@ class StoryProjectService:
                     chapter_dir=chapter_dir,
                     workspace_root=root,
                     extension=extension,
+                    catalog_snapshot=catalog_snapshot,
                 )
-        for state in reversed(self.list_chapter_states(root)):
+        states = (
+            chapter_states
+            if chapter_states is not None
+            else self.list_chapter_states(root)
+        )
+        for state in reversed(states):
             chapter_dir = root / state.relative_path
-            if not state.completed and chapter_dir.is_dir():
+            if not state.completed and self._path_is_directory(
+                chapter_dir,
+                catalog_snapshot=catalog_snapshot,
+            ):
                 return self._next_segment_path_in_chapter(
                     chapter_dir=chapter_dir,
                     workspace_root=root,
                     extension=extension,
+                    catalog_snapshot=catalog_snapshot,
                 )
-        return self._new_chapter_first_path(root, template=template, extension=extension, prompt=prompt)
+        return self._new_chapter_first_path(
+            root,
+            template=template,
+            extension=extension,
+            prompt=prompt,
+            chapter_states=chapter_states,
+        )
 
     def _new_chapter_first_path(
         self,
@@ -1644,8 +1733,13 @@ class StoryProjectService:
         extension: str,
         prompt: str,
         chapter_number: Optional[int] = None,
+        chapter_states: List[ChapterState] | None = None,
     ) -> str:
-        states = self.list_chapter_states(root)
+        states = (
+            chapter_states
+            if chapter_states is not None
+            else self.list_chapter_states(root)
+        )
         # An explicitly requested number is honoured as given. Requesting chapter
         # 5 while 3 exists is the author's call; renumbering it to 4 would write
         # prose under a heading they did not ask for.
@@ -1743,8 +1837,14 @@ class StoryProjectService:
     def agent_temp_root(self, workspace_root: Path) -> Path:
         return self.agent_root(workspace_root) / "temp"
 
-    def read_project_settings(self, workspace_root: Path) -> Dict[str, Any]:
-        self.ensure_project_structure(workspace_root)
+    def read_project_settings(
+        self,
+        workspace_root: Path,
+        *,
+        ensure_structure: bool = True,
+    ) -> Dict[str, Any]:
+        if ensure_structure:
+            self.ensure_project_structure(workspace_root)
         payload = self._read_json(self.project_settings_path(workspace_root))
         if not isinstance(payload, dict):
             payload = {}
@@ -1897,8 +1997,14 @@ class StoryProjectService:
         )
         return current
 
-    def read_chapter_progress(self, workspace_root: Path) -> Dict[str, Any]:
-        self.ensure_project_structure(workspace_root)
+    def read_chapter_progress(
+        self,
+        workspace_root: Path,
+        *,
+        ensure_structure: bool = True,
+    ) -> Dict[str, Any]:
+        if ensure_structure:
+            self.ensure_project_structure(workspace_root)
         payload = self._read_json(self.chapter_progress_path(workspace_root))
         if not isinstance(payload, dict):
             payload = {}
@@ -1970,35 +2076,69 @@ class StoryProjectService:
         )
         return progress
 
-    def list_chapter_states(self, workspace_root: Path) -> List[ChapterState]:
+    def list_chapter_states(
+        self,
+        workspace_root: Path,
+        *,
+        catalog_snapshot: ContentCatalogSnapshot | None = None,
+    ) -> List[ChapterState]:
+        record_counter("chapterSnapshotBuildCount")
         root = Path(workspace_root).resolve()
-        self._normalize_chapter_directories(root)
-        chapters_root = root / "chapters"
-        progress = self.read_chapter_progress(root)
+        if catalog_snapshot is not None and catalog_snapshot.workspace_root != root:
+            raise ValueError("content catalog workspace does not match chapter workspace")
+        if catalog_snapshot is None:
+            self._normalize_chapter_directories(root)
+        progress = self.read_chapter_progress(
+            root,
+            ensure_structure=catalog_snapshot is None,
+        )
         chapter_entries = progress.get("chapters") if isinstance(progress.get("chapters"), dict) else {}
         states: List[ChapterState] = []
-        if not chapters_root.exists():
-            return states
-
-        chapter_paths = [*self._sorted_chapter_dirs(chapters_root), *self._sorted_flat_chapter_files(chapters_root)]
-        chapter_paths.sort(
-            key=lambda path: (
-                self._extract_chapter_number(path.stem if path.is_file() else path.name) or 999999,
-                path.stat().st_mtime,
-                path.name.lower(),
+        chapter_records: List[Tuple[Path, bool, int]] = []
+        if catalog_snapshot is not None:
+            for relative, mtime_ns in catalog_snapshot.directories.items():
+                relative_path = Path(relative)
+                if len(relative_path.parts) == 2 and relative_path.parts[0] == "chapters":
+                    chapter_records.append((root / relative_path, False, int(mtime_ns)))
+            for entry in catalog_snapshot.files(prefix="chapters", suffixes=_TEXT_SEGMENT_SUFFIXES):
+                relative_path = Path(entry.path)
+                if (
+                    len(relative_path.parts) == 2
+                    and relative_path.parts[0] == "chapters"
+                    and relative_path.name.lower() != "readme.md"
+                ):
+                    chapter_records.append((root / relative_path, True, entry.mtime_ns))
+        else:
+            chapters_root = root / "chapters"
+            if not chapters_root.exists():
+                return states
+            chapter_records.extend(
+                (path, False, path.stat().st_mtime_ns)
+                for path in self._sorted_chapter_dirs(chapters_root)
+            )
+            chapter_records.extend(
+                (path, True, path.stat().st_mtime_ns)
+                for path in self._sorted_flat_chapter_files(chapters_root)
+            )
+        chapter_records.sort(
+            key=lambda item: (
+                self._extract_chapter_number(item[0].stem if item[1] else item[0].name)
+                or 999999,
+                item[2],
+                item[0].name.lower(),
             )
         )
 
-        for index, chapter_path in enumerate(chapter_paths, start=1):
+        for index, (chapter_path, is_file, mtime_ns) in enumerate(chapter_records, start=1):
             relative = chapter_path.relative_to(root).as_posix()
             progress_entry = chapter_entries.get(relative) if isinstance(chapter_entries, dict) else {}
             completed = bool(progress_entry.get("completed", False)) if isinstance(progress_entry, dict) else False
             updated_at = (
                 str(progress_entry.get("updatedAt") or "")
                 if isinstance(progress_entry, dict)
-                else datetime.fromtimestamp(chapter_path.stat().st_mtime, timezone.utc).isoformat()
+                else datetime.fromtimestamp(mtime_ns / 1_000_000_000, timezone.utc).isoformat()
             )
-            raw_name = chapter_path.stem if chapter_path.is_file() else chapter_path.name
+            raw_name = chapter_path.stem if is_file else chapter_path.name
             chapter_number = self._extract_chapter_number(raw_name) or index
             states.append(
                 ChapterState(
@@ -2017,6 +2157,9 @@ class StoryProjectService:
         self,
         workspace_root: Path,
         chapter_number: int,
+        *,
+        chapter_states: List[ChapterState] | None = None,
+        catalog_snapshot: ContentCatalogSnapshot | None = None,
     ) -> Optional[str]:
         """T-fix: 根据章号定位已有章节的 in-place 覆写目标路径。
 
@@ -2027,20 +2170,44 @@ class StoryProjectService:
         if not isinstance(chapter_number, int) or chapter_number <= 0:
             return None
         root = Path(workspace_root).resolve()
-        states = self.list_chapter_states(root)
+        states = (
+            chapter_states
+            if chapter_states is not None
+            else self.list_chapter_states(root, catalog_snapshot=catalog_snapshot)
+        )
         match = next((item for item in states if item.chapter_number == chapter_number), None)
         if match is None:
             return None
         chapter_path = root / match.relative_path
-        if chapter_path.is_file():
+        if self._path_is_file(chapter_path, catalog_snapshot=catalog_snapshot):
             return match.relative_path
-        if chapter_path.is_dir():
-            settings = self.read_project_settings(root)
-            extension = "." + settings["storySegmentFormat"]
-            existing_segs = sorted(
-                [p for p in chapter_path.iterdir() if p.is_file() and p.suffix.lower() == extension],
-                key=lambda p: p.name.lower(),
+        if self._path_is_directory(chapter_path, catalog_snapshot=catalog_snapshot):
+            settings = self.read_project_settings(
+                root,
+                ensure_structure=catalog_snapshot is None,
             )
+            extension = "." + settings["storySegmentFormat"]
+            if catalog_snapshot is not None:
+                existing_segs = sorted(
+                    (
+                        root / entry.path
+                        for entry in catalog_snapshot.files(
+                            prefix=match.relative_path,
+                            suffixes=(extension,),
+                        )
+                        if Path(entry.path).parent.as_posix() == match.relative_path
+                    ),
+                    key=lambda path: path.name.lower(),
+                )
+            else:
+                existing_segs = sorted(
+                    (
+                        path
+                        for path in chapter_path.iterdir()
+                        if path.is_file() and path.suffix.lower() == extension
+                    ),
+                    key=lambda path: path.name.lower(),
+                )
             if existing_segs:
                 return existing_segs[0].relative_to(root).as_posix()
             return f"{match.relative_path}/{self._default_segment_name(extension)}"
@@ -2052,6 +2219,8 @@ class StoryProjectService:
         chapter_number: int,
         *,
         prompt: str = "",
+        chapter_states: List[ChapterState] | None = None,
+        catalog_snapshot: ContentCatalogSnapshot | None = None,
     ) -> str:
         """T-fix: 定位"继续/续写第N章"的下一段写入路径。
 
@@ -2063,23 +2232,33 @@ class StoryProjectService:
         if not isinstance(chapter_number, int) or chapter_number <= 0:
             return ""
         root = Path(workspace_root).resolve()
-        self.ensure_project_structure(root)
-        settings = self.read_project_settings(root)
+        if catalog_snapshot is None:
+            self.ensure_project_structure(root)
+        settings = self.read_project_settings(
+            root,
+            ensure_structure=catalog_snapshot is None,
+        )
         extension = "." + settings["storySegmentFormat"]
+        states = (
+            chapter_states
+            if chapter_states is not None
+            else self.list_chapter_states(root, catalog_snapshot=catalog_snapshot)
+        )
         match = next(
-            (item for item in self.list_chapter_states(root) if item.chapter_number == chapter_number),
+            (item for item in states if item.chapter_number == chapter_number),
             None,
         )
         if match is None:
             return ""
         chapter_path = root / match.relative_path
-        if chapter_path.is_dir():
+        if self._path_is_directory(chapter_path, catalog_snapshot=catalog_snapshot):
             return self._next_segment_path_in_chapter(
                 chapter_dir=chapter_path,
                 workspace_root=root,
                 extension=extension,
+                catalog_snapshot=catalog_snapshot,
             )
-        if chapter_path.is_file():
+        if self._path_is_file(chapter_path, catalog_snapshot=catalog_snapshot):
             return match.relative_path
         return ""
 
@@ -2195,30 +2374,50 @@ class StoryProjectService:
                 )
         return diagnostics
 
-    def compute_next_segment_path(self, workspace_root: Path, *, active_file: str = "", prompt: str = "") -> str:
+    def compute_next_segment_path(
+        self,
+        workspace_root: Path,
+        *,
+        active_file: str = "",
+        prompt: str = "",
+        chapter_states: List[ChapterState] | None = None,
+        catalog_snapshot: ContentCatalogSnapshot | None = None,
+    ) -> str:
         root = Path(workspace_root).resolve()
-        self.ensure_project_structure(root)
-        settings = self.read_project_settings(root)
+        if catalog_snapshot is None:
+            self.ensure_project_structure(root)
+        settings = self.read_project_settings(
+            root,
+            ensure_structure=catalog_snapshot is None,
+        )
         extension = "." + settings["storySegmentFormat"]
         max_segments = self._normalize_max_segments_per_chapter(settings.get("maxSegmentsPerChapter"))
-        chapter_states = self.list_chapter_states(root)
+        chapters = (
+            chapter_states
+            if chapter_states is not None
+            else self.list_chapter_states(root, catalog_snapshot=catalog_snapshot)
+        )
 
         active_chapter_relative = self._resolve_active_chapter_relative(active_file)
-        active_chapter_state = next((item for item in chapter_states if item.relative_path == active_chapter_relative), None)
+        active_chapter_state = next((item for item in chapters if item.relative_path == active_chapter_relative), None)
         if active_chapter_relative and active_chapter_state is None:
             active_chapter_number = self._extract_chapter_number(Path(active_chapter_relative).name)
             if active_chapter_number > 0:
                 active_chapter_state = next(
-                    (item for item in chapter_states if item.chapter_number == active_chapter_number),
+                    (item for item in chapters if item.chapter_number == active_chapter_number),
                     None,
                 )
         if active_chapter_relative and active_chapter_state is None:
             active_chapter_path = root / active_chapter_relative
-            if active_chapter_path.exists() and active_chapter_path.is_dir():
+            if self._path_is_directory(
+                active_chapter_path,
+                catalog_snapshot=catalog_snapshot,
+            ):
                 return self._next_segment_path_in_chapter(
                     chapter_dir=active_chapter_path,
                     workspace_root=root,
                     extension=extension,
+                    catalog_snapshot=catalog_snapshot,
                 )
             normalized_active = self._normalize_relative_path(active_file)
             active_suffix = Path(normalized_active).suffix.lower()
@@ -2229,7 +2428,7 @@ class StoryProjectService:
         if active_chapter_state is not None and not active_chapter_state.completed:
             candidate_chapters.append(active_chapter_state)
 
-        for item in reversed(chapter_states):
+        for item in reversed(chapters):
             if item.completed:
                 continue
             if any(existing.relative_path == item.relative_path for existing in candidate_chapters):
@@ -2238,14 +2437,23 @@ class StoryProjectService:
 
         for chapter_state in candidate_chapters:
             chapter_dir = root / chapter_state.relative_path
-            if chapter_dir.is_file():
+            if self._path_is_file(chapter_dir, catalog_snapshot=catalog_snapshot):
                 continue
-            if not chapter_dir.exists() or not chapter_dir.is_dir():
+            if not self._path_is_directory(chapter_dir, catalog_snapshot=catalog_snapshot):
                 continue
-            if self._chapter_has_capacity(chapter_dir, max_segments=max_segments):
-                return self._next_segment_path_in_chapter(chapter_dir=chapter_dir, workspace_root=root, extension=extension)
+            if self._chapter_has_capacity(
+                chapter_dir,
+                max_segments=max_segments,
+                catalog_snapshot=catalog_snapshot,
+            ):
+                return self._next_segment_path_in_chapter(
+                    chapter_dir=chapter_dir,
+                    workspace_root=root,
+                    extension=extension,
+                    catalog_snapshot=catalog_snapshot,
+                )
 
-        next_number = (chapter_states[-1].chapter_number + 1) if chapter_states else 1
+        next_number = (chapters[-1].chapter_number + 1) if chapters else 1
         chapter_title = "未命名"
         if self._normalize_bool(settings.get("autoNameChapterTitle"), default=False):
             chapter_title = self._suggest_new_chapter_title(
@@ -2254,9 +2462,9 @@ class StoryProjectService:
                 prompt=prompt,
                 active_file=active_file,
             )
-        if self._uses_flat_chapter_files(root):
+        if self._uses_flat_chapter_files(root, catalog_snapshot=catalog_snapshot):
             chapter_name = (
-                f"{self._build_new_chapter_name(next_number, title=chapter_title, number_style=self._infer_flat_chapter_number_style(root))}"
+                f"{self._build_new_chapter_name(next_number, title=chapter_title, number_style=self._infer_flat_chapter_number_style(root, catalog_snapshot=catalog_snapshot))}"
                 f"{extension}"
             )
             return f"chapters/{chapter_name}"
@@ -3335,6 +3543,11 @@ class StoryProjectService:
             if self._uses_atomic_bounded_story_commit(generation_contract)
             else set()
         )
+        if atomic_story_paths:
+            get_content_catalog_service(root).mark_dirty(
+                atomic_story_paths,
+                source="story_generation",
+            )
 
         top_level_increment = self._normalize_story_increment_payload(payload)
         has_explicit_apply_variables = any(
@@ -3411,6 +3624,10 @@ class StoryProjectService:
                     segment_path.write_text(next_text + "\n", encoding="utf-8")
                 else:
                     segment_path.write_text(segment_text.rstrip() + "\n", encoding="utf-8")
+                get_content_catalog_service(root).mark_dirty(
+                    [segment_relative_path],
+                    source="story_generation",
+                )
 
             # A newly-created non-canonical directory is only visible to the
             # normalizer after the segment has been written. Apply the rename mapping
@@ -3420,6 +3637,15 @@ class StoryProjectService:
                 segment_relative_path,
                 chapter_path_mapping,
             )
+            if chapter_path_mapping:
+                get_content_catalog_service(root).mark_dirty(
+                    [
+                        *chapter_path_mapping.keys(),
+                        *chapter_path_mapping.values(),
+                        segment_relative_path,
+                    ],
+                    source="chapter_normalization",
+                )
             if segment_text:
                 written_paths.append(segment_relative_path)
 
@@ -3671,6 +3897,11 @@ class StoryProjectService:
                     written_paths.append(wiki_path.relative_to(root).as_posix())
 
         unique_written_paths = list(dict.fromkeys(path for path in written_paths if path))
+        if unique_written_paths:
+            get_content_catalog_service(root).mark_dirty(
+                unique_written_paths,
+                source="story_generation",
+            )
         required_decisions: List[Dict[str, Any]] = []
         if not apply_variables and has_variable_payload:
             required_decisions.append(
@@ -3757,11 +3988,21 @@ class StoryProjectService:
         *,
         active_file: str = "",
         prompt: str = "",
+        chapter_states: List[ChapterState] | None = None,
+        catalog_snapshot: ContentCatalogSnapshot | None = None,
     ) -> Dict[str, Any]:
         root = Path(workspace_root).resolve()
-        self.ensure_project_structure(root)
-        settings = self.read_project_settings(root)
-        chapter_states = self.list_chapter_states(root)
+        if catalog_snapshot is None:
+            self.ensure_project_structure(root)
+        settings = self.read_project_settings(
+            root,
+            ensure_structure=catalog_snapshot is None,
+        )
+        chapters = (
+            chapter_states
+            if chapter_states is not None
+            else self.list_chapter_states(root, catalog_snapshot=catalog_snapshot)
+        )
         current_state_path = self.storydex_root(root) / "memory" / "current-state" / "全部变量.json"
         latest_index_path = self.storydex_root(root) / "memory" / "current-state" / "最新快照索引.json"
         current_state = self._read_json(current_state_path)
@@ -3770,7 +4011,7 @@ class StoryProjectService:
         focus_chapter = self._resolve_focus_chapter_state(
             root,
             active_file=normalized_active_file,
-            chapter_states=chapter_states,
+            chapter_states=chapters,
         )
         focus_chapter_relative = focus_chapter.relative_path if focus_chapter is not None else ""
         recent_segments = self.list_recent_segments(
@@ -3778,15 +4019,25 @@ class StoryProjectService:
             chapter_relative_path=focus_chapter_relative,
             limit=3,
             include_content=False,
+            chapter_states=chapters,
+            catalog_snapshot=catalog_snapshot,
         )
         if not recent_segments:
-            recent_segments = self.list_recent_segments(root, limit=3, include_content=False)
+            recent_segments = self.list_recent_segments(
+                root,
+                limit=3,
+                include_content=False,
+                chapter_states=chapters,
+                catalog_snapshot=catalog_snapshot,
+            )
         relevant_scripts = self.list_relevant_scripts(
             root,
             prompt=prompt,
             active_file=normalized_active_file,
             limit=3,
             include_content=False,
+            chapter_states=chapters,
+            catalog_snapshot=catalog_snapshot,
         )
 
         return {
@@ -3809,7 +4060,7 @@ class StoryProjectService:
                     "completed": item.completed,
                     "updatedAt": item.updated_at,
                 }
-                for item in chapter_states
+                for item in chapters
             ],
             "projectRulesText": "",
             "projectSkillText": "",
@@ -3822,7 +4073,13 @@ class StoryProjectService:
                 max_chars=3200,
             ),
             "focusChapter": self._serialize_chapter_state(focus_chapter),
-            "nextSegmentPath": self.compute_next_segment_path(root, active_file=normalized_active_file, prompt=prompt),
+            "nextSegmentPath": self.compute_next_segment_path(
+                root,
+                active_file=normalized_active_file,
+                prompt=prompt,
+                chapter_states=chapters,
+                catalog_snapshot=catalog_snapshot,
+            ),
             "recentSegmentPaths": [str(item.get("relativePath") or "") for item in recent_segments],
             "storyScriptPaths": [str(item.get("relativePath") or "") for item in relevant_scripts],
         }
@@ -3837,10 +4094,17 @@ class StoryProjectService:
         max_chars: int = 900,
         read_from_tail: bool = False,
         exclude_chapter_numbers: Optional[List[int]] = None,
+        chapter_states: List[ChapterState] | None = None,
+        catalog_snapshot: ContentCatalogSnapshot | None = None,
     ) -> List[Dict[str, Any]]:
         root = Path(workspace_root).resolve()
-        self.ensure_project_structure(root)
-        ordered = self._ordered_segment_paths(root)
+        if catalog_snapshot is None:
+            self.ensure_project_structure(root)
+        ordered = self._ordered_segment_paths(
+            root,
+            chapter_states=chapter_states,
+            catalog_snapshot=catalog_snapshot,
+        )
         normalized_chapter = self._normalize_relative_path(chapter_relative_path)
         if normalized_chapter:
             ordered = [relative for relative in ordered if Path(relative).parent.as_posix() == normalized_chapter]
@@ -3849,15 +4113,28 @@ class StoryProjectService:
             excluded_files: Set[str] = set()
             excluded_dirs: Set[str] = set()
             try:
-                states = self.list_chapter_states(root)
+                states = (
+                    chapter_states
+                    if chapter_states is not None
+                    else self.list_chapter_states(
+                        root,
+                        catalog_snapshot=catalog_snapshot,
+                    )
+                )
                 excluded_numbers = {int(n) for n in exclude_chapter_numbers}
                 for state in states:
                     if state.chapter_number in excluded_numbers:
                         rel = state.relative_path
                         chapter_path = root / rel
-                        if chapter_path.is_file():
+                        if self._path_is_file(
+                            chapter_path,
+                            catalog_snapshot=catalog_snapshot,
+                        ):
                             excluded_files.add(rel)
-                        elif chapter_path.is_dir():
+                        elif self._path_is_directory(
+                            chapter_path,
+                            catalog_snapshot=catalog_snapshot,
+                        ):
                             excluded_dirs.add(rel)
             except Exception:
                 pass
@@ -3876,6 +4153,7 @@ class StoryProjectService:
         results: List[Dict[str, Any]] = []
         for relative in selected:
             segment_path = root / relative
+            catalog_entry = catalog_snapshot.get(relative) if catalog_snapshot is not None else None
             relative_path_obj = Path(relative)
             chapter_path = relative if len(relative_path_obj.parts) == 2 and relative_path_obj.parent.as_posix() == "chapters" else relative_path_obj.parent.as_posix()
             preview = (
@@ -3888,7 +4166,14 @@ class StoryProjectService:
                 "chapterPath": chapter_path,
                 "segmentId": relative_path_obj.stem,
                 "snapshotPath": self.snapshot_relative_path(root, relative),
-                "updatedAt": datetime.fromtimestamp(segment_path.stat().st_mtime, timezone.utc).isoformat(),
+                "updatedAt": datetime.fromtimestamp(
+                    (
+                        catalog_entry.mtime_ns / 1_000_000_000
+                        if catalog_entry is not None
+                        else segment_path.stat().st_mtime
+                    ),
+                    timezone.utc,
+                ).isoformat(),
             }
             if include_content:
                 item["content"] = preview
@@ -3906,15 +4191,22 @@ class StoryProjectService:
         limit: int = 3,
         include_content: bool = False,
         max_chars: int = 1200,
+        chapter_states: List[ChapterState] | None = None,
+        catalog_snapshot: ContentCatalogSnapshot | None = None,
     ) -> List[Dict[str, Any]]:
         root = Path(workspace_root).resolve()
-        self.ensure_project_structure(root)
+        if catalog_snapshot is None:
+            self.ensure_project_structure(root)
         script_root = self.storydex_root(root) / "scripts"
-        if not script_root.exists():
+        if catalog_snapshot is None and not script_root.exists():
             return []
 
         normalized_active_file = self._normalize_relative_path(active_file)
-        focus_chapter = self._resolve_focus_chapter_state(root, active_file=normalized_active_file)
+        focus_chapter = self._resolve_focus_chapter_state(
+            root,
+            active_file=normalized_active_file,
+            chapter_states=chapter_states,
+        )
         focus_name = focus_chapter.display_name if focus_chapter is not None else ""
         terms = self._extract_story_terms(
             prompt=prompt,
@@ -3922,14 +4214,26 @@ class StoryProjectService:
             focus_name=focus_name,
         )
 
-        script_paths = sorted(
-            (
-                script_path
-                for script_path in script_root.rglob("*")
-                if script_path.is_file() and script_path.suffix.lower() in _SCRIPT_CONTEXT_SUFFIXES
-            ),
-            key=lambda path: path.relative_to(root).as_posix(),
-        )
+        catalog_entries: Dict[str, CatalogEntry] = {}
+        if catalog_snapshot is not None:
+            catalog_entries = {
+                entry.path: entry
+                for entry in catalog_snapshot.files(
+                    prefix=".storydex/scripts",
+                    suffixes=_SCRIPT_CONTEXT_SUFFIXES,
+                )
+            }
+            script_paths = [root / relative for relative in sorted(catalog_entries)]
+        else:
+            script_paths = sorted(
+                (
+                    script_path
+                    for script_path in script_root.rglob("*")
+                    if script_path.is_file()
+                    and script_path.suffix.lower() in _SCRIPT_CONTEXT_SUFFIXES
+                ),
+                key=lambda path: path.relative_to(root).as_posix(),
+            )
         if not script_paths:
             return []
 
@@ -3945,6 +4249,9 @@ class StoryProjectService:
                         active_file=normalized_active_file,
                         include_content=include_content,
                         max_chars=max_chars,
+                        catalog_entry=catalog_entries.get(
+                            script_path.relative_to(root).as_posix()
+                        ),
                     )
                     for script_path in script_paths
                 )
@@ -3962,6 +4269,9 @@ class StoryProjectService:
                             active_file=normalized_active_file,
                             include_content=include_content,
                             max_chars=max_chars,
+                            catalog_entry=catalog_entries.get(
+                                script_path.relative_to(root).as_posix()
+                            ),
                         ),
                         script_paths,
                     )
@@ -3993,10 +4303,15 @@ class StoryProjectService:
         active_file: str,
         include_content: bool,
         max_chars: int,
+        catalog_entry: CatalogEntry | None = None,
     ) -> Optional[Dict[str, Any]]:
         try:
             content = read_bounded_text_preview(script_path, max_chars=max(max_chars, 2400))
-            stat = script_path.stat()
+            mtime = (
+                catalog_entry.mtime_ns / 1_000_000_000
+                if catalog_entry is not None
+                else script_path.stat().st_mtime
+            )
         except (OSError, UnicodeDecodeError):
             return None
 
@@ -4013,9 +4328,9 @@ class StoryProjectService:
         item: Dict[str, Any] = {
             "relativePath": relative_path,
             "title": script_path.stem,
-            "updatedAt": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+            "updatedAt": datetime.fromtimestamp(mtime, timezone.utc).isoformat(),
             "score": round(score, 2),
-            "_mtime": stat.st_mtime,
+            "_mtime": mtime,
         }
         if include_content:
             item["content"] = self._truncate_text(content, max_chars=max_chars)
@@ -4265,15 +4580,57 @@ class StoryProjectService:
                 return f"{base_relative}{suffix}"
         return f"{base_relative}.md"
 
-    def _ordered_segment_paths(self, workspace_root: Path) -> List[str]:
+    def _ordered_segment_paths(
+        self,
+        workspace_root: Path,
+        *,
+        chapter_states: List[ChapterState] | None = None,
+        catalog_snapshot: ContentCatalogSnapshot | None = None,
+    ) -> List[str]:
         root = Path(workspace_root).resolve()
         segments: List[Tuple[int, int, str]] = []
-        for chapter_index, chapter in enumerate(self.list_chapter_states(root), start=1):
+        chapters = (
+            chapter_states
+            if chapter_states is not None
+            else self.list_chapter_states(root, catalog_snapshot=catalog_snapshot)
+        )
+        catalog_segments: Dict[str, List[Tuple[Path, int]]] = {}
+        if catalog_snapshot is not None:
+            for entry in catalog_snapshot.files(
+                prefix="chapters",
+                suffixes=_TEXT_SEGMENT_SUFFIXES,
+            ):
+                relative_path = Path(entry.path)
+                if relative_path.name.lower() == "readme.md":
+                    continue
+                catalog_segments.setdefault(relative_path.parent.as_posix(), []).append(
+                    (root / relative_path, entry.mtime_ns)
+                )
+        for chapter_index, chapter in enumerate(chapters, start=1):
             chapter_path = root / chapter.relative_path
-            if self._is_story_text_file(chapter_path):
+            if self._path_is_story_text_file(
+                chapter_path,
+                catalog_snapshot=catalog_snapshot,
+            ):
                 segment_files = [chapter_path]
-            elif chapter_path.is_dir():
-                segment_files = self._sorted_segment_files(chapter_path)
+            elif self._path_is_directory(
+                chapter_path,
+                catalog_snapshot=catalog_snapshot,
+            ):
+                if catalog_snapshot is not None:
+                    segment_files = [
+                        path
+                        for path, _mtime_ns in sorted(
+                            catalog_segments.get(chapter.relative_path, []),
+                            key=lambda item: (
+                                self._extract_segment_number(item[0].stem) or 999999,
+                                item[1],
+                                item[0].name.lower(),
+                            ),
+                        )
+                    ]
+                else:
+                    segment_files = self._sorted_segment_files(chapter_path)
             else:
                 segment_files = []
             for segment_index, file_path in enumerate(segment_files, start=1):
@@ -4285,8 +4642,13 @@ class StoryProjectService:
 
 
     def _sorted_chapter_dirs(self, chapters_root: Path) -> List[Path]:
+        record_counter("directoryScanCount")
+        entries = list(chapters_root.iterdir())
+        record_counter("statCount", len(entries))
+        directories = [path for path in entries if path.is_dir()]
+        record_counter("statCount", len(directories))
         return sorted(
-            [path for path in chapters_root.iterdir() if path.is_dir()],
+            directories,
             key=lambda path: (
                 self._extract_chapter_number(path.name) or 999999,
                 path.stat().st_mtime,
@@ -4295,12 +4657,13 @@ class StoryProjectService:
         )
 
     def _sorted_flat_chapter_files(self, chapters_root: Path) -> List[Path]:
+        record_counter("directoryScanCount")
+        entries = list(chapters_root.iterdir())
+        record_counter("statCount", len(entries))
+        files = [path for path in entries if self._is_story_text_file(path)]
+        record_counter("statCount", len(files))
         return sorted(
-            [
-                path
-                for path in chapters_root.iterdir()
-                if self._is_story_text_file(path)
-            ],
+            files,
             key=lambda path: (
                 self._extract_chapter_number(path.stem) or 999999,
                 path.stat().st_mtime,
@@ -4308,15 +4671,57 @@ class StoryProjectService:
             ),
         )
 
-    def _uses_flat_chapter_files(self, workspace_root: Path) -> bool:
+    def _uses_flat_chapter_files(
+        self,
+        workspace_root: Path,
+        *,
+        catalog_snapshot: ContentCatalogSnapshot | None = None,
+    ) -> bool:
         chapters_root = Path(workspace_root).resolve() / "chapters"
+        if catalog_snapshot is not None:
+            return any(
+                len(Path(entry.path).parts) == 2
+                and Path(entry.path).name.lower() != "readme.md"
+                for entry in catalog_snapshot.files(
+                    prefix="chapters",
+                    suffixes=_TEXT_SEGMENT_SUFFIXES,
+                )
+            )
         return chapters_root.exists() and any(self._sorted_flat_chapter_files(chapters_root))
 
-    def _infer_flat_chapter_number_style(self, workspace_root: Path) -> str:
+    def _infer_flat_chapter_number_style(
+        self,
+        workspace_root: Path,
+        *,
+        catalog_snapshot: ContentCatalogSnapshot | None = None,
+    ) -> str:
         chapters_root = Path(workspace_root).resolve() / "chapters"
-        if not chapters_root.exists():
+        if catalog_snapshot is not None:
+            catalog_files = [
+                (catalog_snapshot.workspace_root / entry.path, entry.mtime_ns)
+                for entry in catalog_snapshot.files(
+                    prefix="chapters",
+                    suffixes=_TEXT_SEGMENT_SUFFIXES,
+                )
+                if len(Path(entry.path).parts) == 2
+                and Path(entry.path).name.lower() != "readme.md"
+            ]
+            flat_files = [
+                path
+                for path, _mtime_ns in sorted(
+                    catalog_files,
+                    key=lambda item: (
+                        self._extract_chapter_number(item[0].stem) or 999999,
+                        item[1],
+                        item[0].name.lower(),
+                    ),
+                )
+            ]
+        elif not chapters_root.exists():
             return "chinese"
-        for path in reversed(self._sorted_flat_chapter_files(chapters_root)):
+        else:
+            flat_files = self._sorted_flat_chapter_files(chapters_root)
+        for path in reversed(flat_files):
             if re.match(r"^第\s*\d{1,4}\s*章", path.stem):
                 return "arabic"
             if re.match(r"^第\s*[一二三四五六七八九十百千两零〇]+\s*章", path.stem):
@@ -4327,6 +4732,50 @@ class StoryProjectService:
     def _is_story_text_file(path: Path) -> bool:
         return (
             path.is_file()
+            and path.suffix.lower() in _TEXT_SEGMENT_SUFFIXES
+            and path.name.lower() != "readme.md"
+        )
+
+    @staticmethod
+    def _catalog_relative_path(
+        path: Path,
+        catalog_snapshot: ContentCatalogSnapshot,
+    ) -> str:
+        try:
+            return path.relative_to(catalog_snapshot.workspace_root).as_posix()
+        except ValueError:
+            return ""
+
+    def _path_is_file(
+        self,
+        path: Path,
+        *,
+        catalog_snapshot: ContentCatalogSnapshot | None,
+    ) -> bool:
+        if catalog_snapshot is None:
+            return path.is_file()
+        relative = self._catalog_relative_path(path, catalog_snapshot)
+        return bool(relative and relative in catalog_snapshot.entries)
+
+    def _path_is_directory(
+        self,
+        path: Path,
+        *,
+        catalog_snapshot: ContentCatalogSnapshot | None,
+    ) -> bool:
+        if catalog_snapshot is None:
+            return path.is_dir()
+        relative = self._catalog_relative_path(path, catalog_snapshot)
+        return bool(relative and relative in catalog_snapshot.directories)
+
+    def _path_is_story_text_file(
+        self,
+        path: Path,
+        *,
+        catalog_snapshot: ContentCatalogSnapshot | None,
+    ) -> bool:
+        return (
+            self._path_is_file(path, catalog_snapshot=catalog_snapshot)
             and path.suffix.lower() in _TEXT_SEGMENT_SUFFIXES
             and path.name.lower() != "readme.md"
         )
@@ -5061,11 +5510,52 @@ class StoryProjectService:
                 score += 1
         return score
 
-    def _chapter_has_capacity(self, chapter_dir: Path, *, max_segments: int) -> bool:
-        segment_count = len(self._sorted_segment_files(chapter_dir))
+    def _chapter_has_capacity(
+        self,
+        chapter_dir: Path,
+        *,
+        max_segments: int,
+        catalog_snapshot: ContentCatalogSnapshot | None = None,
+    ) -> bool:
+        segment_count = len(
+            self._sorted_segment_files(
+                chapter_dir,
+                catalog_snapshot=catalog_snapshot,
+            )
+        )
         return segment_count < max(1, int(max_segments or 1))
 
-    def _sorted_segment_files(self, chapter_dir: Path) -> List[Path]:
+    def _sorted_segment_files(
+        self,
+        chapter_dir: Path,
+        *,
+        catalog_snapshot: ContentCatalogSnapshot | None = None,
+    ) -> List[Path]:
+        if catalog_snapshot is not None:
+            chapter_relative = self._catalog_relative_path(chapter_dir, catalog_snapshot)
+            candidates = [
+                (
+                    catalog_snapshot.workspace_root / entry.path,
+                    entry.mtime_ns,
+                )
+                for entry in catalog_snapshot.files(
+                    prefix=chapter_relative,
+                    suffixes=_TEXT_SEGMENT_SUFFIXES,
+                )
+                if Path(entry.path).parent.as_posix() == chapter_relative
+                and Path(entry.path).name.lower() != "readme.md"
+            ]
+            return [
+                path
+                for path, _mtime_ns in sorted(
+                    candidates,
+                    key=lambda item: (
+                        self._extract_segment_number(item[0].stem) or 999999,
+                        item[1],
+                        item[0].name.lower(),
+                    ),
+                )
+            ]
         return sorted(
             [
                 path
@@ -5075,8 +5565,18 @@ class StoryProjectService:
             key=lambda path: (self._extract_segment_number(path.stem) or 999999, path.stat().st_mtime, path.name.lower()),
         )
 
-    def _next_segment_path_in_chapter(self, *, chapter_dir: Path, workspace_root: Path, extension: str) -> str:
-        segment_files = self._sorted_segment_files(chapter_dir)
+    def _next_segment_path_in_chapter(
+        self,
+        *,
+        chapter_dir: Path,
+        workspace_root: Path,
+        extension: str,
+        catalog_snapshot: ContentCatalogSnapshot | None = None,
+    ) -> str:
+        segment_files = self._sorted_segment_files(
+            chapter_dir,
+            catalog_snapshot=catalog_snapshot,
+        )
         if not segment_files:
             return chapter_dir.relative_to(workspace_root).as_posix() + f"/{self._default_segment_name(extension)}"
 
@@ -6120,6 +6620,7 @@ class StoryProjectService:
             (payload.get(key) for key in path_keys if payload.get(key) not in (None, "")),
             None,
         )
+
         fallback_text = next(
             (payload.get(key) for key in text_keys if payload.get(key) not in (None, "")),
             None,
