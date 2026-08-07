@@ -264,6 +264,8 @@ _LEGACY_AGENT_SKILLS_V1: Dict[str, str] = {
 - WIKI 输出落到 `.storydex/wiki/`。
 - 只把有来源的事实写入知识结构。
 - 标记冲突、过时和需要人工确认的条目。
+- 增量请求先调用 `StorydexSyncWiki`；若返回 `status=ready` 且 `noChanges=true`，用户未要求深度审计时立即结束。
+- 有变化时优先处理 `changedSourcePaths`，仅在端点解析或连续性证据需要时扩大读取范围。
 """,
     "项目目录整理.md": """# 项目目录整理
 
@@ -443,8 +445,9 @@ _DEFAULT_AGENT_SKILLS: Dict[str, str] = {
         inputs=["待处理的章节、角色、世界书、剧本和现有 WIKI。", "实体命名、稳定 ID、证据来源和当前关系图。"],
         asset_targets=[".storydex/wiki/", ".storydex/memory/current/relationship_graph.json（通过受控更新）"],
         steps=[
-            "读取现有 WIKI 索引并识别本次相关实体，优先更新已有稳定 ID。",
-            "从权威来源提取实体、事实、关系、事件和伏笔证据。",
+            "增量请求先调用 StorydexSyncWiki；若 status=ready 且 noChanges=true，用户未要求深度审计时立即结束，不再扫描全库。",
+            "有变化时先读取 changedSourcePaths，并结合现有 WIKI 索引识别相关实体、复用稳定 ID；仅在端点解析或连续性证据需要时扩展范围。",
+            "从权威来源提取实体、事实、关系、事件和伏笔证据；status=error 时先报告 diagnostics，不得当作无变化成功。",
             "区分新增、更新、冲突、过时、别名和待确认条目。",
             "以最小增量更新条目与关系，保留证据路径和可追溯说明。",
             "检查孤立实体、重复实体、无证据关系和知识边界泄露。",

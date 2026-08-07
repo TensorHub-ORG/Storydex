@@ -504,11 +504,13 @@ class StorydexCoomiAgentService:
             )
 
         plan_mode = self._plan_modes.get(runtime_key, False)
-        # Normal chat stays writable unless /plan is active.  The dedicated
-        # WIKI extraction workflow is an explicit read-only contract because
-        # its model output is validated and submitted by the backend.
+        # Normal chat stays writable unless /plan is active. Candidate extraction
+        # blocks all writes. Explicit binding keeps only its guarded Storydex
+        # domain mutator writable while hiding/rejecting generic core writes.
         knowledge_policy = _dict_value(_dict_value(turn_contract).get("knowledgeWritePolicy"))
-        writes_allowed = str(knowledge_policy.get("mode") or "") != "candidate_extraction"
+        knowledge_mode = str(knowledge_policy.get("mode") or "").strip().lower()
+        writes_allowed = knowledge_mode != "candidate_extraction"
+        core_writes_allowed = knowledge_mode not in {"candidate_extraction", "explicit_binding"}
         registry = _create_storydex_tool_registry(
             workspace,
             policy=context_policy_from_turn_contract(turn_contract),
@@ -560,6 +562,7 @@ class StorydexCoomiAgentService:
                     "basePermissionMode": self._permission_mode,
                     "reasoningEffort": reasoning_effort,
                     "writesAllowed": writes_allowed,
+                    "coreWritesAllowed": core_writes_allowed,
                     "allowedWriteRoots": allowed_roots,
                     "toolSpecs": registry.specs(),
                     "mutatingToolNames": mutating_tool_names,
@@ -1701,6 +1704,13 @@ async def _build_coomi_system_prompt(
         "For Storydex usage questions, call StorydexHelpGuideSearch before answering.",
         "For continuity facts not present in assembled context, use StorydexProjectSearch or StorydexWikiQuery when available.",
         (
+            "For an incremental WIKI or knowledge-graph request, call StorydexSyncWiki before reading project files. "
+            "If it returns status=ready and noChanges=true, and the user did not explicitly request a deep audit, "
+            "finish immediately without list_dir, read_file, grep_files, StorydexProjectSearch, or StorydexWikiQuery. "
+            "If changedSourcePaths is non-empty, inspect those paths first and expand only when endpoint resolution "
+            "or continuity evidence requires another source. Never treat status=error as a no-op."
+        ),
+        (
             "For story creation, never write chapters with generic file tools. For any fragment longer than "
             f"{STORY_FRAGMENT_CHUNK_MAX_CHARS} characters, call StorydexStageStoryFragment once per consecutive "
             "chunk, then call StorydexApplyStoryIncrement with stagedFragmentId. Inline only shorter fragments."
@@ -1730,11 +1740,24 @@ async def _build_coomi_system_prompt(
         _render_turn_contract(turn_contract),
     ]
     knowledge_policy = _dict_value(_dict_value(turn_contract).get("knowledgeWritePolicy"))
-    if str(knowledge_policy.get("mode") or "").strip().lower() == "candidate_extraction":
+    knowledge_mode = str(knowledge_policy.get("mode") or "").strip().lower()
+    if knowledge_mode == "candidate_extraction":
         prompt_parts.append(
             "This is a candidate-extraction turn: do not call shell, local_shell, apply_patch, write_file, "
             "edit_file, or Git/version tools. Use read_file/list_dir/search for evidence and submit all relation "
             "results only through StorydexApplyKnowledgeUpdate operation=submit_candidates."
+        )
+    elif knowledge_mode == "explicit_binding":
+        prompt_parts.append(
+            "This is an explicit-binding turn with a guarded knowledge-write boundary. Do not call shell, "
+            "local_shell, apply_patch, write_file, edit_file, memory_write, memory_delete, or any Git/version "
+            "tool, even to create a report or copy a plan. Use StorydexApplyKnowledgeUpdate as the only "
+            "state-changing tool. In the preparation turn call only operation=prepare_explicit; in the later "
+            "user-confirmed turn call only operation=apply_explicit. The domain tool already persists its plan "
+            "or formal knowledge files, so do not duplicate those writes with generic file tools. Do not include "
+            "sessionId, traceId, providerId, model, or extractorVersion in tool arguments; these fields are "
+            "server-managed. If the tool reports a contract-metadata mismatch, retry the same operation once "
+            "with those metadata fields removed."
         )
     if plan_mode:
         prompt_parts.append(

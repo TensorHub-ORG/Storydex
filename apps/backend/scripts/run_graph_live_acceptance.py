@@ -36,8 +36,8 @@ BACKEND_ROOT = REPOSITORY_ROOT / "apps" / "backend"
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 API_PREFIX = "/api/v1"
-REQUIRED_PROVIDER = os.environ.get("STORYDEX_LIVE_PROVIDER", "")
-REQUIRED_MODEL = os.environ.get("STORYDEX_LIVE_MODEL", "")
+DEFAULT_PROVIDER = os.environ.get("STORYDEX_LIVE_PROVIDER", "").strip()
+DEFAULT_MODEL = os.environ.get("STORYDEX_LIVE_MODEL", "").strip()
 SENSITIVE_KEYS = {
     "api_key",
     "apikey",
@@ -88,10 +88,6 @@ def provider_config_path() -> Path:
 
 
 def load_isolated_provider(source: Path, destination: Path, provider_id: str, model: str) -> Dict[str, Any]:
-    if provider_id != REQUIRED_PROVIDER:
-        raise AcceptanceError(f"live acceptance only permits provider {REQUIRED_PROVIDER}")
-    if model != REQUIRED_MODEL:
-        raise AcceptanceError(f"live acceptance only permits model {REQUIRED_MODEL}")
     try:
         document = json.loads(source.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -358,6 +354,8 @@ def run_turn(
     prompt: str,
     reasoning_effort: str,
     label: str,
+    expected_provider: str,
+    expected_model: str,
     confirm_no_snapshot: bool = False,
     timeout_seconds: int = 900,
 ) -> Dict[str, Any]:
@@ -374,6 +372,8 @@ def run_turn(
     reply_parts: List[str] = []
     events: List[Dict[str, Any]] = []
     tool_calls: List[Dict[str, Any]] = []
+    tool_failures: List[Dict[str, Any]] = []
+    tool_successes: List[Dict[str, Any]] = []
     usage: Dict[str, int] = {}
     provider_ids: set[str] = set()
     models: set[str] = set()
@@ -415,10 +415,25 @@ def run_turn(
                         "toolCallId": str(packet.get("tool_call_id") or packet.get("toolCallId") or ""),
                         "isError": bool(packet.get("is_error") or packet.get("isError")),
                     }
+                    arguments = packet.get("arguments")
+                    if isinstance(arguments, Mapping):
+                        call["arguments"] = redact(dict(arguments))
+                    preview = str(packet.get("result_preview") or packet.get("resultPreview") or "").strip()
+                    if preview:
+                        call["resultPreview"] = redact(preview[:1600])
                     if call not in tool_calls:
                         tool_calls.append(call)
-                    if call["isError"]:
-                        errors.append(f"{tool_name}: tool reported error")
+                    if name == "ToolDone":
+                        outcome = {
+                            "toolName": tool_name,
+                            "toolCallId": call["toolCallId"],
+                            "eventIndex": len(events),
+                            "resultPreview": call.get("resultPreview", ""),
+                        }
+                        if call["isError"]:
+                            tool_failures.append(outcome)
+                        else:
+                            tool_successes.append(outcome)
             elif name == "PermissionRequest":
                 approval_id = str(packet.get("approvalId") or packet.get("approval_id") or "").strip()
                 if approval_id:
@@ -435,6 +450,19 @@ def run_turn(
                 errors.append(f"{error_code}: {error_message}" if error_code else error_message)
             elif name in {"AgentCompleted", "RunCompleted"}:
                 completed = True
+    recovered_tool_errors: List[Dict[str, Any]] = []
+    unrecovered_tool_errors: List[Dict[str, Any]] = []
+    for failure in tool_failures:
+        recovered = any(
+            success["toolName"] == failure["toolName"]
+            and int(success["eventIndex"]) > int(failure["eventIndex"])
+            for success in tool_successes
+        )
+        (recovered_tool_errors if recovered else unrecovered_tool_errors).append(failure)
+    errors.extend(
+        f"{item['toolName']}: tool reported unrecovered error"
+        for item in unrecovered_tool_errors
+    )
     if not completed:
         errors.append("stream ended without AgentCompleted")
     result = {
@@ -445,6 +473,8 @@ def run_turn(
         "models": sorted(models),
         "usage": usage,
         "toolCalls": tool_calls,
+        "recoveredToolErrors": recovered_tool_errors,
+        "unrecoveredToolErrors": unrecovered_tool_errors,
         "eventCount": len(events),
         "replyPreview": "".join(reply_parts)[-1600:],
         "completed": completed and not errors,
@@ -454,11 +484,29 @@ def run_turn(
     }
     if errors:
         raise TurnFailure(f"{label} failed: {'; '.join(errors[:4])}", result)
-    if provider_ids and provider_ids != {REQUIRED_PROVIDER}:
+    if provider_ids and provider_ids != {expected_provider}:
         raise AcceptanceError(f"{label} used unexpected provider(s): {sorted(provider_ids)}")
-    if models and {value.casefold() for value in models} != {REQUIRED_MODEL.casefold()}:
+    if models and {value.casefold() for value in models} != {expected_model.casefold()}:
         raise AcceptanceError(f"{label} used unexpected model(s): {sorted(models)}")
     return result
+
+
+def started_tool_names(turn: Mapping[str, Any]) -> List[str]:
+    """Return one ordered name per actual tool call, excluding lifecycle duplicates."""
+
+    names: List[str] = []
+    seen_ids: set[str] = set()
+    for item in turn.get("toolCalls", []) if isinstance(turn.get("toolCalls"), list) else []:
+        if not isinstance(item, Mapping) or str(item.get("event") or "") not in {"ToolCall", "ToolStart", "ToolStarted"}:
+            continue
+        call_id = str(item.get("toolCallId") or "").strip()
+        name = str(item.get("toolName") or "").strip()
+        identity = call_id or f"{name}:{len(names)}"
+        if not name or identity in seen_ids:
+            continue
+        seen_ids.add(identity)
+        names.append(name)
+    return names
 
 
 def run_turn_with_snapshot_confirmation(
@@ -470,6 +518,8 @@ def run_turn_with_snapshot_confirmation(
     prompt: str,
     reasoning_effort: str,
     label: str,
+    expected_provider: str,
+    expected_model: str,
     timeout_seconds: int = 900,
 ) -> Dict[str, Any]:
     """Run a turn and handle the explicit no-restore-point confirmation.
@@ -490,6 +540,8 @@ def run_turn_with_snapshot_confirmation(
             prompt=prompt,
             reasoning_effort=reasoning_effort,
             label=label,
+            expected_provider=expected_provider,
+            expected_model=expected_model,
             confirm_no_snapshot=False,
             timeout_seconds=timeout_seconds,
         )
@@ -517,6 +569,8 @@ def run_turn_with_snapshot_confirmation(
                 prompt=prompt,
                 reasoning_effort=reasoning_effort,
                 label=label,
+                expected_provider=expected_provider,
+                expected_model=expected_model,
                 confirm_no_snapshot=True,
                 timeout_seconds=timeout_seconds,
             )
@@ -685,6 +739,8 @@ def run_acceptance(args: argparse.Namespace) -> Dict[str, Any]:
                     prompt=prompt,
                     reasoning_effort=args.reasoning_effort,
                     label=label,
+                    expected_provider=args.provider_id,
+                    expected_model=args.model,
                 )
             except TurnFailure as exc:
                 scenario["turns"].append(exc.result)
@@ -852,10 +908,63 @@ def run_acceptance(args: argparse.Namespace) -> Dict[str, Any]:
 
         update_prompt = (
             "请扫描当前 Storydex 小说项目自上次 WIKI 更新后的所有改动，增量更新知识图谱与 WIKI。"
-            "不要覆盖未受影响的人工内容；为新增或变化的角色、事件、关系补充来源证据，并标注冲突与待确认项。"
+            "第一步必须调用 StorydexSyncWiki，且在看到返回结果前不要 list_dir、read_file、grep_files、"
+            "StorydexProjectSearch 或 StorydexWikiQuery。若返回 status=ready 且 noChanges=true，立即结束本轮，"
+            "不要继续扫描、审计或重复生成；本轮没有要求深度审计。若 changedSourcePaths 非空，只优先读取这些文件，"
+            "仅在实体端点或连续性证据确有需要时扩展范围。不要覆盖未受影响的人工内容；为新增或变化的角色、事件、"
+            "关系补充来源证据，并标注冲突与待确认项。"
         )
         update_one = execute_turn(prompt=update_prompt, label="incremental-update-1")
         update_two = execute_turn(prompt=update_prompt, label="incremental-update-2")
+        incremental_metrics = []
+        for index, turn in enumerate((update_one, update_two)):
+            tool_names = started_tool_names(turn)
+            if tool_names.count("StorydexSyncWiki") != 1:
+                raise AcceptanceError(
+                    f"{turn.get('label')} must call StorydexSyncWiki exactly once before ending: {tool_names}"
+                )
+            allowed = {
+                "update_plan",
+                "StorydexSyncWiki",
+                # The first incremental turn may need to inspect a changed
+                # ledger/fact source and perform a small number of endpoint /
+                # projection checks. The repeated no-op turn must not read.
+                "read_file",
+                "grep_files",
+                "StorydexWikiQuery",
+            } if index == 0 else {"update_plan", "StorydexSyncWiki"}
+            unexpected = [
+                name for name in tool_names
+                if name not in allowed
+            ]
+            if unexpected:
+                raise AcceptanceError(
+                    f"{turn.get('label')} used disallowed broad-scan tools after StorydexSyncWiki: {unexpected}"
+                )
+            if index == 0 and (
+                tool_names.count("read_file") > 4
+                or tool_names.count("grep_files") > 8
+                or tool_names.count("StorydexWikiQuery") > 3
+            ):
+                raise AcceptanceError(
+                    f"{turn.get('label')} exceeded bounded changed-source verification: {tool_names}"
+                )
+            incremental_metrics.append({
+                "label": turn.get("label"),
+                "toolNames": tool_names,
+                "toolCallCount": len(tool_names),
+                "readFileCount": tool_names.count("read_file"),
+                "targetedVerificationCount": sum(
+                    tool_names.count(name)
+                    for name in ("read_file", "grep_files", "StorydexWikiQuery")
+                ),
+                "broadScanCount": sum(
+                    tool_names.count(name)
+                    for name in ("list_dir", "search", "StorydexProjectSearch")
+                ),
+                "usage": dict(turn.get("usage") or {}),
+                "elapsedMs": int(turn.get("elapsedMs") or 0),
+            })
         post_data(client, base_url, "/story/wiki/sync", {})
         local_graph = post_data(client, base_url, "/story/wiki/rebuild", {})
         final_before_restart = graph_snapshot(client, base_url, include_review=True)
@@ -874,6 +983,7 @@ def run_acceptance(args: argparse.Namespace) -> Dict[str, Any]:
             "afterBackendRestart": reloaded_graph,
             "factIdsStable": True,
             "reviewQueueAfterRestart": review_after_restart,
+            "incrementalNoChangeMetrics": incremental_metrics,
         }
         scenario["status"] = "passed"
         scenario["finishedAt"] = now_iso()
@@ -899,10 +1009,20 @@ def run_acceptance(args: argparse.Namespace) -> Dict[str, Any]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--provider-id", default=REQUIRED_PROVIDER)
-    parser.add_argument("--model", default=REQUIRED_MODEL)
+    parser.add_argument(
+        "--provider-id",
+        default=DEFAULT_PROVIDER or None,
+        required=not DEFAULT_PROVIDER,
+        help="Provider ID; defaults to STORYDEX_LIVE_PROVIDER",
+    )
+    parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL or None,
+        required=not DEFAULT_MODEL,
+        help="Model ID; defaults to STORYDEX_LIVE_MODEL",
+    )
     parser.add_argument("--reasoning-effort", default="high", choices=("auto", "low", "medium", "high", "xhigh", "max"))
-    parser.add_argument("--config", default="", help="Optional source providers.json; only test-provider is copied")
+    parser.add_argument("--config", default="", help="Optional source providers.json; only the requested provider is copied")
     parser.add_argument("--output-dir", default="", help="Defaults to output/live-acceptance")
     return parser.parse_args()
 
@@ -917,14 +1037,14 @@ def main() -> int:
         report = run_acceptance(args)
         report_root = Path(str(report.get("workspace") or "")).parent
         write_json(report_root / "acceptance-report.json", redact(report))
-        print(json.dumps({"status": report["status"], "report": (report_root / "acceptance-report.json").as_posix(), "provider": REQUIRED_PROVIDER, "model": REQUIRED_MODEL}, ensure_ascii=False))
+        print(json.dumps({"status": report["status"], "report": (report_root / "acceptance-report.json").as_posix(), "provider": args.provider_id, "model": args.model}, ensure_ascii=False))
         return 0
     except Exception as exc:
         # run_acceptance normally has already created a unique output folder;
         # if setup failed before it could return, use a separate failure file.
         fallback = (Path(args.output_dir).resolve() if args.output_dir else REPOSITORY_ROOT / "output" / "live-acceptance") / ("failed-" + uuid.uuid4().hex[:8])
         fallback.mkdir(parents=True, exist_ok=True)
-        write_json(fallback / "acceptance-report.json", {"status": "failed", "provider": REQUIRED_PROVIDER, "model": REQUIRED_MODEL, "error": str(exc), "finishedAt": now_iso()})
+        write_json(fallback / "acceptance-report.json", {"status": "failed", "provider": args.provider_id, "model": args.model, "error": str(exc), "finishedAt": now_iso()})
         print(json.dumps({"status": "failed", "report": (fallback / "acceptance-report.json").as_posix(), "error": str(exc)}, ensure_ascii=False))
         return 1
 

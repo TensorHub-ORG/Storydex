@@ -128,6 +128,8 @@ struct BridgeRequest {
     #[serde(default = "default_true")]
     writes_allowed: bool,
     #[serde(default)]
+    core_writes_allowed: Option<bool>,
+    #[serde(default)]
     allowed_write_roots: Vec<PathBuf>,
     #[serde(default)]
     messages: Vec<WireMessage>,
@@ -276,6 +278,7 @@ struct StorydexTools {
     core: CoreTools,
     cwd: PathBuf,
     writes_allowed: bool,
+    core_writes_allowed: bool,
     allowed_write_roots: Vec<PathBuf>,
     custom_specs: Vec<ToolSpec>,
     custom_names: HashSet<String>,
@@ -290,6 +293,9 @@ struct StorydexTools {
 impl ToolRuntime for StorydexTools {
     fn specs(&self) -> Vec<ToolSpec> {
         let mut specs = self.core.specs();
+        if !self.core_writes_allowed {
+            specs.retain(|spec| !is_mutating_core_tool(&spec.name));
+        }
         specs.extend(self.custom_specs.clone());
         if self.plan_mode_active.load(Ordering::Acquire) {
             specs.push(ToolSpec {
@@ -387,20 +393,8 @@ impl StorydexTools {
                     .into(),
             );
         }
-        let mutating = matches!(
-            call.name.as_str(),
-            "write_file"
-                | "edit_file"
-                | "apply_patch"
-                | "shell"
-                | "local_shell"
-                | "memory_write"
-                | "memory_delete"
-                | "configure_mcp"
-                | "install_skill"
-                | "spawn_agent"
-        );
-        if mutating && !self.writes_allowed {
+        let mutating = is_mutating_core_tool(&call.name);
+        if mutating && !self.core_writes_allowed {
             return Some("Storydex turn contract blocks state-changing tools".into());
         }
         if self.allowed_write_roots.is_empty() || !mutating {
@@ -437,6 +431,22 @@ impl StorydexTools {
             ))
         }
     }
+}
+
+fn is_mutating_core_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "write_file"
+            | "edit_file"
+            | "apply_patch"
+            | "shell"
+            | "local_shell"
+            | "memory_write"
+            | "memory_delete"
+            | "configure_mcp"
+            | "install_skill"
+            | "spawn_agent"
+    )
 }
 
 fn is_plan_safe_core_tool(name: &str) -> bool {
@@ -648,12 +658,16 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
         .map(|tool| tool.name.clone())
         .collect();
     let mutating_custom_names = request.mutating_tool_names.into_iter().collect();
+    let core_writes_allowed = request
+        .core_writes_allowed
+        .unwrap_or(request.writes_allowed);
     let controls = Arc::new(ControlHub::default());
     start_control_reader(Arc::clone(&controls), emitter.clone());
     let tools = StorydexTools {
         core,
         cwd: cwd.clone(),
         writes_allowed: request.writes_allowed,
+        core_writes_allowed,
         allowed_write_roots: request.allowed_write_roots,
         custom_specs: request.tool_specs,
         custom_names,
@@ -928,6 +942,20 @@ mod tests {
             .expect("deserialize bridge request");
             assert_eq!(request.reasoning_effort, expected);
         }
+    }
+
+    #[test]
+    fn bridge_request_accepts_separate_core_write_boundary() {
+        let request: BridgeRequest = serde_json::from_value(json!({
+            "action": "run",
+            "writesAllowed": true,
+            "coreWritesAllowed": false
+        }))
+        .expect("deserialize bridge request");
+        assert!(request.writes_allowed);
+        assert_eq!(request.core_writes_allowed, Some(false));
+        assert!(is_mutating_core_tool("write_file"));
+        assert!(!is_mutating_core_tool("read_file"));
     }
 
     #[test]

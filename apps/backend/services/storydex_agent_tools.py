@@ -467,7 +467,10 @@ class StorydexSyncWikiTool(_StorydexWorkspaceToolMixin, BaseTool):
     name = "StorydexSyncWiki"
     description = (
         "Synchronize the local Storydex WIKI and knowledge graph from project files, memory, "
-        "characters, facts, relationships, and item memory."
+        "characters, facts, relationships, and item memory. Call this first for an incremental WIKI request; "
+        "when the result is ready with noChanges=true, stop unless the user explicitly asks for a deep audit. "
+        "When changedSourcePaths is non-empty, inspect those paths first and expand the scope only when endpoint "
+        "or continuity evidence requires it."
     )
     access = ToolAccess.WRITE
     concurrency = ToolConcurrency.BLOCKING
@@ -494,8 +497,52 @@ class StorydexSyncWikiTool(_StorydexWorkspaceToolMixin, BaseTool):
         result = get_story_wiki_service().sync_local_incremental(workspace_root)
         wiki_payload = result if isinstance(result, dict) else {}
         graph = wiki_payload.get("graph") if isinstance(wiki_payload.get("graph"), dict) else {}
+        changed_paths = [
+            str(path)
+            for path in wiki_payload.get("changedSourcePaths", [])
+            if str(path).strip()
+        ] if isinstance(wiki_payload.get("changedSourcePaths"), list) else []
+        diagnostics = [
+            dict(item)
+            for item in wiki_payload.get("diagnostics", [])
+            if isinstance(item, dict)
+        ] if isinstance(wiki_payload.get("diagnostics"), list) else []
+        projection_status = str(wiki_payload.get("status") or "error").strip().lower()
+        projection_ok = projection_status == "ready"
+
+        def safe_int(value: Any) -> int:
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        error_message = next(
+            (
+                str(item.get("message") or "")
+                for item in diagnostics
+                if str(item.get("severity") or "").strip().lower() in {"error", "fatal"}
+                and str(item.get("message") or "").strip()
+            ),
+            next(
+                (
+                    str(item.get("message") or "")
+                    for item in diagnostics
+                    if str(item.get("message") or "").strip()
+                ),
+                "知识图谱投影未就绪。",
+            ),
+        )
         summary = {
-            "ok": True,
+            "ok": projection_ok,
+            "status": projection_status,
+            "noChanges": projection_ok and not changed_paths,
+            "changedSourcePaths": changed_paths,
+            "knowledgeRevision": safe_int(wiki_payload.get("knowledgeRevision")),
+            "builtFromRevision": safe_int(wiki_payload.get("builtFromRevision")),
+            "lastSuccessfulRevision": safe_int(wiki_payload.get("lastSuccessfulRevision")),
+            "sourceSetChecksum": str(wiki_payload.get("sourceSetChecksum") or ""),
+            "graphChecksum": str(wiki_payload.get("graphChecksum") or ""),
+            "diagnostics": diagnostics,
             "workspaceRoot": workspace_root.as_posix(),
             "wiki": {
                 "entryCount": len(wiki_payload.get("entries", []) or []),
@@ -508,7 +555,11 @@ class StorydexSyncWikiTool(_StorydexWorkspaceToolMixin, BaseTool):
                 "index": ".storydex/wiki/index.json",
             },
         }
-        return ToolResult(success=True, output=json.dumps(summary, ensure_ascii=False, indent=2), error=None)
+        return ToolResult(
+            success=projection_ok,
+            output=json.dumps(summary, ensure_ascii=False, indent=2),
+            error=None if projection_ok else error_message,
+        )
 
 
 class StorydexApplyKnowledgeUpdateTool(_StorydexWorkspaceToolMixin, BaseTool):
@@ -608,11 +659,11 @@ class StorydexApplyKnowledgeUpdateTool(_StorydexWorkspaceToolMixin, BaseTool):
                 "candidates": {"type": "array", "items": relation_schema},
                 "planId": {"type": "string"},
                 "expectedFingerprint": {"type": "string"},
-                "sessionId": {"type": "string"},
-                "traceId": {"type": "string"},
-                "providerId": {"type": "string"},
-                "model": {"type": "string"},
-                "extractorVersion": {"type": "string"},
+                "sessionId": {"type": "string", "description": "Server-managed; omit when a Storydex turn contract is active."},
+                "traceId": {"type": "string", "description": "Server-managed; omit when a Storydex turn contract is active."},
+                "providerId": {"type": "string", "description": "Server-managed; omit when a Storydex turn contract is active."},
+                "model": {"type": "string", "description": "Server-managed; omit when a Storydex turn contract is active."},
+                "extractorVersion": {"type": "string", "description": "Server-managed; omit when a Storydex turn contract is active."},
             },
             "additionalProperties": False,
         }

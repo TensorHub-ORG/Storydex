@@ -492,6 +492,63 @@ def test_candidate_submission_is_review_only_and_filters_unsupported_evidence(
     assert repeated["skipped"][0]["reason"] == "unchanged_candidate"
 
 
+def test_candidate_polarity_is_scoped_to_endpoint_anchored_chinese_clauses(
+    tmp_path: Path,
+) -> None:
+    service = StoryKnowledgeRelationService()
+    subject = _entity(service, tmp_path, "潮汐兽", ".storydex/worldbook/潮汐兽.md")
+    nightstar = _entity(service, tmp_path, "夜港星", ".storydex/worldbook/夜港星.md")
+    chapter_path = "chapters/极性.md"
+    asserted_after_negation = "潮汐兽没有离开夜港星，但仍然长期栖息于夜港星浅海。"
+    asserted_after_rumor = "传闻潮汐兽来自夜港星，不过档案证实潮汐兽长期栖息于夜港星。"
+    negated = "潮汐兽未在夜港星栖息。"
+    hypothetical = "假若潮汐兽迁往夜港星，它或许能够存活。"
+    asserted_then_negated = "潮汐兽曾长期栖息于夜港星，但现在不再栖息于夜港星。"
+    _write(
+        tmp_path / chapter_path,
+        "\n".join((
+            asserted_after_negation,
+            asserted_after_rumor,
+            negated,
+            hypothetical,
+            asserted_then_negated,
+        )) + "\n",
+    )
+
+    def candidate(quote: str, predicate: str = "栖息于") -> dict:
+        return {
+            "subjectId": subject["entityId"],
+            "predicate": predicate,
+            "objectId": nightstar["entityId"],
+            "sourceRefs": [{"path": chapter_path, "quote": quote, "role": "chapter"}],
+        }
+
+    result = service.submit_candidates(
+        tmp_path,
+        [
+            candidate(asserted_after_negation),
+            candidate(asserted_after_rumor, predicate="来自"),
+            candidate(negated, predicate="栖息于"),
+            candidate(hypothetical, predicate="存活于"),
+            candidate(asserted_then_negated, predicate="栖息于"),
+        ],
+        trace_id="trace-cn-polarity",
+        provider_id="OPENCODE",
+        model="deepseek-v4-flash",
+    )
+
+    assert result["acceptedCount"] == 2
+    assert {item["reason"] for item in result["skipped"]} == {
+        "negated_evidence",
+        "hypothetical_evidence",
+    }
+    by_predicate = {item["predicate"]: item for item in result["candidates"]}
+    assert by_predicate["栖息于"]["knowledgeStatus"] == "observed"
+    assert by_predicate["栖息于"]["provenance"]["modality"] == "asserted"
+    assert by_predicate["来自"]["knowledgeStatus"] == "inferred"
+    assert by_predicate["来自"]["provenance"]["modality"] == "rumor"
+
+
 def test_changed_evidence_supersedes_the_active_candidate(tmp_path: Path) -> None:
     service = StoryKnowledgeRelationService()
     subject = _entity(service, tmp_path, "Tidebeast", ".storydex/worldbook/Tidebeast.md")
@@ -524,6 +581,46 @@ def test_changed_evidence_supersedes_the_active_candidate(tmp_path: Path) -> Non
     assert superseded["reviewStatus"] == "superseded"
     assert superseded["supersededBy"] == current["id"]
     assert current["reviewStatus"] == "review_required"
+
+
+def test_incremental_wiki_sync_invalidates_review_candidate_after_source_edit(
+    tmp_path: Path,
+) -> None:
+    relation_service = StoryKnowledgeRelationService()
+    subject = _entity(relation_service, tmp_path, "潮汐兽", ".storydex/worldbook/潮汐兽.md")
+    obj = _entity(relation_service, tmp_path, "夜港星", ".storydex/worldbook/夜港星.md")
+    chapter_path = "chapters/001.md"
+    quote = "潮汐兽长期栖息于夜港星。"
+    _write(tmp_path / chapter_path, quote + "\n")
+    submitted = relation_service.submit_candidates(
+        tmp_path,
+        [
+            {
+                "subjectId": subject["entityId"],
+                "predicate": "栖息于",
+                "objectId": obj["entityId"],
+                "sourceRefs": [{"path": chapter_path, "quote": quote, "role": "chapter"}],
+            }
+        ],
+        trace_id="trace-stale-candidate",
+        provider_id="OPENCODE",
+        model="deepseek-v4-flash",
+    )
+    candidate_id = submitted["candidates"][0]["id"]
+    wiki_service = StoryWikiService()
+    initial = wiki_service.rebuild(tmp_path)
+    assert any(edge.get("id") == candidate_id for edge in initial["graph"]["edges"])
+
+    _write(tmp_path / chapter_path, "潮汐兽已经离开此地。\n")
+    updated = wiki_service.sync_local_incremental(tmp_path)
+
+    assert chapter_path in updated["changedSourcePaths"]
+    ledger = relation_service.load_review_ledger(tmp_path)["relations"]
+    stale = next(item for item in ledger if item.get("id") == candidate_id)
+    assert stale["reviewStatus"] == "superseded"
+    assert stale["supersededReason"] == "source_evidence_changed"
+    assert stale["invalidationCode"] == "knowledge_candidate_quote_not_found"
+    assert not any(edge.get("id") == candidate_id for edge in updated["graph"]["edges"])
 
 
 def test_candidate_confirm_reject_and_stale_fingerprint(

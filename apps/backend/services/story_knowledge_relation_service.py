@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -42,14 +43,29 @@ _RELATION_LINE_RE = re.compile(
 _HEADING_RE = re.compile(r"^\s*(?P<marks>#{1,6})\s+(?P<title>.+?)\s*$")
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(?P<body>[\s\S]*?)\n---\s*(?:\n|\Z)")
 _NEGATION_RE = re.compile(
-    r"(?:并不|不是|并非|没有|不存在|从未|未曾|不属于|不位于|不生活|不栖息|否认|never|not\s+|does\s+not)",
+    r"(?:从来没有|没有任何|并不|不是|并非|没有|不存在|从未|未曾|未有|未形成|未在|"
+    r"不属于|不位于|不生活|不栖息|不再|不在|不会|无法|绝非|否认|never|not\s+|does\s+not)",
     re.IGNORECASE,
 )
 _HYPOTHETICAL_RE = re.compile(
-    r"(?:如果|假如|若是|倘若|可能会|也许会|或许会|设想|假设|if\s+|would\s+|could\s+)",
+    r"(?:如果|假如|假若|若是|倘若|要是|一旦|可能会|也许会|或许会|可能|也许|或许|"
+    r"设想|假设|本可|或将|将会|计划|打算|预计|希望|if\s+|would\s+|could\s+)",
     re.IGNORECASE,
 )
 _RUMOR_RE = re.compile(r"(?:传闻|据说|听说|相传|有人说|rumou?r|reportedly|allegedly)", re.IGNORECASE)
+_EVIDENCE_CLAUSE_RE = re.compile(
+    r"(?<=[。！？!?；;\n])|(?<=[，,])\s*(?=(?:但|却|然而|不过|而是|而|只是|仍然|依旧|反而|后来|其实|事实上|同时))"
+)
+_PREDICATE_EVIDENCE_ALIASES = {
+    "lives_on": ("live on", "lives on", "lived on", "inhabit", "inhabits", "栖息于", "栖息", "生活在", "居住于", "居住在"),
+    "came_from": ("came from", "comes from", "originates from", "来自", "源于", "出自"),
+    "located_in": ("located in", "位于", "坐落于"),
+    "belongs_to": ("belongs to", "属于", "隶属于", "隶属"),
+    "owns": ("owns", "拥有", "持有"),
+    "serves": ("serves", "服务于", "效忠于", "效忠"),
+    "trusts": ("trust", "trusts", "信任", "信赖"),
+    "allied_with": ("allied with", "ally", "盟友", "同盟", "结盟"),
+}
 
 
 def _now() -> datetime:
@@ -61,7 +77,124 @@ def _now_iso() -> str:
 
 
 def _clean_text(value: Any) -> str:
-    return re.sub(r"\s+", " ", str(value or "").strip())
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", str(value or "")).strip())
+
+
+def _evidence_name_matches(text: str, name: Any) -> bool:
+    """Match an entity name without treating an English substring as a hit."""
+
+    normalized_name = _clean_text(name)
+    if not normalized_name:
+        return False
+    normalized_text = _clean_text(text)
+    if re.fullmatch(r"[A-Za-z0-9_ -]+", normalized_name):
+        return bool(
+            re.search(
+                rf"(?<![A-Za-z0-9]){re.escape(normalized_name)}(?![A-Za-z0-9])",
+                normalized_text,
+                flags=re.IGNORECASE,
+            )
+        )
+    return re.sub(r"\s+", "", normalized_name) in re.sub(r"\s+", "", normalized_text)
+
+
+def _evidence_clauses(text: Any) -> List[str]:
+    """Split evidence at sentence/contrast boundaries for scoped polarity checks.
+
+    A whole paragraph may contain a negated clause followed by an asserted one
+    (for example, ``没有离开……，但仍然栖息于……``).  Applying a marker to the
+    entire paragraph would incorrectly discard the asserted relation.
+    """
+
+    compact = _clean_text(text)
+    if not compact:
+        return []
+    clauses = [part.strip() for part in _EVIDENCE_CLAUSE_RE.split(compact) if part.strip()]
+    return clauses or [compact]
+
+
+def _predicate_evidence_tokens(predicate: Any) -> List[str]:
+    normalized = _clean_text(predicate).lower()
+    if not normalized:
+        return []
+    tokens = {
+        normalized,
+        re.sub(r"[_-]+", " ", normalized).strip(),
+    }
+    aliases = _PREDICATE_EVIDENCE_ALIASES.get(normalized, ())
+    tokens.update(_clean_text(alias).lower() for alias in aliases)
+    return sorted((token for token in tokens if token), key=len, reverse=True)
+
+
+def _clause_mentions_predicate(clause: str, predicate: Any) -> bool:
+    normalized_clause = _clean_text(clause).lower()
+    for token in _predicate_evidence_tokens(predicate):
+        if re.fullmatch(r"[a-z0-9_ -]+", token):
+            if re.search(
+                rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])",
+                normalized_clause,
+                flags=re.IGNORECASE,
+            ):
+                return True
+        elif token in normalized_clause:
+            return True
+    return False
+
+
+def _evidence_modality(
+    text: Any,
+    *,
+    subject_names: Sequence[str],
+    object_names: Sequence[str],
+    predicate: Any = "",
+) -> str:
+    """Return the latest predicate-relevant modality from endpoint-anchored clauses."""
+
+    clauses = _evidence_clauses(text)
+    anchored = [
+        clause
+        for clause in clauses
+        if any(_evidence_name_matches(clause, name) for name in subject_names)
+        and any(_evidence_name_matches(clause, name) for name in object_names)
+    ]
+    # Chinese often omits the repeated subject after a contrast connector:
+    # “潮汐兽没有离开夜港星，但仍然长期栖息于夜港星”。  Keep such a clause
+    # in scope when it still names one endpoint; its own polarity marker then
+    # decides whether it supports or rejects the relation.
+    for clause in clauses:
+        if clause in anchored or not re.match(
+            r"^(?:但|却|然而|不过|而是|而|只是|后来|反而|其实|事实上|同时)",
+            clause,
+        ):
+            continue
+        if any(_evidence_name_matches(clause, name) for name in (*subject_names, *object_names)):
+            anchored.append(clause)
+    # Some Chinese prose uses a pronoun in the second clause.  The source-ref
+    # validator already anchored both endpoints in the full quote, so retain
+    # the old whole-quote behavior when no individual clause can do so.
+    if not anchored:
+        anchored = [str(text or "")]
+
+    predicate_anchored = [
+        clause for clause in anchored if _clause_mentions_predicate(clause, predicate)
+    ]
+    relevant = predicate_anchored or anchored
+    modalities: List[str] = []
+    for clause in relevant:
+        if _NEGATION_RE.search(clause):
+            modalities.append("negated")
+        elif _HYPOTHETICAL_RE.search(clause):
+            modalities.append("hypothetical")
+        elif _RUMOR_RE.search(clause):
+            modalities.append("rumor")
+        else:
+            modalities.append("asserted")
+
+    # Chinese contrast clauses usually place the current/corrected statement
+    # last: “不是敌人，而是盟友” and “曾经栖息，但现在不再栖息”.  Predicate
+    # scoping prevents an asserted relation about the same endpoints from
+    # accidentally upgrading a different rumored predicate.
+    return modalities[-1] if modalities else "asserted"
 
 
 def _normalize_relative_path(value: Any) -> str:
@@ -720,6 +853,72 @@ class StoryKnowledgeRelationService:
             "nextOffset": start + len(page) if start + len(page) < len(items) else None,
         }
 
+    def invalidate_stale_candidates(self, workspace_root: Path) -> Dict[str, Any]:
+        """Supersede active model candidates whose verbatim evidence no longer exists.
+
+        The WIKI is a rebuildable projection of project files.  A pending
+        extraction must therefore disappear from the active review queue when
+        its source file or exact quote is edited, instead of lingering until a
+        reviewer attempts confirmation and receives a late error.
+        """
+
+        root = Path(workspace_root).resolve()
+        with self._lock:
+            ledger = self.load_review_ledger(root)
+            invalidated: List[Dict[str, Any]] = []
+            invalidated_at = _now_iso()
+            for candidate in ledger["relations"]:
+                if str(candidate.get("reviewStatus") or "") != "review_required":
+                    continue
+                provenance = candidate.get("provenance") if isinstance(candidate.get("provenance"), Mapping) else {}
+                if str(provenance.get("origin") or "") != "agent_extraction":
+                    continue
+                try:
+                    subject = self.resolve_entity(
+                        root,
+                        candidate.get("subject"),
+                        entity_id=candidate.get("subjectId"),
+                        allow_discovery=False,
+                    )
+                    obj = self.resolve_entity(
+                        root,
+                        candidate.get("object"),
+                        entity_id=candidate.get("objectId"),
+                        allow_discovery=False,
+                    )
+                    self._validate_candidate_source_refs(
+                        root,
+                        candidate.get("sourceRefs"),
+                        subject=subject,
+                        obj=obj,
+                    )
+                except KnowledgeRelationError as exc:
+                    candidate.update(
+                        {
+                            "reviewStatus": "superseded",
+                            "supersededAt": invalidated_at,
+                            "supersededReason": "source_evidence_changed",
+                            "invalidationCode": exc.code,
+                        }
+                    )
+                    invalidated.append(
+                        {
+                            "id": str(candidate.get("id") or ""),
+                            "relationKey": str(candidate.get("relationKey") or ""),
+                            "reason": exc.code,
+                        }
+                    )
+
+            if invalidated:
+                ledger["updatedAt"] = invalidated_at
+                self._atomic_write_text(self.review_path(root), _json_text(ledger))
+            return {
+                "ok": True,
+                "invalidatedCount": len(invalidated),
+                "invalidated": invalidated,
+                "writtenPaths": [REVIEW_SOURCE_PATH.as_posix()] if invalidated else [],
+            }
+
     # ------------------------------------------------------------------
     # Explicit two-turn binding workflow
     # ------------------------------------------------------------------
@@ -1131,16 +1330,30 @@ class StoryKnowledgeRelationService:
                     obj=obj,
                 )
                 quote_text = "\n".join(str(item.get("quote") or "") for item in source_refs)
-                if _NEGATION_RE.search(quote_text):
+                subject_names = [
+                    _clean_text(subject.get("canonical_name")),
+                    *self._unique_texts(subject.get("aliases")),
+                ]
+                object_names = [
+                    _clean_text(obj.get("canonical_name")),
+                    *self._unique_texts(obj.get("aliases")),
+                ]
+                evidence_modality = _evidence_modality(
+                    quote_text,
+                    subject_names=subject_names,
+                    object_names=object_names,
+                    predicate=raw.get("predicate") or raw.get("relation"),
+                )
+                if evidence_modality == "negated":
                     skipped.append({"index": index, "reason": "negated_evidence"})
                     continue
-                if _HYPOTHETICAL_RE.search(quote_text):
+                if evidence_modality == "hypothetical":
                     skipped.append({"index": index, "reason": "hypothetical_evidence"})
                     continue
                 knowledge_status = str(raw.get("knowledgeStatus") or "observed")
                 if knowledge_status not in KNOWLEDGE_STATUSES:
                     knowledge_status = "observed"
-                if _RUMOR_RE.search(quote_text):
+                if evidence_modality == "rumor":
                     knowledge_status = "inferred"
                 dto = self.relation_dto(
                     subject=subject,
@@ -1157,6 +1370,7 @@ class StoryKnowledgeRelationService:
                         "extractorVersion": _clean_text(extractor_version) or "storydex-agent-relations-v1",
                         "providerId": _clean_text(provider_id),
                         "model": _clean_text(model),
+                        "modality": evidence_modality,
                     },
                     trace_id=trace_id or raw.get("traceId"),
                     confidence=raw.get("confidence", 0.7),

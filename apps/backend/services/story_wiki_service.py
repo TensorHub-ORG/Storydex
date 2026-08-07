@@ -2584,7 +2584,10 @@ class StoryWikiService:
         """
         from services.story_knowledge_relation_service import get_story_knowledge_relation_service
 
-        return get_story_knowledge_relation_service().migrate_v1(root)
+        relation_service = get_story_knowledge_relation_service()
+        migration = relation_service.migrate_v1(root)
+        invalidation = relation_service.invalidate_stale_candidates(root)
+        return {"migration": migration, "candidateInvalidation": invalidation}
 
     def _backup_legacy_projection(self, root: Path) -> None:
         previous = self._read_existing_payload(root)
@@ -3747,6 +3750,76 @@ class StoryWikiService:
             if not owns_source:
                 continue
             if any(name and name in quote for name in object_names):
+                return True
+        return False
+
+    def _knowledge_relation_edge_is_grounded(
+        self,
+        root: Path,
+        edge: Dict[str, Any],
+        *,
+        nodes: Sequence[Dict[str, Any]],
+    ) -> bool:
+        """Validate persisted fact/candidate evidence against current project files."""
+
+        refs = edge.get("sourceRefs") if isinstance(edge.get("sourceRefs"), list) else []
+        if not refs:
+            return False
+        if self._formal_relation_edge_is_grounded(root, edge, nodes=nodes):
+            return True
+
+        source_id = str(edge.get("source") or "").strip()
+        target_id = str(edge.get("target") or "").strip()
+        if not source_id or not target_id or source_id == target_id:
+            return False
+        endpoint_ids = (source_id, target_id)
+        names_by_id: Dict[str, set[str]] = {endpoint_id: set() for endpoint_id in endpoint_ids}
+        for node in nodes:
+            node_id = str(node.get("id") or "").strip()
+            label = str(node.get("label") or "").strip()
+            if node_id in names_by_id and label:
+                names_by_id[node_id].add(label)
+        for record in EntityRegistry(root).load_records():
+            if record.entity_id in names_by_id:
+                names_by_id[record.entity_id].update(record.names())
+
+        def contains_name(text: str, name: str) -> bool:
+            normalized_name = re.sub(r"\s+", " ", str(name or "")).strip()
+            if len(re.sub(r"\s+", "", normalized_name)) < 2:
+                return False
+            if re.fullmatch(r"[A-Za-z0-9_ -]+", normalized_name):
+                return bool(re.search(
+                    rf"(?<![A-Za-z0-9_]){re.escape(normalized_name)}(?![A-Za-z0-9_])",
+                    text,
+                    flags=re.IGNORECASE,
+                ))
+            return re.sub(r"\s+", "", normalized_name) in re.sub(r"\s+", "", text)
+
+        resolved_root = root.resolve()
+        for ref in refs:
+            if not isinstance(ref, dict) or str(ref.get("role") or "") == "formal_relation":
+                continue
+            relative = str(ref.get("path") or "").strip().replace("\\", "/").lstrip("/")
+            quote = str(ref.get("quote") or "")
+            if not relative or not quote:
+                continue
+            path = (resolved_root / relative).resolve()
+            try:
+                path.relative_to(resolved_root)
+            except ValueError:
+                continue
+            if not path.is_file():
+                continue
+            try:
+                content = path.read_text(encoding="utf-8-sig", errors="strict")
+            except (OSError, UnicodeError):
+                continue
+            if quote not in content:
+                continue
+            if all(
+                any(contains_name(quote, name) for name in names_by_id[endpoint_id])
+                for endpoint_id in endpoint_ids
+            ):
                 return True
         return False
 
@@ -5211,6 +5284,7 @@ class StoryWikiService:
             for node in graph_nodes
             if str(node.get("id") or "").strip()
         }
+        diagnostics: List[Dict[str, Any]] = []
         existing_by_key: Dict[tuple[str, str, str], Dict[str, Any]] = {}
         for edge in graph_edges:
             source = str(edge.get("source") or "").strip()
@@ -5235,6 +5309,18 @@ class StoryWikiService:
             key = (source, predicate, target)
             current = existing_by_key.get(key)
             edge = relation_service.graph_edge_from_relation(relation)
+            if not self._knowledge_relation_edge_is_grounded(
+                root,
+                edge,
+                nodes=graph_nodes,
+            ):
+                diagnostics.append(self._graph_diagnostic(
+                    "graph.relation.evidence_stale",
+                    f"关系“{node_by_id[source].get('label')} {predicate} {node_by_id[target].get('label')}”的来源证据已缺失或无法锚定端点。",
+                    str(relation.get("id") or relation.get("relationKey") or key),
+                    blocking=False,
+                ))
+                return
             # Confirmed facts always win over a review candidate with the same
             # endpoints; otherwise keep the first deterministic record.
             if current is not None:
@@ -5258,7 +5344,7 @@ class StoryWikiService:
             for candidate in review_payload.get("relations", []):
                 if isinstance(candidate, dict):
                     append_relation(candidate, review_allowed=True)
-        return []
+        return diagnostics
 
     def _edge(
         self,

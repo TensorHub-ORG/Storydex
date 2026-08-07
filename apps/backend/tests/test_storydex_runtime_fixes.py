@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from core import feature_flags
-from services import coomi_agent_service, retrieval_service
+from services import coomi_agent_service, retrieval_service, story_wiki_service
 from services.coomi_agent_service import (
     DEFAULT_CONTEXT_WINDOW,
     _coomi_binding_path,
@@ -22,6 +22,7 @@ from services.storydex_agent_tools import (
     StorydexApplyStoryIncrementTool,
     StorydexProjectSearchTool,
     StorydexStageStoryFragmentTool,
+    StorydexSyncWikiTool,
     StorydexWikiQueryTool,
 )
 from services.storydex_context_assembler_service import StorydexContextAssemblerService
@@ -89,6 +90,73 @@ def test_storydex_registry_contains_domain_retrieval_tools(tmp_path) -> None:
     assert isinstance(by_name["StorydexProjectSearch"], StorydexProjectSearchTool)
     assert isinstance(by_name["StorydexWikiQuery"], StorydexWikiQueryTool)
     assert isinstance(by_name["StorydexStageStoryFragment"], StorydexStageStoryFragmentTool)
+
+
+def test_sync_wiki_tool_reports_no_change_revision_and_checksums(tmp_path) -> None:
+    get_story_project_service().ensure_project_structure(tmp_path)
+    chapter = tmp_path / "chapters" / "001.md"
+    chapter.parent.mkdir(parents=True, exist_ok=True)
+    chapter.write_text("潮汐兽长期栖息于夜港星。\n", encoding="utf-8")
+    tool = StorydexSyncWikiTool(workspace_root=tmp_path)
+
+    first = tool.run({})
+    first_payload = json.loads(first.output)
+    second = tool.run({})
+    second_payload = json.loads(second.output)
+
+    assert first.success is True
+    assert first_payload["status"] == "ready"
+    assert first_payload["noChanges"] is False
+    assert "chapters/001.md" in first_payload["changedSourcePaths"]
+    assert first_payload["knowledgeRevision"] > 0
+    assert first_payload["builtFromRevision"] == first_payload["knowledgeRevision"]
+    assert first_payload["lastSuccessfulRevision"] == first_payload["knowledgeRevision"]
+    assert first_payload["sourceSetChecksum"].startswith("sha256:")
+    assert first_payload["graphChecksum"].startswith("sha256:")
+
+    assert second.success is True
+    assert second_payload["status"] == "ready"
+    assert second_payload["noChanges"] is True
+    assert second_payload["changedSourcePaths"] == []
+    assert second_payload["knowledgeRevision"] == first_payload["knowledgeRevision"]
+    assert second_payload["sourceSetChecksum"] == first_payload["sourceSetChecksum"]
+    assert second_payload["graphChecksum"] == first_payload["graphChecksum"]
+
+
+def test_sync_wiki_tool_surfaces_projection_errors_and_diagnostics(tmp_path, monkeypatch) -> None:
+    get_story_project_service().ensure_project_structure(tmp_path)
+    diagnostics = [
+        {"severity": "warning", "code": "graph.warning", "message": "可恢复警告"},
+        {"severity": "error", "code": "graph.failed", "message": "投影构建失败"},
+    ]
+    stub = SimpleNamespace(
+        sync_local_incremental=lambda _root: {
+            "status": "error",
+            "changedSourcePaths": [],
+            "knowledgeRevision": "invalid",
+            "builtFromRevision": 4,
+            "lastSuccessfulRevision": 3,
+            "sourceSetChecksum": "sha256:source",
+            "graphChecksum": "sha256:last-good",
+            "diagnostics": diagnostics,
+            "entries": [],
+            "graph": {"nodes": [], "edges": []},
+        }
+    )
+    monkeypatch.setattr(story_wiki_service, "get_story_wiki_service", lambda: stub)
+
+    result = StorydexSyncWikiTool(workspace_root=tmp_path).run({})
+    payload = json.loads(result.output)
+
+    assert result.success is False
+    assert result.error == "投影构建失败"
+    assert payload["ok"] is False
+    assert payload["status"] == "error"
+    assert payload["noChanges"] is False
+    assert payload["knowledgeRevision"] == 0
+    assert payload["builtFromRevision"] == 4
+    assert payload["lastSuccessfulRevision"] == 3
+    assert payload["diagnostics"] == diagnostics
 
 
 def test_long_story_fragment_is_staged_in_bounded_chunks_then_applied(tmp_path) -> None:

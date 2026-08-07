@@ -56,3 +56,18 @@ def test_negated_or_ambiguous_relationship_text_is_not_promoted():
         assert semantics.status == "unresolved"
 
     assert classify_relationship("共同练习功夫").relation_type == "unknown"
+
+
+def test_relationship_polarity_is_scoped_and_prefers_the_current_contrast_clause():
+    semantics = classify_relationship("两人没有血缘关系，但始终彼此信任，是可靠的伙伴")
+
+    assert semantics.relation_type == "trust"
+    assert semantics.status == "asserted"
+
+    former = classify_relationship("两人曾经是朋友，但后来成为宿敌")
+    assert former.relation_type == "hostility"
+    assert former.status == "asserted"
+
+    corrected = classify_relationship("两人并非敌人，而是彼此信任的盟友")
+    assert corrected.relation_type == "trust"
+    assert corrected.status == "asserted"

@@ -511,6 +511,68 @@ def test_agent_candidate_projection_is_immediately_current_after_ledger_write(tm
     assert any(edge.get("reviewStatus") == "review_required" for edge in graph["graph"]["edges"])
 
 
+def test_confirmed_fact_with_deleted_quote_is_removed_without_discarding_projection(tmp_path):
+    worldbook = tmp_path / ".storydex" / "worldbook"
+    chapter = tmp_path / "chapters" / "001.md"
+    worldbook.mkdir(parents=True)
+    chapter.parent.mkdir(parents=True)
+    worldbook.joinpath("潮汐兽.md").write_text("# 潮汐兽\n", encoding="utf-8")
+    worldbook.joinpath("夜港星.md").write_text("# 夜港星\n", encoding="utf-8")
+    quote = "潮汐兽长期栖息于夜港星。"
+    chapter.write_text(quote + "\n", encoding="utf-8")
+
+    relation_service = StoryKnowledgeRelationService()
+    subject = relation_service.ensure_entity(
+        tmp_path,
+        "潮汐兽",
+        source_path=".storydex/worldbook/潮汐兽.md",
+        kind="setting",
+    )
+    obj = relation_service.ensure_entity(
+        tmp_path,
+        "夜港星",
+        source_path=".storydex/worldbook/夜港星.md",
+        kind="setting",
+    )
+    fact = relation_service.relation_dto(
+        subject=subject,
+        predicate="栖息于",
+        obj=obj,
+        review_status="confirmed",
+        knowledge_status="observed",
+        source_refs=[{"path": "chapters/001.md", "quote": quote, "role": "chapter"}],
+        provenance={"origin": "agent_extraction", "extractorVersion": "test"},
+        confidence="confirmed",
+    )
+    _write_json(
+        relation_service.facts_path(tmp_path),
+        {"version": 2, "schemaVersion": 2, "facts": [fact]},
+    )
+
+    service = StoryWikiService()
+    baseline = service.rebuild(tmp_path)
+    assert any(edge.get("id") == fact["id"] for edge in baseline["graph"]["edges"])
+
+    chapter.write_text("潮汐兽已经离开夜港星。\n", encoding="utf-8")
+    updated = service.sync_local_incremental(tmp_path)
+
+    assert updated["status"] == "ready"
+    assert {node["id"] for node in updated["graph"]["nodes"]} >= {
+        subject["entityId"],
+        obj["entityId"],
+    }
+    assert not any(edge.get("id") == fact["id"] for edge in updated["graph"]["edges"])
+    stale = next(
+        item for item in updated["diagnostics"]
+        if item.get("code") == "graph.relation.evidence_stale"
+    )
+    assert stale["severity"] == "warning"
+    assert stale["blocking"] is False
+    persisted = json.loads(service.wiki_json_path(tmp_path).read_text(encoding="utf-8"))
+    assert persisted["status"] == "ready"
+    assert persisted["graphChecksum"] == updated["graphChecksum"]
+
+
 def test_read_or_build_rebuilds_old_category_schema_payload(tmp_path):
     chapters = tmp_path / "chapters"
     chapters.mkdir()

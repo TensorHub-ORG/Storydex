@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Optional
 
@@ -52,7 +53,6 @@ _DIMENSION_TOKENS = (
             "合伙人",
         ),
     ),
-    ("alliance", ("alliance", "ally", "partner", "同盟", "盟友", "合作", "结盟", "联手", "伙伴")),
     ("trust", ("trust", "trusted", "信任", "信赖", "托付")),
     ("loyalty", ("loyalty", "loyal", "忠诚", "效忠", "追随")),
     (
@@ -68,6 +68,7 @@ _DIMENSION_TOKENS = (
             "妻子", "丈夫", "夫妻", "叔叔", "姑姑", "舅舅", "姨妈", "姨母",
         ),
     ),
+    ("alliance", ("alliance", "ally", "partner", "同盟", "盟友", "合作", "结盟", "联手", "伙伴")),
 )
 
 _UNCERTAINTY_TOKENS = (
@@ -85,6 +86,20 @@ _NON_CURRENT_TOKENS = (
     "曾经是", "曾是", "过去是", "此前是", "原同事", "前同事", "前任同事", "已分手", "已经分手",
     "former ", "used to be", "ex-",
 )
+
+_SEMANTIC_CLAUSE_RE = re.compile(
+    r"(?<=[。！？!?；;\n])|(?<=[，,])\s*(?=(?:但|却|然而|不过|而是|而|只是|后来|反而|其实|事实上|同时))"
+)
+_DIMENSION_PRIORITY = {
+    "hostility": 80,
+    "rivalry": 75,
+    "professional": 70,
+    "family": 65,
+    "trust": 60,
+    "loyalty": 55,
+    "intimacy": 50,
+    "alliance": 45,
+}
 
 
 def semantics_for_dimension(dimension: str) -> RelationshipSemantics:
@@ -108,21 +123,41 @@ def semantics_for_dimension(dimension: str) -> RelationshipSemantics:
 
 
 def classify_relationship(description: str) -> RelationshipSemantics:
-    normalized = _compact_text(description).lower()
-    dimension_tokens = (
-        token
-        for _dimension, tokens in _DIMENSION_TOKENS
-        for token in tokens
-    )
-    if any(token in normalized for token in (*_UNCERTAINTY_TOKENS, *_NON_CURRENT_TOKENS)):
+    text = unicodedata.normalize("NFKC", _compact_text(description))
+    if not text:
         return semantics_for_dimension("unknown")
-    if any(token in normalized for token in _NEGATION_TOKENS) and any(
-        token in normalized for token in dimension_tokens
-    ):
-        return semantics_for_dimension("unknown")
-    for dimension, tokens in _DIMENSION_TOKENS:
-        if any(token in normalized for token in tokens):
-            return semantics_for_dimension(dimension)
+
+    asserted_dimensions: list[str] = []
+    clauses = [
+        clause.strip()
+        for clause in _SEMANTIC_CLAUSE_RE.split(text)
+        if clause.strip()
+    ] or [text]
+    for clause in clauses:
+        normalized = clause.lower()
+        if any(token in normalized for token in (*_UNCERTAINTY_TOKENS, *_NON_CURRENT_TOKENS)):
+            continue
+        dimensions = [
+            (dimension, token)
+            for dimension, tokens in _DIMENSION_TOKENS
+            for token in tokens
+            if token.lower() in normalized
+        ]
+        if not dimensions:
+            continue
+        if any(token in normalized for token in _NEGATION_TOKENS):
+            continue
+        # Prefer a specific/longer term, then a semantic priority.  This makes
+        # “信任的伙伴” resolve to trust rather than the generic alliance token
+        # while retaining the later asserted clause after a negated contrast.
+        dimension = max(
+            dimensions,
+            key=lambda item: (len(item[1]), _DIMENSION_PRIORITY.get(item[0], 0)),
+        )[0]
+        asserted_dimensions.append(dimension)
+
+    if asserted_dimensions:
+        return semantics_for_dimension(asserted_dimensions[-1])
     return semantics_for_dimension("unknown")
 
 

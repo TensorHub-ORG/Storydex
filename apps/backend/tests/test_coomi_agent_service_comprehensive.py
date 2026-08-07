@@ -405,8 +405,87 @@ async def test_stream_events_preserves_storydex_event_contract(monkeypatch, tmp_
     assert started_payload["permissionMode"] == "full_access"
     assert started_payload["reasoningEffort"] == "medium"
     assert started_payload["writesAllowed"] is True
+    assert started_payload["coreWritesAllowed"] is True
     assert any(tool["name"] == "StorydexSyncWiki" for tool in started_payload["toolSpecs"])
     assert "This turn is read-only" not in started_payload["systemPrompt"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_binding_blocks_core_writes_but_keeps_guarded_domain_mutator(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    started_payload = {}
+
+    class Bridge:
+        async def events(self):
+            yield {"type": "completed", "data": {"usage": {"input_tokens": 1, "output_tokens": 1}}}
+
+        async def close(self):
+            return None
+
+        async def cancel(self, *, steer=False):
+            return None
+
+    async def start(payload):
+        started_payload.update(payload)
+        return Bridge()
+
+    monkeypatch.setattr(coomi.LiveBridgeProcess, "start", start)
+    monkeypatch.setattr(
+        coomi.StorydexCoomiAgentService,
+        "get_status",
+        lambda self, **_kwargs: {"model": "model", "providerId": "provider"},
+    )
+    monkeypatch.setattr(coomi, "STORYDEX_COOMI_SESSIONS", tmp_path / "sessions")
+    contract = {
+        "intentFrame": {
+            "primary": "wiki_work",
+            "operationType": "modify_existing",
+            "effect": "modify",
+            "canWrite": True,
+        },
+        "knowledgeWritePolicy": {
+            "mode": "explicit_binding",
+            "confirmationRequired": True,
+            "confirmed": False,
+        },
+        "executionPolicy": {
+            "directFileWrites": False,
+            "allowedWriteRoots": [".storydex/.agent/runtime/knowledge-write-plans/"],
+        },
+    }
+
+    events = [
+        event
+        async for event in coomi.StorydexCoomiAgentService().stream_events(
+            prompt="把潮汐兽绑定到夜港星，关系是栖息于",
+            trace_id="trace-explicit",
+            session_id="story-explicit",
+            workspace_root=tmp_path,
+            turn_contract=contract,
+        )
+    ]
+
+    assert events[-1][0] == "AgentCompleted"
+    assert started_payload["writesAllowed"] is True
+    assert started_payload["coreWritesAllowed"] is False
+    assert "StorydexApplyKnowledgeUpdate" in started_payload["mutatingToolNames"]
+    prompt = started_payload["systemPrompt"]
+    assert "Do not call shell" in prompt
+    assert "write_file" in prompt
+    assert "StorydexApplyKnowledgeUpdate as the only state-changing tool" in prompt
+    assert "only prepare_explicit is allowed" in prompt
+    assert "Do not include sessionId, traceId, providerId, model, or extractorVersion" in prompt
+
+    confirmed_contract = json.loads(json.dumps(contract))
+    confirmed_contract["knowledgeWritePolicy"]["confirmed"] = True
+    confirmed_prompt = await coomi._build_coomi_system_prompt(
+        workspace_root=tmp_path,
+        prompt="确认",
+        turn_contract=confirmed_contract,
+    )
+    assert "only apply_explicit is allowed in this later confirmation turn" in confirmed_prompt
 
 
 @pytest.mark.asyncio
@@ -754,3 +833,5 @@ def test_system_prompt_assigns_core_and_domain_tool_ownership(tmp_path) -> None:
     assert "operationDiscipline (read_only)" not in prompt
     assert "operationGuidance (respond_only)" in prompt
     assert "routing guidance, not a permission boundary" in prompt
+    assert "call StorydexSyncWiki before reading project files" in prompt
+    assert "status=ready and noChanges=true" in prompt
