@@ -569,6 +569,23 @@ fn resolve_provider(
     Ok(provider)
 }
 
+fn save_session_after_run(
+    store: &SessionStore,
+    session: &mut Session,
+    outcome: Result<bool, coomi_engine::AgentError>,
+) -> Result<bool> {
+    session.touch();
+    let save_result = store.save(session);
+    match (outcome, save_result) {
+        (Ok(cancelled), Ok(())) => Ok(cancelled),
+        (Ok(_), Err(save_error)) => Err(save_error),
+        (Err(run_error), Ok(())) => Err(run_error.into()),
+        (Err(run_error), Err(save_error)) => Err(anyhow::anyhow!(
+            "{run_error}; additionally failed to save interrupted session: {save_error:#}"
+        )),
+    }
+}
+
 async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
     let cwd = canonical_directory(&request.cwd, "workspace")?;
     std::fs::create_dir_all(&request.home)?;
@@ -688,7 +705,7 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
     };
     let provider = HttpModelProvider::new(provider_config)?;
     let agent = Agent::new(system_prompt).with_reasoning_effort(request.reasoning_effort);
-    let cancelled = {
+    let run_outcome: Result<bool, coomi_engine::AgentError> = {
         let run = async {
             agent
                 .run_turn(
@@ -713,18 +730,15 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
         };
         tokio::pin!(run);
         if controls.cancellation_requested.load(Ordering::Acquire) {
-            true
+            Ok(true)
         } else {
             tokio::select! {
-                result = &mut run => {
-                    result?;
-                    false
-                }
-                _ = controls.cancelled.notified() => true,
+                result = &mut run => result.map(|()| false),
+                _ = controls.cancelled.notified() => Ok(true),
             }
         }
     };
-    store.save(&session)?;
+    let cancelled = save_session_after_run(&store, &mut session, run_outcome)?;
     if cancelled {
         emitter.event(
             "cancelled",
@@ -1008,6 +1022,70 @@ mod tests {
         })
         .expect("assistant message");
         assert_eq!(message.tool_calls.len(), 1);
+    }
+
+    #[test]
+    fn failed_run_outcome_is_saved_before_error_propagates() {
+        let directory = std::env::temp_dir().join(format!(
+            "storydex-coomi-bridge-failed-run-test-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).expect("create failed-run test directory");
+        let store = SessionStore::new(&directory);
+        let mut session = Session::new("mock", "deepseek-v4-flash", directory.clone());
+        let session_id = session.id;
+        session
+            .messages
+            .push(ChatMessage::user("read probe.txt and finish the task"));
+        let mut assistant = ChatMessage::assistant(
+            "",
+            vec![ToolCall {
+                id: "call-probe".into(),
+                name: "read_file".into(),
+                arguments: json!({"path": "probe.txt"}),
+            }],
+        );
+        assistant.provider_items.push(json!({
+            "role": "assistant",
+            "content": null,
+            "reasoning_content": "inspect the requested file",
+            "tool_calls": [{
+                "id": "call-probe",
+                "type": "function",
+                "function": {"name": "read_file", "arguments": "{\"path\":\"probe.txt\"}"}
+            }]
+        }));
+        session.messages.push(assistant);
+        session
+            .messages
+            .push(ChatMessage::tool("call-probe", "success: probe contents"));
+
+        let error = save_session_after_run(
+            &store,
+            &mut session,
+            Err(coomi_engine::AgentError::Provider(anyhow::anyhow!(
+                "provider returned HTTP 402 Payment Required"
+            ))),
+        )
+        .expect_err("the provider error must still propagate");
+
+        assert!(error.to_string().contains("HTTP 402 Payment Required"));
+        let restored = store.load(session_id).expect("load interrupted session");
+        assert_eq!(restored.messages.len(), 3);
+        assert_eq!(
+            restored.messages[0].content,
+            "read probe.txt and finish the task"
+        );
+        assert_eq!(
+            restored.messages[1].provider_items[0]["reasoning_content"],
+            "inspect the requested file"
+        );
+        assert_eq!(
+            restored.messages[2].tool_call_id.as_deref(),
+            Some("call-probe")
+        );
+
+        std::fs::remove_dir_all(&directory).expect("remove failed-run test directory");
     }
 
     #[test]
