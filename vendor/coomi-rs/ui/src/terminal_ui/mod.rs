@@ -1590,7 +1590,7 @@ fn handle_runtime_event(app: &mut TuiState, runtime_event: RuntimeEvent) {
                     }
                 }
                 AgentEvent::ContextUpdated(status) => app.context_status = status,
-                AgentEvent::CompactionStarted { automatic } => {
+                AgentEvent::CompactionStarted { automatic, .. } => {
                     app.status = if automatic {
                         "Compacting context".into()
                     } else {

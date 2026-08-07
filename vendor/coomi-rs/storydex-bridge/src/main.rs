@@ -123,6 +123,8 @@ struct BridgeRequest {
     #[serde(default)]
     base_permission_mode: String,
     #[serde(default)]
+    checkpoint_context: Option<Value>,
+    #[serde(default)]
     tool_specs: Vec<ToolSpec>,
     #[serde(default)]
     mutating_tool_names: Vec<String>,
@@ -182,9 +184,22 @@ impl AgentObserver for StorydexObserver {
             AgentEvent::TextDelta(value) => ("text_delta", json!({"text": value})),
             AgentEvent::ReasoningDelta(value) => ("reasoning_delta", json!({"text": value})),
             AgentEvent::ContextUpdated(status) => ("context_updated", json!(status)),
-            AgentEvent::CompactionStarted { automatic } => {
-                ("compaction_started", json!({"automatic": automatic}))
-            }
+            AgentEvent::CompactionStarted {
+                automatic,
+                checkpoint_valid,
+                checkpoint_hash,
+                tool_call_count,
+                evidence_revision_count,
+            } => (
+                "compaction_started",
+                json!({
+                    "automatic": automatic,
+                    "checkpointValid": checkpoint_valid,
+                    "checkpointHash": checkpoint_hash,
+                    "toolCallCount": tool_call_count,
+                    "evidenceRevisionCount": evidence_revision_count,
+                }),
+            ),
             AgentEvent::CompactionCompleted {
                 automatic,
                 before_tokens,
@@ -671,6 +686,14 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
         &provider_config.model,
         &cwd,
     )?;
+    if request.checkpoint_context.is_some()
+        && session.checkpoint_context != request.checkpoint_context
+    {
+        session.checkpoint_context = request.checkpoint_context.clone();
+        store
+            .save(&session)
+            .context("failed to persist structured checkpoint context before execution")?;
+    }
     let session_init_ms = session_started.elapsed().as_secs_f64() * 1000.0;
     emitter.event(
         "session_bound",
@@ -779,7 +802,10 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
     let provider_started = Instant::now();
     let provider = HttpModelProvider::new(provider_config)?;
     let provider_init_ms = provider_started.elapsed().as_secs_f64() * 1000.0;
-    let agent = Agent::new(system_prompt).with_reasoning_effort(request.reasoning_effort);
+    let checkpoint_store = store.clone();
+    let agent = Agent::new(system_prompt)
+        .with_reasoning_effort(request.reasoning_effort)
+        .with_compaction_checkpoint_writer(move |session| checkpoint_store.save(session));
     emitter.event(
         "runtime_initialized",
         json!({

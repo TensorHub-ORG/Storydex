@@ -478,6 +478,10 @@ pub enum AgentEvent {
     ContextUpdated(ContextStatus),
     CompactionStarted {
         automatic: bool,
+        checkpoint_valid: bool,
+        checkpoint_hash: String,
+        tool_call_count: usize,
+        evidence_revision_count: usize,
     },
     CompactionCompleted {
         automatic: bool,

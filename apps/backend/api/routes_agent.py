@@ -1493,10 +1493,39 @@ def _extract_trace_metrics(
     }
     observed_tool_signatures: set[str] = set()
     duplicate_tool_calls_same_revision = 0
+    evidence_observations = 0
+    evidence_invalidations = 0
+    evidence_byte_intervals: dict[tuple[str, str], list[tuple[int, int]]] = {}
+    evidence_covered_paths: set[str] = set()
+    evidence_missing_paths: set[str] = set()
     for item in events:
         if item.get("event") != "ToolDone":
             continue
         data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        ledger = data.get("evidenceLedger") if isinstance(data.get("evidenceLedger"), dict) else {}
+        evidence_observations += int(ledger.get("observationCount") or 0)
+        for observation in ledger.get("observations", []):
+            if not isinstance(observation, dict):
+                continue
+            evidence_invalidations += len(observation.get("invalidated") or [])
+            evidence_path = str(observation.get("path") or "")
+            evidence_revision = str(observation.get("revision") or "")
+            for span in observation.get("spans", []):
+                if not isinstance(span, dict):
+                    continue
+                try:
+                    start_byte = max(0, int(span.get("startByte") or 0))
+                    end_byte = max(start_byte, int(span.get("endByte") or 0))
+                except (TypeError, ValueError):
+                    continue
+                if end_byte > start_byte:
+                    evidence_byte_intervals.setdefault(
+                        (evidence_path, evidence_revision),
+                        [],
+                    ).append((start_byte, end_byte))
+        coverage = ledger.get("coverage") if isinstance(ledger.get("coverage"), dict) else {}
+        evidence_covered_paths.update(str(path) for path in coverage.get("coveredPaths", []) if str(path))
+        evidence_missing_paths.update(str(path) for path in coverage.get("missingPaths", []) if str(path))
         revision = str(data.get("source_revision") or "").strip()
         if not revision:
             continue
@@ -1516,6 +1545,16 @@ def _extract_trace_metrics(
         if signature in observed_tool_signatures:
             duplicate_tool_calls_same_revision += 1
         observed_tool_signatures.add(signature)
+
+    evidence_unique_bytes = 0
+    for intervals in evidence_byte_intervals.values():
+        merged_intervals: list[list[int]] = []
+        for start_byte, end_byte in sorted(intervals):
+            if not merged_intervals or start_byte > merged_intervals[-1][1]:
+                merged_intervals.append([start_byte, end_byte])
+            else:
+                merged_intervals[-1][1] = max(merged_intervals[-1][1], end_byte)
+        evidence_unique_bytes += sum(end_byte - start_byte for start_byte, end_byte in merged_intervals)
 
     model_usages: List[Dict[str, Any]] = []
     for item in events:
@@ -1616,6 +1655,15 @@ def _extract_trace_metrics(
         "logicalInputTokens": max(input_tokens_by_round, default=0),
         "transmittedInputTokens": sum(input_tokens_by_round),
         "cachedInputTokens": sum(cached_tokens_by_round),
+        "evidenceObservations": evidence_observations,
+        "evidenceInvalidations": evidence_invalidations,
+        "uniqueEvidenceBytes": evidence_unique_bytes,
+        "evidenceCoverage": {
+            "coveredPathCount": len(evidence_covered_paths),
+            "missingPathCount": len(evidence_missing_paths),
+            "coveredPaths": sorted(evidence_covered_paths),
+            "missingPaths": sorted(evidence_missing_paths),
+        },
         **runtime_metrics,
     }
 
@@ -1642,6 +1690,9 @@ def _merge_runtime_trace_metrics(
         "logicalInputTokens",
         "transmittedInputTokens",
         "cachedInputTokens",
+        "evidenceObservations",
+        "evidenceInvalidations",
+        "uniqueEvidenceBytes",
     )
     totals = context_trace.get("totals") if isinstance(context_trace.get("totals"), dict) else {}
     totals.update({key: trace.get(key, 0) for key in runtime_keys})
@@ -1653,6 +1704,7 @@ def _merge_runtime_trace_metrics(
     )
     performance.update({key: trace.get(key, 0) for key in runtime_keys})
     context_trace["performance"] = performance
+    context_trace["evidenceCoverage"] = trace.get("evidenceCoverage", {})
     return context_trace
 
 

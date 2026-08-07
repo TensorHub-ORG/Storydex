@@ -92,6 +92,10 @@ FEATURE_FLAG_DEFAULTS: dict[str, object] = {
     "CONTEXT_PIPELINE_FTS5": True,
     "CONTEXT_LRU_ENABLED": False,
     "CONTEXT_TOKEN_BUDGET_REAL": False,
+    # P1-7 token controls remain shadow/disabled by default.  Projects can
+    # override these integers through the same feature-flag file/env path.
+    "CONTEXT_TOKEN_WINDOW": 256000,
+    "CONTEXT_OUTPUT_RESERVE_TOKENS": 8192,
     "MEMORY_LAYER_V2": False,
     "SUMMARY_PRODUCT_ENABLED": False,
     "ENTITY_MODEL_V2": False,

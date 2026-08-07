@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import hashlib
-import importlib.metadata
 import json
 import os
 import re
@@ -900,6 +899,18 @@ class ReplayableLLMProvider:
                         ),
                     }
                 )
+                token_accounting = request_record.get("tokenAccounting")
+                if isinstance(token_accounting, dict):
+                    cached_input = normalized_usage.get("cacheReadInputTokens")
+                    if cached_input is not None:
+                        try:
+                            token_accounting["cachedInputTokens"] = max(0, int(cached_input or 0))
+                        except (TypeError, ValueError):
+                            token_accounting["cachedInputTokens"] = 0
+                    request_record["tokenAccounting"] = token_accounting
+                    request_record["cachedInputTokens"] = int(
+                        token_accounting.get("cachedInputTokens") or 0
+                    )
         return normalized_usage
 
     @staticmethod

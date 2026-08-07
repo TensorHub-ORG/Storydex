@@ -529,7 +529,6 @@ class StorydexCoomiAgentService:
         turn_contract: Dict[str, Any] | None = None,
         cancellation_token: Any = None,
     ) -> AsyncIterator[tuple[str, Dict[str, Any]]]:
-        del active_file
         started = time.perf_counter()
         workspace = Path(workspace_root).resolve()
         normalized_session = str(session_id or "default").strip() or "default"
@@ -639,6 +638,14 @@ class StorydexCoomiAgentService:
                     "writesAllowed": writes_allowed,
                     "coreWritesAllowed": core_writes_allowed,
                     "allowedWriteRoots": allowed_roots,
+                    "checkpointContext": _compaction_checkpoint_context(
+                        workspace_root=workspace,
+                        session_id=normalized_session,
+                        permission_mode=permission_mode,
+                        prompt=effective_prompt,
+                        active_file=active_file,
+                        turn_contract=turn_contract,
+                    ),
                     "toolSpecs": registry.specs(),
                     "mutatingToolNames": mutating_tool_names,
                 }
@@ -674,6 +681,8 @@ class StorydexCoomiAgentService:
         )
         translator = _CoomiEventTranslator(
             session_id=normalized_session,
+            trace_id=trace_id,
+            workspace_root=workspace,
             usage_baseline=_runtime_session_usage(binding),
             bridge_start_ms=bridge_start_ms,
         )
@@ -1504,14 +1513,27 @@ class _CoomiEventTranslator:
         self,
         *,
         session_id: str,
+        trace_id: str = "",
+        workspace_root: Path | None = None,
         usage_baseline: Dict[str, Any] | None = None,
         bridge_start_ms: float = 0.0,
     ) -> None:
         self.session_id = session_id
+        self.trace_id = str(trace_id or "")
+        self.workspace_root = Path(workspace_root).resolve() if workspace_root is not None else None
+        self.evidence_ledger = None
+        if self.workspace_root is not None:
+            try:
+                from services.evidence_ledger_service import get_evidence_ledger_service
+
+                self.evidence_ledger = get_evidence_ledger_service(self.workspace_root, session_id)
+            except Exception:
+                logger.exception("Unable to initialize evidence ledger for %s", session_id)
         self.started_tools: dict[str, float] = {}
         self.usage_baseline = dict(usage_baseline or {})
         self.turn_usage: Dict[str, Any] | None = None
         self.reasoning_plan: Dict[str, Any] | None = None
+        self.compaction_checkpoint: Dict[str, Any] = {}
         self.runtime_metrics: Dict[str, float] = {
             "bridgeStartMs": round(max(0.0, float(bridge_start_ms or 0.0)), 3)
         }
@@ -1663,6 +1685,16 @@ class _CoomiEventTranslator:
                 "arguments": call.get("arguments") or {},
             }
             payload.update(_tool_result_provenance(raw_output))
+            if self.evidence_ledger is not None:
+                try:
+                    payload["evidenceLedger"] = self.evidence_ledger.record_tool_result(
+                        tool_name=str(call.get("name") or "unknown"),
+                        arguments=call.get("arguments") if isinstance(call.get("arguments"), dict) else {},
+                        raw_output=raw_output,
+                        turn_id=self.trace_id,
+                    )
+                except Exception:
+                    logger.exception("Unable to record tool evidence for %s", call.get("name"))
             review = _knowledge_review_from_tool_preview(str(call.get("name") or ""), preview)
             if review:
                 payload["knowledge_review"] = review
@@ -1684,6 +1716,21 @@ class _CoomiEventTranslator:
                 "usage": self.turn_usage,
                 **_context_snapshot_from_bridge(data),
             }
+        if name == "compaction_started":
+            self.compaction_checkpoint = {
+                "checkpointValid": bool(data.get("checkpointValid")),
+                "checkpointHash": str(data.get("checkpointHash") or ""),
+                "toolCallCount": int(data.get("toolCallCount") or 0),
+                "evidenceRevisionCount": int(data.get("evidenceRevisionCount") or 0),
+            }
+            return "CompressionEvent", {
+                "_type": "CompressionEvent",
+                "_version": 1,
+                "strategy": "coomi-rs",
+                "compact_status": "checkpoint_ready",
+                "automatic": bool(data.get("automatic")),
+                **self.compaction_checkpoint,
+            }
         if name == "compaction_completed":
             before = int(data.get("beforeTokens") or 0)
             after = int(data.get("afterTokens") or 0)
@@ -1695,6 +1742,7 @@ class _CoomiEventTranslator:
                 "compressed_messages": after,
                 "compact_status": "completed",
                 "summary": f"Coomi compacted context tokens: {before} -> {after}.",
+                **self.compaction_checkpoint,
             }
         if name == "plan_updated":
             steps = data.get("steps") if isinstance(data.get("steps"), list) else []
@@ -1838,6 +1886,69 @@ def _build_coomi_memory(
 ) -> tuple[None, None]:
     del workspace_root, policy, provider
     return None, None
+
+
+def _compaction_checkpoint_context(
+    *,
+    workspace_root: Path,
+    session_id: str,
+    permission_mode: str,
+    prompt: str,
+    active_file: str,
+    turn_contract: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    contract = _dict_value(turn_contract)
+    turn_plan = _dict_value(contract.get("turnPlan"))
+    intent = _dict_value(contract.get("intentFrame"))
+    targets: list[str] = []
+    for value in (
+        active_file,
+        turn_plan.get("authoritativeChapterPath"),
+        turn_plan.get("nextSegmentPath"),
+    ):
+        normalized = str(value or "").strip().replace("\\", "/")
+        if normalized:
+            targets.append(normalized)
+    for item in turn_plan.get("fragmentTargets", []):
+        if isinstance(item, dict) and str(item.get("path") or "").strip():
+            targets.append(str(item["path"]).strip().replace("\\", "/"))
+    for value in intent.get("assetTargets", []):
+        normalized = str(value or "").strip().replace("\\", "/")
+        if normalized:
+            targets.append(normalized)
+    evidence_revisions: list[Dict[str, Any]] = []
+    try:
+        from services.evidence_ledger_service import get_evidence_ledger_service
+
+        snapshot = get_evidence_ledger_service(workspace_root, session_id).snapshot()
+        for item in snapshot.get("entries", [])[:128]:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path") or "")
+            revision = str(item.get("revision") or "")
+            if path and revision:
+                evidence_revisions.append(
+                    {
+                        "path": path,
+                        "revision": revision,
+                        "spans": [
+                            dict(span)
+                            for span in item.get("spans", [])[:32]
+                            if isinstance(span, dict)
+                        ],
+                    }
+                )
+    except Exception:
+        logger.exception("Unable to snapshot evidence ledger for compaction checkpoint")
+    return {
+        "_type": "StorydexCompactionContext",
+        "_version": 1,
+        "permissionMode": str(permission_mode or ""),
+        "target": targets[0] if targets else "",
+        "targets": list(dict.fromkeys(targets)),
+        "promptHash": "sha256:" + sha256(str(prompt or "").encode("utf-8")).hexdigest(),
+        "evidenceRevisions": evidence_revisions,
+    }
 
 
 async def _build_coomi_system_prompt(
@@ -2270,8 +2381,15 @@ def _render_context_assembly_blocks(value: Dict[str, Any]) -> str:
     for raw in blocks[:14]:
         block = _dict_value(raw)
         content = str(block.get("content") or "").strip()
-        if not content:
+        omitted = bool(block.get("omitted"))
+        truncated = bool(block.get("truncated")) and not omitted
+        drop_reason = str(block.get("dropReason") or "").strip()
+        if omitted:
+            content = f"[omitted: {drop_reason or 'context_budget'}]"
+        elif not content:
             continue
+        elif truncated:
+            content = f"[truncated: {drop_reason or 'context_budget'}]\n{content}"
         title = str(block.get("title") or block.get("id") or "Context").strip()
         source_paths = (
             block.get("sourcePaths") if isinstance(block.get("sourcePaths"), list) else []

@@ -519,7 +519,7 @@ impl AgentObserver for TerminalObserver {
                 "[context {}% {}/{}]",
                 status.used_percent, status.used_tokens, status.effective_context_window
             ),
-            AgentEvent::CompactionStarted { automatic } => eprintln!(
+            AgentEvent::CompactionStarted { automatic, .. } => eprintln!(
                 "[context compaction {}]",
                 if *automatic { "automatic" } else { "manual" }
             ),

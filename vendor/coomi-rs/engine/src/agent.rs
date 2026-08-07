@@ -2,6 +2,7 @@ use crate::AgentEvent;
 use crate::AgentObserver;
 use crate::ApprovalHandler;
 use crate::ChatMessage;
+use crate::CompactionCheckpoint;
 use crate::CompactionRequest;
 use crate::InputQueue;
 use crate::ModelProvider;
@@ -48,6 +49,7 @@ pub struct Agent {
     force_compaction: bool,
     input_queue: Option<Arc<InputQueue>>,
     reasoning_effort: ReasoningEffort,
+    compaction_checkpoint_writer: Option<Arc<dyn Fn(&Session) -> anyhow::Result<()> + Send + Sync>>,
 }
 
 impl Agent {
@@ -61,6 +63,7 @@ impl Agent {
             force_compaction: false,
             input_queue: None,
             reasoning_effort: ReasoningEffort::Auto,
+            compaction_checkpoint_writer: None,
         }
     }
 
@@ -81,6 +84,14 @@ impl Agent {
 
     pub fn with_reasoning_effort(mut self, reasoning_effort: ReasoningEffort) -> Self {
         self.reasoning_effort = reasoning_effort;
+        self
+    }
+
+    pub fn with_compaction_checkpoint_writer<F>(mut self, writer: F) -> Self
+    where
+        F: Fn(&Session) -> anyhow::Result<()> + Send + Sync + 'static,
+    {
+        self.compaction_checkpoint_writer = Some(Arc::new(writer));
         self
     }
 
@@ -149,10 +160,10 @@ impl Agent {
         } else {
             Vec::new()
         };
-        session.messages = normalize_history(&session.messages);
+        let normalized = normalize_history(&session.messages);
         session
             .context
-            .recompute(&self.system_prompt, &session.messages, &tool_specs);
+            .recompute(&self.system_prompt, &normalized, &tool_specs);
         observer.on_event(&AgentEvent::ContextUpdated(
             session.context.status(&provider.capabilities()),
         ));
@@ -251,10 +262,10 @@ impl Agent {
         let mut compacted_for_provider_error = false;
 
         for round in 1..=self.max_tool_rounds {
-            session.messages = normalize_history(&session.messages);
+            let normalized = normalize_history(&session.messages);
             session
                 .context
-                .recompute(&self.system_prompt, &session.messages, &tool_specs);
+                .recompute(&self.system_prompt, &normalized, &tool_specs);
             observer.on_event(&AgentEvent::ContextUpdated(
                 session.context.status(&capabilities),
             ));
@@ -269,6 +280,8 @@ impl Agent {
                     !(self.force_compaction && round == 1),
                 )
                 .await?;
+            } else {
+                session.messages = normalized;
             }
 
             observer.on_event(&AgentEvent::ModelStarted {
@@ -384,7 +397,25 @@ impl Agent {
         automatic: bool,
     ) -> Result<(), AgentError> {
         let before_tokens = session.context.estimated_active_tokens;
-        observer.on_event(&AgentEvent::CompactionStarted { automatic });
+        let checkpoint = CompactionCheckpoint::from_session(session)
+            .map_err(|error| AgentError::Compaction(anyhow::anyhow!(error)))?;
+        checkpoint
+            .validate()
+            .map_err(|error| AgentError::Compaction(anyhow::anyhow!(error)))?;
+        let checkpoint_hash = checkpoint.checkpoint_hash.clone();
+        let tool_call_count = checkpoint.tool_calls.len();
+        let evidence_revision_count = checkpoint.evidence_revisions.len();
+        session.compaction_checkpoint = Some(checkpoint);
+        if let Some(writer) = &self.compaction_checkpoint_writer {
+            writer(session).map_err(AgentError::Compaction)?;
+        }
+        observer.on_event(&AgentEvent::CompactionStarted {
+            automatic,
+            checkpoint_valid: true,
+            checkpoint_hash,
+            tool_call_count,
+            evidence_revision_count,
+        });
         let capabilities = provider.capabilities();
         let mut normalized = normalize_history(&session.messages);
         let compaction_limit = capabilities
@@ -800,6 +831,61 @@ mod tests {
         assert!(session.messages.last().is_some_and(|message| {
             message.compaction_summary && message.content.contains("summary")
         }));
+        assert!(
+            session
+                .compaction_checkpoint
+                .as_ref()
+                .is_some_and(|checkpoint| {
+                    checkpoint.validate().is_ok() && checkpoint.source_message_count == 1
+                })
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_checkpoint_preserves_the_original_session() {
+        let mut session = Session::new("mock", "tiny", PathBuf::from("."));
+        session.messages.push(ChatMessage::user("keep this target"));
+        session
+            .messages
+            .push(ChatMessage::tool("orphan", "unexpected result"));
+        let before = session.messages.clone();
+        let provider = CompactingProvider {
+            calls: Mutex::new(0),
+        };
+
+        let error = Agent::new("test")
+            .compact_session(&mut session, &provider, &EchoTool, &NoopObserver)
+            .await
+            .expect_err("invalid checkpoint must fail closed");
+
+        assert!(error.to_string().contains("orphan tool result"));
+        assert_eq!(session.messages, before);
+        assert_eq!(*provider.calls.lock().expect("lock calls"), 0);
+    }
+
+    #[tokio::test]
+    async fn compaction_persists_pre_compaction_checkpoint_before_provider_call() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let store = crate::SessionStore::new(home.path());
+        let mut session = Session::new("mock", "tiny", home.path().to_path_buf());
+        session
+            .messages
+            .push(ChatMessage::user("retain original target"));
+        let session_id = session.id;
+        let checkpoint_store = store.clone();
+        let provider = CompactingProvider {
+            calls: Mutex::new(0),
+        };
+
+        Agent::new("test")
+            .with_compaction_checkpoint_writer(move |value| checkpoint_store.save(value))
+            .compact_session(&mut session, &provider, &EchoTool, &NoopObserver)
+            .await
+            .expect("compact with checkpoint writer");
+
+        let persisted = store.load(session_id).expect("load persisted checkpoint");
+        assert_eq!(persisted.messages[0].content, "retain original target");
+        assert!(persisted.compaction_checkpoint.is_some());
     }
 
     #[test]

@@ -179,6 +179,21 @@ def build_context_trace(
             "logicalInputTokens": 0,
             "transmittedInputTokens": 0,
             "cachedInputTokens": 0,
+            "shadowLogicalInputTokens": 0,
+            "shadowTransmittedInputTokens": 0,
+            "shadowCachedInputTokens": 0,
+            "shadowOutputReserveTokens": 0,
+            "shadowRequestCount": 0,
+            "shadowTokenDelta": 0,
+            "logicalContextTokens": 0,
+            "transmittedContextTokens": 0,
+            "cachedContextTokens": 0,
+            "contextOmittedBlockCount": 0,
+            "contextTruncatedBlockCount": 0,
+            "contextCacheHitCount": 0,
+            "evidenceObservations": 0,
+            "evidenceInvalidations": 0,
+            "uniqueEvidenceBytes": 0,
         },
     }
 
@@ -299,6 +314,46 @@ def capture_provider_request(
         "estimateErrorTokens": None,
         "estimateErrorPct": None,
     }
+    try:
+        # Local import avoids a module cycle: context_budget_service uses the
+        # token estimator defined in this module.
+        from services.context_budget_service import (
+            DEFAULT_OUTPUT_RESERVE_TOKENS,
+            request_token_accounting,
+        )
+
+        raw_reserve = (kwargs or {}).get("outputReserveTokens")
+        if raw_reserve is None:
+            raw_reserve = (kwargs or {}).get("output_reserve_tokens")
+        try:
+            reserve = int(raw_reserve) if raw_reserve is not None else DEFAULT_OUTPUT_RESERVE_TOKENS
+        except (TypeError, ValueError):
+            reserve = DEFAULT_OUTPUT_RESERVE_TOKENS
+        token_accounting = request_token_accounting(
+            messages=messages,
+            tools=tools or [],
+            output_reserve_tokens=reserve,
+        )
+        request_record["tokenAccounting"] = token_accounting
+        request_record.update(
+            {
+                "logicalInputTokens": int(token_accounting.get("logicalInputTokens") or 0),
+                "transmittedInputTokens": int(token_accounting.get("transmittedInputTokens") or 0),
+                "cachedInputTokens": int(token_accounting.get("cachedInputTokens") or 0),
+                "outputReserveTokens": int(token_accounting.get("outputReserveTokens") or 0),
+            }
+        )
+    except Exception:
+        # Request capture is observability-only; preserve the Provider call if
+        # an optional accounting dependency is unavailable.
+        request_record["tokenAccounting"] = {
+            "_type": "RequestTokenAccounting",
+            "_version": 1,
+            "logicalInputTokens": request_record["requestEstTokens"],
+            "transmittedInputTokens": request_record["requestEstTokens"],
+            "cachedInputTokens": 0,
+            "outputReserveTokens": 0,
+        }
 
     assembly = context_assembly if isinstance(context_assembly, dict) else {}
     trace = assembly.get("contextTrace") if isinstance(assembly.get("contextTrace"), dict) else None
@@ -452,6 +507,15 @@ def merge_llm_metrics(context_trace: Dict[str, Any] | None, metrics: Dict[str, A
         "cacheCreationInputTokens",
     )
     reported_reasoning = _sum_optional(reported_requests, "reasoningTokens")
+    accounting_records = [
+        request.get("tokenAccounting")
+        for request in provider_requests
+        if isinstance(request.get("tokenAccounting"), dict)
+    ]
+    shadow_logical = sum(int(item.get("logicalInputTokens") or 0) for item in accounting_records)
+    shadow_transmitted = sum(int(item.get("transmittedInputTokens") or 0) for item in accounting_records)
+    shadow_cached = sum(int(item.get("cachedInputTokens") or 0) for item in accounting_records)
+    shadow_reserve = sum(int(item.get("outputReserveTokens") or 0) for item in accounting_records)
     coverage_pct = (
         round((len(reported_requests) / len(provider_requests)) * 100, 4)
         if provider_requests
@@ -495,8 +559,30 @@ def merge_llm_metrics(context_trace: Dict[str, Any] | None, metrics: Dict[str, A
             "providerAttemptCount": provider_attempt_count,
             "providerRetryCount": provider_retry_count,
             "providerFailedAttemptCount": provider_failed_attempt_count,
+            "shadowLogicalInputTokens": shadow_logical,
+            "shadowTransmittedInputTokens": shadow_transmitted,
+            "shadowCachedInputTokens": shadow_cached,
+            "shadowOutputReserveTokens": shadow_reserve,
+            "shadowRequestCount": len(accounting_records),
+            "shadowTokenDelta": shadow_transmitted - shadow_logical,
         }
     )
+    # Keep the long-standing aggregate names useful for direct callers.  The
+    # route-level runtime merge may replace them with observed Provider usage;
+    # the shadow-prefixed values remain the deterministic request accounting.
+    if not int(totals.get("logicalInputTokens") or 0):
+        totals["logicalInputTokens"] = shadow_logical
+    if not int(totals.get("transmittedInputTokens") or 0):
+        totals["transmittedInputTokens"] = shadow_transmitted
+    if not int(totals.get("cachedInputTokens") or 0):
+        totals["cachedInputTokens"] = shadow_cached
+    trace["requestTokenAccounting"] = {
+        "logicalInputTokens": shadow_logical,
+        "transmittedInputTokens": shadow_transmitted,
+        "cachedInputTokens": shadow_cached,
+        "outputReserveTokens": shadow_reserve,
+        "requestCount": len(accounting_records),
+    }
     trace["totals"] = totals
     return trace
 
@@ -546,6 +632,37 @@ def summarize_context_trace(context_trace: Dict[str, Any] | None) -> Dict[str, A
         "logicalInputTokens": int(totals.get("logicalInputTokens") or 0),
         "transmittedInputTokens": int(totals.get("transmittedInputTokens") or 0),
         "cachedInputTokens": int(totals.get("cachedInputTokens") or 0),
+        "shadowLogicalInputTokens": int(totals.get("shadowLogicalInputTokens") or 0),
+        "shadowTransmittedInputTokens": int(totals.get("shadowTransmittedInputTokens") or 0),
+        "shadowCachedInputTokens": int(totals.get("shadowCachedInputTokens") or 0),
+        "shadowOutputReserveTokens": int(totals.get("shadowOutputReserveTokens") or 0),
+        "shadowRequestCount": int(totals.get("shadowRequestCount") or 0),
+        "shadowTokenDelta": int(totals.get("shadowTokenDelta") or 0),
+        "logicalContextTokens": int(totals.get("logicalContextTokens") or 0),
+        "transmittedContextTokens": int(totals.get("transmittedContextTokens") or 0),
+        "cachedContextTokens": int(totals.get("cachedContextTokens") or 0),
+        "contextOmittedBlockCount": int(totals.get("contextOmittedBlockCount") or 0),
+        "contextTruncatedBlockCount": int(totals.get("contextTruncatedBlockCount") or 0),
+        "contextCacheHitCount": int(totals.get("contextCacheHitCount") or 0),
+        "contextBudgetMode": str(
+            (trace.get("tokenAccounting") or {}).get("mode")
+            if isinstance(trace.get("tokenAccounting"), dict)
+            else ""
+        ),
+        "contextCacheStatus": str(
+            (trace.get("cache") or {}).get("status")
+            if isinstance(trace.get("cache"), dict)
+            else ""
+        ),
+        "jitEnabled": bool(
+            (trace.get("jit") or {}).get("enabled")
+            if isinstance(trace.get("jit"), dict)
+            else False
+        ),
+        "evidenceObservations": int(totals.get("evidenceObservations") or 0),
+        "evidenceInvalidations": int(totals.get("evidenceInvalidations") or 0),
+        "uniqueEvidenceBytes": int(totals.get("uniqueEvidenceBytes") or 0),
+        "evidenceCoverage": trace.get("evidenceCoverage") if isinstance(trace.get("evidenceCoverage"), dict) else {},
         "providerReportedTotalTokens": totals.get("providerReportedTotalTokens"),
         "estimatedUsageRequestCount": int(totals.get("estimatedUsageRequestCount") or 0),
         "missingUsageRequestCount": int(totals.get("missingUsageRequestCount") or 0),

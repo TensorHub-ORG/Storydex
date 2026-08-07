@@ -3,13 +3,17 @@ use crate::ContextState;
 use crate::LoopState;
 use crate::PlanState;
 use crate::TokenUsage;
+use crate::ToolCall;
 use anyhow::Context;
 use anyhow::Result;
 use chrono::DateTime;
 use chrono::Utc;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::cmp::Reverse;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -17,6 +21,154 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 pub const SESSION_SCHEMA_VERSION: u32 = 1;
+pub const COMPACTION_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ToolCallCheckpoint {
+    pub id: String,
+    pub name: String,
+    pub arguments: Value,
+    #[serde(default)]
+    pub result: Option<String>,
+    #[serde(default)]
+    pub complete: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CompactionCheckpoint {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub plan: Option<PlanState>,
+    #[serde(default)]
+    pub loop_state: Option<LoopState>,
+    #[serde(default)]
+    pub permission_mode: String,
+    #[serde(default)]
+    pub target: String,
+    #[serde(default)]
+    pub evidence_revisions: Vec<Value>,
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCallCheckpoint>,
+    pub source_message_count: usize,
+    pub source_message_hash: String,
+    pub checkpoint_hash: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl CompactionCheckpoint {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != COMPACTION_CHECKPOINT_SCHEMA_VERSION {
+            return Err(format!(
+                "unsupported compaction checkpoint schema {}; expected {}",
+                self.schema_version, COMPACTION_CHECKPOINT_SCHEMA_VERSION
+            ));
+        }
+        if let Some(plan) = &self.plan {
+            plan.validate()?;
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        for call in &self.tool_calls {
+            if call.id.trim().is_empty() || !ids.insert(call.id.clone()) {
+                return Err(
+                    "compaction checkpoint contains duplicate or empty tool call ids".into(),
+                );
+            }
+            if call.name.trim().is_empty() {
+                return Err(format!(
+                    "compaction checkpoint tool call {} has no name",
+                    call.id
+                ));
+            }
+            if call.complete && call.result.is_none() {
+                return Err(format!("completed tool call {} has no result", call.id));
+            }
+        }
+        if self.source_message_count == 0 {
+            return Err("compaction checkpoint has no source messages".into());
+        }
+        if self.source_message_hash.trim().is_empty() || self.checkpoint_hash.trim().is_empty() {
+            return Err("compaction checkpoint is missing integrity hashes".into());
+        }
+        Ok(())
+    }
+
+    pub fn from_session(session: &Session) -> Result<Self, String> {
+        if session.messages.is_empty() {
+            return Err("compaction checkpoint requires at least one message".into());
+        }
+        let mut calls: BTreeMap<String, (ToolCall, Option<String>)> = BTreeMap::new();
+        for message in &session.messages {
+            for call in &message.tool_calls {
+                if calls.contains_key(&call.id) {
+                    return Err(format!("duplicate tool call id {}", call.id));
+                }
+                calls.insert(call.id.clone(), (call.clone(), None));
+            }
+            if let Some(call_id) = &message.tool_call_id {
+                let Some((_call, result)) = calls.get_mut(call_id) else {
+                    return Err(format!("orphan tool result {}", call_id));
+                };
+                if result.is_some() {
+                    return Err(format!("duplicate tool result {}", call_id));
+                }
+                *result = Some(message.content.clone());
+            }
+        }
+        let tool_calls = calls
+            .into_values()
+            .map(|(call, result)| ToolCallCheckpoint {
+                id: call.id,
+                name: call.name,
+                arguments: call.arguments,
+                complete: result.is_some(),
+                result,
+            })
+            .collect::<Vec<_>>();
+        let source_bytes =
+            serde_json::to_vec(&session.messages).map_err(|error| error.to_string())?;
+        let source_message_hash = format!("sha256:{:x}", Sha256::digest(source_bytes));
+        let context = session
+            .checkpoint_context
+            .as_ref()
+            .and_then(Value::as_object);
+        let permission_mode = context
+            .and_then(|value| {
+                value
+                    .get("permissionMode")
+                    .or_else(|| value.get("permission_mode"))
+            })
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let target = context
+            .and_then(|value| value.get("target").or_else(|| value.get("targetPath")))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let evidence_revisions = context
+            .and_then(|value| value.get("evidenceRevisions"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut checkpoint = Self {
+            schema_version: COMPACTION_CHECKPOINT_SCHEMA_VERSION,
+            plan: session.plan.clone(),
+            loop_state: session.loop_state.clone(),
+            permission_mode,
+            target,
+            evidence_revisions,
+            tool_calls,
+            source_message_count: session.messages.len(),
+            source_message_hash,
+            checkpoint_hash: String::new(),
+            created_at: Utc::now(),
+        };
+        let bytes = serde_json::to_vec(&checkpoint).map_err(|error| error.to_string())?;
+        checkpoint.checkpoint_hash = format!("sha256:{:x}", Sha256::digest(bytes));
+        checkpoint.validate()?;
+        Ok(checkpoint)
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Session {
@@ -36,6 +188,10 @@ pub struct Session {
     pub loop_state: Option<LoopState>,
     #[serde(default)]
     pub hooks_started: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_context: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_checkpoint: Option<CompactionCheckpoint>,
 }
 
 impl Session {
@@ -54,6 +210,8 @@ impl Session {
             plan: None,
             loop_state: None,
             hooks_started: false,
+            checkpoint_context: None,
+            compaction_checkpoint: None,
         }
     }
 
@@ -78,6 +236,7 @@ pub struct SessionSummary {
     pub preview: String,
 }
 
+#[derive(Clone)]
 pub struct SessionStore {
     directory: PathBuf,
 }
@@ -323,5 +482,73 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
             .count();
         assert_eq!(temporary_files, 0);
+    }
+
+    #[test]
+    fn compaction_checkpoint_preserves_structured_state_and_tool_pairs() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let mut session = Session::new("provider", "model", home.path().to_path_buf());
+        session.plan = Some(PlanState {
+            explanation: Some("inspect before edit".into()),
+            steps: vec![crate::PlanStep {
+                step: "Inspect chapter".into(),
+                status: crate::PlanStepStatus::InProgress,
+            }],
+        });
+        session.loop_state = Some(LoopState {
+            objective: "Finish chapter audit".into(),
+            status: crate::LoopStatus::Active,
+            token_budget: Some(10_000),
+            tokens_used: 120,
+            time_used_seconds: 2,
+            blocked_streak: 0,
+            turns_completed: 1,
+        });
+        session.checkpoint_context = Some(serde_json::json!({
+            "permissionMode": "plan_mode",
+            "target": "chapters/001.md",
+            "evidenceRevisions": [{"path": "chapters/001.md", "revision": "sha256:test"}],
+        }));
+        session.messages.push(ChatMessage::assistant(
+            "",
+            vec![ToolCall {
+                id: "call-1".into(),
+                name: "read_file".into(),
+                arguments: serde_json::json!({"path": "chapters/001.md"}),
+            }],
+        ));
+        session
+            .messages
+            .push(ChatMessage::tool("call-1", "success: chapter evidence"));
+
+        let checkpoint = CompactionCheckpoint::from_session(&session).expect("build checkpoint");
+
+        checkpoint.validate().expect("valid checkpoint");
+        assert_eq!(checkpoint.permission_mode, "plan_mode");
+        assert_eq!(checkpoint.target, "chapters/001.md");
+        assert_eq!(checkpoint.evidence_revisions.len(), 1);
+        assert_eq!(checkpoint.tool_calls.len(), 1);
+        assert!(checkpoint.tool_calls[0].complete);
+        assert_eq!(
+            checkpoint.tool_calls[0].result.as_deref(),
+            Some("success: chapter evidence")
+        );
+    }
+
+    #[test]
+    fn corrupt_tool_pair_checkpoint_fails_without_mutating_messages() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let mut session = Session::new("provider", "model", home.path().to_path_buf());
+        session
+            .messages
+            .push(ChatMessage::tool("orphan", "unexpected"));
+        let before = session.messages.clone();
+
+        let error = CompactionCheckpoint::from_session(&session)
+            .expect_err("orphan result must fail checkpoint validation");
+
+        assert!(error.contains("orphan tool result"));
+        assert_eq!(session.messages, before);
+        assert!(session.compaction_checkpoint.is_none());
     }
 }

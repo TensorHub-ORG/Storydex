@@ -9,7 +9,16 @@ from typing import Any, Dict, List, Sequence, Set, Tuple
 
 from core.bounded_text_io import read_text_limited as read_bounded_text_limited
 from core.bounded_text_io import read_text_preview as read_bounded_text_preview
+from core.config import FEATURE_FLAG_DEFAULTS
+from core.feature_flags import FeatureFlags
 from services.content_catalog_service import ContentCatalogSnapshot
+from services.context_budget_service import (
+    DEFAULT_CONTEXT_WINDOW,
+    DEFAULT_OUTPUT_RESERVE_TOKENS,
+    apply_context_controls,
+    context_cache_key,
+    get_context_assembly_cache,
+)
 from services.context_trace_service import (
     MAX_CONTEXT_SOURCE_PATHS,
     build_context_trace,
@@ -19,7 +28,6 @@ from services.context_trace_service import (
 from services.context_policy import ContextPolicy
 from services.entity_registry import EntityRegistry
 from services.fact_memory_store import FactMemoryStore
-from services.performance_trace_service import record_duration
 from services.relationship_memory_store import RelationshipMemoryStore
 from services.story_project_service import ChapterState, StoryProjectService, get_story_project_service
 
@@ -68,6 +76,49 @@ class StorydexContextAssemblerService:
         assemble_started = time.perf_counter()
         root = Path(workspace_root).resolve()
         effective_policy = policy if isinstance(policy, ContextPolicy) else ContextPolicy()
+        flags = FeatureFlags(root, FEATURE_FLAG_DEFAULTS)
+        lru_enabled = flags.get_bool("CONTEXT_LRU_ENABLED")
+        real_token_budget = flags.get_bool("CONTEXT_TOKEN_BUDGET_REAL")
+        jit_enabled = flags.get_bool("JIT_CONTEXT_LOADING_ENABLED")
+        context_window = flags.get_int("CONTEXT_TOKEN_WINDOW", DEFAULT_CONTEXT_WINDOW)
+        output_reserve_tokens = flags.get_int(
+            "CONTEXT_OUTPUT_RESERVE_TOKENS",
+            DEFAULT_OUTPUT_RESERVE_TOKENS,
+        )
+        block_config = {
+            "realTokenBudget": real_token_budget,
+            "jit": jit_enabled,
+            "contextWindow": context_window,
+            "outputReserveTokens": output_reserve_tokens,
+            "policy": effective_policy.fingerprint,
+        }
+        cache_key = ""
+        cache_status = "disabled"
+        if lru_enabled and catalog_snapshot is not None:
+            cache_status = "miss"
+            cache_key = context_cache_key(
+                workspace_root=root,
+                catalog_snapshot=catalog_snapshot,
+                policy_fingerprint=effective_policy.fingerprint,
+                prompt=prompt,
+                active_file=active_file,
+                intent_primary=intent_primary,
+                turn_plan=turn_plan,
+                block_config=block_config,
+            )
+            cached = get_context_assembly_cache().get(cache_key)
+            if cached is not None:
+                budget = cached.get("budget") if isinstance(cached.get("budget"), dict) else {}
+                budget["cacheStatus"] = "hit"
+                budget["cacheKey"] = cache_key
+                cached["budget"] = budget
+                context_trace = cached.get("contextTrace") if isinstance(cached.get("contextTrace"), dict) else {}
+                context_trace["cache"] = {"enabled": True, "status": "hit", "key": cache_key}
+                totals = context_trace.get("totals") if isinstance(context_trace.get("totals"), dict) else {}
+                totals["contextCacheHitCount"] = int(totals.get("contextCacheHitCount") or 0) + 1
+                context_trace["totals"] = totals
+                cached["contextTrace"] = context_trace
+                return cached
         if catalog_snapshot is None:
             self.story_project_service.ensure_project_structure(root)
         generation_context = self.story_project_service.build_generation_context(
@@ -564,14 +615,52 @@ class StorydexContextAssemblerService:
             trace_source=sources[-1],
         )
 
-        total_chars = sum(int(block.get("charCount") or 0) for block in blocks)
+        controlled_blocks, token_accounting, budget_notes = apply_context_controls(
+            blocks,
+            prompt=prompt,
+            real_budget_enabled=real_token_budget,
+            jit_enabled=jit_enabled,
+            context_window=context_window,
+            output_reserve_tokens=output_reserve_tokens,
+            base_input_tokens=0,
+        )
+        notes.extend(budget_notes)
+        self._sync_context_sources(sources, controlled_blocks)
+        total_chars = sum(
+            len(str(block.get("content") or ""))
+            for block in controlled_blocks
+            if not bool(block.get("omitted"))
+        )
         context_trace = build_context_trace(
             sources,
-            blocks,
+            controlled_blocks,
             assemble_ms=(time.perf_counter() - assemble_started) * 1000,
             context_policy=effective_policy.to_dict(),
         )
-        return {
+        context_trace["tokenAccounting"] = dict(token_accounting)
+        context_trace["cache"] = {
+            "enabled": bool(lru_enabled and catalog_snapshot is not None),
+            "status": cache_status,
+            "key": cache_key,
+        }
+        context_trace["jit"] = {
+            "enabled": bool(jit_enabled),
+            "terms": list(token_accounting.get("jitTerms") or []),
+            "omittedBlocks": list(token_accounting.get("omittedBlocks") or []),
+        }
+        trace_totals = context_trace.get("totals") if isinstance(context_trace.get("totals"), dict) else {}
+        trace_totals.update(
+            {
+                "logicalContextTokens": int(token_accounting.get("logicalContextTokens") or 0),
+                "transmittedContextTokens": int(token_accounting.get("transmittedContextTokens") or 0),
+                "cachedContextTokens": int(token_accounting.get("cachedContextTokens") or 0),
+                "contextOmittedBlockCount": len(token_accounting.get("omittedBlocks") or []),
+                "contextTruncatedBlockCount": len(token_accounting.get("truncatedBlocks") or []),
+                "contextCacheHitCount": 0,
+            }
+        )
+        context_trace["totals"] = trace_totals
+        result = {
             "_type": "ContextAssembly",
             "_version": 1,
             "status": "assembled",
@@ -587,11 +676,15 @@ class StorydexContextAssemblerService:
             "budget": {
                 "maxTotalChars": max_total_chars,
                 "totalChars": total_chars,
-                "blockCount": len(blocks),
+                "blockCount": len(controlled_blocks),
+                "tokenAccounting": dict(token_accounting),
+                "cacheStatus": cache_status,
+                "cacheKey": cache_key,
+                "jitEnabled": bool(jit_enabled),
             },
             "activeEntities": list(active_entities),
             "sources": sources,
-            "promptBlocks": blocks,
+            "promptBlocks": controlled_blocks,
             "contextTrace": context_trace,
             "notes": notes,
             "turnPlanRef": {
@@ -602,6 +695,9 @@ class StorydexContextAssemblerService:
                 "nextSegmentPath": str((turn_plan or {}).get("nextSegmentPath") or generation_context.get("nextSegmentPath") or ""),
             },
         }
+        if lru_enabled and catalog_snapshot is not None and cache_key:
+            get_context_assembly_cache().put(cache_key, result)
+        return result
 
     def _runtime_preset_paths(self, root: Path) -> List[str]:
         paths: List[str] = []
@@ -1343,6 +1439,44 @@ class StorydexContextAssemblerService:
         )
 
     @staticmethod
+    def _sync_context_sources(
+        sources: Sequence[Dict[str, Any]],
+        blocks: Sequence[Dict[str, Any]],
+    ) -> None:
+        """Reflect JIT/token controls in the source-level Trace records."""
+        by_kind = {
+            str(block.get("id") or ""): block
+            for block in blocks
+            if isinstance(block, dict) and str(block.get("id") or "")
+        }
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            block = by_kind.get(str(source.get("kind") or ""))
+            if block is None:
+                continue
+            omitted = bool(block.get("omitted"))
+            content = "" if omitted else str(block.get("content") or "")
+            truncated = bool(block.get("truncated")) and not omitted
+            reason = str(block.get("dropReason") or "")
+            finalize_context_source(
+                source,
+                content=content,
+                included=bool(content) and not omitted,
+                truncated=truncated,
+                drop_reason=reason,
+            )
+            source.update(
+                {
+                    "logicalEstTokens": int(block.get("logicalTokenCount") or 0),
+                    "transmittedEstTokens": int(block.get("tokenCount") or 0),
+                    "omitted": omitted,
+                    "controlDropReason": reason,
+                }
+            )
+            block["charCount"] = len(content)
+
+    @staticmethod
     def _append_policy_block(
         blocks: List[Dict[str, Any]],
         *,
@@ -1430,6 +1564,8 @@ class StorydexContextAssemblerService:
                 ][: max(0, int(max_source_paths))],
                 "charCount": len(truncated),
                 "content": truncated,
+                "truncated": was_truncated,
+                "dropReason": "truncated_to_budget" if was_truncated else "",
             }
         )
         finalize_context_source(

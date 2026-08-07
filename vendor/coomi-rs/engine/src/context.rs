@@ -215,8 +215,38 @@ pub fn estimate_request_tokens(
 
 pub fn compacted_history(messages: &[ChatMessage], summary: &str) -> Vec<ChatMessage> {
     let mut compacted = retained_user_history(messages);
+    compacted.extend(retained_tool_chain(messages));
     compacted.push(ChatMessage::summary(format!("{SUMMARY_PREFIX}\n{summary}")));
     compacted
+}
+
+fn retained_tool_chain(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    let normalized = normalize_history(messages);
+    let Some(start) = normalized
+        .iter()
+        .rposition(|message| message.role == Role::Assistant && !message.tool_calls.is_empty())
+    else {
+        return Vec::new();
+    };
+    let call_ids = normalized[start]
+        .tool_calls
+        .iter()
+        .map(|call| call.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut retained = vec![normalized[start].clone()];
+    retained.extend(
+        normalized[start + 1..]
+            .iter()
+            .filter(|message| {
+                message.role == Role::Tool
+                    && message
+                        .tool_call_id
+                        .as_deref()
+                        .is_some_and(|id| call_ids.contains(id))
+            })
+            .cloned(),
+    );
+    retained
 }
 
 pub fn retained_user_history(messages: &[ChatMessage]) -> Vec<ChatMessage> {
@@ -336,6 +366,32 @@ mod tests {
         let compacted = compacted_history(&messages, "new");
         assert_eq!(compacted.len(), 3);
         assert!(compacted[2].compaction_summary);
+    }
+
+    #[test]
+    fn compacted_history_keeps_the_latest_complete_tool_chain() {
+        let messages = vec![
+            ChatMessage::user("inspect the chapter"),
+            ChatMessage::assistant(
+                "",
+                vec![ToolCall {
+                    id: "read-1".into(),
+                    name: "read_file".into(),
+                    arguments: json!({"path": "chapters/001.md"}),
+                }],
+            ),
+            ChatMessage::tool("read-1", "success: evidence"),
+        ];
+
+        let compacted = compacted_history(&messages, "summary");
+
+        assert!(compacted.iter().any(|message| {
+            message.role == Role::Assistant
+                && message.tool_calls.iter().any(|call| call.id == "read-1")
+        }));
+        assert!(compacted.iter().any(|message| {
+            message.role == Role::Tool && message.tool_call_id.as_deref() == Some("read-1")
+        }));
     }
 
     #[test]
