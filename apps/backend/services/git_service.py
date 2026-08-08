@@ -66,6 +66,7 @@ class GitService:
     DEFAULT_BRANCH = "develop"
     DEFAULT_AUTHOR_NAME = "Storydex Local"
     DEFAULT_AUTHOR_EMAIL = "storydex@local"
+    COMMAND_TIMEOUT_SECONDS = 30
     HISTORY_LIMIT = 24
     SAFE_GITIGNORE_LINES = [".storydex/.agent/", ".storydex/.cache/"]
     AGENT_RUNTIME_PREFIX = ".storydex/.agent/"
@@ -1869,7 +1870,17 @@ class GitService:
                 encoding="utf-8",
                 errors="replace",
                 check=False,
+                timeout=cls.COMMAND_TIMEOUT_SECONDS,
             )
+        except subprocess.TimeoutExpired as exc:
+            raise GitServiceError(
+                "Local Git command timed out.",
+                details={
+                    "args": args,
+                    "gitExecutable": git_executable,
+                    "timeoutSeconds": cls.COMMAND_TIMEOUT_SECONDS,
+                },
+            ) from exc
         except OSError as exc:
             raise GitServiceError(
                 "Local Git command failed to start.",

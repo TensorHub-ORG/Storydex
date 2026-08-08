@@ -36,6 +36,9 @@ BACKEND_ROOT = REPOSITORY_ROOT / "apps" / "backend"
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 API_PREFIX = "/api/v1"
+
+from services.agent_lifecycle_trace import build_agent_lifecycle_trace  # noqa: E402
+
 DEFAULT_PROVIDER = os.environ.get("STORYDEX_LIVE_PROVIDER", "").strip()
 DEFAULT_MODEL = os.environ.get("STORYDEX_LIVE_MODEL", "").strip()
 SENSITIVE_KEYS = {
@@ -282,7 +285,9 @@ def summarize_event(name: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
         "traceId", "sessionId", "providerId", "llmProvider", "llmModel", "responseModel",
         "toolName", "tool_name", "toolCallId", "tool_call_id", "isError", "is_error",
         "status", "phase", "message", "error_type", "approvalId", "approval_id",
-        "code", "noRestorePoint", "confirmNoSnapshotRequired",
+        "code", "noRestorePoint", "confirmNoSnapshotRequired", "timestamp", "startedAt", "label", "detail",
+        "elapsedMs", "round", "current", "attempt", "maxAttempts", "resetTextCharacters",
+        "durationMs", "duration_ms",
     ):
         if key in payload and payload[key] not in (None, ""):
             value = payload[key]
@@ -300,6 +305,44 @@ def summarize_event(name: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
             summary["confirmNoSnapshotRequired"] = bool(details.get("confirmNoSnapshotRequired"))
         if "available" in details:
             summary["snapshotAvailable"] = bool(details.get("available"))
+    if name == "TextChunk":
+        summary["visibleChars"] = len(str(payload.get("content") or ""))
+    if name == "ReasoningChunk":
+        # Keep timing evidence without persisting hidden reasoning text.
+        summary["reasoningChars"] = len(str(payload.get("content") or payload.get("text") or ""))
+    if name == "RuntimeMetrics":
+        summary["runtimeMetrics"] = {
+            str(key): round(float(value or 0), 3)
+            for key, value in payload.items()
+            if str(key).endswith("Ms")
+        }
+    if name == "ModelCompleted":
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {}
+        summary["response"] = {
+            "responseModel": str(payload.get("responseModel") or metadata.get("responseModel") or ""),
+            "finishReason": str(payload.get("finishReason") or metadata.get("finishReason") or ""),
+            "responseStatus": str(payload.get("responseStatus") or metadata.get("responseStatus") or ""),
+            "nativeReasoning": bool(payload.get("nativeReasoning") or metadata.get("nativeReasoning")),
+        }
+    if name == "ReasoningPlan":
+        plan = payload.get("plan") if isinstance(payload.get("plan"), Mapping) else {}
+        summary["reasoningPlan"] = redact(
+            {
+                key: plan.get(key)
+                for key in (
+                    "requested",
+                    "sent",
+                    "source",
+                    "fallbackReason",
+                    "fallback_reason",
+                    "wireFields",
+                    "supported",
+                    "reasoningSupported",
+                    "thinkingLevels",
+                )
+                if key in plan
+            }
+        )
     return redact(summary)
 
 
@@ -361,6 +404,7 @@ def run_turn(
 ) -> Dict[str, Any]:
     trace_id = str(uuid.uuid4())
     started = time.time()
+    request_started_at = now_iso()
     headers = {"x-session-id": session_id, "x-trace-id": trace_id}
     payload = {
         "prompt": prompt,
@@ -392,7 +436,10 @@ def run_turn(
         for name, packet in parse_sse_events(response):
             if time.time() - started > timeout_seconds:
                 raise AcceptanceError(f"{label} exceeded {timeout_seconds}s timeout")
-            events.append(summarize_event(name, packet))
+            summary = summarize_event(name, packet)
+            summary["observedAt"] = now_iso()
+            summary["observedElapsedMs"] = int(max(0.0, time.time() - started) * 1000)
+            events.append(summary)
             for key in ("providerId", "llmProvider"):
                 value = str(packet.get(key) or "").strip()
                 if value:
@@ -465,6 +512,25 @@ def run_turn(
     )
     if not completed:
         errors.append("stream ended without AgentCompleted")
+    request_finished_at = now_iso()
+    lifecycle = build_agent_lifecycle_trace(
+        events,
+        request_started_at=request_started_at,
+        request_finished_at=request_finished_at,
+    )
+    reasoning_plans = [
+        dict(item.get("reasoningPlan") or {})
+        for item in events
+        if isinstance(item.get("reasoningPlan"), Mapping)
+    ]
+    response_models = sorted(
+        {
+            str((item.get("response") or {}).get("responseModel") or "").strip()
+            for item in events
+            if isinstance(item.get("response"), Mapping)
+            and str((item.get("response") or {}).get("responseModel") or "").strip()
+        }
+    )
     result = {
         "label": label,
         "traceId": trace_id,
@@ -480,6 +546,20 @@ def run_turn(
         "completed": completed and not errors,
         "errors": errors,
         "elapsedMs": int((time.time() - started) * 1000),
+        "lifecycle": lifecycle,
+        "protocol": {
+            "transport": "HTTP SSE",
+            "toolEvents": sorted(
+                {
+                    str(item.get("event") or "")
+                    for item in events
+                    if str(item.get("event") or "") in {"ToolStart", "ToolDone", "ToolCall", "ToolStarted"}
+                }
+            ),
+            "reasoningPlans": reasoning_plans,
+            "responseModels": response_models,
+            "providerRetries": int(lifecycle.get("retryCount") or 0),
+        },
         "events": events[-160:],
     }
     if errors:

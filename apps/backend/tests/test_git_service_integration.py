@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,26 @@ def git_service(monkeypatch):
     service = GitService()
     yield service
     GitService._resolve_git_executable.cache_clear()
+
+
+def test_git_process_has_a_bounded_timeout(
+    git_service: GitService,
+    monkeypatch,
+    tmp_path: Path,
+):
+    observed = {}
+
+    def time_out(command, **kwargs):
+        observed.update(kwargs)
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr("services.git_service.subprocess.run", time_out)
+
+    with pytest.raises(GitServiceError, match="timed out") as exc_info:
+        git_service._run_git_process_result(tmp_path, ["status"])
+
+    assert observed["timeout"] == GitService.COMMAND_TIMEOUT_SECONDS
+    assert exc_info.value.details["timeoutSeconds"] == GitService.COMMAND_TIMEOUT_SECONDS
 
 
 def test_full_local_git_lifecycle_and_restore(git_service: GitService, tmp_path: Path):
