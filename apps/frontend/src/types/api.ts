@@ -18,6 +18,7 @@ export interface ApiTrace {
   cacheCreationInputTokens: number;
   cacheHitRatio: number;
   cacheSavings: number;
+  lifecycle?: Record<string, unknown>;
 }
 
 export interface ApiEnvelope<T> {

@@ -40,6 +40,7 @@ from services.execution_coordinator import (
 )
 from services.git_service import get_git_service
 from services.llm_replay import get_llm_metrics, llm_trace, reset_llm_metrics
+from services.agent_lifecycle_trace import build_agent_lifecycle_trace
 from services.project_service import get_project_service
 from services.story_project_service import (
     DEFAULT_CHAPTER_WORD_COUNT_TARGET,
@@ -1640,6 +1641,7 @@ def _extract_trace_metrics(
     else:
         prompt_tokens = 0
         completion_tokens = total_tokens
+    lifecycle = build_agent_lifecycle_trace(events)
     return {
         "traceId": trace_id,
         "durationMs": duration_ms,
@@ -1664,6 +1666,7 @@ def _extract_trace_metrics(
             "coveredPaths": sorted(evidence_covered_paths),
             "missingPaths": sorted(evidence_missing_paths),
         },
+        "lifecycle": lifecycle,
         **runtime_metrics,
     }
 

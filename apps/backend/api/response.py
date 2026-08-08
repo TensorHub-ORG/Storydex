@@ -42,6 +42,7 @@ class ApiTrace(BaseModel):
     logical_input_tokens: int = Field(alias="logicalInputTokens", default=0)
     transmitted_input_tokens: int = Field(alias="transmittedInputTokens", default=0)
     cached_input_tokens: int = Field(alias="cachedInputTokens", default=0)
+    lifecycle: Dict[str, Any] = Field(default_factory=dict)
 
     model_config = ConfigDict(populate_by_name=True, protected_namespaces=())
 
