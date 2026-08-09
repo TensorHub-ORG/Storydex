@@ -108,7 +108,8 @@ jobs:
         run: |
           set -euo pipefail
           apk_url="https://updates.septemc.com/storydex/android/$APK_NAME"
-          overlay_url="https://storydex.septemc.com/assets/storydex-android-download-v$ANDROID_VERSION.js"
+          overlay_name="storydex-android-download-v$ANDROID_VERSION.js"
+          overlay_url="https://storydex.septemc.com/assets/$overlay_name"
           curl --fail --silent --show-error --location --head "$apk_url?run=$GITHUB_RUN_ID"
           curl --fail --silent --show-error --location "$overlay_url?run=$GITHUB_RUN_ID" | grep -F '下载 Android 版（测试）'
 
