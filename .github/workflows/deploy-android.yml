@@ -111,4 +111,30 @@ jobs:
           overlay_url="https://storydex.septemc.com/assets/storydex-android-download-v$ANDROID_VERSION.js"
           curl --fail --silent --show-error --location --head "$apk_url?run=$GITHUB_RUN_ID"
           curl --fail --silent --show-error --location "$overlay_url?run=$GITHUB_RUN_ID" | grep -F '下载 Android 版（测试）'
-          curl --fail --silent --show-error --location "https://storydex.septemc.com/?run=$GITHUB_RUN_ID" | grep -F "/assets/storydex-android-download-v$ANDROID_VERSION.js"
+
+          # The website root path rejects scripted requests (HTTP 403 at the
+          # nginx layer, including requests from CI runners), so verify the
+          # index.html injection directly on the server instead of over HTTP.
+          for name in DEPLOY_HOST DEPLOY_PORT DEPLOY_USER DEPLOY_SSH_KEY; do
+            [[ -n "${!name:-}" ]] || { echo "Missing required secret: $name" >&2; exit 1; }
+          done
+          install -d -m 700 "$RUNNER_TEMP/storydex-ssh-verify"
+          key_path="$RUNNER_TEMP/storydex-ssh-verify/id_ed25519"
+          known_hosts_path="$RUNNER_TEMP/storydex-ssh-verify/known_hosts"
+          printf '%s\n' "$DEPLOY_SSH_KEY" | tr -d '\r' > "$key_path"
+          chmod 600 "$key_path"
+          if [[ -n "${DEPLOY_KNOWN_HOSTS:-}" ]]; then
+            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" | tr -d '\r' > "$known_hosts_path"
+            strict_mode=yes
+          else
+            : > "$known_hosts_path"
+            strict_mode=accept-new
+          fi
+
+          target="$DEPLOY_USER@$DEPLOY_HOST"
+          website_dir="/www/wwwroot/storydex.septemc.com"
+          ssh -i "$key_path" -p "$DEPLOY_PORT" \
+            -o "UserKnownHostsFile=$known_hosts_path" -o "StrictHostKeyChecking=$strict_mode" \
+            "$target" \
+            "grep -Fq '/assets/$overlay_name' '$website_dir/index.html' && echo 'website index.html injection verified'"
+          rm -f "$key_path"
