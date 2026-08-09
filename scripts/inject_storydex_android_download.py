@@ -36,12 +36,18 @@ def inject_overlay(index_path: Path, script_url: str, version: str) -> bool:
     if not backup.exists():
         shutil.copy2(index_path, backup)
 
+    # mkstemp creates the temporary file with mode 0600; preserve the original
+    # index.html permissions (typically 0644) so the web server can still read
+    # the replaced file after os.replace.
+    original_mode = index_path.stat().st_mode & 0o777
+
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{index_path.name}.", suffix=".tmp", dir=index_path.parent
     )
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
             stream.write(updated)
+        os.chmod(temporary_name, original_mode)
         os.replace(temporary_name, index_path)
     except Exception:
         Path(temporary_name).unlink(missing_ok=True)

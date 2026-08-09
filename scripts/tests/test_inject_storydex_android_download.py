@@ -1,4 +1,7 @@
+import sys
 from pathlib import Path
+
+import pytest
 
 from scripts.inject_storydex_android_download import (
     END_MARKER,
@@ -20,6 +23,19 @@ def test_inject_overlay_is_atomic_and_idempotent(tmp_path: Path) -> None:
 
     assert inject_overlay(index, "/assets/android-v0.1.0.js", "0.1.0") is False
     assert index.read_text(encoding="utf-8") == first
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX permission bits are not preserved on Windows",
+)
+def test_inject_overlay_preserves_original_permissions(tmp_path: Path) -> None:
+    index = tmp_path / "index.html"
+    index.write_text("<html><body><div id=\"app\"></div></body></html>", encoding="utf-8")
+    index.chmod(0o644)
+
+    assert inject_overlay(index, "/assets/android-v0.1.0.js", "0.1.0") is True
+    assert (index.stat().st_mode & 0o777) == 0o644
 
 
 def test_inject_overlay_replaces_an_older_version(tmp_path: Path) -> None:

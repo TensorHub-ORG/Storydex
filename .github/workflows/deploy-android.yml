@@ -99,7 +99,7 @@ jobs:
           scp "${scp_common[@]}" "$overlay_local" "$target:$overlay_tmp"
           scp "${scp_common[@]}" "$injector_local" "$target:$injector_tmp"
           ssh "${ssh_common[@]}" "$target" \
-            "set -eu; mv -f '$apk_tmp' '$android_dir/$APK_NAME'; mv -f '$overlay_tmp' '$website_dir/assets/$overlay_name'; python3 '$injector_tmp' '$website_dir/index.html' '/assets/$overlay_name' '$ANDROID_VERSION'; rm -f '$injector_tmp'"
+            "set -eu; mv -f '$apk_tmp' '$android_dir/$APK_NAME'; mv -f '$overlay_tmp' '$website_dir/assets/$overlay_name'; python3 '$injector_tmp' '$website_dir/index.html' '/assets/$overlay_name' '$ANDROID_VERSION'; chmod 644 '$website_dir/index.html'; rm -f '$injector_tmp'"
 
           rm -f "$key_path"
 
