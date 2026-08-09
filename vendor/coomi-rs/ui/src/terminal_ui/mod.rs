@@ -3896,7 +3896,13 @@ mod tests {
         let (_home, mut state) = test_state();
         state.open_overlay(OverlayKind::Settings);
         assert_eq!(settings_mcp_items(&state).len(), 6);
-        assert_eq!(settings_skill_items(&state).len(), 8);
+        assert_eq!(settings_skill_items(&state).len(), 9);
+        assert!(
+            state
+                .skill_entries
+                .iter()
+                .any(|entry| entry.id == "shizuku")
+        );
 
         let settings = state.settings.as_mut().expect("settings");
         settings.tab = SettingsTab::Mcp;

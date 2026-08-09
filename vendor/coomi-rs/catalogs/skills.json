@@ -64,6 +64,14 @@
       "repository": "github/awesome-copilot",
       "ref": "main",
       "subdir": "skills/documentation-writer"
+    },
+    {
+      "id": "shizuku",
+      "name": "Shizuku",
+      "description": "Check Shizuku authorization before privileged Android operations.",
+      "repository": "TensorHub-ORG/Storydex",
+      "ref": "main",
+      "subdir": "vendor/coomi-rs/skills/shizuku"
     }
   ]
 }

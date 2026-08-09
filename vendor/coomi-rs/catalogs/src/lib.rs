@@ -8,7 +8,6 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::Command;
 
 const MCP_CATALOG: &str = include_str!("../mcp.json");
 const SKILL_CATALOG: &str = include_str!("../skills.json");
@@ -85,7 +84,7 @@ impl CatalogInstaller {
                 .is_none_or(|value| value.trim().is_empty())
             {
                 anyhow::bail!(
-                    "missing parameter `{}` ({})",
+                    "缺少必填参数 `{}` ({})，请填写后再安装",
                     parameter.key,
                     parameter.label
                 )
@@ -139,6 +138,36 @@ impl CatalogInstaller {
         self.install_skill_inner(id, true)
     }
 
+    /// 卸载 Skill：删除 skills/{id} 目录与 config/skills.json 中的条目。
+    pub fn uninstall_skill(&self, id: &str) -> Result<PathBuf> {
+        // 与安装一致：id 必须先在内置目录中解析出合法条目，杜绝路径穿越
+        // （id=".."、"%2E%2E%2F" 等经 URL 解码后越界删除任意目录）。
+        let catalog = builtin_skills()?;
+        let entry = catalog
+            .entries
+            .iter()
+            .find(|entry| entry.id.eq_ignore_ascii_case(id))
+            .with_context(|| format!("Skill `{id}` is not in the built-in catalog"))?;
+        let destination = self.home.join("skills").join(&entry.id);
+        if destination.exists() {
+            fs::remove_dir_all(&destination)
+                .with_context(|| format!("failed to remove {}", destination.display()))?;
+        }
+        let config_path = self.home.join("config").join("skills.json");
+        if config_path.exists() {
+            let bytes = fs::read(&config_path)
+                .with_context(|| format!("failed to read {}", config_path.display()))?;
+            if let Ok(mut document) = serde_json::from_slice::<Value>(&bytes) {
+                if let Some(skills) = document.get_mut("skills").and_then(Value::as_object_mut) {
+                    skills.remove(id);
+                    fs::write(&config_path, serde_json::to_vec_pretty(&document)?)
+                        .with_context(|| format!("failed to write {}", config_path.display()))?;
+                }
+            }
+        }
+        Ok(destination)
+    }
+
     fn install_skill_inner(&self, id: &str, replace: bool) -> Result<PathBuf> {
         let catalog = builtin_skills()?;
         let entry = catalog
@@ -161,24 +190,73 @@ impl CatalogInstaller {
         if let Some(parent) = cache.parent() {
             fs::create_dir_all(parent)?;
         }
-        let repository_url = format!("https://github.com/{}.git", entry.repository);
-        run_git([
-            "clone",
-            "--depth",
-            "1",
-            "--filter=blob:none",
-            "--sparse",
-            "--branch",
-            entry.git_ref.as_str(),
-            repository_url.as_str(),
-            cache.to_string_lossy().as_ref(),
-        ])?;
-        run_git_in(&cache, ["sparse-checkout", "set", entry.subdir.as_str()])?;
+        // 通过 GitHub codeload zip 下载并解压（不依赖 git 命令：手机 bootstrap 未内置 git）。
+        let zip_url = format!(
+            "https://codeload.github.com/{}/zip/refs/heads/{}",
+            entry.repository, entry.git_ref
+        );
+        let bytes = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .user_agent("coomi-android")
+            .build()
+            .context("failed to build download client")?
+            .get(&zip_url)
+            .send()
+            .context("failed to download skill archive")?
+            .error_for_status()
+            .context("skill archive download failed")?
+            .bytes()
+            .context("failed to read skill archive")?;
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes))
+            .context("skill archive is not a valid zip")?;
+        // codeload zip 的根目录形如 {repo}-{ref}/，把其中 {subdir}/ 的内容解压到目标。
+        let repo_basename = entry.repository.rsplit('/').next().unwrap_or("repository");
+        // GitHub normalizes slashes in branch names in codeload archive roots
+        // (for example codex/feat/x becomes repo-codex-feat-x).
+        let root_prefixes = [
+            format!("{repo_basename}-{}/", entry.git_ref),
+            format!("{repo_basename}-{}/", entry.git_ref.replace('/', "-")),
+        ];
+        let subdir_prefix = format!("{}/", entry.subdir);
+        for index in 0..archive.len() {
+            let mut file = archive
+                .by_index(index)
+                .with_context(|| format!("invalid zip entry #{index}"))?;
+            let name = file.name().to_string();
+            let Some(rest) = root_prefixes
+                .iter()
+                .find_map(|prefix| name.strip_prefix(prefix))
+            else {
+                continue;
+            };
+            if rest != entry.subdir && !rest.starts_with(&subdir_prefix) {
+                continue;
+            }
+            // zip-slip 防护：拒绝任何越界片段。
+            if rest
+                .split('/')
+                .any(|segment| segment.is_empty() || segment == "..")
+            {
+                continue;
+            }
+            let target = cache.join(rest);
+            if file.is_dir() {
+                fs::create_dir_all(&target)?;
+            } else {
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                let mut output = std::fs::File::create(&target)
+                    .with_context(|| format!("failed to write {}", target.display()))?;
+                std::io::copy(&mut file, &mut output)?;
+            }
+        }
         let source = cache.join(&entry.subdir);
         if !source.is_dir() {
             anyhow::bail!("downloaded repository has no directory `{}`", entry.subdir)
         }
-        let commit = run_git_in_capture(&cache, ["rev-parse", "HEAD"])?;
+        // zip 包不带 commit hash，用 ref 名作为版本记录。
+        let commit = entry.git_ref.clone();
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -262,48 +340,6 @@ fn substitute(template: &str, values: &BTreeMap<String, String>) -> Result<Strin
     Ok(output)
 }
 
-fn run_git<'a>(args: impl IntoIterator<Item = &'a str>) -> Result<()> {
-    let output = Command::new("git").args(args).output()?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "git clone failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )
-    }
-    Ok(())
-}
-
-fn run_git_in<'a>(directory: &Path, args: impl IntoIterator<Item = &'a str>) -> Result<()> {
-    let output = Command::new("git")
-        .current_dir(directory)
-        .args(args)
-        .output()?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "git sparse checkout failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )
-    }
-    Ok(())
-}
-
-fn run_git_in_capture<'a>(
-    directory: &Path,
-    args: impl IntoIterator<Item = &'a str>,
-) -> Result<String> {
-    let output = Command::new("git")
-        .current_dir(directory)
-        .args(args)
-        .output()?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "git command failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-}
-
 fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
     fs::create_dir_all(destination)?;
     for entry in fs::read_dir(source)? {
@@ -351,5 +387,21 @@ mod tests {
             document.pointer("/servers/filesystem/enabled"),
             Some(&Value::Bool(true))
         );
+    }
+
+    #[test]
+    fn uninstall_skill_rejects_path_traversal_ids() {
+        // 卸载只接受内置目录中的合法 id：路径穿越（..、绝对路径、任意目录名）一律拒绝。
+        let home = tempfile::tempdir().expect("temporary home");
+        let installer = CatalogInstaller::new(home.path());
+        for malicious in ["..", "../x", "/etc", "a/b", "%2e%2e"] {
+            assert!(
+                installer.uninstall_skill(malicious).is_err(),
+                "uninstall should reject {malicious}"
+            );
+        }
+        // 不存在的合法目录 id 不会报错（视为已卸载），但也不得删到 skills 之外。
+        assert!(installer.uninstall_skill("frontend-design").is_ok());
+        assert!(home.path().join("skills").is_dir() || !home.path().join("skills").exists());
     }
 }

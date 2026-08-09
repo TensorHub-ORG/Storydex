@@ -54,6 +54,7 @@ quota_apps/
 node_modules/
 apps/frontend/node_modules/
 apps/frontend/dist/
+apps/android-frontend/dist/
 apps/frontend/.vite/
 apps/frontend/.playwright-cli/
 apps/frontend/.tmp/

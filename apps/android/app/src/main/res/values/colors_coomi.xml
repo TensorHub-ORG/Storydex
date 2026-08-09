@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Coomi 设计令牌 · 颜色
+    主色 蓝 #2D61C6 + 白，点缀色 橙 #D47458。
+    命名规则：coomi_<角色>[_<变体>]，只在浅色主题下使用（onboarding / dashboard）。
+    终端本体（Theme.TermuxActivity）仍走原有深色配色，不受影响。
+-->
+<resources>
+
+    <!-- ============ 品牌蓝 ============ -->
+    <color name="coomi_blue">#2D61C6</color>
+    <color name="coomi_blue_press">#2551A8</color>
+    <color name="coomi_blue_disabled">#A8BEE8</color>
+    <!-- 浅蓝底：选中态 chip / 图标底 / 高亮块 -->
+    <color name="coomi_blue_soft">#E8EEFB</color>
+    <color name="coomi_blue_faint">#F3F6FD</color>
+    <color name="coomi_blue_border">#C6D5F2</color>
+    <!-- logo 里的四角星色，用于装饰性小元素 -->
+    <color name="coomi_star">#92B4EE</color>
+
+    <!-- ============ 点缀橙：需要注意 / 待授权 ============ -->
+    <color name="coomi_orange">#D47458</color>
+    <color name="coomi_orange_press">#B85F45</color>
+    <color name="coomi_orange_soft">#FCEEE9</color>
+    <color name="coomi_orange_border">#F0CFC3</color>
+
+    <!-- ============ 中性色 ============ -->
+    <color name="coomi_white">#FFFFFF</color>
+    <!-- 页面底色（卡片浮在它上面） -->
+    <color name="coomi_page">#F4F5F7</color>
+    <!-- 卡片内的填充块 / 次级按钮 -->
+    <color name="coomi_fill">#F5F6F8</color>
+    <color name="coomi_fill_press">#ECEEF1</color>
+    <color name="coomi_divider">#EDEFF2</color>
+    <color name="coomi_border">#E4E7EC</color>
+
+    <color name="coomi_text">#1B1D21</color>
+    <color name="coomi_text_2">#6B7280</color>
+    <color name="coomi_text_3">#9CA3AF</color>
+    <color name="coomi_text_on_blue">#FFFFFF</color>
+
+    <!-- ============ 语义色 ============ -->
+    <color name="coomi_ok">#1F9D6B</color>
+    <color name="coomi_ok_soft">#E8F6F0</color>
+    <color name="coomi_warn">#C77B1B</color>
+    <color name="coomi_warn_soft">#FDF4E6</color>
+    <color name="coomi_danger">#D9503F</color>
+    <color name="coomi_danger_soft">#FCEEEC</color>
+
+    <!-- ============ 透明遮罩 ============ -->
+    <color name="coomi_scrim">#66000000</color>
+    <color name="coomi_ripple">#1F2D61C6</color>
+    <color name="coomi_transparent">#00000000</color>
+
+    <!-- 自适应图标背景（纯白，与 mipmap 前景配合） -->
+    <color name="coomi_icon_bg">#FFFFFF</color>
+
+    <!-- Storydex desktop-compatible appearance palettes. -->
+    <color name="coomi_theme_white_bg">#FFFFFF</color>
+    <color name="coomi_theme_white_page">#F3F4F6</color>
+    <color name="coomi_theme_white_fill">#F7F7F8</color>
+    <color name="coomi_theme_white_border">#E5E7EB</color>
+    <color name="coomi_theme_white_text">#1F2937</color>
+    <color name="coomi_theme_white_text_2">#596273</color>
+    <color name="coomi_theme_white_text_3">#8B93A1</color>
+    <color name="coomi_theme_white_accent">#D06D3B</color>
+    <color name="coomi_theme_white_accent_press">#B6562D</color>
+    <color name="coomi_theme_white_accent_soft">#FFF1E9</color>
+
+    <color name="coomi_theme_default_bg">#F8FAFC</color>
+    <color name="coomi_theme_default_page">#EEF2F7</color>
+    <color name="coomi_theme_default_fill">#F3F6FA</color>
+    <color name="coomi_theme_default_border">#E1E7EF</color>
+    <color name="coomi_theme_default_text">#162030</color>
+    <color name="coomi_theme_default_text_2">#3F4E62</color>
+    <color name="coomi_theme_default_text_3">#728095</color>
+    <color name="coomi_theme_default_accent">#D06D3B</color>
+    <color name="coomi_theme_default_accent_press">#B6562D</color>
+    <color name="coomi_theme_default_accent_soft">#FBECE4</color>
+
+    <color name="coomi_theme_snow_bg">#F7FBFF</color>
+    <color name="coomi_theme_snow_page">#EDF4FF</color>
+    <color name="coomi_theme_snow_fill">#EEF4FF</color>
+    <color name="coomi_theme_snow_border">#DCE7F7</color>
+    <color name="coomi_theme_snow_text">#16315E</color>
+    <color name="coomi_theme_snow_text_2">#42638F</color>
+    <color name="coomi_theme_snow_text_3">#6F8BB2</color>
+    <color name="coomi_theme_snow_accent">#4E79EF</color>
+    <color name="coomi_theme_snow_accent_press">#325DDD</color>
+    <color name="coomi_theme_snow_accent_soft">#E8F0FF</color>
+
+    <color name="coomi_theme_book_bg">#FFFAF2</color>
+    <color name="coomi_theme_book_page">#EFE7DD</color>
+    <color name="coomi_theme_book_fill">#F3EADF</color>
+    <color name="coomi_theme_book_border">#E5D8CA</color>
+    <color name="coomi_theme_book_text">#3F2F26</color>
+    <color name="coomi_theme_book_text_2">#5B4738</color>
+    <color name="coomi_theme_book_text_3">#816F62</color>
+    <color name="coomi_theme_book_accent">#B56033</color>
+    <color name="coomi_theme_book_accent_press">#984520</color>
+    <color name="coomi_theme_book_accent_soft">#F3E4D8</color>
+
+    <color name="coomi_night_fill_strong">#22262D</color>
+    <color name="coomi_night_blue">#5B8BF0</color>
+    <color name="coomi_night_ok">#38B98A</color>
+    <color name="coomi_night_ok_soft">#1B362C</color>
+    <color name="coomi_night_danger">#E86A58</color>
+    <color name="coomi_night_warn_soft">#332C1C</color>
+    <color name="coomi_night_orange">#E08A6B</color>
+    <color name="coomi_night_orange_soft">#3A2821</color>
+    <color name="coomi_night_orange_border">#5E3B2E</color>
+    <color name="coomi_night_bg">#131518</color>
+    <color name="coomi_night_page">#191C21</color>
+    <color name="coomi_night_fill">#1A1D22</color>
+    <color name="coomi_night_border">#252A32</color>
+    <color name="coomi_night_text">#E7E9EE</color>
+    <color name="coomi_night_text_2">#9AA2AF</color>
+    <color name="coomi_night_text_3">#68717F</color>
+    <color name="coomi_night_blue_soft">#1C2C50</color>
+    <color name="coomi_night_danger_soft">#3D241F</color>
+</resources>

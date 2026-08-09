@@ -1,0 +1,308 @@
+<script setup lang="ts">
+/**
+ * 输入区。
+ * DeepSeek 的输入框是「一整块大圆角卡片」：文本在上，模式开关和发送在下一行。
+ * 这里的两个 chip 都对应真实协议能力（enter/exit_plan_mode、set_permission_mode），
+ * ⊕ 展开指令面板：Android SAF 文件导入 + 可滚动的斜杠指令列表。
+ */
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useSessionStore } from '@/stores/session'
+import { useStoryStore, type AgentMode, type NarrativeMode } from '@/stores/story'
+import CoomiIcon from './CoomiIcon.vue'
+
+const session = useSessionStore()
+const story = useStoryStore()
+
+/** 斜杠指令：点击后填入输入框，可编辑后发送。 */
+const SLASH_COMMANDS = [
+  { name: '/loop', desc: '循环执行直到完成' },
+  { name: '/plan', desc: '进入计划模式' },
+  { name: '/mcp', desc: '管理 MCP 服务器' },
+  { name: '/skills', desc: '查看可用技能' },
+  { name: '/memory', desc: '查看持久记忆' },
+]
+
+const text = ref('')
+const textarea = ref<HTMLTextAreaElement | null>(null)
+const quickOpen = ref(false)
+const transferText = ref('')
+const transferProgress = ref(0)
+const textareaScrollable = ref(false)
+const hasNative = typeof window !== 'undefined' && !!window.CoomiAndroid
+
+const canSend = computed(() => text.value.trim().length > 0)
+const isJumpIn = computed(() => session.isBusy && canSend.value)
+const showStop = computed(() => session.isBusy && !canSend.value)
+const agentLabels: Record<AgentMode, string> = { story: '剧情', narrator: '旁白', agent: 'Agent' }
+const narrativeLabels: Record<NarrativeMode, string> = { immersive: '沉浸', narrative: '叙事', free: '自由' }
+
+function autoGrow() {
+  const el = textarea.value
+  if (!el) return
+  el.style.height = 'auto'
+  const scrollHeight = el.scrollHeight
+  textareaScrollable.value = scrollHeight > 132
+  el.style.height = Math.min(scrollHeight, 132) + 'px'
+}
+
+async function submit() {
+  if (!canSend.value) return
+  session.sendMessage(text.value)
+  text.value = ''
+  await nextTick()
+  autoGrow()
+}
+
+/** 主按钮：空着且在忙 = 停止，其余 = 发送 / 插队。 */
+function tapPrimary() {
+  if (showStop.value) session.cancel()
+  else submit()
+}
+
+function onKeydown(e: KeyboardEvent) {
+  // Enter 默认换行（需求：换行键就换行）；Ctrl/Cmd+Enter 仍可快捷发送。
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submit() }
+}
+
+function cycleAgentMode() {
+  const values: AgentMode[] = ['story', 'narrator', 'agent']
+  const next = values[(values.indexOf(story.agentMode) + 1) % values.length]
+  story.setAgentMode(next)
+}
+function cycleNarrativeMode() {
+  const values: NarrativeMode[] = ['immersive', 'narrative', 'free']
+  story.setNarrativeMode(values[(values.indexOf(story.narrativeMode) + 1) % values.length])
+}
+
+async function insert(t: string) {
+  text.value = text.value.trim() ? text.value.replace(/\s+$/, '') + '\n' + t : t
+  quickOpen.value = false
+  await nextTick()
+  autoGrow()
+  textarea.value?.focus()
+}
+
+/** 斜杠指令：直接替换输入框内容，可继续编辑。 */
+async function insertSlash(cmd: string) {
+  text.value = cmd
+  quickOpen.value = false
+  await nextTick()
+  autoGrow()
+  textarea.value?.focus()
+}
+
+function toggleQuick() { quickOpen.value = !quickOpen.value }
+
+function importFiles() { quickOpen.value = false; window.CoomiAndroid?.importFiles?.() }
+function authorizeFolder() { quickOpen.value = false; window.CoomiAndroid?.authorizeFolder?.() }
+function onTransferProgress(event: Event) {
+  const detail = (event as CustomEvent<{ message?: string; progress?: number }>).detail ?? {}
+  transferText.value = detail.message ?? '正在传输文件'
+  transferProgress.value = detail.progress ?? 0
+}
+function onFilesImported(event: Event) {
+  const detail = (event as CustomEvent<{ paths?: string[]; requestId?: string }>).detail ?? {}
+  const paths = detail.paths ?? []
+  transferText.value = paths.length ? `已导入 ${paths.length} 个文件` : '文件导入完成'
+  transferProgress.value = 100
+  if (detail.requestId) session.completeFileTransfer(detail.requestId, paths)
+  else if (paths.length) void insert(`请读取这些已导入文件：\n${paths.join('\n')}`)
+  setTimeout(() => { transferText.value = ''; transferProgress.value = 0 }, 2600)
+}
+function onFileExported(event: Event) {
+  const detail = (event as CustomEvent<{ requestId?: string; path?: string }>).detail ?? {}
+  if (detail.requestId) session.completeFileTransfer(detail.requestId, detail.path ? [detail.path] : [])
+}
+onMounted(() => {
+  window.addEventListener('coomi:file-transfer-progress', onTransferProgress)
+  window.addEventListener('coomi:files-imported', onFilesImported)
+  window.addEventListener('coomi:file-exported', onFileExported)
+  loadDraft()
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('coomi:file-transfer-progress', onTransferProgress)
+  window.removeEventListener('coomi:files-imported', onFilesImported)
+  window.removeEventListener('coomi:file-exported', onFileExported)
+  saveDraft()
+})
+
+// ── 草稿按会话持久化：每个会话（含新对话）各自保留输入框内容 ──
+const DRAFT_PREFIX = 'coomi.draft.'
+let draftTimer: ReturnType<typeof setTimeout> | null = null
+
+function draftKey(id: string) { return DRAFT_PREFIX + id }
+
+function loadDraft() {
+  let saved = ''
+  try { saved = localStorage.getItem(draftKey(session.sessionId)) ?? '' } catch { /* ignore */ }
+  text.value = saved
+  void nextTick(autoGrow)
+}
+
+function saveDraft() {
+  if (draftTimer) { clearTimeout(draftTimer); draftTimer = null }
+  try { localStorage.setItem(draftKey(session.sessionId), text.value) } catch { /* ignore */ }
+}
+
+// 切会话（含新建会话）时：先把旧会话的草稿存回【旧】key，再加载新会话草稿。
+// 注意：watch 回调里 session.sessionId 已经是新值，保存必须用回调的 prev 参数，
+// 否则旧内容会被写进新会话的 key，导致所有会话显示同一个草稿。
+watch(() => session.sessionId, (next, prev) => {
+  if (prev && prev !== next) {
+    try { localStorage.setItem(draftKey(prev), text.value) } catch { /* ignore */ }
+  }
+  loadDraft()
+})
+watch(text, () => {
+  if (draftTimer) clearTimeout(draftTimer)
+  draftTimer = setTimeout(saveDraft, 200)
+})
+</script>
+
+<template>
+  <div class="composer">
+    <div v-if="transferText" class="transfer">
+      <span>{{ transferText }}</span><progress :value="transferProgress" max="100" />
+    </div>
+    <div v-if="quickOpen" class="quick-scrim" @click="quickOpen = false" />
+    <div v-if="quickOpen" class="quick">
+      <p class="qhead">指令</p>
+      <div v-if="hasNative" class="file-actions">
+        <button class="qchip file" @click="importFiles"><CoomiIcon name="fileRead" :size="15" />选择文件</button>
+        <button class="qchip file" @click="authorizeFolder"><CoomiIcon name="folder" :size="15" />授权目录</button>
+      </div>
+      <div class="slash-list">
+        <button v-for="c in SLASH_COMMANDS" :key="c.name" class="slash-item" @click="insertSlash(c.name)">
+          <code>{{ c.name }}</code><span>{{ c.desc }}</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="field" :class="{ busy: session.isBusy }">
+      <div class="input-clip">
+        <textarea
+          ref="textarea"
+          v-model="text"
+          class="input"
+          :class="{ scrollable: textareaScrollable }"
+          rows="1"
+          :placeholder="session.isBusy ? '补充你的行动…' : story.agentMode === 'agent' ? '给 Agent 下达任务…' : '说出你的行动…'"
+          @input="autoGrow"
+          @keydown="onKeydown"
+        />
+      </div>
+
+      <div class="bar">
+        <button class="pill on" @click="cycleAgentMode">
+          <CoomiIcon name="sparkle" :size="14" />
+          <span>{{ agentLabels[story.agentMode] }}</span>
+        </button>
+        <button v-if="story.agentMode !== 'agent'" class="pill" @click="cycleNarrativeMode">
+          <CoomiIcon name="target" :size="14" />
+          <span>{{ narrativeLabels[story.narrativeMode] }}</span>
+        </button>
+
+        <span class="spacer" />
+
+        <button class="act" aria-label="快捷指令" @click="toggleQuick">
+          <CoomiIcon name="plusCircle" :size="21" />
+        </button>
+
+        <button
+          class="send"
+          :class="{ jump: isJumpIn, stop: showStop }"
+          :disabled="!canSend && !session.isBusy"
+          :aria-label="showStop ? '停止' : isJumpIn ? '插队' : '发送'"
+          @click="tapPrimary"
+        >
+          <CoomiIcon v-if="showStop" name="stop" :size="17" />
+          <CoomiIcon v-else-if="isJumpIn" name="subtask" :size="18" />
+          <CoomiIcon v-else name="arrowUp" :size="18" />
+        </button>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.composer { position: relative; padding: 6px 10px calc(var(--safe-bottom) + 8px); background: var(--bg); }
+.transfer { display: flex; align-items: center; gap: 8px; margin: 0 2px 6px; font-size: 11.5px; color: var(--text-2); }
+.transfer span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.transfer progress { width: 76px; height: 4px; accent-color: var(--blue); }
+
+.field {
+  padding: 4px 6px 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 26px;
+  background: var(--fill);
+  transition: border-color .16s;
+}
+.field:focus-within { border-color: var(--blue-border); background: var(--bg); }
+.field.busy { border-color: var(--border-strong); }
+
+.input-clip { overflow: hidden; border-radius: 18px 18px 8px 8px; }
+.input {
+  display: block; width: 100%; max-height: 132px; overflow-y: hidden;
+  padding: 9px 10px 5px 6px; border: 0; background: none; outline: none; resize: none;
+  font: inherit; font-size: 15.5px; line-height: 1.5; color: var(--text);
+  scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent;
+}
+.input.scrollable { overflow-y: auto; }
+.input::placeholder { color: var(--text-3); }
+.input:not(.scrollable)::-webkit-scrollbar { display: none; width: 0; }
+.input.scrollable::-webkit-scrollbar { width: 3px; }
+.input.scrollable::-webkit-scrollbar-track { margin-block: 12px 7px; background: transparent; }
+.input.scrollable::-webkit-scrollbar-thumb { border-radius: 3px; background: var(--border-strong); }
+
+.bar { display: flex; align-items: center; gap: 6px; padding: 2px 0 0 2px; }
+.spacer { flex: 1; }
+
+.act {
+  display: grid; place-items: center; width: 34px; height: 34px;
+  border: 0; border-radius: 50%; background: none; color: var(--text-2);
+}
+.act:active { background: var(--fill-press); }
+
+.send {
+  display: grid; place-items: center; flex-shrink: 0;
+  width: 36px; height: 36px;
+  border: 0; border-radius: 50%;
+  background: var(--blue); color: #fff;
+  transition: background .16s, transform .06s;
+}
+.send.jump { background: var(--orange); }
+.send.stop { background: var(--text); }
+.send:disabled { background: var(--border-strong); pointer-events: none; }
+.send:active { transform: scale(.92); }
+
+/* 指令面板浮层：可滚动卡片 */
+.quick-scrim { position: fixed; inset: 0; z-index: 1; }
+.quick {
+  position: absolute; z-index: 2; left: 10px; right: 10px; bottom: calc(100% - 6px);
+  max-height: min(56vh, 360px); overflow-y: auto;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--border); border-radius: var(--r-card);
+  background: var(--bg); box-shadow: var(--shadow-2);
+  animation: coomi-cascade .18s ease both;
+}
+.qhead { margin-bottom: 8px; font-size: 12px; font-weight: 600; color: var(--text-3); }
+.file-actions { display: flex; gap: 7px; margin-bottom: 8px; }
+.qchip.file { display: inline-flex; align-items: center; gap: 5px; color: var(--blue); }
+.qchip {
+  height: 32px; padding: 0 13px;
+  border: 1px solid var(--border); border-radius: var(--r-pill);
+  background: var(--bg); font-size: 13.5px; color: var(--text-2);
+}
+.qchip:active { background: var(--blue-soft); border-color: var(--blue-border); color: var(--blue); }
+
+/* 斜杠指令逐行列表 */
+.slash-list { display: flex; flex-direction: column; gap: 2px; }
+.slash-item {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 10px 8px; border: 0; border-radius: 10px;
+  background: none; text-align: left; cursor: pointer;
+}
+.slash-item code { font-family: inherit; font-size: 13.5px; font-weight: 700; color: var(--blue); }
+.slash-item span { font-size: 12.5px; color: var(--text-2); }
+.slash-item:active { background: var(--blue-soft); }
+</style>

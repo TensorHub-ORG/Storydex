@@ -1,0 +1,4 @@
+interface:
+  display_name: "Shizuku"
+  short_description: "Check Shizuku status and explain its Android usage"
+  default_prompt: "Use the bundled self-check script to determine the current Shizuku state and explain how to continue."

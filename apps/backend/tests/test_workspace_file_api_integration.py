@@ -10,6 +10,8 @@ from fastapi.testclient import TestClient
 
 from api import routes_file, routes_story, routes_wiki
 from main import app
+from services import content_pipeline_service
+from services.content_pipeline_service import ContentPipelineService
 from services.git_service import GitService
 
 
@@ -34,6 +36,16 @@ def workspace_client(tmp_path: Path, monkeypatch):
         monkeypatch.setenv("STORYDEX_GIT_EXECUTABLE", executable)
         GitService._resolve_git_executable.cache_clear()
     with TestClient(app, raise_server_exceptions=False) as client:
+        content_pipeline_service.stop_content_pipeline()
+        deterministic_pipeline = ContentPipelineService()
+        monkeypatch.setattr(
+            content_pipeline_service,
+            "sync_content_workspace",
+            lambda workspace_root, reconcile=True: deterministic_pipeline.sync_workspace(
+                workspace_root,
+                reconcile=reconcile,
+            ),
+        )
         yield client, root, project
     GitService._resolve_git_executable.cache_clear()
 

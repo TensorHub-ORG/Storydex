@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+axum.workspace = true
 clap.workspace = true
 coomi-catalogs = { path = "../catalogs" }
 coomi-engine = { path = "../engine" }
@@ -23,12 +24,18 @@ coomi-services = { path = "../services" }
 coomi-tools = { path = "../tools" }
 crossterm.workspace = true
 dirs.workspace = true
+fs2.workspace = true
+futures-util.workspace = true
+md5.workspace = true
 ratatui.workspace = true
 pulldown-cmark.workspace = true
+reqwest.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+tower-http.workspace = true
 unicode-width.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+chrono.workspace = true
 tempfile.workspace = true

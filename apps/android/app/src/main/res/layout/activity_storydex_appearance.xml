@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="?attr/coomiPage"
+    android:fitsSystemWindows="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:gravity="center_vertical"
+        android:paddingStart="@dimen/coomi_gutter"
+        android:paddingEnd="@dimen/coomi_gutter">
+        <ImageButton
+            android:id="@+id/btn_appearance_back"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:src="@drawable/coomi_ic_back"
+            android:tint="?attr/coomiText"
+            android:contentDescription="@string/storydex_appearance_title"/>
+        <TextView
+            style="@style/Coomi.Text.Heading"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="@dimen/coomi_space_s"
+            android:text="@string/storydex_appearance_title"/>
+    </LinearLayout>
+
+    <RadioGroup
+        android:id="@+id/theme_group"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:layout_marginStart="@dimen/coomi_gutter"
+        android:layout_marginEnd="@dimen/coomi_gutter"
+        android:layout_marginTop="@dimen/coomi_space_m"
+        android:background="@drawable/coomi_bg_card">
+        <RadioButton
+            android:id="@+id/theme_white"
+            style="@style/Coomi.Row"
+            android:saveEnabled="false"
+            android:buttonTint="?attr/colorAccent"
+            android:text="@string/storydex_theme_white"/>
+        <View style="@style/Coomi.Divider"/>
+        <RadioButton
+            android:id="@+id/theme_default"
+            style="@style/Coomi.Row"
+            android:saveEnabled="false"
+            android:buttonTint="?attr/colorAccent"
+            android:text="@string/storydex_theme_default"/>
+        <View style="@style/Coomi.Divider"/>
+        <RadioButton
+            android:id="@+id/theme_snow"
+            style="@style/Coomi.Row"
+            android:saveEnabled="false"
+            android:buttonTint="?attr/colorAccent"
+            android:text="@string/storydex_theme_snow"/>
+        <View style="@style/Coomi.Divider"/>
+        <RadioButton
+            android:id="@+id/theme_book"
+            style="@style/Coomi.Row"
+            android:saveEnabled="false"
+            android:buttonTint="?attr/colorAccent"
+            android:text="@string/storydex_theme_book"/>
+        <View style="@style/Coomi.Divider"/>
+        <RadioButton
+            android:id="@+id/theme_dark"
+            style="@style/Coomi.Row"
+            android:saveEnabled="false"
+            android:buttonTint="?attr/colorAccent"
+            android:text="@string/storydex_theme_dark"/>
+    </RadioGroup>
+</LinearLayout>

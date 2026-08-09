@@ -1,0 +1,114 @@
+name: Deploy Android release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: GitHub Release tag containing the Android APK
+        required: true
+        default: v2.0.2
+      version:
+        description: Android semantic version
+        required: true
+        default: 0.1.0
+      asset_name:
+        description: Android APK asset filename
+        required: true
+        default: Storydex-Android-arm64-v0.1.0.apk
+      sha256:
+        description: Expected APK SHA-256
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: storydex-android-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Publish APK and website download
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      ANDROID_VERSION: ${{ inputs.version }}
+      APK_NAME: ${{ inputs.asset_name }}
+      APK_SHA256: ${{ inputs.sha256 }}
+      DEPLOY_HOST: ${{ secrets.STORYDEX_DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ secrets.STORYDEX_DEPLOY_PORT }}
+      DEPLOY_USER: ${{ secrets.STORYDEX_DEPLOY_USER }}
+      DEPLOY_PATH: ${{ secrets.STORYDEX_DEPLOY_PATH }}
+      DEPLOY_SSH_KEY: ${{ secrets.STORYDEX_DEPLOY_SSH_KEY }}
+      DEPLOY_KNOWN_HOSTS: ${{ secrets.STORYDEX_DEPLOY_KNOWN_HOSTS }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download and verify Android release asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$ANDROID_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$APK_NAME" =~ ^[A-Za-z0-9._-]+\.apk$ ]]
+          [[ "$APK_SHA256" =~ ^[0-9A-Fa-f]{64}$ ]]
+          mkdir -p release-assets
+          gh release download "$RELEASE_TAG" --pattern "$APK_NAME" --dir release-assets
+          printf '%s  %s\n' "${APK_SHA256,,}" "release-assets/$APK_NAME" | sha256sum --check --strict
+
+      - name: Publish APK and website overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in DEPLOY_HOST DEPLOY_PORT DEPLOY_USER DEPLOY_PATH DEPLOY_SSH_KEY; do
+            [[ -n "${!name:-}" ]] || { echo "Missing required secret: $name" >&2; exit 1; }
+          done
+
+          deploy_path="${DEPLOY_PATH%/}"
+          [[ "$deploy_path" == */windows ]] || { echo "Unexpected Windows deploy path" >&2; exit 1; }
+          update_root="${deploy_path%/windows}"
+          android_dir="$update_root/android"
+          website_dir="/www/wwwroot/storydex.septemc.com"
+          overlay_name="storydex-android-download-v$ANDROID_VERSION.js"
+          overlay_local="apps/website-overlay/$overlay_name"
+          injector_local="scripts/inject_storydex_android_download.py"
+          [[ -f "$overlay_local" && -f "$injector_local" ]]
+
+          install -d -m 700 "$RUNNER_TEMP/storydex-ssh"
+          key_path="$RUNNER_TEMP/storydex-ssh/id_ed25519"
+          known_hosts_path="$RUNNER_TEMP/storydex-ssh/known_hosts"
+          printf '%s\n' "$DEPLOY_SSH_KEY" | tr -d '\r' > "$key_path"
+          chmod 600 "$key_path"
+          if [[ -n "${DEPLOY_KNOWN_HOSTS:-}" ]]; then
+            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" | tr -d '\r' > "$known_hosts_path"
+            strict_mode=yes
+          else
+            : > "$known_hosts_path"
+            strict_mode=accept-new
+          fi
+
+          target="$DEPLOY_USER@$DEPLOY_HOST"
+          ssh_common=(-i "$key_path" -p "$DEPLOY_PORT" -o "UserKnownHostsFile=$known_hosts_path" -o "StrictHostKeyChecking=$strict_mode")
+          scp_common=(-i "$key_path" -P "$DEPLOY_PORT" -o "UserKnownHostsFile=$known_hosts_path" -o "StrictHostKeyChecking=$strict_mode")
+          apk_tmp="$android_dir/.$APK_NAME.$GITHUB_RUN_ID.tmp"
+          overlay_tmp="$website_dir/assets/.$overlay_name.$GITHUB_RUN_ID.tmp"
+          injector_tmp="/tmp/storydex-android-inject-$GITHUB_RUN_ID.py"
+
+          ssh "${ssh_common[@]}" "$target" "mkdir -p '$android_dir' '$website_dir/assets'"
+          scp "${scp_common[@]}" "release-assets/$APK_NAME" "$target:$apk_tmp"
+          scp "${scp_common[@]}" "$overlay_local" "$target:$overlay_tmp"
+          scp "${scp_common[@]}" "$injector_local" "$target:$injector_tmp"
+          ssh "${ssh_common[@]}" "$target" \
+            "set -eu; mv -f '$apk_tmp' '$android_dir/$APK_NAME'; mv -f '$overlay_tmp' '$website_dir/assets/$overlay_name'; python3 '$injector_tmp' '$website_dir/index.html' '/assets/$overlay_name' '$ANDROID_VERSION'; rm -f '$injector_tmp'"
+
+          rm -f "$key_path"
+
+      - name: Verify public Android download and website
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk_url="https://updates.septemc.com/storydex/android/$APK_NAME"
+          overlay_url="https://storydex.septemc.com/assets/storydex-android-download-v$ANDROID_VERSION.js"
+          curl --fail --silent --show-error --location --head "$apk_url?run=$GITHUB_RUN_ID"
+          curl --fail --silent --show-error --location "$overlay_url?run=$GITHUB_RUN_ID" | grep -F '下载 Android 版（测试）'
+          curl --fail --silent --show-error --location "https://storydex.septemc.com/?run=$GITHUB_RUN_ID" | grep -F "/assets/storydex-android-download-v$ANDROID_VERSION.js"
