@@ -925,6 +925,149 @@ describe("agent store sessions and Git decision UX", () => {
   });
 });
 
+describe("agent store coomi status normalization boundaries", () => {
+  it("normalizes reasoning wire fields, capabilities, request plans, and model choices", () => {
+    const status = __agentStoreTestUtils?.normalizeCoomiStatus({
+      runtime: "coomi",
+      installed: true,
+      reasoningCapability: {
+        support: "BOGUS",
+        source: "BOGUS",
+        promptFallback: true,
+        fallbackReason: "invalid mapping",
+        levels: [
+          { effort: "high", control: "native", wireFields: [{ path: "" }] },
+          { effort: "bogus", control: "native" },
+          { effort: "medium", control: "prompt" },
+          { effort: "xhigh", control: "auto" },
+          { effort: "max", control: "native", wire_fields: [{ path: "reasoning.effort", value: "max" }] }
+        ]
+      },
+      reasoningRequestPlan: {
+        requested: "BOGUS",
+        control: "BOGUS",
+        sent: true,
+        promptApplied: true
+      },
+      models: [
+        { selector: "  " },
+        { selector: "fast", providerId: "provider", providerDisplay: "Provider", model: "fast-model", isFast: true }
+      ]
+    });
+
+    expect(status?.reasoningCapability).toMatchObject({
+      support: "unknown",
+      source: "unknown",
+      promptFallback: true,
+      fallbackReason: "invalid mapping",
+      levels: [
+        { effort: "medium", control: "prompt", wireFields: [] },
+        { effort: "max", control: "native", wireFields: [{ path: "reasoning.effort", value: "max" }] }
+      ]
+    });
+    expect(status?.reasoningRequestPlan).toMatchObject({
+      requested: "auto",
+      control: "auto",
+      sent: true,
+      promptApplied: true,
+      support: "unknown",
+      source: "unknown"
+    });
+    expect(status?.models).toEqual([
+      expect.objectContaining({
+        selector: "fast",
+        providerId: "provider",
+        providerDisplay: "Provider",
+        model: "fast-model",
+        isFast: true
+      })
+    ]);
+  });
+
+  it("derives reasoning control from wire fields and prompt fallback", () => {
+    const status = __agentStoreTestUtils?.normalizeCoomiStatus({
+      runtime: "coomi",
+      installed: true,
+      reasoningCapability: {
+        support: "supported",
+        source: "model_config",
+        promptFallback: false,
+        levels: [
+          { effort: "low", control: "native", wireFields: [] },
+          { effort: "low", control: "native", wireFields: [{ path: "a" }] },
+          { effort: "low", control: "weird", wireFields: [] },
+          { effort: "low", control: "weird", wireFields: [{ path: "b" }] },
+          { effort: "low" }
+        ]
+      }
+    });
+    expect(status?.reasoningCapability?.levels).toEqual([
+      { effort: "low", control: "native", wireFields: [{ path: "a", value: undefined }], routeSensitive: false },
+      { effort: "low", control: "native", wireFields: [{ path: "b", value: undefined }], routeSensitive: false }
+    ]);
+  });
+
+  it("resolves reasoning effort from the capability level list", () => {
+    const store = useAgentStore();
+    store.reasoningEffort = "high";
+    store.applyCoomiStatusContext({} as any);
+    expect(store.reasoningEffort).toBe("auto");
+
+    store.coomiStatus = {
+      runtime: "coomi", installed: true,
+      reasoningCapability: {
+        support: "supported", source: "model_config",
+        levels: [{ effort: "high", control: "native", wireFields: [] }]
+      }
+    } as any;
+    store.reasoningEffort = "high";
+    store.applyCoomiStatusContext(store.coomiStatus);
+    expect(store.reasoningEffort).toBe("high");
+
+    store.reasoningEffort = "max";
+    store.applyCoomiStatusContext(store.coomiStatus);
+    expect(store.reasoningEffort).toBe("auto");
+  });
+
+  it("normalizes missing fields and fallback defaults", () => {
+    const status = __agentStoreTestUtils?.normalizeCoomiStatus({
+      runtime: "coomi",
+      installed: true,
+      reasoningCapability: {
+        promptFallback: true,
+        levels: [{ effort: "LOW" }]
+      },
+      reasoningRequestPlan: {},
+      models: [{ selector: "bare" }]
+    });
+    expect(status?.reasoningCapability).toMatchObject({
+      support: "unknown",
+      source: "unknown",
+      levels: [
+        { effort: "low", control: "prompt", wireFields: [], routeSensitive: false }
+      ]
+    });
+    expect(status?.reasoningRequestPlan).toMatchObject({
+      requested: "auto",
+      control: "auto",
+      sent: false,
+      promptApplied: false,
+      support: "unknown",
+      source: "unknown",
+      fallbackReason: undefined
+    });
+    expect(status?.models).toEqual([
+      expect.objectContaining({
+        selector: "bare",
+        providerId: "",
+        providerDisplay: "",
+        model: "",
+        isFast: false
+      })
+    ]);
+  });
+});
+
 function latestRunForFollowup() {
   return {
     traceId: "trace-active", sessionId: "session-a", prompt: "previous", route: "coomi", agentMode: "coomi",
