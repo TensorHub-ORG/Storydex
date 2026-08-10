@@ -26,7 +26,7 @@
 </table>
 
 <p align="center">
-  <img alt="release" src="https://img.shields.io/badge/release-v2.0.2-2563eb?style=flat-square" />
+  <img alt="release" src="https://img.shields.io/badge/release-v2.0.3-2563eb?style=flat-square" />
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0%20%2B%20Commons%20Clause-0f766e?style=flat-square" />
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-f97316?style=flat-square" />
   <img alt="desktop" src="https://img.shields.io/badge/desktop-Electron%2040-47848f?style=flat-square&logo=electron&logoColor=white" />
@@ -116,6 +116,13 @@ Storydex/
 ## 作者与版权
 
 Copyright 2026 Septemc and Flowby.
+
+## v2.0.3
+
+v2.0.3 是修复 Coomi Rust 运行时崩溃的维护版本，建议所有现有安装升级。
+
+- 修复 Coomi 工具输出截断在非 UTF-8 字符边界触发 `String::truncate` 断言崩溃的问题；输出截断改为按字符边界对齐，分析长中文小说文本不再导致运行时崩溃。
+- 完善有界读取完整性协议，大文件在输出预算内按页流式读取，不再破坏多字节字符。
 
 ## v2.0.1
 
