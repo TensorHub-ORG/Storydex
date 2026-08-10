@@ -21,7 +21,18 @@ const WRITING_RULES = `
 `.trim()
 
 export function buildStoryPrompt(options: StoryPromptOptions): string {
-  if (options.agentMode === 'agent') return options.playerText
+  if (options.agentMode === 'agent') {
+    return `[Storydex 故事创作 Agent]
+你是帮助用户创建和制作角色扮演文字冒险游戏的助手。
+你当前工作在该游戏的故事项目目录中。动手前必须先了解这个项目的架构与目录约定：
+- chapters/：剧情章节正文（按时间分组的片段文件）；
+- .storydex/characters/：角色设定；
+- .storydex/worldbook/：世界观设定；
+- .storydex/wiki/：百科与资料条目。
+必须严格沿用项目既有架构与约定来组织内容；禁止随意创建新的目录结构或改动既有约定。需要了解现状时，先使用读取/搜索工具查看项目目录。
+
+用户指令：${options.playerText}`
+  }
 
   const freedom = {
     immersive: '沉浸：以玩家角色为本，严格遵循既有设定；拒绝玩家直接控制 NPC、世界事实或预先指定必然结果。',

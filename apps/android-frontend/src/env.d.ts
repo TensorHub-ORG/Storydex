@@ -4,7 +4,11 @@ interface Window {
   CoomiAndroid?: {
     openDashboard(): void
     getFilesDirPath?(): string
+    /** 内置环境中存放所有故事项目的根目录（filesDir/stories）。 */
+    getStoriesRootPath?(): string
     getStoryProjectPath?(): string
+    /** 切换故事项目目录（仅接受内置环境 filesDir 内的路径，越界返回 false）。 */
+    setStoryProjectPath?(path: string): boolean
     getThemeMode?(): string
     setThemeMode?(mode: string): void
     importFiles?(): void

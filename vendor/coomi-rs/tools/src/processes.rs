@@ -262,7 +262,10 @@ fn platform_shell(command: &str) -> Command {
 
 #[cfg(not(windows))]
 fn platform_shell(command: &str) -> Command {
-    let mut process = Command::new("/bin/bash");
+    // COOMI_SHELL 允许宿主（Termux / Storydex Android 等）指定 bootstrap 内的 bash
+    // （如 $PREFIX/bin/bash）；未设置时回退桌面 Linux/macOS 的 /bin/bash。
+    let shell = std::env::var("COOMI_SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+    let mut process = Command::new(shell);
     process.args(["-lc", command]);
     process
 }

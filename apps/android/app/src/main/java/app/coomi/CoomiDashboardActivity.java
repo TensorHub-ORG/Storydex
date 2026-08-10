@@ -11,8 +11,6 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.Build;
-import android.os.Environment;
-import android.provider.DocumentsContract;
 import android.provider.Settings;
 import android.net.Uri;
 import android.view.View;
@@ -42,7 +40,6 @@ public class CoomiDashboardActivity extends Activity {
 
     private static final String LOG_TAG = "CoomiDashboardActivity";
     private static final int STATUS_REFRESH_MS = 5000;
-    private static final int REQUEST_STORY_PROJECT = 6401;
 
     private View mStatusIndicator;
     private TextView mStatusText;
@@ -169,82 +166,15 @@ public class CoomiDashboardActivity extends Activity {
         refreshStoryProjectCard();
     }
 
+    /**
+     * 切换故事项目目录：只允许在 Storydex 内置环境（filesDir）内选择。
+     * 复用前端文件管理器（pick 模式）浏览并选择内置环境中的目录，
+     * 不再走系统 SAF 目录选择器（避免选取外部存储目录）。
+     */
     private void chooseStoryProject() {
-        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
-        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
-            | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
-            | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
-        try {
-            startActivityForResult(intent, REQUEST_STORY_PROJECT);
-        } catch (Exception error) {
-            showStoryProjectPathDialog();
-        }
-    }
-
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != REQUEST_STORY_PROJECT || resultCode != RESULT_OK || data == null) return;
-        Uri uri = data.getData();
-        if (uri == null) return;
-        try {
-            getContentResolver().takePersistableUriPermission(uri,
-                data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION));
-        } catch (SecurityException ignored) { /* Some providers grant access without persistence. */ }
-        String path = resolveTreePath(uri);
-        if (path != null && CoomiStoryPreference.setProjectPath(this, path)) {
-            refreshStoryProjectCard();
-            return;
-        }
-        Toast.makeText(this, R.string.storydex_project_unavailable, Toast.LENGTH_LONG).show();
-        showStoryProjectPathDialog();
-    }
-
-    @Nullable
-    private String resolveTreePath(Uri uri) {
-        try {
-            String documentId = DocumentsContract.getTreeDocumentId(uri);
-            if (documentId.startsWith("raw:")) return documentId.substring(4);
-            String[] parts = documentId.split(":", 2);
-            String volume = parts[0];
-            String relative = parts.length > 1 ? parts[1] : "";
-            File root;
-            if ("primary".equalsIgnoreCase(volume)) {
-                root = Environment.getExternalStorageDirectory();
-            } else if ("home".equalsIgnoreCase(volume)) {
-                root = new File(Environment.getExternalStorageDirectory(), "Documents");
-            } else {
-                root = new File("/storage", volume);
-            }
-            return relative.isEmpty() ? root.getAbsolutePath() : new File(root, relative).getAbsolutePath();
-        } catch (Exception ignored) {
-            return null;
-        }
-    }
-
-    private void showStoryProjectPathDialog() {
-        EditText input = new EditText(this);
-        input.setSingleLine(true);
-        input.setText(CoomiStoryPreference.getProjectPath(this));
-        input.setSelection(input.getText().length());
-        int padding = Math.round(20 * getResources().getDisplayMetrics().density);
-        android.widget.FrameLayout container = new android.widget.FrameLayout(this);
-        container.setPadding(padding, 0, padding, 0);
-        container.addView(input);
-        new android.app.AlertDialog.Builder(this)
-            .setTitle(R.string.storydex_project_dialog_title)
-            .setMessage(R.string.storydex_project_dialog_message)
-            .setView(container)
-            .setNegativeButton(android.R.string.cancel, null)
-            .setPositiveButton(R.string.storydex_project_save, (dialog, which) -> {
-                if (CoomiStoryPreference.setProjectPath(this, input.getText().toString())) {
-                    refreshStoryProjectCard();
-                } else {
-                    Toast.makeText(this, R.string.storydex_project_unavailable, Toast.LENGTH_LONG).show();
-                }
-            })
-            .show();
+        Intent intent = new Intent(this, com.termux.app.CoomiActivity.class);
+        intent.putExtra(com.termux.app.CoomiActivity.EXTRA_ROUTE, "#/files?pick=1");
+        startActivity(intent);
     }
 
     private void refreshStoryProjectCard() {
@@ -285,9 +215,8 @@ public class CoomiDashboardActivity extends Activity {
                     input.setError(getString(R.string.storydex_project_name_invalid));
                     return;
                 }
-                File current = new File(CoomiStoryPreference.getProjectPath(this));
-                File parent = current.getParentFile();
-                if (parent == null) parent = new File(getFilesDir(), "stories");
+                // 新建故事一律创建在内置环境的 stories 根目录下，避免跟随旧项目位置跑到外部。
+                File parent = CoomiStoryPreference.getStoriesRoot(this);
                 File project = new File(parent, name);
                 if (project.exists()) {
                     input.setError(getString(R.string.storydex_project_exists));

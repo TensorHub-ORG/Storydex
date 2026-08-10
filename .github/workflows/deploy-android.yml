@@ -6,15 +6,15 @@ on:
       tag:
         description: GitHub Release tag containing the Android APK
         required: true
-        default: v2.0.2
+        default: v2.0.3
       version:
         description: Android semantic version
         required: true
-        default: 0.1.0
+        default: 0.1.1
       asset_name:
         description: Android APK asset filename
         required: true
-        default: Storydex-Android-arm64-v0.1.0.apk
+        default: Storydex-Android-arm64-v0.1.1.apk
       sha256:
         description: Expected APK SHA-256
         required: true

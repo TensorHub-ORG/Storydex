@@ -115,6 +115,8 @@ onMounted(() => {
       return 0
     }).catch(() => { /* A failed future turn will surface the write error in the timeline. */ })
   }
+  // 导入的已有故事项目：本地无片段数据时从项目目录 chapters/ 扫描加载（幂等）。
+  void story.loadFragmentsFromProject()
   // 记录引擎当前工作目录，会话列表据此把不同项目的会话隔离开。
   void apiGet<{ cwd?: string }>('/api/runtime/health')
     .then(h => { if (h?.cwd) sessions.setCurrentCwd(h.cwd) })

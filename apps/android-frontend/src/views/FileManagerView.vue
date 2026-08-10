@@ -18,8 +18,12 @@ interface Entry { name: string; is_dir: boolean; size: number; modified: number 
 
 const HOME = window.CoomiAndroid?.getFilesDirPath?.() || '/data/user/0/com.storydex.android/files'
 const STORY_ROOT = window.CoomiAndroid?.getStoryProjectPath?.() || HOME
+const STORIES_ROOT = window.CoomiAndroid?.getStoriesRootPath?.() || HOME + '/stories'
 const storyScope = route.query.root === 'story'
-const ROOT = storyScope ? STORY_ROOT : HOME
+/** pick 模式：从控制台「切换目录」进入，在 stories 根目录下选择故事项目目录。 */
+const pickMode = route.query.pick === '1'
+const scoped = storyScope || pickMode
+const ROOT = storyScope ? STORY_ROOT : (pickMode ? STORIES_ROOT : HOME)
 const path = ref(ROOT)
 const entries = ref<Entry[]>([])
 const loading = ref(true)
@@ -31,17 +35,20 @@ const clipMode = ref<'copy' | 'move'>('copy')
 
 const parentPath = computed(() => {
   const p = path.value.replace(/\/+$/, '')
-  if (storyScope && p === ROOT.replace(/\/+$/, '')) return ROOT
+  if (scoped && p === ROOT.replace(/\/+$/, '')) return ROOT
   const idx = p.lastIndexOf('/')
   const parent = idx <= 0 ? '/' : p.slice(0, idx)
-  return storyScope && !insideStoryRoot(parent) ? ROOT : parent
+  return scoped && !insideStoryRoot(parent) ? ROOT : parent
 })
 const crumbs = computed(() => {
-  const base = storyScope ? ROOT.replace(/\/+$/, '') : ''
-  const relative = storyScope ? path.value.slice(base.length) : path.value
+  const base = scoped ? ROOT.replace(/\/+$/, '') : ''
+  const relative = scoped ? path.value.slice(base.length) : path.value
   const parts = relative.split('/').filter(Boolean)
-  const out: { label: string; path: string }[] = storyScope
-    ? [{ label: ROOT.split('/').filter(Boolean).pop() || '故事项目', path: ROOT }]
+  const rootLabel = storyScope
+    ? (ROOT.split('/').filter(Boolean).pop() || '故事项目')
+    : (pickMode ? '故事根目录' : '')
+  const out: { label: string; path: string }[] = scoped
+    ? [{ label: rootLabel, path: ROOT }]
     : []
   let acc = base
   for (const part of parts) { acc += '/' + part; out.push({ label: part, path: acc }) }
@@ -51,6 +58,8 @@ const crumbs = computed(() => {
 function insideStoryRoot(candidate: string): boolean {
   const root = ROOT.replace(/\/+$/, '')
   const normalized = candidate.replace(/\/+$/, '')
+  // 拒绝包含 .. 段的路径，避免字符串前缀匹配误判（原生侧 canonical 校验兜底）。
+  if (normalized.split('/').includes('..')) return false
   return normalized === root || normalized.startsWith(root + '/')
 }
 
@@ -76,7 +85,7 @@ async function load(dir: string) {
   loading.value = true
   error.value = ''
   try {
-    const target = storyScope && !insideStoryRoot(dir) ? ROOT : dir
+    const target = scoped && !insideStoryRoot(dir) ? ROOT : dir
     const data = await api('GET', '/api/fs/list?path=' + encodeURIComponent(target))
     path.value = data.path
     entries.value = data.entries ?? []
@@ -214,6 +223,21 @@ function setAsSessionDir() {
   notice.value = '已设为当前会话目录'
 }
 
+/** pick 模式：把当前浏览的目录设为故事项目（越界由原生拒绝）。 */
+function pickAsStoryProject() {
+  if (!window.CoomiAndroid?.setStoryProjectPath) {
+    notice.value = '当前环境不支持切换故事项目'
+    return
+  }
+  const ok = window.CoomiAndroid.setStoryProjectPath(path.value)
+  if (ok) {
+    notice.value = '已切换故事项目'
+    setTimeout(goDashboard, 800)
+  } else {
+    notice.value = '请进入故事根目录下的某个目录再选择'
+  }
+}
+
 onMounted(async () => {
   if (storyScope) await session.setSessionCwd(ROOT)
   await load(path.value)
@@ -227,13 +251,13 @@ function goDashboard() {
 
 <template>
   <div class="page">
-    <PageHead :title="storyScope ? '故事项目' : '文件管理'" @back="goDashboard" />
+    <PageHead :title="pickMode ? '选择故事项目目录' : storyScope ? '故事项目' : '文件管理'" @back="goDashboard" />
     <main class="body">
       <!-- 路径导航 -->
       <div class="crumbs">
-        <button v-if="!storyScope" class="crumb" @click="load('/')">/</button>
+        <button v-if="!scoped" class="crumb" @click="load('/')">/</button>
         <template v-for="(c, index) in crumbs" :key="c.path">
-          <span v-if="!storyScope || index > 0" class="sep">/</span>
+          <span v-if="!scoped || index > 0" class="sep">/</span>
           <button class="crumb" :class="{ cur: c.path === path }" @click="load(c.path)">{{ c.label }}</button>
         </template>
       </div>
@@ -243,13 +267,14 @@ function goDashboard() {
 
       <!-- 工具条 -->
       <div class="toolbar">
-        <button class="tbtn" @click="load(parentPath)" :disabled="path === (storyScope ? ROOT : '/')">
+        <button class="tbtn" @click="load(parentPath)" :disabled="path === (scoped ? ROOT : '/')">
           <CoomiIcon name="chevronLeft" :size="15" /><span>上一级</span>
         </button>
         <button class="tbtn" @click="startCreate('dir')"><CoomiIcon name="plus" :size="15" /><span>新建文件夹</span></button>
         <button class="tbtn" @click="startCreate('file')"><CoomiIcon name="plus" :size="15" /><span>新建文件</span></button>
         <button class="tbtn" @click="paste" :disabled="clip.length === 0"><CoomiIcon name="paste" :size="15" /><span>粘贴{{ clip.length ? `(${clip.length})` : '' }}</span></button>
-        <button v-if="!storyScope" class="tbtn" @click="setAsSessionDir"><CoomiIcon name="target" :size="15" /><span>设为会话目录</span></button>
+        <button v-if="pickMode" class="tbtn pick" @click="pickAsStoryProject"><CoomiIcon name="target" :size="15" /><span>选为故事项目</span></button>
+        <button v-else-if="!storyScope" class="tbtn" @click="setAsSessionDir"><CoomiIcon name="target" :size="15" /><span>设为会话目录</span></button>
       </div>
 
       <!-- 列表 -->
@@ -334,6 +359,7 @@ function goDashboard() {
 }
 .tbtn:disabled { opacity: 0.4; }
 .tbtn.danger { color: var(--danger); background: var(--danger-soft); }
+.tbtn.pick { color: var(--blue); background: var(--blue-soft); }
 .file-list { display: flex; flex-direction: column; gap: 2px; }
 .file-row {
   display: flex; align-items: center; gap: 10px;

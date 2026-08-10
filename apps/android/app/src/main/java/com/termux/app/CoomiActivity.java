@@ -385,10 +385,22 @@ public class CoomiActivity extends Activity {
         @JavascriptInterface
         public String getFilesDirPath() { return CoomiActivity.this.getFilesDir().getAbsolutePath(); }
 
+        /** 内置环境中存放所有故事项目的根目录（filesDir/stories）。 */
+        @JavascriptInterface
+        public String getStoriesRootPath() {
+            return CoomiStoryPreference.getStoriesRoot(CoomiActivity.this).getAbsolutePath();
+        }
+
         /** The persisted story root used by both the dashboard and the Web story UI. */
         @JavascriptInterface
         public String getStoryProjectPath() {
             return CoomiStoryPreference.getProjectPath(CoomiActivity.this);
+        }
+
+        /** 前端文件管理选择模式切换故事项目目录：仅接受内置环境（filesDir）内的路径，越界返回 false。 */
+        @JavascriptInterface
+        public boolean setStoryProjectPath(String path) {
+            return CoomiStoryPreference.setProjectPath(CoomiActivity.this, path);
         }
 
         /** 前端上报任务状态（running/done），更新通知栏「任务执行中/已完成」。 */

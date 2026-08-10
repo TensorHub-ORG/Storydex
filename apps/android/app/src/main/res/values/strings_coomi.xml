@@ -178,22 +178,18 @@
     <string name="coomi_shizuku_unavailable">不可用</string>
 
     <string name="storydex_project_label">故事项目</string>
-    <string name="storydex_project_choose">选择故事项目目录</string>
     <string name="storydex_project_current">当前故事</string>
     <string name="storydex_project_switch">切换目录</string>
     <string name="storydex_project_create">创建新故事</string>
     <string name="storydex_project_create_title">创建新故事</string>
-    <string name="storydex_project_create_message">新故事会创建在当前故事项目的同级目录中。</string>
+    <string name="storydex_project_create_message">新故事会创建在内置环境的 stories 目录下。</string>
     <string name="storydex_project_create_hint">故事名称</string>
     <string name="storydex_project_create_action">创建并使用</string>
     <string name="storydex_project_created">新故事已创建</string>
     <string name="storydex_project_name_invalid">请输入不包含 / 或 \\ 的故事名称。</string>
     <string name="storydex_project_exists">同名故事目录已经存在。</string>
     <string name="storydex_project_hint">Agent 的所有剧情执行与片段文件仅围绕此目录</string>
-    <string name="storydex_project_dialog_title">故事项目目录</string>
-    <string name="storydex_project_dialog_message">输入可读写的绝对路径；目录不存在时会自动创建。</string>
-    <string name="storydex_project_save">使用此目录</string>
-    <string name="storydex_project_unavailable">无法将该目录作为故事项目，请选择手机内部存储中的可读写目录。</string>
+    <string name="storydex_project_unavailable">仅可选择 Storydex 内置环境中的目录。</string>
     <string name="storydex_appearance_title">外观</string>
     <string name="storydex_theme_white">纯白工作台</string>
     <string name="storydex_theme_default">现代浅色</string>

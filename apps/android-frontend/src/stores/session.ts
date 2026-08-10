@@ -299,6 +299,15 @@ export const useSessionStore = defineStore('session', () => {
       : []
   }
 
+  /** 待机：清空时间线回到剧情主页（空态首屏），不换会话、不中断后台任务。 */
+  function standby() {
+    endAssistantStream()
+    timeline.value = []
+    usage.value = null
+    loop.value = { active: false, currentStep: 0, totalSteps: 0, status: '' }
+    runState.value = 'idle'
+  }
+
   /** 从引擎 /api/sessions/{id} 恢复完整历史；成功返回 true。 */
   async function restoreFromEngine(id: string): Promise<boolean> {
     try {
@@ -469,7 +478,7 @@ export const useSessionStore = defineStore('session', () => {
   }
   function pushNotice(tone: 'info' | 'warn' | 'error' | 'success', text: string) { timeline.value.push({ kind: 'notice', id: nextId(), tone, text }) }
 
-  return { sessionId, timeline, runState, usage, cwd, loop, isBusy, pendingApproval, pendingQuestion, connect, disconnect, sendMessage, cancel, approve, answerQuestion, setPermissionMode, togglePlanMode, selectModel, setReasoningEffort, completeFileTransfer, newSession, continueStory, openSession, deleteSession, setSessionCwd, sendGuide }
+  return { sessionId, timeline, runState, usage, cwd, loop, isBusy, pendingApproval, pendingQuestion, connect, disconnect, sendMessage, cancel, approve, answerQuestion, setPermissionMode, togglePlanMode, selectModel, setReasoningEffort, completeFileTransfer, newSession, continueStory, standby, openSession, deleteSession, setSessionCwd, sendGuide }
 })
 
 function fmtTokens(n: number): string { return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n) }

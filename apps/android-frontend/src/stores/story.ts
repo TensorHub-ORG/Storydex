@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { authedFetch } from '@/bridge/http'
+import { apiGet, authedFetch } from '@/bridge/http'
 import type { Timelineitem } from './viewModel'
 import { buildStoryPrompt } from '@/story/prompt'
 
@@ -104,6 +104,56 @@ function nextGroupTimestamp(existingGroups: Set<string>, latestGroup?: string): 
   return candidate
 }
 
+interface FsEntry { name: string; is_dir: boolean; size: number; modified: number }
+interface FsListData { path: string; entries: FsEntry[] }
+
+/** frontmatter 值去引号：优先 JSON.parse（处理 \" 转义），失败时剥掉首尾成对引号。 */
+function unquoteFrontmatterValue(value: string): string {
+  const v = value.trim()
+  if (v.length >= 2 && v.startsWith('"') && v.endsWith('"')) {
+    try { return JSON.parse(v) } catch { return v.slice(1, -1) }
+  }
+  if (v.length >= 2 && v.startsWith("'") && v.endsWith("'")) return v.slice(1, -1)
+  return v
+}
+
+/** 解析剧情片段文件的 frontmatter（---\nsummary: …\ncreatedAt: …\n---\n\n正文）。 */
+function parseFragmentFile(raw: string): { summary: string; createdAt: number; content: string } | null {
+  const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/)
+  if (!match) return null
+  const meta: Record<string, string> = {}
+  for (const line of match[1].split(/\r?\n/)) {
+    const idx = line.indexOf(':')
+    if (idx > 0) meta[line.slice(0, idx).trim().toLowerCase()] = unquoteFrontmatterValue(line.slice(idx + 1))
+  }
+  const createdAt = Date.parse(meta.createdat ?? meta.created_at ?? '')
+  return {
+    summary: meta.summary ?? '',
+    createdAt: Number.isFinite(createdAt) ? createdAt : 0,
+    content: (match[2] ?? '').trim(),
+  }
+}
+
+/** 递归收集某目录下的 .md 文件（fs/list 单层，需要逐层展开）。 */
+async function collectMarkdownFiles(
+  absDir: string,
+  relPrefix: string,
+  out: { rel: string; abs: string }[],
+): Promise<void> {
+  let data: FsListData
+  try {
+    data = await apiGet(`/api/fs/list?path=${encodeURIComponent(absDir)}`)
+  } catch {
+    return
+  }
+  for (const e of data.entries ?? []) {
+    if (e.name === '.' || e.name === '..') continue
+    const rel = relPrefix ? `${relPrefix}/${e.name}` : e.name
+    if (e.is_dir) await collectMarkdownFiles(`${absDir}/${e.name}`, rel, out)
+    else if (/\.md$/i.test(e.name)) out.push({ rel, abs: `${absDir}/${e.name}` })
+  }
+}
+
 export const useStoryStore = defineStore('story', () => {
   const projectPath = ref(window.CoomiAndroid?.getStoryProjectPath?.() ?? '')
   const initial = readState(projectPath.value)
@@ -130,7 +180,7 @@ export const useStoryStore = defineStore('story', () => {
     }))
   }
 
-  function setAgentMode(mode: AgentMode) { agentMode.value = mode; persist() }
+  function setAgentMode(mode: AgentMode) { agentMode.value = mode; persist(); if (mode !== 'agent') void loadFragmentsFromProject() }
   function setNarrativeMode(mode: NarrativeMode) { narrativeMode.value = mode; persist() }
   function setFragmentLength(min: number, max: number) {
     const nextMin = normalizedLength(min, fragmentMin.value)
@@ -228,10 +278,70 @@ export const useStoryStore = defineStore('story', () => {
     return synced
   }
 
+  /**
+   * 从当前故事项目目录扫描已有剧情片段（chapters/**​/*.md）并格式化加载到侧边栏。
+   * 适用「从外部导入的已有数据项目」：本 app 生成的片段都在 localStorage 里，
+   * 已有本地数据时跳过（不覆盖本地编辑与行动建议）；本地为空时以项目目录为权威重建。
+   */
+  async function loadFragmentsFromProject(): Promise<boolean> {
+    const current = window.CoomiAndroid?.getStoryProjectPath?.() ?? projectPath.value
+    if (!current) return false
+    // 项目目录切换（同一页面实例内）：先重置本地片段，避免旧项目数据串到新项目。
+    if (current !== projectPath.value) {
+      projectPath.value = current
+      fragments.value = []
+    }
+    if (fragments.value.length > 0) return false
+    const chaptersDir = current.replace(/\/+$/, '') + '/chapters'
+    try {
+      const files: { rel: string; abs: string }[] = []
+      await collectMarkdownFiles(chaptersDir, 'chapters', files)
+      if (files.length === 0) return false
+      const candidates: Array<StoryFragment & { sortKey: number }> = []
+      const seenIds = new Set<string>()
+      for (const f of files) {
+        const res = await authedFetch(`/api/fs/raw?path=${encodeURIComponent(f.abs)}`)
+        if (!res.ok) continue
+        const parsed = parseFragmentFile(await res.text())
+        if (!parsed || !parsed.content) continue
+        const parts = f.rel.split('/')
+        const group = parts.length > 1 ? parts[1] : 'imported'
+        const filename = parts[parts.length - 1]
+        // 与 captureTurn 的 id 约定一致：group-组内序号（文件名形如 {group}-{序号}.md）。
+        const sequence = (filename.replace(/\.md$/i, '').split('-').pop() || '000')
+        const id = `${group}-${sequence}`
+        if (seenIds.has(id)) continue // 嵌套子目录可能产生相同 id，跳过重复
+        seenIds.add(id)
+        candidates.push({
+          id,
+          group,
+          filename,
+          path: f.rel,
+          createdAt: parsed.createdAt,
+          summary: parsed.summary || shortSummary(parsed.content),
+          content: parsed.content,
+          suggestions: [],
+          synced: true,
+          sortKey: parsed.createdAt,
+        })
+      }
+      if (candidates.length === 0) return false
+      // 按 createdAt 升序（外部命名 chapter2/chapter10 用字典序会错乱）。
+      candidates.sort((a, b) => a.sortKey - b.sortKey)
+      // 竞态保护：等待 fs/raw 期间若已有新片段生成（captureTurn），放弃覆盖。
+      if (fragments.value.length > 0) return false
+      fragments.value = candidates.map(({ sortKey, ...fragment }) => fragment)
+      persist()
+      return true
+    } catch {
+      return false
+    }
+  }
+
   return {
     fragments, agentMode, narrativeMode, fragmentMin, fragmentMax, reasoningEffort, projectPath, olderExpanded,
     latest, latestFive, older, setAgentMode, setNarrativeMode, setFragmentLength, setReasoningEffort,
-    promptFor, captureTurn, updateFragment, syncFragments,
+    promptFor, captureTurn, updateFragment, syncFragments, loadFragmentsFromProject,
     parseStoryResponse,
   }
 })

@@ -24,8 +24,28 @@ const MODES: { key: AgentMode; label: string; icon: string; desc: string }[] = [
 const FREEDOM: { key: NarrativeMode; label: string }[] = [
   { key: 'immersive', label: '沉浸' }, { key: 'narrative', label: '叙事' }, { key: 'free', label: '自由' },
 ]
-const suggestions = computed(() => story.latest?.suggestions ?? ['回顾我现在的处境', '观察眼前的人', '检查周围环境', '迈出下一步'])
+/** 各模式空态首屏的四项固定建议（story 模式优先用最新片段的动态行动建议）。 */
+const MODE_SUGGESTIONS: Record<AgentMode, string[]> = {
+  story: ['回顾我现在的处境', '观察眼前的人', '检查周围环境', '迈出下一步'],
+  narrator: ['详细总结当前主角详细面板', '总结当前故事背景现状', '总结当前与主角相关的人物', '总结当前的完整精炼剧情线'],
+  agent: ['我需要创建一个故事设定', '我需要整理故事文件', '我需要制作角色设定', '我需要制作风格预设'],
+}
+const suggestions = computed(() =>
+  story.agentMode === 'story'
+    ? (story.latest?.suggestions?.length ? story.latest.suggestions : MODE_SUGGESTIONS.story)
+    : MODE_SUGGESTIONS[story.agentMode],
+)
 
+const TITLES: Record<AgentMode, string> = {
+  story: '剧情可以怎么发展？',
+  narrator: '想了解故事的哪一面？',
+  agent: '有什么想为你的故事世界做的？',
+}
+const SUBTITLES: Record<AgentMode, string> = {
+  story: '选择一种行动，让这个故事从这里持续向前。',
+  narrator: '选择一项要查看的状态，我只解说、不续写。',
+  agent: '选择一项任务，或直接给 Agent 下达指令。',
+}
 const hint = computed(() => MODES.find(m => m.key === story.agentMode)?.desc ?? '')
 
 function pick(key: AgentMode) {
@@ -37,8 +57,8 @@ function pick(key: AgentMode) {
 <template>
   <div class="empty">
     <CoomiMark :size="52" class="logo" />
-    <h1>剧情可以怎么发展？</h1>
-    <p class="sub">{{ story.latest?.summary || '选择一种行动，让这个故事从这里持续向前。' }}</p>
+    <h1>{{ TITLES[story.agentMode] }}</h1>
+    <p class="sub">{{ story.latest?.summary || SUBTITLES[story.agentMode] }}</p>
 
     <p v-if="connection.demo" class="demobar">
       <CoomiIcon name="alert" :size="14" />
