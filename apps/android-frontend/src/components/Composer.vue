@@ -67,7 +67,7 @@ function onKeydown(e: KeyboardEvent) {
 function cycleAgentMode() {
   const values: AgentMode[] = ['story', 'narrator', 'agent']
   const next = values[(values.indexOf(story.agentMode) + 1) % values.length]
-  story.setAgentMode(next)
+  session.switchAgentMode(next)
 }
 function cycleNarrativeMode() {
   const values: NarrativeMode[] = ['immersive', 'narrative', 'free']

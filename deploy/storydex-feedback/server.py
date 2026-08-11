@@ -32,6 +32,7 @@ MAX_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_TEXT = 5000
 TOKEN_LIFETIME_SECONDS = 12 * 60 * 60
 MAX_SUBMISSIONS_PER_IP_HOUR = 30
+ANDROID_INITIAL_DOWNLOADS = 28
 COOMI_LOGIN_URL = "https://updates.septemc.com/coomi/feedback/api/admin/login"
 IMAGE_TYPES = {
     "image/png": (".png", b"\x89PNG\r\n\x1a\n"),
@@ -168,6 +169,19 @@ class FeedbackStore:
                     ON feedback(received_at DESC);
                 CREATE UNIQUE INDEX IF NOT EXISTS feedback_submission_id_idx
                     ON feedback(submission_id);
+                CREATE TABLE IF NOT EXISTS site_counters (
+                    name TEXT PRIMARY KEY,
+                    value INTEGER NOT NULL CHECK(value >= 0)
+                );
+                CREATE TABLE IF NOT EXISTS site_counter_events (
+                    event_id TEXT PRIMARY KEY,
+                    counter_name TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS site_counter_events_created_at_idx
+                    ON site_counter_events(created_at DESC);
+                INSERT OR IGNORE INTO site_counters (name, value)
+                    VALUES ('android_downloads', 28);
                 """
             )
         if not self.secret_path.exists():
@@ -191,6 +205,32 @@ class FeedbackStore:
 
     def auth_secret(self) -> bytes:
         return self.secret_path.read_text(encoding="ascii").strip().encode("ascii")
+
+    def android_downloads(self) -> int:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM site_counters WHERE name = 'android_downloads'"
+            ).fetchone()
+        return max(ANDROID_INITIAL_DOWNLOADS, int(row["value"]) if row else 0)
+
+    def record_android_download(self, event_id: str) -> int:
+        normalized = bounded_text(event_id, 160)
+        if not re.fullmatch(r"[0-9A-Za-z._:-]{8,160}", normalized):
+            raise FeedbackError("eventId 格式无效。")
+        with self.connect() as connection:
+            inserted = connection.execute(
+                """INSERT OR IGNORE INTO site_counter_events
+                   (event_id, counter_name, created_at) VALUES (?, 'android_downloads', ?)""",
+                (normalized, utc_now()),
+            ).rowcount
+            if inserted:
+                connection.execute(
+                    "UPDATE site_counters SET value = value + 1 WHERE name = 'android_downloads'"
+                )
+            row = connection.execute(
+                "SELECT value FROM site_counters WHERE name = 'android_downloads'"
+            ).fetchone()
+        return max(ANDROID_INITIAL_DOWNLOADS, int(row["value"]) if row else 0)
 
     def save(self, payload: Dict[str, Any], client_ip: str, user_agent: str) -> str:
         data = validate_feedback(payload)
@@ -409,6 +449,10 @@ class FeedbackHandler(BaseHTTPRequestHandler):
                 feedback_id = self.store.save(payload, client_ip, self.headers.get("User-Agent", ""))
                 self.send_json(HTTPStatus.CREATED, {"ok": True, "id": feedback_id})
                 return
+            if path == f"{BASE_PATH}/site-stats/download-android":
+                count = self.store.record_android_download(payload.get("eventId"))
+                self.send_json(HTTPStatus.OK, {"androidDownloads": count})
+                return
             if path == f"{BASE_PATH}/api/admin/login":
                 if not verify_admin_password(bounded_text(payload.get("password"), 500)):
                     self.send_json(HTTPStatus.UNAUTHORIZED, {"error": "密码错误或认证服务不可用。"})
@@ -428,6 +472,9 @@ class FeedbackHandler(BaseHTTPRequestHandler):
         params = parse_qs(parsed.query)
         if path in {f"{BASE_PATH}/health", f"{BASE_PATH}/api/health"}:
             self.send_json(HTTPStatus.OK, {"ok": True, "service": "storydex-feedback"})
+            return
+        if path == f"{BASE_PATH}/site-stats/download-android":
+            self.send_json(HTTPStatus.OK, {"androidDownloads": self.store.android_downloads()})
             return
         if path in {BASE_PATH, f"{BASE_PATH}/admin"}:
             self.send_response(HTTPStatus.OK)

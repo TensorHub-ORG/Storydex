@@ -11,6 +11,19 @@ import CoomiIcon from '@/components/CoomiIcon.vue'
 import { authedFetch } from '@/bridge/http'
 
 const router = useRouter()
+const CORE_ABILITIES = [
+  ['项目检索', '按推理强度检索章节、角色、世界观与来源'],
+  ['连续性与溯源', '核对事实、变量来源、矛盾与过期记忆'],
+  ['剧本与时间', '维护故事内时间、剧本路线、完成条件与闪回'],
+  ['角色塑造', '人物动机、关系、成长弧与非模板化命名'],
+  ['世界构建', '制度、地理、文化、规则与因果约束'],
+  ['情节设计', '冲突、伏笔、节奏、转折与回收'],
+  ['对白写作', '区分声线、潜台词、身份与情绪变化'],
+  ['悬疑推理', '线索公平性、误导、证据链与揭晓节奏'],
+  ['动作场景', '空间关系、能力限制、节奏与可追踪后果'],
+  ['文字润色', '按激活预设改善表达并保持事实不变'],
+  ['互动叙事', '保留玩家选择权，拒绝越权控制并提供替代行动'],
+] as const
 
 /** 解析引擎响应：兼容空 body（旧引擎进程对未知路由返回 404 空体），错误带可读信息。 */
 async function parseRes(res: Response): Promise<any> {
@@ -104,8 +117,8 @@ async function setEnabled(kind: 'mcp' | 'skill', item: McpItem | SkillItem, enab
     // 本地乐观更新：立即反映按钮/徽标状态（不依赖后续 load 是否成功）。
     item.enabled = enabled
     notice.value = enabled
-      ? `已启用${kind === 'mcp' ? ' MCP' : ' Skill'}「${item.name}」，新开会话后生效`
-      : `已停用${kind === 'mcp' ? ' MCP' : ' Skill'}「${item.name}」，文件与配置已保留，可随时重新启用`
+      ? `已启用${kind === 'mcp' ? '通用工具' : '创作能力'}「${item.name}」，新开会话后生效`
+      : `已停用${kind === 'mcp' ? '通用工具' : '创作能力'}「${item.name}」，文件与配置已保留，可随时重新启用`
     await load()
   } catch (e) {
     notice.value = `${enabled ? '启用' : '停用'}失败：${e instanceof Error ? e.message : String(e)}`
@@ -128,7 +141,7 @@ async function deleteItem() {
     const resource = target.kind === 'mcp' ? 'mcp' : 'skills'
     const res = await authedFetch(`/api/catalog/${resource}/${target.item.id}`, { method: 'DELETE' })
     await parseRes(res)
-    notice.value = `已彻底删除${target.kind === 'mcp' ? ' MCP' : ' Skill'}「${target.item.name}」`
+    notice.value = `已彻底删除${target.kind === 'mcp' ? '通用工具' : '创作能力'}「${target.item.name}」`
     askDelete.value = null
     await load()
   } catch (e) {
@@ -198,7 +211,14 @@ function switchScope(next: Scope) {
 }
 
 /** 当前视图下要渲染的列表（已安装｜仓库）。 */
-const visibleMcp = computed(() => (scope.value === 'installed' ? installedMcp.value : mcp.value))
+const STORY_TOOL_COPY: Record<string, { name: string; description: string }> = {
+  filesystem: { name: '外部资料目录', description: '授权一个参考资料目录，用于检索设定集、文献和素材。' },
+  fetch: { name: '网页资料读取', description: '联网读取历史、地理、专业知识和公开网页，作为故事研究来源。' },
+  memory: { name: '资料关系图谱', description: '辅助维护复杂人物、地点、组织、事件与关系。' },
+}
+const visibleMcp = computed(() => scope.value === 'installed'
+  ? installedMcp.value
+  : mcp.value.filter(item => STORY_TOOL_COPY[item.id]).map(item => ({ ...item, ...STORY_TOOL_COPY[item.id] })))
 const visibleSkills = computed(() => (scope.value === 'installed' ? installedSkills.value : skills.value))
 
 async function installMcp() {
@@ -213,7 +233,7 @@ async function installMcp() {
       body: JSON.stringify({ id: item.id, values: installValues.value }),
     })
     await parseRes(res)
-    notice.value = `已安装 MCP「${item.name}」，重启引擎或新开会话后生效`
+    notice.value = `已安装通用工具「${item.name}」，重启引擎或新开会话后生效`
     closeInstallForm()
     await load()
   } catch (e) {
@@ -233,7 +253,7 @@ async function installSkill(item: SkillItem) {
       body: JSON.stringify({ id: item.id }),
     })
     await parseRes(res)
-    notice.value = `已安装 Skill「${item.name}」，重启引擎或新开会话后生效`
+    notice.value = `已安装创作能力「${item.name}」，重启引擎或新开会话后生效`
     await load()
   } catch (e) {
     notice.value = `安装失败：${e instanceof Error ? e.message : String(e)}`
@@ -264,15 +284,15 @@ function goDashboard() {
         </button>
       </div>
 
-      <!-- 二级：MCP | Skills -->
+      <!-- 能力分类 -->
       <div class="tabs">
-        <button class="tab" :class="{ on: tab === 'mcp' }" @click="tab = 'mcp'">
-          <CoomiIcon name="plug" :size="15" />MCP
-          <span class="cnt">{{ scope === 'installed' ? installedMcp.length : mcp.length }}</span>
-        </button>
         <button class="tab" :class="{ on: tab === 'skills' }" @click="tab = 'skills'">
-          <CoomiIcon name="wrench" :size="15" />Skills
-          <span class="cnt">{{ scope === 'installed' ? installedSkills.length : skills.length }}</span>
+          <CoomiIcon name="sparkle" :size="15" />故事创作
+          <span class="cnt">{{ CORE_ABILITIES.length }}</span>
+        </button>
+        <button class="tab" :class="{ on: tab === 'mcp' }" @click="tab = 'mcp'">
+          <CoomiIcon name="globe" :size="15" />通用工具
+          <span class="cnt">{{ scope === 'installed' ? installedMcp.length : mcp.length }}</span>
         </button>
       </div>
 
@@ -283,7 +303,7 @@ function goDashboard() {
       <!-- MCP -->
       <template v-if="tab === 'mcp'">
         <p v-if="!loading && visibleMcp.length === 0" class="hint">
-          {{ scope === 'installed' ? '本机还没有已安装的 MCP Server。' : '目录为空，暂时没有可安装的 MCP Server。' }}
+          {{ scope === 'installed' ? '本机还没有已安装的通用工具。' : '目录为空，暂时没有可安装的通用工具。' }}
         </p>
         <div v-else class="cards">
           <div v-for="item in visibleMcp" :key="item.id" class="card">
@@ -299,7 +319,7 @@ function goDashboard() {
               <CoomiIcon name="chevronRight" :size="14" class="chev" :class="{ open: expanded === item.id }" />
             </button>
             <div v-if="expanded === item.id" class="detail">
-              <p class="cdesc">{{ item.description || '本机配置的 MCP Server' }}</p>
+              <p class="cdesc">{{ item.description || '本机配置的通用工具' }}</p>
               <span v-if="item.transport" class="cmeta"><CoomiIcon name="link" :size="12" />{{ item.transport }}</span>
               <span v-if="item.path" class="cmeta path"><CoomiIcon name="folder" :size="12" />{{ item.path }}</span>
               <div class="dops">
@@ -320,10 +340,11 @@ function goDashboard() {
 
       <!-- Skills -->
       <template v-else>
-        <p v-if="!loading && visibleSkills.length === 0" class="hint">
-          {{ scope === 'installed' ? '本机还没有已安装的 Skill。' : '目录为空，暂时没有可安装的 Skill。' }}
-        </p>
-        <div v-else class="cards">
+        <p class="core-hint">核心创作能力已随 Storydex 内置，使用频率和检索深度随推理强度调整，无需联网安装。</p>
+        <div class="cards core-grid">
+          <div v-for="ability in CORE_ABILITIES" :key="ability[0]" class="card core-card"><span class="tile on"><CoomiIcon name="sparkle" :size="18" /></span><span class="core-copy"><b>{{ ability[0] }}</b><small>{{ ability[1] }}</small></span><span class="badge ok">内置</span></div>
+        </div>
+        <div v-if="false" class="cards">
           <div v-for="item in visibleSkills" :key="item.id" class="card">
             <button class="card-head" @click.stop="toggleExpanded(item.id)">
               <span class="tile" :class="{ on: item.installed }">
@@ -337,7 +358,7 @@ function goDashboard() {
               <CoomiIcon name="chevronRight" :size="14" class="chev" :class="{ open: expanded === item.id }" />
             </button>
             <div v-if="expanded === item.id" class="detail">
-              <p class="cdesc">{{ item.description || '本机安装的 Skill' }}</p>
+              <p class="cdesc">{{ item.description || '本机安装的创作能力' }}</p>
               <span v-if="item.repository" class="cmeta"><CoomiIcon name="globe" :size="12" />{{ item.repository }}</span>
               <span v-if="item.path" class="cmeta path"><CoomiIcon name="folder" :size="12" />{{ item.path }}</span>
               <div class="dops">
@@ -362,7 +383,7 @@ function goDashboard() {
           <div class="grip" />
           <div class="stitle">
             <CoomiIcon :name="askDelete.kind === 'mcp' ? 'plug' : 'wrench'" :size="17" />
-            彻底删除{{ askDelete.kind === 'mcp' ? ' MCP' : ' Skill' }}「{{ askDelete.item.name }}」？
+            彻底删除{{ askDelete.kind === 'mcp' ? '通用工具' : '创作能力' }}「{{ askDelete.item.name }}」？
           </div>
           <p class="sdesc">
             {{ askDelete.kind === 'mcp'
@@ -380,11 +401,11 @@ function goDashboard() {
       <div v-if="askMcp" class="sheet-mask" @click.self="askMcp = null">
         <div class="sheet">
           <div class="grip" />
-          <div class="stitle"><CoomiIcon name="plug" :size="17" />安装 MCP「{{ askMcp.name }}」？</div>
+          <div class="stitle"><CoomiIcon name="plug" :size="17" />安装通用工具「{{ askMcp.name }}」？</div>
           <p class="sdesc">{{ askMcp.description }}</p>
           <div class="sinfo">
             <span><CoomiIcon name="link" :size="13" />{{ askMcp.transport }}</span>
-            <span><CoomiIcon name="folder" :size="13" />写入 config/mcp_servers.json</span>
+            <span><CoomiIcon name="folder" :size="13" />写入本地工具配置</span>
             <span><CoomiIcon name="refresh" :size="13" />重启引擎或新开会话后生效</span>
           </div>
           <div class="sheet-actions">
@@ -398,11 +419,11 @@ function goDashboard() {
       <div v-if="askSkill" class="sheet-mask" @click.self="askSkill = null">
         <div class="sheet">
           <div class="grip" />
-          <div class="stitle"><CoomiIcon name="wrench" :size="17" />安装 Skill「{{ askSkill.name }}」？</div>
+          <div class="stitle"><CoomiIcon name="wrench" :size="17" />安装创作能力「{{ askSkill.name }}」？</div>
           <p class="sdesc">{{ askSkill.description }}</p>
           <div class="sinfo">
             <span v-if="askSkill.repository"><CoomiIcon name="globe" :size="13" />{{ askSkill.repository }}</span>
-            <span><CoomiIcon name="folder" :size="13" />安装到 skills 目录</span>
+            <span><CoomiIcon name="folder" :size="13" />安装到创作能力目录</span>
             <span><CoomiIcon name="refresh" :size="13" />重启引擎或新开会话后生效</span>
           </div>
           <div class="sheet-actions">
@@ -429,7 +450,7 @@ function goDashboard() {
               autocomplete="off"
             />
           </label>
-          <p v-if="installingMcp.required_parameters.length === 0" class="sdesc">该 MCP 无需额外配置，直接安装即可。</p>
+          <p v-if="installingMcp.required_parameters.length === 0" class="sdesc">该工具无需额外配置，直接安装即可。</p>
           <div class="sheet-actions">
             <button class="btn ghost" @click="closeInstallForm">取消</button>
             <button class="btn primary" :disabled="busy !== null || !installReady" @click="installMcp">
@@ -483,6 +504,8 @@ function goDashboard() {
 .hint { margin: 18px 0; text-align: center; font-size: 13px; color: var(--text-3); }
 
 .cards { display: flex; flex-direction: column; gap: 8px; }
+.core-hint { margin:0 0 10px; color:var(--text-3); font-size:12px; line-height:1.6; }
+.core-card { flex-wrap:nowrap; }.core-copy { display:flex; min-width:0; flex:1; flex-direction:column; gap:3px; }.core-copy b { font-size:13.5px; }.core-copy small { color:var(--text-3); font-size:11.5px; line-height:1.45; }
 .card {
   display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
   padding: 10px 12px; border-radius: var(--r-card);

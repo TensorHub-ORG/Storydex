@@ -1,0 +1,4 @@
+interface:
+  display_name: "文风与文字润色"
+  short_description: "依照项目风格预设润色正文并保持事实时间人物声线和玩家选择"
+  default_prompt: "Use -editing to revise this prose under the active project style presets."

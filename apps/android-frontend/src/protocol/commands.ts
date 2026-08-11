@@ -1,7 +1,7 @@
 import type { AgentEvent } from './events'
 
 export type PermissionMode = 'ask' | 'auto' | 'full'
-export type ReasoningEffort = 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+export type ReasoningEffort = 'auto' | 'low' | 'medium' | 'high' | 'xhigh'
 export type ApprovalDecision = 'allow' | 'deny' | 'always'
 
 export interface SendMessageCommand { command: 'send_message'; text: string }
@@ -14,13 +14,16 @@ export interface EnterPlanModeCommand { command: 'enter_plan_mode' }
 export interface ExitPlanModeCommand { command: 'exit_plan_mode' }
 export interface SelectModelCommand { command: 'select_model'; provider_id: string; model: string }
 export interface SetReasoningEffortCommand { command: 'set_reasoning_effort'; effort: ReasoningEffort }
+export interface SetStorydexModeCommand { command: 'set_storydex_mode'; mode: 'story' | 'narrator' | 'agent' }
+export interface ResetStoryContextCommand { command: 'reset_story_context' }
 export interface FileTransferResultCommand { command: 'file_transfer_result'; request_id: string; paths: string[] }
 export interface SendGuideCommand { command: 'send_guide'; key: string }
 
 export type AgentCommand =
   | SendMessageCommand | CancelCommand | JumpInCommand | ApproveToolCommand
   | AnswerQuestionCommand | SetPermissionModeCommand | EnterPlanModeCommand
-  | ExitPlanModeCommand | SelectModelCommand | SetReasoningEffortCommand | FileTransferResultCommand
+  | ExitPlanModeCommand | SelectModelCommand | SetReasoningEffortCommand | SetStorydexModeCommand
+  | ResetStoryContextCommand | FileTransferResultCommand
   | SendGuideCommand
 
 export const PROTOCOL_VERSION = 1

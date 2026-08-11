@@ -78,6 +78,10 @@ jobs:
           base="https://updates.septemc.com/storydex/feedback"
           curl --fail --silent --show-error "$base/health?sha=$GITHUB_SHA" | grep -F 'storydex-feedback'
           curl --fail --silent --show-error "$base/admin?sha=$GITHUB_SHA" | grep -F 'Storydex 反馈管理'
+          android_stats="$(curl --fail --silent --show-error \
+            'https://storydex.septemc.com/api/stats/download-android')"
+          python3 -c 'import json,sys; data=json.load(sys.stdin); assert data["androidDownloads"] >= 28' \
+            <<< "$android_stats"
           status="$(curl --silent --show-error --output /tmp/invalid-feedback.json --write-out '%{http_code}' \
             -H 'Content-Type: application/json' -d '{"source":"settings","description":"bad"}' "$base/api")"
           [[ "$status" == 422 ]]

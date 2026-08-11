@@ -1,0 +1,4 @@
+interface:
+  display_name: "连续性与事实溯源"
+  short_description: "检查角色时间记忆剧本章节来源以及人物知情范围的一致性"
+  default_prompt: "Use -continuity to audit this story turn against established facts and provenance."

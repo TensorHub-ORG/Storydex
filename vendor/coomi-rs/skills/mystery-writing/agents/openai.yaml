@@ -1,0 +1,4 @@
+interface:
+  display_name: "悬疑与证据链"
+  short_description: "设计公平线索合理误导完整证据链人物知情范围以及揭晓节奏"
+  default_prompt: "Use -writing to design a fair mystery with traceable clues and reveals."

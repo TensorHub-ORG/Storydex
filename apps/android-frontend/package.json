@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:random": "node scripts/test-random-mechanics.mjs"
   },
   "dependencies": {
     "marked": "^12.0.2",

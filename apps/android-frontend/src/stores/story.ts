@@ -3,10 +3,13 @@ import { defineStore } from 'pinia'
 import { apiGet, authedFetch } from '@/bridge/http'
 import type { Timelineitem } from './viewModel'
 import { buildStoryPrompt } from '@/story/prompt'
+import { rollMechanics, type CharacterGenderMode } from '@/story/randomMechanics'
+import { useKeywordLibraryStore } from './keywordLibraries'
+import { useProjectStore } from './project'
 
 export type AgentMode = 'story' | 'narrator' | 'agent'
 export type NarrativeMode = 'immersive' | 'narrative' | 'free'
-export type ReasoningEffort = 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+export type ReasoningEffort = 'auto' | 'low' | 'medium' | 'high' | 'xhigh'
 
 export interface StoryFragment {
   id: string
@@ -23,11 +26,17 @@ export interface StoryFragment {
 
 const LEGACY_STORAGE_KEY = 'storydex.mobile.story.v1'
 const PROJECT_STORAGE_PREFIX = 'storydex.mobile.story.project.v2:'
-const PREFERENCE_STORAGE_KEY = 'storydex.mobile.story.preferences.v2'
+const LEGACY_PREFERENCE_STORAGE_KEY = 'storydex.mobile.story.preferences.v2'
+const PREFERENCE_STORAGE_PREFIX = 'storydex.mobile.story.preferences.v3:'
 const ACTIONS_MARKER = '[STORYDEX_ACTIONS]'
+const STATE_MARKER = '[STORYDEX_STATE_DELTA]'
 
 function projectStorageKey(projectPath: string): string {
   return PROJECT_STORAGE_PREFIX + encodeURIComponent(projectPath || '__default__')
+}
+
+function preferenceStorageKey(projectPath: string): string {
+  return PREFERENCE_STORAGE_PREFIX + encodeURIComponent(projectPath || '__default__')
 }
 
 interface StoryState {
@@ -37,6 +46,10 @@ interface StoryState {
   fragmentMin: number
   fragmentMax: number
   reasoningEffort: ReasoningEffort
+  fortuneEnabled: boolean
+  eventEnabled: boolean
+  characterEnabled: boolean
+  characterGender: CharacterGenderMode
 }
 
 function normalizedLength(value: unknown, fallback: number): number {
@@ -50,11 +63,22 @@ function readState(projectPath: string): StoryState {
     const projectValue = localStorage.getItem(projectKey)
     const legacy = JSON.parse(localStorage.getItem(LEGACY_STORAGE_KEY) ?? '{}')
     const value = projectValue ? JSON.parse(projectValue) : legacy
-    const preferences = JSON.parse(localStorage.getItem(PREFERENCE_STORAGE_KEY) ?? '{}')
+    const preferences = JSON.parse(
+      localStorage.getItem(preferenceStorageKey(projectPath))
+      ?? localStorage.getItem(LEGACY_PREFERENCE_STORAGE_KEY)
+      ?? '{}',
+    )
     const fragmentMin = normalizedLength(preferences.fragmentMin, 1000)
     const fragmentMax = Math.max(fragmentMin, normalizedLength(preferences.fragmentMax, 2000))
-    const reasoningEffort = ['auto', 'low', 'medium', 'high', 'xhigh', 'max'].includes(preferences.reasoningEffort)
-      ? preferences.reasoningEffort as ReasoningEffort : 'high'
+    const reasoningEffort = preferences.reasoningEffort === 'max'
+      ? 'xhigh'
+      : ['auto', 'low', 'medium', 'high', 'xhigh'].includes(preferences.reasoningEffort)
+        ? preferences.reasoningEffort as ReasoningEffort : 'high'
+    const fortuneEnabled = preferences.fortuneEnabled !== false
+    const eventEnabled = preferences.eventEnabled === true
+    const characterEnabled = (preferences.characterEnabled ?? preferences.romanceEnabled) === true
+    const characterGender = ['random', 'male', 'female'].includes(preferences.characterGender)
+      ? preferences.characterGender as CharacterGenderMode : 'random'
     return {
       fragments: Array.isArray(value.fragments) ? value.fragments : [],
       agentMode: ['story', 'narrator', 'agent'].includes(preferences.agentMode ?? value.agentMode)
@@ -64,11 +88,16 @@ function readState(projectPath: string): StoryState {
       fragmentMin,
       fragmentMax,
       reasoningEffort,
+      fortuneEnabled,
+      eventEnabled,
+      characterEnabled,
+      characterGender,
     }
   } catch {
     return {
       fragments: [], agentMode: 'story', narrativeMode: 'immersive',
       fragmentMin: 1000, fragmentMax: 2000, reasoningEffort: 'high',
+      fortuneEnabled: true, eventEnabled: false, characterEnabled: false, characterGender: 'random',
     }
   }
 }
@@ -82,16 +111,20 @@ function shortSummary(content: string): string {
   return content.replace(/[#*_>`\[\]()]/g, '').replace(/\s+/g, ' ').trim().slice(0, 50)
 }
 
-function parseStoryResponse(raw: string): { content: string; suggestions: string[] } | null {
+function parseStoryResponse(raw: string): { content: string; suggestions: string[]; delta: import('./project').StoryStateDelta } | null {
   const markerIndex = raw.lastIndexOf(ACTIONS_MARKER)
   if (markerIndex < 0) return null
+  const stateIndex = raw.lastIndexOf(STATE_MARKER)
+  if (stateIndex < markerIndex) return null
   const content = raw.slice(0, markerIndex).trim()
-  const suggestions = raw.slice(markerIndex + ACTIONS_MARKER.length)
+  const suggestions = raw.slice(markerIndex + ACTIONS_MARKER.length, stateIndex)
     .split(/\r?\n/)
     .map(line => line.replace(/^\s*(?:[-*•]|\d+[.)、])\s*/, '').trim())
     .filter(Boolean)
     .slice(0, 4)
-  return content && suggestions.length === 4 ? { content, suggestions } : null
+  let delta: import('./project').StoryStateDelta
+  try { delta = JSON.parse(raw.slice(stateIndex + STATE_MARKER.length).trim()) } catch { return null }
+  return content && suggestions.length === 4 && delta && typeof delta === 'object' ? { content, suggestions, delta } : null
 }
 
 function nextGroupTimestamp(existingGroups: Set<string>, latestGroup?: string): string {
@@ -155,6 +188,8 @@ async function collectMarkdownFiles(
 }
 
 export const useStoryStore = defineStore('story', () => {
+  const keywordLibraries = useKeywordLibraryStore()
+  const project = useProjectStore()
   const projectPath = ref(window.CoomiAndroid?.getStoryProjectPath?.() ?? '')
   const initial = readState(projectPath.value)
   const fragments = ref<StoryFragment[]>(initial.fragments)
@@ -163,6 +198,10 @@ export const useStoryStore = defineStore('story', () => {
   const fragmentMin = ref(initial.fragmentMin)
   const fragmentMax = ref(initial.fragmentMax)
   const reasoningEffort = ref<ReasoningEffort>(initial.reasoningEffort)
+  const fortuneEnabled = ref(initial.fortuneEnabled)
+  const eventEnabled = ref(initial.eventEnabled)
+  const characterEnabled = ref(initial.characterEnabled)
+  const characterGender = ref<CharacterGenderMode>(initial.characterGender)
   const olderExpanded = ref(false)
 
   const latest = computed(() => fragments.value[fragments.value.length - 1] ?? null)
@@ -171,12 +210,16 @@ export const useStoryStore = defineStore('story', () => {
 
   function persist() {
     localStorage.setItem(projectStorageKey(projectPath.value), JSON.stringify({ fragments: fragments.value }))
-    localStorage.setItem(PREFERENCE_STORAGE_KEY, JSON.stringify({
+    localStorage.setItem(preferenceStorageKey(projectPath.value), JSON.stringify({
       agentMode: agentMode.value,
       narrativeMode: narrativeMode.value,
       fragmentMin: fragmentMin.value,
       fragmentMax: fragmentMax.value,
       reasoningEffort: reasoningEffort.value,
+      fortuneEnabled: fortuneEnabled.value,
+      eventEnabled: eventEnabled.value,
+      characterEnabled: characterEnabled.value,
+      characterGender: characterGender.value,
     }))
   }
 
@@ -190,8 +233,31 @@ export const useStoryStore = defineStore('story', () => {
     persist()
   }
   function setReasoningEffort(effort: ReasoningEffort) { reasoningEffort.value = effort; persist() }
+  function setFortuneEnabled(enabled: boolean) { fortuneEnabled.value = enabled; persist(); void project.patchSettings({ fortuneEnabled: enabled }) }
+  function setEventEnabled(enabled: boolean) { eventEnabled.value = enabled; persist(); void project.patchSettings({ eventEnabled: enabled }) }
+  function setCharacterEnabled(enabled: boolean) { characterEnabled.value = enabled; persist(); void project.patchSettings({ characterEnabled: enabled }) }
+  function setCharacterGender(gender: CharacterGenderMode) { characterGender.value = gender; persist(); void project.patchSettings({ characterGender: gender }) }
+
+  async function hydrateProjectSettings() {
+    await project.initialize()
+    fortuneEnabled.value = project.settings.fortuneEnabled
+    eventEnabled.value = project.settings.eventEnabled
+    characterEnabled.value = project.settings.characterEnabled
+    characterGender.value = project.settings.characterGender
+    await keywordLibraries.initialize()
+    persist()
+  }
 
   function promptFor(text: string): string {
+    const mechanics = rollMechanics({
+      fortuneEnabled: fortuneEnabled.value,
+      eventEnabled: eventEnabled.value,
+      characterEnabled: characterEnabled.value,
+      characterGender: characterGender.value,
+      eventLibrary: keywordLibraries.eventLibrary,
+      maleLibrary: keywordLibraries.maleLibrary,
+      femaleLibrary: keywordLibraries.femaleLibrary,
+    })
     return buildStoryPrompt({
       agentMode: agentMode.value,
       narrativeMode: narrativeMode.value,
@@ -199,6 +265,8 @@ export const useStoryStore = defineStore('story', () => {
       fragmentMax: fragmentMax.value,
       playerText: text,
       actionsMarker: ACTIONS_MARKER,
+      stateMarker: STATE_MARKER,
+      mechanics: mechanics.block || undefined,
     })
   }
 
@@ -220,9 +288,12 @@ export const useStoryStore = defineStore('story', () => {
     if (!assistant || assistant.kind !== 'assistant' || !assistant.content.trim()) return null
     if (latest.value?.sourceMessageId === assistant.id) return null
     const parsed = parseStoryResponse(assistant.content)
+    // 只有完整的正文、行动建议与状态增量都通过解析才算剧情推进。
+    // OOC 拒绝不带标记，因此绝不会归档或推进时间/剧本/记忆。
     if (!parsed) return null
-    assistant.content = parsed.content
-    if (latest.value?.content === parsed.content) return null
+    const content = parsed.content
+    assistant.content = content
+    if (latest.value?.content === content) return null
     const now = Date.now()
     const startsNewGroup = fragments.value.length % 5 === 0
     const group = startsNewGroup
@@ -231,7 +302,6 @@ export const useStoryStore = defineStore('story', () => {
     const sequence = (fragments.value.filter(item => item.group === group).length + 1).toString().padStart(3, '0')
     const filename = `${group}-${sequence}.md`
     const relativePath = `chapters/${group}/${filename}`
-    const content = parsed.content
     const summary = shortSummary(content)
     const fragment: StoryFragment = {
       id: `${group}-${sequence}`,
@@ -248,6 +318,8 @@ export const useStoryStore = defineStore('story', () => {
     const body = `---\nsummary: ${JSON.stringify(summary)}\ncreatedAt: ${new Date(now).toISOString()}\n---\n\n${content}\n`
     if (projectPath.value) await writeStoryFragment(sessionId, relativePath, body)
     fragments.value.push(fragment)
+    try { await project.applyStoryDelta(parsed.delta) }
+    catch { await project.markMemoryPending().catch(() => {}) }
     persist()
     return fragment
   }
@@ -262,6 +334,7 @@ export const useStoryStore = defineStore('story', () => {
     fragment.content = trimmed
     fragment.summary = summary
     fragment.synced = true
+    await project.markMemoryStale(fragment.path).catch(() => {})
     persist()
     return true
   }
@@ -338,10 +411,13 @@ export const useStoryStore = defineStore('story', () => {
     }
   }
 
+  void hydrateProjectSettings()
   return {
     fragments, agentMode, narrativeMode, fragmentMin, fragmentMax, reasoningEffort, projectPath, olderExpanded,
+    fortuneEnabled, eventEnabled, characterEnabled, characterGender,
     latest, latestFive, older, setAgentMode, setNarrativeMode, setFragmentLength, setReasoningEffort,
-    promptFor, captureTurn, updateFragment, syncFragments, loadFragmentsFromProject,
+    setFortuneEnabled, setEventEnabled, setCharacterEnabled, setCharacterGender,
+    promptFor, captureTurn, updateFragment, syncFragments, loadFragmentsFromProject, hydrateProjectSettings,
     parseStoryResponse,
   }
 })

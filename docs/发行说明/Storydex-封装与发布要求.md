@@ -9,7 +9,7 @@
 
 ### 1.1 通用规则
 
-1. 正式版本使用语义化版本号 `主版本.次版本.修订号`，Git 标签必须使用 `v` 前缀，例如桌面版 `2.0.3` 对应标签 `v2.0.3`。
+1. 正式版本使用语义化版本号 `主版本.次版本.修订号`，Git 标签必须使用 `v` 前缀，例如桌面版 `2.0.4` 对应标签 `v2.0.4`。
 2. Windows 与 Android 使用各自独立的版本号序列：桌面版延续 `2.x`，Android 测试版延续 `0.1.x`。
 3. 正式标签只能指向已经推送到远程 `main` 的发布提交；不得从未提交、未推送或测试失败的工作区创建标签。
 
@@ -23,7 +23,7 @@
 版本一致性检查（例如）：
 
 ```powershell
-node scripts/validate_version_consistency.cjs --expected=2.0.3
+node scripts/validate_version_consistency.cjs --expected=2.0.4
 ```
 
 ### 1.3 Android APK 版
@@ -63,7 +63,7 @@ npm --prefix apps/desktop run check:encoding
 npm --prefix apps/desktop run check:release
 npm --prefix apps/desktop run test:update-feed
 npm --prefix apps/desktop run package:win
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare_release_bundle.ps1 -Version 2.0.3
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare_release_bundle.ps1 -Version 2.0.4
 ```
 
 任何命令返回非零退出码时禁止发布。
@@ -79,7 +79,7 @@ Android 发布提交必须通过：
 - APK 构建命令（在 `apps/android` 下）：
 
 ```powershell
-$env:TERMUX_APP_VERSION_NAME = "0.1.1"   # 可选，build.gradle 已硬编码时省略
+$env:TERMUX_APP_VERSION_NAME = "0.1.2"   # 可选，build.gradle 已硬编码时省略
 .\gradlew.bat :app:assembleRelease
 ```
 
@@ -177,24 +177,24 @@ APK 必须内置：
 
 ```powershell
 git push origin main
-git tag -a v2.0.3 -m "Storydex v2.0.3"
-git push origin v2.0.3
+git tag -a v2.0.4 -m "Storydex v2.0.4"
+git push origin v2.0.4
 ```
 
 ### 5.2 Android APK 版
 
-- Android APK 作为资产挂载到**桌面版对应的 GitHub Release**（例如 `v2.0.3`），与桌面资产一起发布。
+- Android APK 作为资产挂载到**桌面版对应的 GitHub Release**（例如 `v2.0.4`），与桌面资产一起发布。
 - 发布 APK 由 `.github/workflows/deploy-android.yml` 手动触发（workflow_dispatch），输入 `tag`、`version`、`asset_name`、`sha256`：
-  - `tag`：包含 APK 的 GitHub Release 标签（默认 `v2.0.3`）。
-  - `version`：Android 语义化版本（默认 `0.1.1`）。
-  - `asset_name`：APK 资产文件名（默认 `Storydex-Android-arm64-v0.1.1.apk`）。
+  - `tag`：包含 APK 的 GitHub Release 标签（默认 `v2.0.4`）。
+  - `version`：Android 语义化版本（默认 `0.1.2`）。
+  - `asset_name`：APK 资产文件名（默认 `Storydex-Android-arm64-v0.1.2.apk`）。
   - `sha256`：APK 的 SHA-256（必填，与 release 资产校验一致）。
 - 触发方式（本地或 Actions 页面）：
 
 ```powershell
-$sha = (Get-FileHash .\Storydex-Android-arm64-v0.1.1.apk -Algorithm SHA256).Hash.ToLower()
-gh release upload v2.0.3 Storydex-Android-arm64-v0.1.1.apk Storydex-Android-arm64-v0.1.1.apk.sha256
-gh workflow run deploy-android.yml -f tag=v2.0.3 -f version=0.1.1 -f asset_name=Storydex-Android-arm64-v0.1.1.apk -f sha256=$sha
+$sha = (Get-FileHash .\Storydex-Android-arm64-v0.1.2.apk -Algorithm SHA256).Hash.ToLower()
+gh release upload v2.0.4 Storydex-Android-arm64-v0.1.2.apk Storydex-Android-arm64-v0.1.2.apk.sha256
+gh workflow run deploy-android.yml -f tag=v2.0.4 -f version=0.1.2 -f asset_name=Storydex-Android-arm64-v0.1.2.apk -f sha256=$sha
 ```
 
 - workflow 会从 GitHub Release 下载 APK、校验 SHA-256、发布到 Android 更新源，并注入官网下载按钮 overlay。
@@ -235,11 +235,11 @@ https://updates.septemc.com/storydex/windows/
 ```powershell
 $base = 'https://updates.septemc.com/storydex/windows'
 Invoke-WebRequest -UseBasicParsing "$base/latest.yml?verify=1"
-Invoke-WebRequest -UseBasicParsing -Method Head "$base/StorydexSetup-x64-2.0.3.exe"
-Invoke-WebRequest -UseBasicParsing -Method Head "$base/StorydexSetup-x64-2.0.3.exe.blockmap"
+Invoke-WebRequest -UseBasicParsing -Method Head "$base/StorydexSetup-x64-2.0.4.exe"
+Invoke-WebRequest -UseBasicParsing -Method Head "$base/StorydexSetup-x64-2.0.4.exe.blockmap"
 ```
 
-`latest.yml` 中的 `version` 必须为正确版本号，例如， `2.0.3`，`path` 必须为 `StorydexSetup-x64-2.0.3.exe`（例如）。
+`latest.yml` 中的 `version` 必须为正确版本号，例如， `2.0.4`，`path` 必须为 `StorydexSetup-x64-2.0.4.exe`（例如）。
 
 ### 6.2 Android APK 版
 
@@ -269,7 +269,7 @@ https://updates.septemc.com/storydex/android/
 同步后必须验证（例如）：
 
 ```powershell
-$apk = 'https://updates.septemc.com/storydex/android/Storydex-Android-arm64-v0.1.1.apk'
+$apk = 'https://updates.septemc.com/storydex/android/Storydex-Android-arm64-v0.1.2.apk'
 Invoke-WebRequest -UseBasicParsing -Method Head "$apk?verify=1"
 ```
 
@@ -297,19 +297,19 @@ Invoke-WebRequest -UseBasicParsing -Method Head "$apk?verify=1"
 
 ### 9.1 Windows 桌面版
 
-- 版本：`2.0.3`
-- 标签：`v2.0.3`
-- Release 标题：`Storydex v2.0.3`
-- 安装包：`StorydexSetup-x64-2.0.3.exe`
+- 版本：`2.0.4`
+- 标签：`v2.0.4`
+- Release 标题：`Storydex v2.0.4`
+- 安装包：`StorydexSetup-x64-2.0.4.exe`
 - 更新目录：`/www/wwwroot/updates.septemc.com/storydex/windows`
 - 更新元数据：`https://updates.septemc.com/storydex/windows/latest.yml`
 - 必须内置：`docs/guide`、`docs/prompts`、`docs/skills`
 
 ### 9.2 Android APK 版
 
-- 版本：`0.1.1`
-- APK：`Storydex-Android-arm64-v0.1.1.apk`
+- 版本：`0.1.2`
+- APK：`Storydex-Android-arm64-v0.1.2.apk`
 - 更新目录：`/www/wwwroot/updates.septemc.com/storydex/android`
-- 更新地址：`https://updates.septemc.com/storydex/android/Storydex-Android-arm64-v0.1.1.apk`
-- 官网下载按钮 overlay：`apps/website-overlay/storydex-android-download-v0.1.1.js`
+- 更新地址：`https://updates.septemc.com/storydex/android/Storydex-Android-arm64-v0.1.2.apk`
+- 官网下载按钮 overlay：`apps/website-overlay/storydex-android-download-v0.1.2.js`
 - 发布工作流：`.github/workflows/deploy-android.yml`（workflow_dispatch）

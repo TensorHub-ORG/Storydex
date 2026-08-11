@@ -24,6 +24,10 @@ export const useSessionStore = defineStore('session', () => {
   const usage = ref<{
     total: number; input: number; output: number; contextRatio: number
     contextUsed: number; contextWindow: number
+    cachedInput: number; reasoning: number; turnInput: number; turnCachedInput: number
+    turnOutput: number; turnReasoning: number; turnCacheRate: number
+    categories: Record<string, number>; mode: 'story' | 'narrator' | 'agent'
+    project: NonNullable<import('@/protocol/events').UsageInfo['project']>
   } | null>(null)
   /** 当前会话的工作目录（会话标记路径，绑定为会话执行目录）。 */
   const cwd = ref('')
@@ -106,6 +110,7 @@ export const useSessionStore = defineStore('session', () => {
       if (s === 'open') {
         t.send({ command: 'set_permission_mode', mode: config.permissionMode })
         t.send({ command: 'set_reasoning_effort', effort: story.reasoningEffort })
+        t.send({ command: 'set_storydex_mode', mode: story.agentMode })
         if (config.currentProviderId && config.currentModel) {
           t.send({ command: 'select_model', provider_id: config.currentProviderId, model: config.currentModel })
         }
@@ -182,6 +187,16 @@ export const useSessionStore = defineStore('session', () => {
           contextRatio: ev.usage.context_ratio ?? previous?.contextRatio ?? 0,
           contextUsed: ev.usage.context_used_tokens ?? previous?.contextUsed ?? 0,
           contextWindow: ev.usage.context_window_tokens ?? previous?.contextWindow ?? 0,
+          cachedInput: ev.usage.cached_input_tokens ?? previous?.cachedInput ?? 0,
+          reasoning: ev.usage.reasoning_tokens ?? previous?.reasoning ?? 0,
+          turnInput: ev.usage.turn_input_tokens ?? previous?.turnInput ?? 0,
+          turnCachedInput: ev.usage.turn_cached_input_tokens ?? previous?.turnCachedInput ?? 0,
+          turnOutput: ev.usage.turn_output_tokens ?? previous?.turnOutput ?? 0,
+          turnReasoning: ev.usage.turn_reasoning_tokens ?? previous?.turnReasoning ?? 0,
+          turnCacheRate: ev.usage.turn_cache_rate ?? previous?.turnCacheRate ?? 0,
+          categories: ev.usage.categories ?? previous?.categories ?? {},
+          mode: ev.usage.mode ?? previous?.mode ?? story.agentMode,
+          project: ev.usage.project ?? previous?.project ?? {},
         }
         break
       }
@@ -200,6 +215,7 @@ export const useSessionStore = defineStore('session', () => {
       case 'turn_end':
         endAssistantStream(); cancelRunningTools(); connection.setRetry(null); runState.value = 'idle'
         void story.captureTurn(timeline.value, sessionId.value)
+          .then(fragment => { if (fragment && story.fragments.length % 10 === 0) resetStoryContext() })
           .catch(error => pushNotice('error', error instanceof Error ? error.message : '剧情片段写入失败'))
           .finally(persistSoon)
         break
@@ -219,6 +235,16 @@ export const useSessionStore = defineStore('session', () => {
           contextRatio: usage.value?.contextRatio ?? 0,
           contextUsed: usage.value?.contextUsed ?? 0,
           contextWindow: usage.value?.contextWindow ?? 0,
+          cachedInput: usage.value?.cachedInput ?? 0,
+          reasoning: usage.value?.reasoning ?? 0,
+          turnInput: usage.value?.turnInput ?? 0,
+          turnCachedInput: usage.value?.turnCachedInput ?? 0,
+          turnOutput: usage.value?.turnOutput ?? 0,
+          turnReasoning: usage.value?.turnReasoning ?? 0,
+          turnCacheRate: usage.value?.turnCacheRate ?? 0,
+          categories: usage.value?.categories ?? {},
+          mode: usage.value?.mode ?? story.agentMode,
+          project: usage.value?.project ?? {},
         }
         if (typeof ev.cwd === 'string' && ev.cwd) cwd.value = ev.cwd
         break
@@ -277,6 +303,7 @@ export const useSessionStore = defineStore('session', () => {
     story.setReasoningEffort(effort)
     transport.value?.send({ command: 'set_reasoning_effort', effort })
   }
+  function resetStoryContext() { transport.value?.send({ command: 'reset_story_context' }) }
   function completeFileTransfer(requestId: string, paths: string[]) {
     transport.value?.send({ command: 'file_transfer_result', request_id: requestId, paths })
   }
@@ -285,6 +312,23 @@ export const useSessionStore = defineStore('session', () => {
     flushPersistence()
     endAssistantStream(); timeline.value = []; usage.value = null
     loop.value = { active: false, currentStep: 0, totalSteps: 0, status: '' }; runState.value = 'idle'
+    sessionId.value = createSessionId()
+    connect()
+  }
+
+  /** 主模式互切必须换引擎会话，确保上下文窗口与旧模式完全隔离。 */
+  function switchAgentMode(mode: import('./story').AgentMode) {
+    if (mode === story.agentMode) return
+    if (isBusy.value) transport.value?.send({ command: 'cancel' })
+    endAssistantStream()
+    cancelRunningTools()
+    flushPersistence()
+    story.setAgentMode(mode)
+    config.setPermissionMode(mode === 'agent' ? 'full' : 'auto')
+    timeline.value = []
+    usage.value = null
+    loop.value = { active: false, currentStep: 0, totalSteps: 0, status: '' }
+    runState.value = 'idle'
     sessionId.value = createSessionId()
     connect()
   }
@@ -478,7 +522,7 @@ export const useSessionStore = defineStore('session', () => {
   }
   function pushNotice(tone: 'info' | 'warn' | 'error' | 'success', text: string) { timeline.value.push({ kind: 'notice', id: nextId(), tone, text }) }
 
-  return { sessionId, timeline, runState, usage, cwd, loop, isBusy, pendingApproval, pendingQuestion, connect, disconnect, sendMessage, cancel, approve, answerQuestion, setPermissionMode, togglePlanMode, selectModel, setReasoningEffort, completeFileTransfer, newSession, continueStory, standby, openSession, deleteSession, setSessionCwd, sendGuide }
+  return { sessionId, timeline, runState, usage, cwd, loop, isBusy, pendingApproval, pendingQuestion, connect, disconnect, sendMessage, cancel, approve, answerQuestion, setPermissionMode, togglePlanMode, selectModel, setReasoningEffort, resetStoryContext, completeFileTransfer, newSession, switchAgentMode, continueStory, standby, openSession, deleteSession, setSessionCwd, sendGuide }
 })
 
 function fmtTokens(n: number): string { return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n) }

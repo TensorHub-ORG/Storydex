@@ -26,7 +26,7 @@
 </table>
 
 <p align="center">
-  <img alt="release" src="https://img.shields.io/badge/release-v2.0.3-2563eb?style=flat-square" />
+  <img alt="release" src="https://img.shields.io/badge/release-v2.0.4-2563eb?style=flat-square" />
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0%20%2B%20Commons%20Clause-0f766e?style=flat-square" />
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-f97316?style=flat-square" />
   <img alt="desktop" src="https://img.shields.io/badge/desktop-Electron%2040-47848f?style=flat-square&logo=electron&logoColor=white" />
@@ -116,6 +116,16 @@ Storydex/
 ## 作者与版权
 
 Copyright 2026 Septemc and Flowby.
+
+## v2.0.4
+
+v2.0.4 完成 Storydex Android 剧情创作系统的项目级重构，并同步增强桌面端共用的 Coomi Rust 运行时与发行能力。
+
+- Android 剧情设置重构为基础设置、风格预设、随机系统、剧本管理、记忆系统、时间系统和主题外观七个页面，配置随故事项目独立保存。
+- 新增项目级风格预设、持续推进剧本、结构化记忆、故事时间、上下文周期、缓存命中率和分模式 token 统计。
+- 随机事件与随机人物支持男女独立词库、分类 JSON 导入导出、项目隔离、内置恢复与因果链合并，并约束人物命名避免模板化高频风雅名。
+- 文件管理补齐内联操作菜单、多选、冲突处理和永久删除确认；剧情、旁白与 Agent 模式切换保留旧对话并重建上下文。
+- 官网同步提供 Windows 2.0.4 与 Android 0.1.2 下载入口，并分别统计桌面版与 Android 下载量。
 
 ## v2.0.3
 

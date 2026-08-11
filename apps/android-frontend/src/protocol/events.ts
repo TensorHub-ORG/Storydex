@@ -2,9 +2,31 @@ export type ToolAccess = 'read_only' | 'write' | 'destructive'
 
 export interface UsageInfo {
   input_tokens: number; output_tokens: number; total_tokens: number
+  cached_input_tokens?: number
+  reasoning_tokens?: number
   context_ratio?: number
   context_used_tokens?: number
   context_window_tokens?: number
+  turn_input_tokens?: number
+  turn_cached_input_tokens?: number
+  turn_output_tokens?: number
+  turn_reasoning_tokens?: number
+  turn_cache_rate?: number
+  categories?: Record<string, number>
+  mode?: 'story' | 'narrator' | 'agent'
+  project?: {
+    current_period_id?: string
+    modes?: Partial<Record<'story' | 'narrator' | 'agent', {
+      turns: number
+      input_tokens: number
+      cached_input_tokens: number
+      output_tokens: number
+      reasoning_tokens: number
+      cache_rate: number
+      recent_10_cache_rate: number
+      categories: Record<string, number>
+    }>>
+  }
 }
 
 export interface TextChunkEvent { event_type: 'text_chunk'; content: string }

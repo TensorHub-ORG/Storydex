@@ -1,0 +1,4 @@
+interface:
+  display_name: "情节与人物创作"
+  short_description: "设计人物世界情节对白动作场景并维护玩家选择权和故事因果"
+  default_prompt: "Use -craft to develop this scene while preserving character agency and causality."

@@ -6,15 +6,15 @@ on:
       tag:
         description: GitHub Release tag containing the Android APK
         required: true
-        default: v2.0.3
+        default: v2.0.4
       version:
         description: Android semantic version
         required: true
-        default: 0.1.1
+        default: 0.1.2
       asset_name:
         description: Android APK asset filename
         required: true
-        default: Storydex-Android-arm64-v0.1.1.apk
+        default: Storydex-Android-arm64-v0.1.2.apk
       sha256:
         description: Expected APK SHA-256
         required: true
@@ -111,7 +111,14 @@ jobs:
           overlay_name="storydex-android-download-v$ANDROID_VERSION.js"
           overlay_url="https://storydex.septemc.com/assets/$overlay_name"
           curl --fail --silent --show-error --location --head "$apk_url?run=$GITHUB_RUN_ID"
-          curl --fail --silent --show-error --location "$overlay_url?run=$GITHUB_RUN_ID" | grep -F '下载 Android 版（测试）'
+          overlay_content="$(curl --fail --silent --show-error --location "$overlay_url?run=$GITHUB_RUN_ID")"
+          grep -F 'Android 版（测试）' <<< "$overlay_content"
+          grep -F '去 GitHub 上为我们点颗星 →' <<< "$overlay_content"
+
+          stats_response="$(curl --fail --silent --show-error --location \
+            'https://storydex.septemc.com/api/stats/download-android')"
+          python3 -c 'import json,sys; data=json.load(sys.stdin); assert data["androidDownloads"] >= 28' \
+            <<< "$stats_response"
 
           # The website root path rejects scripted requests (HTTP 403 at the
           # nginx layer, including requests from CI runners), so verify the

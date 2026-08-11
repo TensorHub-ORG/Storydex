@@ -21,6 +21,24 @@ class NginxIncludeTests(unittest.TestCase):
         self.assertEqual(module.install_include(updated, "/srv/storydex/nginx-location.conf"), updated)
         self.assertGreater(updated.index(expected), updated.index("updates.septemc.com"))
 
+    def test_inserts_website_stats_include(self) -> None:
+        source = """server { server_name other.example; }\nserver {\n    server_name storydex.septemc.com;\n}\n"""
+        expected = "include /srv/storydex/website-nginx-location.conf;"
+        updated = module.install_include(
+            source,
+            "/srv/storydex/website-nginx-location.conf",
+            "storydex.septemc.com",
+        )
+        self.assertIn(expected, updated)
+        self.assertEqual(
+            module.install_include(
+                updated,
+                "/srv/storydex/website-nginx-location.conf",
+                "storydex.septemc.com",
+            ),
+            updated,
+        )
+
     def test_installer_materializes_detected_service_identity(self) -> None:
         package_root = Path(__file__).parents[1]
         installer = (package_root / "install.sh").read_text(encoding="utf-8")
@@ -37,6 +55,8 @@ class NginxIncludeTests(unittest.TestCase):
         self.assertIn("nginx_bin=/www/server/nginx/sbin/nginx", installer)
         self.assertIn("nginx_args=(-p /www/server/nginx/ -c conf/nginx.conf)", installer)
         self.assertIn("/etc/init.d/nginx reload", installer)
+        self.assertIn("storydex.septemc.com", installer)
+        self.assertIn("website-nginx-location.conf", installer)
         self.assertGreaterEqual(installer.count("nginx_test"), 3)
         self.assertGreaterEqual(installer.count("nginx_reload"), 3)
 

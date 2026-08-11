@@ -12,6 +12,7 @@ package_dir="${3%/}"
 [[ "$feedback_root" == /www/wwwroot/updates.septemc.com/storydex/feedback ]]
 [[ "$release_id" =~ ^[0-9A-Za-z._-]+$ ]]
 [[ -f "$package_dir/server.py" && -f "$package_dir/admin.html" ]]
+[[ -f "$package_dir/website-nginx-location.conf" ]]
 
 release_dir="$feedback_root/releases/$release_id"
 current_link="$feedback_root/current"
@@ -45,6 +46,26 @@ if [[ -z "$site_config" ]]; then
   done < <(find /www/server/panel/vhost/nginx /etc/nginx -maxdepth 3 -type f -name '*.conf' 2>/dev/null | sort -u)
 fi
 [[ -n "$site_config" ]] || { echo "updates.septemc.com nginx config not found" >&2; exit 1; }
+
+website_site_config=""
+for candidate in \
+  /www/server/panel/vhost/nginx/storydex.septemc.com.conf \
+  /etc/nginx/conf.d/storydex.septemc.com.conf \
+  /etc/nginx/sites-enabled/storydex.septemc.com; do
+  if [[ -f "$candidate" ]] && grep -Eq 'server_name[^;]*storydex\.septemc\.com' "$candidate"; then
+    website_site_config="$candidate"
+    break
+  fi
+done
+if [[ -z "$website_site_config" ]]; then
+  while IFS= read -r candidate; do
+    if grep -Eq 'server_name[^;]*storydex\.septemc\.com' "$candidate"; then
+      website_site_config="$candidate"
+      break
+    fi
+  done < <(find /www/server/panel/vhost/nginx /etc/nginx -maxdepth 3 -type f -name '*.conf' 2>/dev/null | sort -u)
+fi
+[[ -n "$website_site_config" ]] || { echo "storydex.septemc.com nginx config not found" >&2; exit 1; }
 
 nginx_args=()
 panel_nginx=0
@@ -101,8 +122,17 @@ if [[ -f "$snippet_path" ]]; then
   cp -a "$snippet_path" "$snippet_backup"
 fi
 install -m 0644 "$release_dir/nginx-location.conf" "$snippet_path"
+website_snippet_path="$feedback_root/website-nginx-location.conf"
+website_snippet_backup=""
+if [[ -f "$website_snippet_path" ]]; then
+  website_snippet_backup="$(mktemp /tmp/storydex-feedback-website-snippet.XXXXXX)"
+  cp -a "$website_snippet_path" "$website_snippet_backup"
+fi
+install -m 0644 "$release_dir/website-nginx-location.conf" "$website_snippet_path"
 config_backup="$(mktemp /tmp/storydex-feedback-nginx.XXXXXX)"
 cp -a "$site_config" "$config_backup"
+website_config_backup="$(mktemp /tmp/storydex-feedback-website-nginx.XXXXXX)"
+cp -a "$website_site_config" "$website_config_backup"
 
 rollback() {
   status=$?
@@ -110,10 +140,16 @@ rollback() {
   if [[ $status -ne 0 ]]; then
     echo "deployment failed; restoring previous service and nginx configuration" >&2
     cp -a "$config_backup" "$site_config" || true
+    cp -a "$website_config_backup" "$website_site_config" || true
     if [[ -n "$snippet_backup" ]]; then
       cp -a "$snippet_backup" "$snippet_path" || true
     else
       rm -f "$snippet_path"
+    fi
+    if [[ -n "$website_snippet_backup" ]]; then
+      cp -a "$website_snippet_backup" "$website_snippet_path" || true
+    else
+      rm -f "$website_snippet_path"
     fi
     if [[ -n "$previous_target" ]]; then
       ln -sfn "$previous_target" "$current_link.rollback"
@@ -125,12 +161,14 @@ rollback() {
     fi
     nginx_test && nginx_reload || true
   fi
-  rm -f "$config_backup" "$snippet_backup"
+  rm -f "$config_backup" "$snippet_backup" "$website_config_backup" "$website_snippet_backup"
   exit "$status"
 }
 trap rollback EXIT
 
 python3 "$release_dir/install_nginx_include.py" "$site_config" "$snippet_path"
+python3 "$release_dir/install_nginx_include.py" \
+  "$website_site_config" "$website_snippet_path" --server-name storydex.septemc.com
 nginx_test
 
 ln -sfn "$release_dir" "$current_link.next"

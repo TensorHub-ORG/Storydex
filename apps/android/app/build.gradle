@@ -60,9 +60,9 @@ android {
         applicationId "com.storydex.android"
         minSdkVersion project.properties.minSdkVersion.toInteger()
         targetSdkVersion storydexTargetSdk
-        // v0.1.1：Storydex Android 测试版（基于 Coomi-Android v1.2.6 工程移植，修复 COOMI_SHELL、UI 改进）
-        versionCode 2
-        versionName "0.1.1"
+        // v0.1.2: Storydex Android 剧情创作、项目记忆、时间与上下文系统。
+        versionCode 3
+        versionName "0.1.2"
 
         if (appVersionName) versionName = appVersionName
         validateVersionName(versionName)

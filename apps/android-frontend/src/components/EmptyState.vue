@@ -8,12 +8,16 @@ import { computed } from 'vue'
 import { useSessionStore } from '@/stores/session'
 import { useStoryStore, type AgentMode, type NarrativeMode } from '@/stores/story'
 import { useConnectionStore } from '@/stores/connection'
+import { useProjectStore } from '@/stores/project'
+import { useRouter } from 'vue-router'
 import CoomiIcon from './CoomiIcon.vue'
 import CoomiMark from './CoomiMark.vue'
 
 const session = useSessionStore()
 const story = useStoryStore()
 const connection = useConnectionStore()
+const project = useProjectStore()
+const router = useRouter()
 
 const MODES: { key: AgentMode; label: string; icon: string; desc: string }[] = [
   { key: 'story', label: '剧情', icon: 'sparkle', desc: '沉浸式推进剧情，拒绝明确 OOC 与越权操控' },
@@ -49,13 +53,13 @@ const SUBTITLES: Record<AgentMode, string> = {
 const hint = computed(() => MODES.find(m => m.key === story.agentMode)?.desc ?? '')
 
 function pick(key: AgentMode) {
-  story.setAgentMode(key)
-  session.setPermissionMode(key === 'agent' ? 'full' : 'auto')
+  session.switchAgentMode(key)
 }
 </script>
 
 <template>
   <div class="empty">
+    <button v-if="story.agentMode !== 'agent'" class="story-time" @click="router.push({ path: '/settings', query: { tab: 'time' } })"><CoomiIcon name="clock" :size="15" /><span>故事时间</span><b>{{ project.currentTimeLabel }}</b><CoomiIcon name="chevronRight" :size="13" /></button>
     <CoomiMark :size="52" class="logo" />
     <h1>{{ TITLES[story.agentMode] }}</h1>
     <p class="sub">{{ story.latest?.summary || SUBTITLES[story.agentMode] }}</p>
@@ -108,7 +112,9 @@ function pick(key: AgentMode) {
   text-align: center;
 }
 .logo { margin-bottom: 14px; }
-h1 { font-size: 21px; font-weight: 600; letter-spacing: -.3px; color: var(--text); }
+.story-time { display:flex; align-items:center; gap:6px; margin-bottom:16px; padding:7px 10px; border:1px solid var(--border); border-radius:7px; background:var(--bg); color:var(--text-3); font-size:11.5px; }
+.story-time b { color:var(--text); font-size:12.5px; }
+h1 { font-size: 21px; font-weight: 600; letter-spacing: 0; color: var(--text); }
 .sub {
   max-width: 268px; margin-top: 8px;
   font-size: 13.5px; line-height: 1.65; color: var(--text-3);

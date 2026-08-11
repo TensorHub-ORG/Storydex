@@ -89,6 +89,16 @@ class FeedbackStoreTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(len(self.store.list("", 20)), 1)
 
+    def test_android_download_counter_starts_at_baseline_and_is_idempotent(self) -> None:
+        self.assertEqual(self.store.android_downloads(), 28)
+        self.assertEqual(self.store.record_android_download("android-event-0001"), 29)
+        self.assertEqual(self.store.record_android_download("android-event-0001"), 29)
+        self.assertEqual(self.store.record_android_download("android-event-0002"), 30)
+
+    def test_android_download_counter_rejects_invalid_event_id(self) -> None:
+        with self.assertRaisesRegex(server.FeedbackError, "eventId"):
+            self.store.record_android_download("bad")
+
     def test_connect_passes_a_string_path_to_legacy_sqlite(self) -> None:
         original_connect = server.sqlite3.connect
         observed_paths = []

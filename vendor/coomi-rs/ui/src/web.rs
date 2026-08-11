@@ -30,6 +30,7 @@ use coomi_engine::PlanStepStatus;
 use coomi_engine::ReasoningEffort;
 use coomi_engine::Session;
 use coomi_engine::SessionStore;
+use coomi_engine::TokenUsage;
 use coomi_engine::ToolCall;
 use coomi_engine::ToolRuntime;
 use coomi_engine::UserInputRequest;
@@ -54,6 +55,8 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -222,12 +225,39 @@ enum PermissionMode {
     Full,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum StorydexMode {
+    Story,
+    Narrator,
+    #[default]
+    Agent,
+}
+
+impl StorydexMode {
+    fn parse(value: &str) -> Self {
+        match value {
+            "story" => Self::Story,
+            "narrator" => Self::Narrator,
+            _ => Self::Agent,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Story => "story",
+            Self::Narrator => "narrator",
+            Self::Agent => "agent",
+        }
+    }
+}
+
 struct ConnectionContext {
     tx: mpsc::UnboundedSender<Message>,
     permission: Arc<RwLock<PermissionMode>>,
     plan_mode: AtomicBool,
     selected_model: RwLock<Option<String>>,
     reasoning_effort: RwLock<ReasoningEffort>,
+    storydex_mode: RwLock<StorydexMode>,
     /// 会话任务（连接生命周期内始终复用同一实例）：send_message 创建的任务
     /// 结束 remove_task 后，新任务必须仍能通过 conn_tx 推送事件——
     /// 若每次从 state.tasks 新建，conn_tx 会丢（表现为第二次消息无输出）。
@@ -246,6 +276,7 @@ impl ConnectionContext {
             plan_mode: AtomicBool::new(false),
             selected_model: RwLock::new(None),
             reasoning_effort: RwLock::new(ReasoningEffort::High),
+            storydex_mode: RwLock::new(StorydexMode::Agent),
             task,
         }
     }
@@ -365,6 +396,7 @@ pub async fn serve(
         .route("/api/fs/rename", post(fs_rename))
         .route("/api/fs/copy", post(fs_copy))
         .route("/api/fs/write", post(fs_write))
+        .route("/api/storydex/usage/new-period", post(new_usage_period))
         .route("/api/catalog", get(catalog_index))
         .route("/api/catalog/mcp/install", post(install_mcp_catalog))
         .route("/api/catalog/mcp/{id}", delete(uninstall_mcp_catalog))
@@ -1338,9 +1370,34 @@ async fn fs_rename(
     let session_id = body.get("session_id").and_then(Value::as_str);
     let from_path = sandboxed_path(&state, from, session_id)?;
     let to_path = sandboxed_path(&state, to, session_id)?;
-    std::fs::rename(&from_path, &to_path).map_err(|e| {
-        ApiError::internal(format!("failed to rename {}: {e}", from_path.display()))
-    })?;
+    let replace = body
+        .get("replace")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if from_path == to_path {
+        return Ok(Json(json!({ "ok": true })));
+    }
+    if from_path.is_dir() && to_path.starts_with(&from_path) {
+        return Err(ApiError::bad_request("cannot move a directory into itself"));
+    }
+    if from_path.is_dir() && from_path.starts_with(&to_path) {
+        return Err(ApiError::bad_request(
+            "cannot replace a directory with one of its descendants",
+        ));
+    }
+    if to_path.exists() {
+        if !replace {
+            return Err(ApiError::bad_request("destination already exists"));
+        }
+        ensure_replaceable_target(&state, &to_path)?;
+        move_replacing(&from_path, &to_path).map_err(|e| {
+            ApiError::internal(format!("failed to replace {}: {e}", to_path.display()))
+        })?;
+    } else {
+        std::fs::rename(&from_path, &to_path).map_err(|e| {
+            ApiError::internal(format!("failed to rename {}: {e}", from_path.display()))
+        })?;
+    }
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -1359,8 +1416,34 @@ async fn fs_copy(
     let session_id = body.get("session_id").and_then(Value::as_str);
     let from_path = sandboxed_path(&state, from, session_id)?;
     let to_path = sandboxed_path(&state, to, session_id)?;
-    copy_recursive(&from_path, &to_path)
-        .map_err(|e| ApiError::internal(format!("failed to copy {}: {e}", from_path.display())))?;
+    let replace = body
+        .get("replace")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if from_path == to_path {
+        return Err(ApiError::bad_request("source and destination are the same"));
+    }
+    if from_path.is_dir() && to_path.starts_with(&from_path) {
+        return Err(ApiError::bad_request("cannot copy a directory into itself"));
+    }
+    if from_path.is_dir() && from_path.starts_with(&to_path) {
+        return Err(ApiError::bad_request(
+            "cannot replace a directory with one of its descendants",
+        ));
+    }
+    if to_path.exists() {
+        if !replace {
+            return Err(ApiError::bad_request("destination already exists"));
+        }
+        ensure_replaceable_target(&state, &to_path)?;
+        copy_replacing(&from_path, &to_path).map_err(|e| {
+            ApiError::internal(format!("failed to replace {}: {e}", to_path.display()))
+        })?;
+    } else {
+        copy_recursive(&from_path, &to_path).map_err(|e| {
+            ApiError::internal(format!("failed to copy {}: {e}", from_path.display()))
+        })?;
+    }
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -1377,6 +1460,64 @@ fn copy_recursive(from: &std::path::Path, to: &std::path::Path) -> std::io::Resu
     }
 }
 
+fn ensure_replaceable_target(state: &AppState, target: &std::path::Path) -> Result<(), ApiError> {
+    if target == state.cwd || target == state.home {
+        return Err(ApiError::bad_request("cannot replace a protected root"));
+    }
+    Ok(())
+}
+
+fn remove_path(target: &std::path::Path) -> std::io::Result<()> {
+    if target.is_dir() && !target.is_symlink() {
+        std::fs::remove_dir_all(target)
+    } else {
+        std::fs::remove_file(target)
+    }
+}
+
+fn transfer_temp_path(target: &std::path::Path) -> std::path::PathBuf {
+    let parent = target.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let stem = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("item");
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    parent.join(format!(
+        ".{stem}.storydex-replace-{}-{nonce}",
+        std::process::id()
+    ))
+}
+
+fn copy_replacing(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    let temp = transfer_temp_path(to);
+    if let Err(error) = copy_recursive(from, &temp) {
+        let _ = remove_path(&temp);
+        return Err(error.into());
+    }
+    if let Err(error) = remove_path(to) {
+        let _ = remove_path(&temp);
+        return Err(error.into());
+    }
+    std::fs::rename(&temp, to)
+}
+
+fn move_replacing(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    let temp = transfer_temp_path(to);
+    std::fs::rename(from, &temp)?;
+    if let Err(error) = remove_path(to) {
+        let _ = std::fs::rename(&temp, from);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::rename(&temp, to) {
+        let _ = std::fs::rename(&temp, from);
+        return Err(error);
+    }
+    Ok(())
+}
+
 async fn fs_write(
     State(state): State<AppState>,
     Json(body): Json<Value>,
@@ -1390,12 +1531,29 @@ async fn fs_write(
         .and_then(Value::as_str)
         .unwrap_or_default();
     let target = sandboxed_path(&state, path, body.get("session_id").and_then(Value::as_str))?;
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    std::fs::write(&target, content)
+    atomic_write_bytes(&target, content.as_bytes())
         .map_err(|e| ApiError::internal(format!("failed to write {}: {e}", target.display())))?;
     Ok(Json(json!({ "ok": true })))
+}
+
+async fn new_usage_period(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let usage_dir = state.cwd.join(".storydex").join("usage");
+    fs::create_dir_all(&usage_dir).map_err(|error| {
+        ApiError::internal(format!("failed to create usage directory: {error}"))
+    })?;
+    let period_id = format!("period-{}", Uuid::new_v4());
+    atomic_write_json(
+        &usage_dir.join("period.json"),
+        &json!({
+            "schema_version": 1,
+            "current_period_id": period_id,
+            "created_at": unix_time(),
+        }),
+    )
+    .map_err(|error| ApiError::internal(format!("failed to create usage period: {error}")))?;
+    write_project_usage_summary(&usage_dir)
+        .map_err(|error| ApiError::internal(format!("failed to update usage summary: {error}")))?;
+    Ok(Json(json!({ "ok": true, "period_id": period_id })))
 }
 
 async fn list_providers(State(state): State<AppState>) -> Json<Value> {
@@ -1954,6 +2112,47 @@ async fn handle_command(
             }
             context.send_ack(envelope_id);
         }
+        "set_storydex_mode" => {
+            let mode = StorydexMode::parse(
+                payload
+                    .get("mode")
+                    .and_then(Value::as_str)
+                    .unwrap_or("agent"),
+            );
+            *context.storydex_mode.write().await = mode;
+            context.send_ack(envelope_id);
+        }
+        "reset_story_context" => {
+            if context.task.running.load(Ordering::SeqCst) {
+                context.send_error(envelope_id, "cannot reset a running story context");
+                return;
+            }
+            let id = match Uuid::parse_str(session_id) {
+                Ok(id) => id,
+                Err(_) => {
+                    context.send_error(envelope_id, "invalid session id");
+                    return;
+                }
+            };
+            let store = SessionStore::new(&state.home);
+            match store.load(id) {
+                Ok(mut session) => {
+                    session.messages.clear();
+                    session.context = Default::default();
+                    session.compaction_checkpoint = None;
+                    session.touch();
+                    if let Err(error) = store.save(&session) {
+                        context.send_error(
+                            envelope_id,
+                            format!("failed to reset story context: {error:#}"),
+                        );
+                        return;
+                    }
+                    context.send_ack(envelope_id);
+                }
+                Err(_) => context.send_ack(envelope_id),
+            }
+        }
         "enter_plan_mode" => {
             context.plan_mode.store(true, Ordering::Relaxed);
             context.send_ack(envelope_id);
@@ -2110,11 +2309,17 @@ async fn run_turn(
         })
     });
     let provider_config = registry.resolve(selector)?;
+    let storydex_mode = *context.storydex_mode.read().await;
+    let reasoning_effort = *context.reasoning_effort.read().await;
     let intent_result = story_intent_preflight(&registry, &provider_config, prompt).await;
+    let mut auxiliary_usage = TokenUsage::default();
     let mut effective_prompt = match intent_result {
-        Some(result) => format!(
-            "{prompt}\n\n[隐藏意图判断结果]\n{result}\n只能把此结果用于边界判断，不要在正文中提及分类器、OOC 标签或本段提示。"
-        ),
+        Some((result, usage)) => {
+            auxiliary_usage.add(&usage);
+            format!(
+                "{prompt}\n\n[隐藏意图判断结果]\n{result}\n只能把此结果用于边界判断，不要在正文中提及分类器、OOC 标签或本段提示。"
+            )
+        }
         None => prompt.to_owned(),
     };
     let mut session = load_or_create_web_session(
@@ -2135,21 +2340,40 @@ async fn run_turn(
         state.cwd.clone()
     };
 
-    if is_story_prompt(prompt) {
-        let assembled = assemble_mobile_story_context(&cwd);
-        if !assembled.is_empty() {
-            effective_prompt.push_str("\n\n[Storydex 隐藏项目上下文]\n");
-            effective_prompt.push_str(&assembled);
-            effective_prompt.push_str(
+    let assembled = if storydex_mode != StorydexMode::Agent || is_story_prompt(prompt) {
+        assemble_mobile_story_context(&cwd, storydex_mode, reasoning_effort_rank(reasoning_effort))
+    } else {
+        StoryContextAssembly::default()
+    };
+    if !assembled.text.is_empty() {
+        effective_prompt.push_str("\n\n[Storydex 隐藏项目上下文]\n");
+        effective_prompt.push_str(&assembled.text);
+        effective_prompt.push_str(
                 "\n以上内容只用于保持连续性与设定一致，不得在正文中复述本区块标题、文件路径或装配过程。",
             );
-        }
+    }
+    if storydex_mode == StorydexMode::Story
+        && reasoning_effort == ReasoningEffort::XHigh
+        && let Some((review, usage)) = story_continuity_preflight(
+            &provider_config,
+            &assembled.text,
+            story_player_input(prompt),
+        )
+        .await
+    {
+        auxiliary_usage.add(&usage);
+        effective_prompt.push_str("\n\n[隐藏连续性审校]\n");
+        effective_prompt.push_str(&review);
+        effective_prompt.push_str("\n只用于生成前校验，不得在正文中复述审校过程。");
     }
 
     let permission = *context.permission.read().await;
-    let policy_mode = match permission {
-        PermissionMode::Ask => AccessMode::WorkspaceWrite,
-        PermissionMode::Auto | PermissionMode::Full => AccessMode::FullAccess,
+    let policy_mode = match storydex_mode {
+        StorydexMode::Story | StorydexMode::Narrator => AccessMode::ReadOnly,
+        StorydexMode::Agent => match permission {
+            PermissionMode::Ask => AccessMode::WorkspaceWrite,
+            PermissionMode::Auto | PermissionMode::Full => AccessMode::FullAccess,
+        },
     };
     let global_memory = global_memory_enabled(&state.home);
     let policy = SecurityPolicy::new(&cwd, policy_mode)?;
@@ -2179,10 +2403,12 @@ async fn run_turn(
     };
     let observer = BrowserObserver::new(
         Arc::clone(&task),
-        session.usage.input_tokens,
-        session.usage.output_tokens,
+        session.usage.clone(),
+        cwd.clone(),
+        storydex_mode,
+        assembled.categories,
+        auxiliary_usage,
     );
-    let reasoning_effort = *context.reasoning_effort.read().await;
     let agent = Agent::new(prompt_context)
         .with_max_tool_rounds(96)
         .with_reasoning_effort(reasoning_effort)
@@ -2208,7 +2434,10 @@ async fn run_turn(
         maybe_degrade_vision(state, session_id, &session, error);
     }
     store.save(&session)?;
-    turn_result?;
+    if let Err(error) = turn_result {
+        observer.finalize_usage();
+        return Err(error.into());
+    }
 
     while session
         .loop_state
@@ -2223,8 +2452,12 @@ async fn run_turn(
         }
         session.touch();
         store.save(&session)?;
-        loop_result?;
+        if let Err(error) = loop_result {
+            observer.finalize_usage();
+            return Err(error.into());
+        }
     }
+    observer.finalize_usage();
     Ok(())
 }
 
@@ -2235,7 +2468,8 @@ fn parse_reasoning_effort(value: &str) -> Option<ReasoningEffort> {
         "medium" => Some(ReasoningEffort::Medium),
         "high" => Some(ReasoningEffort::High),
         "xhigh" => Some(ReasoningEffort::XHigh),
-        "max" => Some(ReasoningEffort::Max),
+        // Legacy Android settings used `max`; migrate it to the supported top level.
+        "max" => Some(ReasoningEffort::XHigh),
         _ => None,
     }
 }
@@ -2243,18 +2477,50 @@ fn parse_reasoning_effort(value: &str) -> Option<ReasoningEffort> {
 const STORY_CONTEXT_CHAR_BUDGET: usize = 28_000;
 const STORY_CONTEXT_FILE_LIMIT: usize = 10_000;
 
+#[derive(Default)]
+struct StoryContextAssembly {
+    text: String,
+    categories: BTreeMap<String, u64>,
+}
+
+fn reasoning_effort_rank(effort: ReasoningEffort) -> usize {
+    match effort {
+        ReasoningEffort::Auto | ReasoningEffort::Medium => 2,
+        ReasoningEffort::Low => 1,
+        ReasoningEffort::High => 3,
+        ReasoningEffort::XHigh | ReasoningEffort::Max => 4,
+    }
+}
+
+fn story_setting_usize(root: &Path, key: &str, fallback: usize, min: usize, max: usize) -> usize {
+    fs::read_to_string(root.join(".storydex").join("settings.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|value| value.get(key).and_then(Value::as_u64))
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(fallback)
+        .clamp(min, max)
+}
+
 /// Mobile Storydex keeps Coomi's Agent runtime and adds a bounded, project-only
 /// context layer. Older chapters contribute summaries, while the newest prose
 /// and formal knowledge files contribute full text within a shared budget.
-fn assemble_mobile_story_context(project_root: &Path) -> String {
-    let mut budget = STORY_CONTEXT_CHAR_BUDGET;
-    let mut output = String::from(
+fn assemble_mobile_story_context(
+    project_root: &Path,
+    mode: StorydexMode,
+    reasoning_rank: usize,
+) -> StoryContextAssembly {
+    let recent_count = story_setting_usize(project_root, "recentFragments", 3, 1, 20);
+    let mut budget = STORY_CONTEXT_CHAR_BUDGET.saturating_mul(reasoning_rank.max(1)) / 2;
+    let mut assembly = StoryContextAssembly::default();
+    assembly.text = String::from(
         "使用顺序：项目正式资料 > 最近剧情正文 > 较早片段摘要 > 会话记忆。若仍有歧义，使用工具在当前项目内继续读取。\n",
     );
+    *assembly.categories.entry("rules".into()).or_default() += 40;
 
     let mut chapters = collect_markdown_files(&project_root.join("chapters"));
     chapters.sort();
-    let recent_start = chapters.len().saturating_sub(5);
+    let recent_start = chapters.len().saturating_sub(recent_count);
     let older = &chapters[..recent_start];
     let recent = &chapters[recent_start..];
 
@@ -2271,8 +2537,9 @@ fn assemble_mobile_story_context(project_root: &Path) -> String {
         }
     }
     append_context_section(
-        &mut output,
+        &mut assembly,
         &mut budget,
+        "story",
         "较早剧情片段摘要",
         &summary_lines.join("\n"),
     );
@@ -2280,18 +2547,19 @@ fn assemble_mobile_story_context(project_root: &Path) -> String {
     for path in recent {
         if let Some(text) = read_story_text(path, 7_000) {
             append_context_section(
-                &mut output,
+                &mut assembly,
                 &mut budget,
+                "story",
                 &format!("最近剧情 {}", relative_story_path(project_root, path)),
                 &text,
             );
         }
     }
 
-    for (label, relative) in [
-        ("角色资料", ".storydex/characters"),
-        ("世界观资料", ".storydex/worldbook"),
-        ("WIKI 资料", ".storydex/wiki"),
+    for (category, label, relative) in [
+        ("characters_world", "角色资料", ".storydex/characters"),
+        ("characters_world", "世界观资料", ".storydex/worldbook"),
+        ("characters_world", "WIKI 资料", ".storydex/wiki"),
     ] {
         let mut files = collect_markdown_files(&project_root.join(relative));
         files.sort();
@@ -2301,15 +2569,130 @@ fn assemble_mobile_story_context(project_root: &Path) -> String {
             }
             if let Some(text) = read_story_text(&path, 5_000) {
                 append_context_section(
-                    &mut output,
+                    &mut assembly,
                     &mut budget,
+                    category,
                     &format!("{} {}", label, relative_story_path(project_root, &path)),
                     &text,
                 );
             }
         }
     }
-    output
+
+    append_story_json_file(
+        &mut assembly,
+        &mut budget,
+        project_root,
+        ".storydex/memory/state.json",
+        "memory",
+        "当前故事记忆与锁定事实",
+        12_000,
+    );
+    append_story_json_file(
+        &mut assembly,
+        &mut budget,
+        project_root,
+        ".storydex/time/state.json",
+        "scripts_time",
+        "当前故事时间",
+        4_000,
+    );
+    append_story_index_files(
+        &mut assembly,
+        &mut budget,
+        project_root,
+        ".storydex/presets",
+        "constraints",
+        "已激活风格预设",
+        false,
+    );
+    append_story_index_files(
+        &mut assembly,
+        &mut budget,
+        project_root,
+        ".storydex/scripts",
+        "scripts_time",
+        if mode == StorydexMode::Narrator {
+            "已发生剧本状态"
+        } else {
+            "当前有效剧本"
+        },
+        mode == StorydexMode::Narrator,
+    );
+    assembly
+}
+
+fn append_story_json_file(
+    assembly: &mut StoryContextAssembly,
+    budget: &mut usize,
+    root: &Path,
+    relative: &str,
+    category: &str,
+    label: &str,
+    limit: usize,
+) {
+    let path = root.join(relative);
+    if let Some(text) = read_story_text(&path, limit) {
+        append_context_section(assembly, budget, category, label, &text);
+    }
+}
+
+fn append_story_index_files(
+    assembly: &mut StoryContextAssembly,
+    budget: &mut usize,
+    root: &Path,
+    relative_dir: &str,
+    category: &str,
+    label: &str,
+    completed_only: bool,
+) {
+    let directory = root.join(relative_dir);
+    let Ok(raw) = fs::read_to_string(directory.join("index.json")) else {
+        return;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+        return;
+    };
+    let mut entries = value
+        .get("entries")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    entries.sort_by_key(|entry| entry.get("order").and_then(Value::as_i64).unwrap_or(0));
+    // UI order is high -> low; inject low -> high so the strongest item is closest to the action.
+    entries.reverse();
+    for entry in entries {
+        let enabled = entry
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let status = entry
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("active");
+        if !enabled || (completed_only && status != "completed") {
+            continue;
+        }
+        let Some(filename) = entry.get("filename").and_then(Value::as_str) else {
+            continue;
+        };
+        if filename.contains('/') || filename.contains('\\') {
+            continue;
+        }
+        if let Some(text) = read_story_text(&directory.join(filename), 8_000) {
+            let title = entry
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or(filename);
+            append_context_section(
+                assembly,
+                budget,
+                category,
+                &format!("{label}：{title}"),
+                &text,
+            );
+        }
+    }
 }
 
 fn collect_markdown_files(root: &Path) -> Vec<PathBuf> {
@@ -2374,7 +2757,13 @@ fn relative_story_path(root: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
-fn append_context_section(output: &mut String, budget: &mut usize, label: &str, text: &str) {
+fn append_context_section(
+    assembly: &mut StoryContextAssembly,
+    budget: &mut usize,
+    category: &str,
+    label: &str,
+    text: &str,
+) {
     if *budget == 0 || text.trim().is_empty() {
         return;
     }
@@ -2383,12 +2772,17 @@ fn append_context_section(output: &mut String, budget: &mut usize, label: &str, 
         *budget = 0;
         return;
     }
-    output.push_str(&header);
+    assembly.text.push_str(&header);
     *budget -= header.chars().count();
     let content = truncate_chars(text.trim(), *budget);
     *budget = budget.saturating_sub(content.chars().count());
-    output.push_str(&content);
-    output.push('\n');
+    assembly.text.push_str(&content);
+    assembly.text.push('\n');
+    let tokens = u64::try_from(header.len().saturating_add(content.len()))
+        .unwrap_or(u64::MAX)
+        .saturating_add(3)
+        / 4;
+    *assembly.categories.entry(category.to_owned()).or_default() += tokens;
 }
 
 fn truncate_chars(text: &str, limit: usize) -> String {
@@ -2407,7 +2801,7 @@ async fn story_intent_preflight(
     registry: &ProviderRegistry,
     main: &coomi_services::ProviderConfig,
     prompt: &str,
-) -> Option<String> {
+) -> Option<(String, TokenUsage)> {
     if !is_story_prompt(prompt) {
         return None;
     }
@@ -2438,7 +2832,49 @@ async fn story_intent_preflight(
     .await
     .ok()
     .and_then(Result::ok)
-    .map(|response| response.content.trim().chars().take(240).collect())
+    .map(|response| {
+        (
+            response.content.trim().chars().take(240).collect(),
+            response.usage,
+        )
+    })
+}
+
+async fn story_continuity_preflight(
+    config: &coomi_services::ProviderConfig,
+    context: &str,
+    player_input: &str,
+) -> Option<(String, TokenUsage)> {
+    let provider = HttpModelProvider::new(config.clone()).ok()?;
+    let bounded_context = context.chars().take(24_000).collect::<String>();
+    let request = ModelRequest {
+        model: provider.model().to_owned(),
+        messages: vec![
+            coomi_engine::ChatMessage::system(
+                "你是 Storydex 连续性审校器。只检查本轮行动与已有剧情、角色事实、故事时间、已发生剧本和锁定记忆是否冲突，并给出不超过8条生成约束。不得续写正文，不得调用工具，不得泄露未发生剧本。",
+            ),
+            coomi_engine::ChatMessage::user(format!(
+                "项目上下文：\n{bounded_context}\n\n玩家行动：{player_input}"
+            )),
+        ],
+        tools: Vec::new(),
+        max_output_tokens: Some(500),
+        required_tool: None,
+        reasoning_effort: ReasoningEffort::High,
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        provider.complete(request),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .map(|response| {
+        (
+            response.content.trim().chars().take(1_600).collect(),
+            response.usage,
+        )
+    })
 }
 
 fn is_story_prompt(prompt: &str) -> bool {
@@ -2527,56 +2963,369 @@ struct BrowserObserver {
     task: Arc<SessionTask>,
     started: StdMutex<HashMap<String, Instant>>,
     usage: StdMutex<BrowserUsageState>,
+    project_root: PathBuf,
+    mode: StorydexMode,
+    category_weights: BTreeMap<String, u64>,
+    finalized: AtomicBool,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct BrowserUsageState {
     input_tokens: u64,
+    cached_input_tokens: u64,
     output_tokens: u64,
+    reasoning_tokens: u64,
     context_used_tokens: u64,
     context_window_tokens: u64,
+    turn_usage: TokenUsage,
 }
 
 impl BrowserObserver {
-    fn new(task: Arc<SessionTask>, input_tokens: u64, output_tokens: u64) -> Self {
+    fn new(
+        task: Arc<SessionTask>,
+        usage: TokenUsage,
+        project_root: PathBuf,
+        mode: StorydexMode,
+        category_weights: BTreeMap<String, u64>,
+        initial_turn_usage: TokenUsage,
+    ) -> Self {
         Self {
             task,
             started: StdMutex::new(HashMap::new()),
             usage: StdMutex::new(BrowserUsageState {
-                input_tokens,
-                output_tokens,
+                input_tokens: usage.input_tokens,
+                cached_input_tokens: usage.cached_input_tokens,
+                output_tokens: usage.output_tokens,
+                reasoning_tokens: usage.reasoning_tokens.unwrap_or_default(),
+                turn_usage: initial_turn_usage,
                 ..BrowserUsageState::default()
             }),
+            project_root,
+            mode,
+            category_weights,
+            finalized: AtomicBool::new(false),
         }
     }
 
     fn send_usage(&self) {
-        let state = *self
+        let state = self
             .usage
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.task.push_event(browser_usage_event(state));
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let project = read_project_usage_summary(&self.project_root);
+        self.task.push_event(browser_usage_event(
+            &state,
+            self.mode,
+            &self.category_weights,
+            project.as_ref(),
+        ));
+    }
+
+    fn finalize_usage(&self) {
+        if self.finalized.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let turn_usage = self
+            .usage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .turn_usage
+            .clone();
+        if turn_usage.input_tokens == 0 && turn_usage.output_tokens == 0 {
+            return;
+        }
+        let categories =
+            normalized_usage_categories(self.mode, &self.category_weights, turn_usage.input_tokens);
+        let _ = append_project_usage(&self.project_root, self.mode, &turn_usage, &categories);
+        self.send_usage();
     }
 }
 
-fn browser_usage_event(state: BrowserUsageState) -> Value {
+fn browser_usage_event(
+    state: &BrowserUsageState,
+    mode: StorydexMode,
+    category_weights: &BTreeMap<String, u64>,
+    project: Option<&Value>,
+) -> Value {
     let total_tokens = state.input_tokens.saturating_add(state.output_tokens);
     let context_ratio = if state.context_window_tokens == 0 {
         0.0
     } else {
         (state.context_used_tokens as f64 / state.context_window_tokens as f64).min(1.0)
     };
+    let turn_cache_rate = cache_rate(&state.turn_usage);
+    let categories = normalized_usage_categories(
+        mode,
+        category_weights,
+        state.context_used_tokens.max(state.turn_usage.input_tokens),
+    );
     json!({
         "event_type": "usage_update",
         "usage": {
             "input_tokens": state.input_tokens,
+            "cached_input_tokens": state.cached_input_tokens,
             "output_tokens": state.output_tokens,
+            "reasoning_tokens": state.reasoning_tokens,
             "total_tokens": total_tokens,
             "context_used_tokens": state.context_used_tokens,
             "context_window_tokens": state.context_window_tokens,
             "context_ratio": context_ratio,
+            "turn_input_tokens": state.turn_usage.input_tokens,
+            "turn_cached_input_tokens": state.turn_usage.cached_input_tokens,
+            "turn_output_tokens": state.turn_usage.output_tokens,
+            "turn_reasoning_tokens": state.turn_usage.reasoning_tokens.unwrap_or_default(),
+            "turn_cache_rate": turn_cache_rate,
+            "categories": categories,
+            "mode": mode.label(),
+            "project": project.cloned().unwrap_or_else(|| json!({})),
         },
     })
+}
+
+fn cache_rate(usage: &TokenUsage) -> f64 {
+    if usage.input_tokens == 0 {
+        0.0
+    } else {
+        (usage.cached_input_tokens as f64 / usage.input_tokens as f64).clamp(0.0, 1.0)
+    }
+}
+
+fn usage_category_keys(mode: StorydexMode) -> &'static [&'static str] {
+    match mode {
+        StorydexMode::Story => &[
+            "rules",
+            "story",
+            "characters_world",
+            "memory",
+            "scripts_time",
+            "constraints",
+            "player_interaction",
+            "capabilities",
+        ],
+        StorydexMode::Narrator => &[
+            "rules",
+            "narrative_source",
+            "characters_world",
+            "memory",
+            "occurred_scripts",
+            "narration_constraints",
+            "user_request",
+            "capabilities",
+        ],
+        StorydexMode::Agent => &[
+            "rules",
+            "conversation",
+            "project_files",
+            "tool_results",
+            "plans",
+            "user_request",
+            "capabilities",
+        ],
+    }
+}
+
+fn normalized_usage_categories(
+    mode: StorydexMode,
+    raw_weights: &BTreeMap<String, u64>,
+    total: u64,
+) -> BTreeMap<String, u64> {
+    let keys = usage_category_keys(mode);
+    let mut weights = BTreeMap::new();
+    for key in keys {
+        weights.insert(
+            (*key).to_string(),
+            raw_weights.get(*key).copied().unwrap_or(1).max(1),
+        );
+    }
+    if mode == StorydexMode::Narrator {
+        for (source, target) in [
+            ("story", "narrative_source"),
+            ("scripts_time", "occurred_scripts"),
+            ("constraints", "narration_constraints"),
+        ] {
+            if let Some(value) = raw_weights.get(source) {
+                weights.insert(target.to_string(), (*value).max(1));
+            }
+        }
+    }
+    if mode == StorydexMode::Agent && !raw_weights.is_empty() {
+        weights.insert(
+            "project_files".into(),
+            raw_weights.values().copied().sum::<u64>().max(1),
+        );
+    }
+    let weight_total = weights.values().copied().sum::<u64>().max(1);
+    let mut result = BTreeMap::new();
+    let mut assigned = 0u64;
+    for (index, (key, weight)) in weights.iter().enumerate() {
+        let value = if index + 1 == weights.len() {
+            total.saturating_sub(assigned)
+        } else {
+            total.saturating_mul(*weight) / weight_total
+        };
+        assigned = assigned.saturating_add(value);
+        result.insert(key.clone(), value);
+    }
+    result
+}
+
+fn append_project_usage(
+    project_root: &Path,
+    mode: StorydexMode,
+    usage: &TokenUsage,
+    categories: &BTreeMap<String, u64>,
+) -> std::io::Result<()> {
+    let usage_dir = project_root.join(".storydex").join("usage");
+    fs::create_dir_all(&usage_dir)?;
+    let period_id = current_usage_period(&usage_dir);
+    let entry = json!({
+        "schema_version": 1,
+        "period_id": period_id,
+        "timestamp": unix_time(),
+        "mode": mode.label(),
+        "input_tokens": usage.input_tokens,
+        "cached_input_tokens": usage.cached_input_tokens,
+        "output_tokens": usage.output_tokens,
+        "reasoning_tokens": usage.reasoning_tokens.unwrap_or_default(),
+        "categories": categories,
+    });
+    let ledger_path = usage_dir.join("ledger.jsonl");
+    let mut ledger = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&ledger_path)?;
+    serde_json::to_writer(&mut ledger, &entry)?;
+    ledger.write_all(b"\n")?;
+    ledger.flush()?;
+    write_project_usage_summary(&usage_dir)
+}
+
+fn current_usage_period(usage_dir: &Path) -> String {
+    fs::read_to_string(usage_dir.join("period.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|value| value.get("current_period_id")?.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "initial".into())
+}
+
+fn usage_ledger_entries(usage_dir: &Path) -> Vec<Value> {
+    fs::read_to_string(usage_dir.join("ledger.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect()
+}
+
+fn write_project_usage_summary(usage_dir: &Path) -> std::io::Result<()> {
+    let entries = usage_ledger_entries(usage_dir);
+    let current_period = current_usage_period(usage_dir);
+    let summary = summarize_usage_entries(&entries, &current_period);
+    atomic_write_json(&usage_dir.join("summary.json"), &summary)
+}
+
+fn read_project_usage_summary(project_root: &Path) -> Option<Value> {
+    let usage_dir = project_root.join(".storydex").join("usage");
+    fs::read_to_string(usage_dir.join("summary.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+}
+
+fn summarize_usage_entries(entries: &[Value], current_period: &str) -> Value {
+    let mut modes = serde_json::Map::new();
+    for mode in [
+        StorydexMode::Story,
+        StorydexMode::Narrator,
+        StorydexMode::Agent,
+    ] {
+        let matching = entries
+            .iter()
+            .filter(|entry| entry.get("period_id").and_then(Value::as_str) == Some(current_period))
+            .filter(|entry| entry.get("mode").and_then(Value::as_str) == Some(mode.label()))
+            .collect::<Vec<_>>();
+        let recent = matching.iter().rev().take(10).copied().collect::<Vec<_>>();
+        let input = sum_json_u64(&matching, "input_tokens");
+        let cached = sum_json_u64(&matching, "cached_input_tokens");
+        let recent_input = sum_json_u64(&recent, "input_tokens");
+        let recent_cached = sum_json_u64(&recent, "cached_input_tokens");
+        let mut categories = BTreeMap::<String, u64>::new();
+        for entry in &matching {
+            if let Some(values) = entry.get("categories").and_then(Value::as_object) {
+                for (key, value) in values {
+                    *categories.entry(key.clone()).or_default() = categories
+                        .get(key)
+                        .copied()
+                        .unwrap_or_default()
+                        .saturating_add(value.as_u64().unwrap_or_default());
+                }
+            }
+        }
+        modes.insert(
+            mode.label().into(),
+            json!({
+                "turns": matching.len(),
+                "input_tokens": input,
+                "cached_input_tokens": cached,
+                "output_tokens": sum_json_u64(&matching, "output_tokens"),
+                "reasoning_tokens": sum_json_u64(&matching, "reasoning_tokens"),
+                "cache_rate": if input == 0 { 0.0 } else { cached as f64 / input as f64 },
+                "recent_10_cache_rate": if recent_input == 0 { 0.0 } else { recent_cached as f64 / recent_input as f64 },
+                "categories": categories,
+            }),
+        );
+    }
+    json!({
+        "schema_version": 1,
+        "current_period_id": current_period,
+        "updated_at": unix_time(),
+        "modes": modes,
+    })
+}
+
+fn sum_json_u64(entries: &[&Value], key: &str) -> u64 {
+    entries
+        .iter()
+        .filter_map(|entry| entry.get(key).and_then(Value::as_u64))
+        .fold(0u64, u64::saturating_add)
+}
+
+fn atomic_write_json(path: &Path, value: &Value) -> std::io::Result<()> {
+    let mut bytes = serde_json::to_vec_pretty(value)?;
+    bytes.push(b'\n');
+    atomic_write_bytes(path, &bytes)
+}
+
+fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let stem = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("storydex");
+    let temp = parent.join(format!(".{stem}.{}.tmp", Uuid::new_v4()));
+    let backup = parent.join(format!(".{stem}.{}.bak", Uuid::new_v4()));
+    let mut file = fs::File::create(&temp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+
+    if !path.exists() {
+        return fs::rename(temp, path);
+    }
+    if fs::rename(&temp, path).is_ok() {
+        return Ok(());
+    }
+    fs::rename(path, &backup)?;
+    match fs::rename(&temp, path) {
+        Ok(()) => {
+            let _ = fs::remove_file(backup);
+            Ok(())
+        }
+        Err(error) => {
+            let _ = fs::rename(backup, path);
+            let _ = fs::remove_file(temp);
+            Err(error)
+        }
+    }
 }
 
 impl AgentObserver for BrowserObserver {
@@ -2635,7 +3384,9 @@ impl AgentObserver for BrowserObserver {
             AgentEvent::TurnCompleted(usage) => {
                 if let Ok(mut state) = self.usage.lock() {
                     state.input_tokens = usage.input_tokens;
+                    state.cached_input_tokens = usage.cached_input_tokens;
                     state.output_tokens = usage.output_tokens;
+                    state.reasoning_tokens = usage.reasoning_tokens.unwrap_or_default();
                 }
                 self.send_usage();
             }
@@ -2680,8 +3431,13 @@ impl AgentObserver for BrowserObserver {
                 }
                 self.send_usage();
             }
+            AgentEvent::ModelCompleted { usage, .. } => {
+                if let Ok(mut state) = self.usage.lock() {
+                    state.turn_usage.add(usage);
+                }
+                self.send_usage();
+            }
             AgentEvent::ModelStarted { .. }
-            | AgentEvent::ModelCompleted { .. }
             | AgentEvent::ProviderRetry { .. }
             | AgentEvent::CompactionStarted { .. }
             | AgentEvent::QueuedInputAccepted(_) => {}
@@ -3052,7 +3808,7 @@ mod tests {
             ("medium", ReasoningEffort::Medium),
             ("high", ReasoningEffort::High),
             ("xhigh", ReasoningEffort::XHigh),
-            ("max", ReasoningEffort::Max),
+            ("max", ReasoningEffort::XHigh),
         ] {
             assert_eq!(parse_reasoning_effort(value), Some(expected));
         }
@@ -3090,14 +3846,14 @@ mod tests {
             .expect("write character");
         std::fs::write(wiki.join("city.md"), "雾城每天午夜封门。").expect("write wiki");
 
-        let context = assemble_mobile_story_context(project.path());
-        assert!(context.contains("片段1摘要"));
-        assert!(!context.contains("SENTINEL_1"));
-        assert!(context.contains("SENTINEL_3"));
-        assert!(context.contains("SENTINEL_7"));
-        assert!(context.contains("主角怕火"));
-        assert!(context.contains("雾城每天午夜封门"));
-        assert!(context.chars().count() <= STORY_CONTEXT_CHAR_BUDGET + 200);
+        let context = assemble_mobile_story_context(project.path(), StorydexMode::Story, 2);
+        assert!(context.text.contains("片段1摘要"));
+        assert!(!context.text.contains("SENTINEL_1"));
+        assert!(!context.text.contains("SENTINEL_3"));
+        assert!(context.text.contains("SENTINEL_7"));
+        assert!(context.text.contains("主角怕火"));
+        assert!(context.text.contains("雾城每天午夜封门"));
+        assert!(context.text.chars().count() <= STORY_CONTEXT_CHAR_BUDGET + 200);
     }
 
     #[test]
@@ -3138,16 +3894,56 @@ mod tests {
 
     #[test]
     fn browser_usage_includes_session_and_context_totals() {
-        let value = browser_usage_event(BrowserUsageState {
+        let state = BrowserUsageState {
             input_tokens: 12_000,
+            cached_input_tokens: 8_000,
             output_tokens: 800,
+            reasoning_tokens: 120,
             context_used_tokens: 32_000,
             context_window_tokens: 128_000,
-        });
+            turn_usage: TokenUsage {
+                input_tokens: 10_000,
+                cached_input_tokens: 7_500,
+                output_tokens: 600,
+                reasoning_tokens: Some(100),
+            },
+        };
+        let value = browser_usage_event(
+            &state,
+            StorydexMode::Story,
+            &BTreeMap::from([("story".into(), 4), ("memory".into(), 1)]),
+            None,
+        );
         assert_eq!(value["usage"]["total_tokens"], 12_800);
         assert_eq!(value["usage"]["context_used_tokens"], 32_000);
         assert_eq!(value["usage"]["context_window_tokens"], 128_000);
         assert_eq!(value["usage"]["context_ratio"], 0.25);
+        assert_eq!(value["usage"]["turn_cache_rate"], 0.75);
+        assert_eq!(
+            value["usage"]["categories"]
+                .as_object()
+                .unwrap()
+                .values()
+                .filter_map(Value::as_u64)
+                .sum::<u64>(),
+            32_000
+        );
+    }
+
+    #[test]
+    fn usage_summary_separates_modes_and_weights_cache_rates() {
+        let entries = vec![
+            json!({"period_id":"p1","mode":"story","input_tokens":100,"cached_input_tokens":80,"output_tokens":20,"reasoning_tokens":4,"categories":{"story":60}}),
+            json!({"period_id":"p1","mode":"story","input_tokens":300,"cached_input_tokens":60,"output_tokens":40,"reasoning_tokens":8,"categories":{"story":180}}),
+            json!({"period_id":"p1","mode":"agent","input_tokens":200,"cached_input_tokens":100,"output_tokens":30,"reasoning_tokens":0,"categories":{"project_files":120}}),
+            json!({"period_id":"old","mode":"story","input_tokens":10_000,"cached_input_tokens":0,"output_tokens":1,"reasoning_tokens":0,"categories":{}}),
+        ];
+        let summary = summarize_usage_entries(&entries, "p1");
+        assert_eq!(summary["modes"]["story"]["turns"], 2);
+        assert_eq!(summary["modes"]["story"]["input_tokens"], 400);
+        assert_eq!(summary["modes"]["story"]["cache_rate"], 0.35);
+        assert_eq!(summary["modes"]["agent"]["turns"], 1);
+        assert_eq!(summary["modes"]["narrator"]["turns"], 0);
     }
 
     #[test]
@@ -3320,5 +4116,45 @@ mod tests {
         }
         assert!(found_running, "running session present in list");
         assert!(found_idle, "idle session present in list");
+    }
+
+    #[test]
+    fn copy_replacing_removes_stale_directory_contents() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        std::fs::create_dir_all(&source).expect("create source");
+        std::fs::create_dir_all(&target).expect("create target");
+        std::fs::write(source.join("fresh.txt"), "fresh").expect("write source");
+        std::fs::write(target.join("stale.txt"), "stale").expect("write target");
+
+        copy_replacing(&source, &target).expect("replace directory by copy");
+
+        assert_eq!(
+            std::fs::read_to_string(target.join("fresh.txt")).unwrap(),
+            "fresh"
+        );
+        assert!(!target.join("stale.txt").exists());
+        assert!(source.join("fresh.txt").exists());
+    }
+
+    #[test]
+    fn move_replacing_removes_stale_directory_and_source() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        std::fs::create_dir_all(&source).expect("create source");
+        std::fs::create_dir_all(&target).expect("create target");
+        std::fs::write(source.join("fresh.txt"), "fresh").expect("write source");
+        std::fs::write(target.join("stale.txt"), "stale").expect("write target");
+
+        move_replacing(&source, &target).expect("replace directory by move");
+
+        assert_eq!(
+            std::fs::read_to_string(target.join("fresh.txt")).unwrap(),
+            "fresh"
+        );
+        assert!(!target.join("stale.txt").exists());
+        assert!(!source.exists());
     }
 }
