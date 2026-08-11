@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).parents[1] / "server.py"
@@ -87,6 +88,21 @@ class FeedbackStoreTests(unittest.TestCase):
         second = self.store.save(payload, "127.0.0.1", "test")
         self.assertEqual(first, second)
         self.assertEqual(len(self.store.list("", 20)), 1)
+
+    def test_connect_passes_a_string_path_to_legacy_sqlite(self) -> None:
+        original_connect = server.sqlite3.connect
+        observed_paths = []
+
+        def legacy_connect(database, *args, **kwargs):
+            self.assertIsInstance(database, str)
+            observed_paths.append(database)
+            return original_connect(database, *args, **kwargs)
+
+        with mock.patch.object(server.sqlite3, "connect", side_effect=legacy_connect):
+            with self.store.connect() as connection:
+                connection.execute("SELECT 1")
+
+        self.assertEqual(observed_paths, [str(self.store.database_path)])
 
 
 if __name__ == "__main__":

@@ -179,7 +179,8 @@ class FeedbackStore:
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.database_path, timeout=10.0)
+        # Python 3.6's sqlite module does not yet accept pathlib.Path objects.
+        connection = sqlite3.connect(str(self.database_path), timeout=10.0)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         try:
