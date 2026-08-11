@@ -52,10 +52,13 @@ if ! id "$service_user" >/dev/null 2>&1; then
 fi
 id "$service_user" >/dev/null 2>&1
 service_group="$(id -gn "$service_user")"
-python_bin="$(command -v python3 || true)"
+python_bin=/usr/bin/python3
+if [[ ! -x "$python_bin" ]]; then
+  python_bin="$(command -v python3 || true)"
+fi
 [[ -n "$python_bin" && "$python_bin" == /* ]] || { echo "python3 executable not found" >&2; exit 1; }
-"$python_bin" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' \
-  || { echo "Storydex feedback requires Python 3.9 or newer: $python_bin" >&2; exit 1; }
+"$python_bin" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 6) else 1)' \
+  || { echo "Storydex feedback requires Python 3.6 or newer: $python_bin" >&2; exit 1; }
 
 mkdir -p "$feedback_root/releases" "$feedback_root/data/images"
 [[ ! -e "$release_dir" ]]

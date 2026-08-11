@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Small, dependency-free feedback receiver for the Storydex update host."""
 
-from __future__ import annotations
-
 import argparse
 import base64
 import binascii
@@ -11,15 +9,16 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import mimetypes
 from pathlib import Path
 import re
 import secrets
 import sqlite3
+from socketserver import ThreadingMixIn
 import time
-from typing import Any, Iterator
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Type
 from urllib import error as urlerror
 from urllib import request as urlrequest
 from urllib.parse import parse_qs, quote, urlparse
@@ -83,7 +82,7 @@ def sanitize_structured_value(value: Any, depth: int = 0) -> Any:
     return str(value)[:MAX_TEXT]
 
 
-def load_json_object(raw: bytes) -> dict[str, Any]:
+def load_json_object(raw: bytes) -> Dict[str, Any]:
     try:
         value = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -93,7 +92,7 @@ def load_json_object(raw: bytes) -> dict[str, Any]:
     return value
 
 
-def validate_feedback(payload: dict[str, Any]) -> dict[str, Any]:
+def validate_feedback(payload: Dict[str, Any]) -> Dict[str, Any]:
     source = bounded_text(payload.get("source"), 20)
     if source not in {"error", "settings"}:
         raise FeedbackError("source 必须是 error 或 settings。")
@@ -192,7 +191,7 @@ class FeedbackStore:
     def auth_secret(self) -> bytes:
         return self.secret_path.read_text(encoding="ascii").strip().encode("ascii")
 
-    def save(self, payload: dict[str, Any], client_ip: str, user_agent: str) -> str:
+    def save(self, payload: Dict[str, Any], client_ip: str, user_agent: str) -> str:
         data = validate_feedback(payload)
         normalized_ip = bounded_text(client_ip, 120)
         with self.connect() as connection:
@@ -209,8 +208,8 @@ class FeedbackStore:
             if int(recent_count) >= MAX_SUBMISSIONS_PER_IP_HOUR:
                 raise FeedbackError("反馈提交过于频繁，请稍后重试。", HTTPStatus.TOO_MANY_REQUESTS)
         feedback_id = str(uuid4())
-        staged: list[tuple[str, str, str, int]] = []
-        written: list[Path] = []
+        staged = []  # type: List[Tuple[str, str, str, int]]
+        written = []  # type: List[Path]
         try:
             for image in data["images"]:
                 if not isinstance(image, dict):
@@ -264,10 +263,13 @@ class FeedbackStore:
             return feedback_id
         except Exception:
             for destination in written:
-                destination.unlink(missing_ok=True)
+                try:
+                    destination.unlink()
+                except FileNotFoundError:
+                    pass
             raise
 
-    def list(self, query: str, limit: int) -> list[dict[str, Any]]:
+    def list(self, query: str, limit: int) -> List[Dict[str, Any]]:
         limit = max(1, min(limit, 200))
         pattern = f"%{query[:200]}%"
         with self.connect() as connection:
@@ -282,7 +284,7 @@ class FeedbackStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def detail(self, feedback_id: str) -> dict[str, Any] | None:
+    def detail(self, feedback_id: str) -> Optional[Dict[str, Any]]:
         with self.connect() as connection:
             row = connection.execute("SELECT * FROM feedback WHERE id = ?", (feedback_id,)).fetchone()
             if row is None:
@@ -293,7 +295,7 @@ class FeedbackStore:
             ).fetchall()
         result = dict(row)
         for key in ("error_json", "diagnostics_json", "privacy_json"):
-            result[key.removesuffix("_json")] = json.loads(result.pop(key))
+            result[key[:-5]] = json.loads(result.pop(key))
         result["images"] = [
             {
                 **dict(image),
@@ -303,7 +305,7 @@ class FeedbackStore:
         ]
         return result
 
-    def image(self, image_id: str) -> tuple[Path, str] | None:
+    def image(self, image_id: str) -> Optional[Tuple[Path, str]]:
         with self.connect() as connection:
             row = connection.execute(
                 "SELECT stored_name, mime_type FROM images WHERE id = ?", (image_id,)
@@ -359,7 +361,7 @@ class FeedbackHandler(BaseHTTPRequestHandler):
     def log_message(self, format_string: str, *args: Any) -> None:
         print(f"{self.address_string()} - {format_string % args}", flush=True)
 
-    def send_json(self, status: int, payload: dict[str, Any]) -> None:
+    def send_json(self, status: int, payload: Dict[str, Any]) -> None:
         body = compact_json(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -370,7 +372,7 @@ class FeedbackHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def read_json(self) -> dict[str, Any]:
+    def read_json(self) -> Dict[str, Any]:
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError as exc:
@@ -469,13 +471,18 @@ class FeedbackHandler(BaseHTTPRequestHandler):
         self.send_json(HTTPStatus.NOT_FOUND, {"error": "接口不存在。"})
 
 
-def build_handler(store: FeedbackStore, admin_html: bytes) -> type[FeedbackHandler]:
+def build_handler(store: FeedbackStore, admin_html: bytes) -> Type[FeedbackHandler]:
     class BoundFeedbackHandler(FeedbackHandler):
         pass
 
     BoundFeedbackHandler.store = store
     BoundFeedbackHandler.admin_html = admin_html
     return BoundFeedbackHandler
+
+
+class ThreadingFeedbackServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
 
 
 def main() -> None:
@@ -493,7 +500,7 @@ def main() -> None:
     if args.check:
         print(compact_json({"ok": True, "database": str(store.database_path), "admin": str(admin_path)}))
         return
-    server = ThreadingHTTPServer((args.host, args.port), build_handler(store, admin_html))
+    server = ThreadingFeedbackServer((args.host, args.port), build_handler(store, admin_html))
     print(f"Storydex feedback listening on http://{args.host}:{args.port}{BASE_PATH}", flush=True)
     server.serve_forever()
 
