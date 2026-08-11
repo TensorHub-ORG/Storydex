@@ -52,6 +52,10 @@ if ! id "$service_user" >/dev/null 2>&1; then
 fi
 id "$service_user" >/dev/null 2>&1
 service_group="$(id -gn "$service_user")"
+python_bin="$(command -v python3 || true)"
+[[ -n "$python_bin" && "$python_bin" == /* ]] || { echo "python3 executable not found" >&2; exit 1; }
+"$python_bin" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' \
+  || { echo "Storydex feedback requires Python 3.9 or newer: $python_bin" >&2; exit 1; }
 
 mkdir -p "$feedback_root/releases" "$feedback_root/data/images"
 [[ ! -e "$release_dir" ]]
@@ -62,7 +66,7 @@ chmod -R u=rwX,go=rX "$release_dir"
 chown -R "$service_user:$service_group" "$feedback_root/data"
 chmod 750 "$feedback_root/data" "$feedback_root/data/images"
 
-python3 "$release_dir/server.py" --root "$feedback_root" --check
+"$python_bin" "$release_dir/server.py" --root "$feedback_root" --check
 chown -R "$service_user:$service_group" "$feedback_root/data"
 
 snippet_path="$feedback_root/nginx-location.conf"
@@ -110,6 +114,7 @@ mv -Tf "$current_link.next" "$current_link"
 sed \
   -e "s|__CURRENT__|$current_link|g" \
   -e "s|__ROOT__|$feedback_root|g" \
+  -e "s|__PYTHON__|$python_bin|g" \
   -e "s|__SERVICE_USER__|$service_user|g" \
   -e "s|__SERVICE_GROUP__|$service_group|g" \
   "$release_dir/storydex-feedback.service" > /etc/systemd/system/storydex-feedback.service
