@@ -116,6 +116,8 @@ jobs:
           git diff --check
       - name: CI policy regressions
         run: node --test scripts/tests/check-coverage.test.cjs scripts/tests/resolve-ci-scope.test.cjs scripts/tests/ci-preflight.test.cjs
+      - name: Feedback receiver regressions
+        run: python3 -m unittest discover -s deploy/storydex-feedback/tests -v
 
   backend-tests:
     name: backend-tests (${{ matrix.os }}, py${{ matrix.python }})

@@ -45,6 +45,15 @@ from services.story_word_count_service import (
 TARGET = 3000
 
 
+def test_exception_diagnostics_redact_provider_credentials() -> None:
+    diagnostic = routes._safe_exception_diagnostic(RuntimeError(
+        '{"api_key":"sk-examplecredential12345","accessToken":"private-token"}'
+    ))
+    assert "examplecredential" not in diagnostic
+    assert "private-token" not in diagnostic
+    assert "[redacted]" in diagnostic
+
+
 def _decode_sse(chunk: str) -> tuple[str, Dict[str, Any]]:
     event_name = ""
     payload: Dict[str, Any] = {}
@@ -261,6 +270,8 @@ def test_bounded_execution_reports_structured_elastic_draft_rejection_reason(
     assert outcome["error"] == {
         "type": "StoryDraftGenerationFailed",
         "causeType": "ElasticManuscriptRejected",
+        "message": "elastic_draft_version_mismatch",
+        "retryable": False,
         "reason": "elastic_draft_version_mismatch",
     }
 
@@ -342,6 +353,8 @@ def test_bounded_execution_reports_canonical_quality_issue_codes(
     assert outcome["error"] == {
         "type": "StoryDraftGenerationFailed",
         "causeType": "ElasticManuscriptRejected",
+        "message": "canonical_quality_rejected",
+        "retryable": False,
         "reason": "canonical_quality_rejected",
         "issues": ["incomplete_ending"],
     }

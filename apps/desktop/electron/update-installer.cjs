@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { spawn } = require("child_process");
@@ -7,6 +8,45 @@ const LAUNCH_LOCK_STATES = new Set(["preparing", ...ACTIVE_INSTALL_STATES]);
 const DEFAULT_LOCK_MAX_AGE_MS = 30 * 60 * 1000;
 const DEFAULT_READY_TIMEOUT_MS = 15_000;
 const DEFAULT_POLL_INTERVAL_MS = 50;
+
+function findCachedInstaller(cacheRoot, fsModule = fs) {
+  const pendingRoot = path.join(String(cacheRoot || ""), "pending");
+  const metadataPath = path.join(pendingRoot, "update-info.json");
+  try {
+    const metadata = JSON.parse(fsModule.readFileSync(metadataPath, "utf8"));
+    const fileName = path.basename(String(metadata?.fileName || ""));
+    if (!fileName || path.extname(fileName).toLowerCase() !== ".exe") return null;
+    const installerPath = path.join(pendingRoot, fileName);
+    const stat = fsModule.statSync(installerPath);
+    if (!stat.isFile() || stat.size <= 0) return null;
+    const versionMatch = fileName.match(/(?:^|[-_])v?(\d+\.\d+\.\d+)(?:[-_.]|$)/i);
+    return {
+      installerPath,
+      metadataPath,
+      fileName,
+      version: versionMatch?.[1] || "",
+      sha512: typeof metadata?.sha512 === "string" ? metadata.sha512.trim() : ""
+    };
+  } catch {
+    return null;
+  }
+}
+
+function verifyCachedInstaller(cached, fsModule = fs) {
+  const installerPath = String(cached?.installerPath || "");
+  const expected = String(cached?.sha512 || "").trim();
+  if (!installerPath || !/^[A-Za-z0-9+/]{80,}={0,2}$/.test(expected)) {
+    return Promise.resolve(false);
+  }
+  return new Promise((resolve) => {
+    const hash = crypto.createHash("sha512");
+    const stream = fsModule.createReadStream(installerPath);
+    stream.on("error", () => resolve(false));
+    hash.on("error", () => resolve(false));
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", () => resolve(hash.digest("base64") === expected));
+  });
+}
 
 function clearInstallLock(lockPath, fsModule = fs) {
   try {
@@ -96,7 +136,24 @@ function launchUpdateHelper(options) {
     }
   }
 
+  for (const [name, value] of Object.entries({ helperScript, installerPath, appPath })) {
+    if (!fsModule.existsSync(value) || !fsModule.statSync(value).isFile()) {
+      throw new Error(`Update helper ${name} does not exist: ${value}`);
+    }
+  }
+
   fsModule.mkdirSync(path.dirname(lockPath), { recursive: true });
+  const launchDiagnosticPath = path.join(path.dirname(lockPath), "launch.json");
+  fsModule.writeFileSync(launchDiagnosticPath, JSON.stringify({
+    state: "launching",
+    helperScript,
+    installerPath,
+    appPath,
+    lockPath,
+    logPath,
+    parentPid: Number(parentPid),
+    updatedAt: new Date().toISOString()
+  }, null, 2), "utf8");
   acquirePreliminaryInstallLock(lockPath, fsModule);
 
   let child;
@@ -196,6 +253,8 @@ function launchUpdateHelper(options) {
 module.exports = {
   ACTIVE_INSTALL_STATES,
   clearInstallLock,
+  findCachedInstaller,
   launchUpdateHelper,
-  readActiveInstallLock
+  readActiveInstallLock,
+  verifyCachedInstaller
 };

@@ -66,6 +66,28 @@ export interface AgentSettingsUpdateRequest {
   wikiContextEnabled: boolean;
 }
 
+export interface FeedbackImagePayload {
+  name: string;
+  mimeType: string;
+  dataUrl: string;
+}
+
+export interface FeedbackSubmitRequest {
+  source: "error" | "settings";
+  category: string;
+  description: string;
+  contact?: string;
+  errorMessage?: string;
+  errorType?: string;
+  errorDetails?: Record<string, unknown>;
+  diagnostics?: Record<string, unknown>;
+  images?: FeedbackImagePayload[];
+}
+
+export interface FeedbackSubmitResponse {
+  feedbackId: string;
+}
+
 export interface SystemBootstrapResponse {
   globalRoot: string;
   uiPreferences: UIPreferencesResponse;

@@ -4,6 +4,8 @@ import type { ApiEnvelope, ApiResult } from "@/types/api";
 import type {
   AgentSettingsResponse,
   AgentSettingsUpdateRequest,
+  FeedbackSubmitRequest,
+  FeedbackSubmitResponse,
   SystemBootstrapResponse,
   SystemHealthResponse,
   UIPreferencesResponse,
@@ -90,6 +92,17 @@ export async function updateAgentSettings(
     return unwrapEnvelope(response.data, "Agent settings update failed.");
   } catch (error: unknown) {
     rethrowSystemError(error, "Agent settings update failed.");
+  }
+}
+
+export async function submitFeedback(
+  payload: FeedbackSubmitRequest
+): Promise<ApiResult<FeedbackSubmitResponse>> {
+  try {
+    const response = await apiClient.post<ApiEnvelope<FeedbackSubmitResponse>>("/sys/feedback", payload);
+    return unwrapEnvelope(response.data, "Feedback submission failed.");
+  } catch (error: unknown) {
+    rethrowSystemError(error, "Feedback submission failed.");
   }
 }
 

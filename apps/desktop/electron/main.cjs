@@ -5,7 +5,7 @@ const net = require("net");
 const http = require("http");
 const { pathToFileURL } = require("url");
 const { spawn } = require("child_process");
-const { launchUpdateHelper, readActiveInstallLock } = require("./update-installer.cjs");
+const { findCachedInstaller, launchUpdateHelper, readActiveInstallLock, verifyCachedInstaller } = require("./update-installer.cjs");
 let resolveUpdateFeedUrl = (desktopPackage, overrideUrl) =>
   String(overrideUrl || desktopPackage?.storydexUpdateFeedUrl || desktopPackage?.build?.extraMetadata?.storydexUpdateFeedUrl || "").trim();
 try {
@@ -859,7 +859,8 @@ let updaterState = {
   releaseNotes: "",
   progress: null,
   error: "",
-  feedUrl: ""
+  feedUrl: "",
+  diagnosticLog: ""
 };
 
 function resolveAutoUpdater() {
@@ -882,6 +883,22 @@ function updaterRuntimeRoot() {
 
 function updaterInstallLockPath() {
   return path.join(updaterRuntimeRoot(), "installing.json");
+}
+
+function recoverDownloadedInstaller() {
+  const cached = findCachedInstaller(updaterRuntimeRoot());
+  if (!cached) return null;
+  downloadedInstallerPath = cached.installerPath;
+  return cached;
+}
+
+function isVersionNewer(candidate, current) {
+  const left = String(candidate || "").split(".").map((value) => Number(value));
+  const right = String(current || "").split(".").map((value) => Number(value));
+  if (left.length !== 3 || right.length !== 3 || [...left, ...right].some((value) => !Number.isInteger(value))) {
+    return false;
+  }
+  return left.some((value, index) => value !== right[index] && value > right[index] && left.slice(0, index).every((part, partIndex) => part === right[partIndex]));
 }
 
 function readUpdaterInstallLock() {
@@ -951,7 +968,7 @@ function initializeAutoUpdater() {
   updaterRetryIndex = 0;
 
   if (updaterConfigured) {
-    setUpdaterState({ supported: true, status: "idle", error: "" });
+    setUpdaterState({ supported: true, error: "" });
     return;
   }
 
@@ -1008,7 +1025,16 @@ function initializeAutoUpdater() {
   });
 
   updaterConfigured = true;
-  setUpdaterState({ supported: true, status: "idle", feedUrl: configuredFeed, error: "" });
+  const cachedInstaller = recoverDownloadedInstaller();
+  const cachedUpdateAvailable = cachedInstaller && isVersionNewer(cachedInstaller.version, updaterState.currentVersion);
+  if (!cachedUpdateAvailable) downloadedInstallerPath = "";
+  setUpdaterState({
+    supported: true,
+    status: cachedUpdateAvailable ? "downloaded" : "idle",
+    availableVersion: cachedUpdateAvailable ? cachedInstaller.version : updaterState.availableVersion,
+    feedUrl: configuredFeed,
+    error: ""
+  });
 }
 
 async function checkForDesktopUpdates() {
@@ -1055,17 +1081,30 @@ async function performInstallDesktopUpdate() {
   if (!autoUpdater || updaterState.status !== "downloaded") {
     return false;
   }
+  if (!downloadedInstallerPath || !fs.existsSync(downloadedInstallerPath)) {
+    recoverDownloadedInstaller();
+  }
   if (process.platform !== "win32" || !downloadedInstallerPath || !fs.existsSync(downloadedInstallerPath)) {
     setUpdaterState({ status: "error", error: "未找到已下载的安装程序，请重新下载更新。" });
     return false;
   }
   try {
+    const cachedInstaller = findCachedInstaller(updaterRuntimeRoot());
+    if (
+      !cachedInstaller
+      || path.resolve(cachedInstaller.installerPath) !== path.resolve(downloadedInstallerPath)
+      || !await verifyCachedInstaller(cachedInstaller)
+    ) {
+      setUpdaterState({ status: "error", error: "更新安装包校验失败，请重新下载更新。" });
+      return false;
+    }
     const runtimeRoot = updaterRuntimeRoot();
     const lockPath = updaterInstallLockPath();
     const logPath = path.join(runtimeRoot, "install.log");
     const helperScript = app.isPackaged
       ? path.join(process.resourcesPath, "app.asar.unpacked", "electron", "update-helper.ps1")
       : path.join(__dirname, "update-helper.ps1");
+    setUpdaterState({ diagnosticLog: logPath });
     const helper = await launchUpdateHelper({
       helperScript,
       installerPath: downloadedInstallerPath,
@@ -1081,7 +1120,12 @@ async function performInstallDesktopUpdate() {
     setTimeout(() => app.quit(), 150).unref?.();
     return true;
   } catch (error) {
-    setUpdaterState({ status: "error", error: error?.message || String(error) });
+    const diagnosticLog = path.join(updaterRuntimeRoot(), "install.log");
+    setUpdaterState({
+      status: "error",
+      error: `${error?.message || String(error)}（诊断日志：${diagnosticLog}）`,
+      diagnosticLog
+    });
     return false;
   }
 }

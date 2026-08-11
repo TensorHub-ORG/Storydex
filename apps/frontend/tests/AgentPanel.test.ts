@@ -40,7 +40,10 @@ vi.mock("@/stores/git", () => ({ useGitStore: () => git }));
 vi.mock("@/stores/workspace", () => ({ useWorkspaceStore: () => workspace }));
 vi.mock("@/utils/filePreview", () => filePreview);
 vi.mock("@/api/workspace", () => ({ fetchStoryChapterTemplates: vi.fn().mockResolvedValue({ data: { items: [] } }) }));
-vi.mock("@/api/client", () => ({ describeTransportError: (_error: unknown, fallback: string) => fallback }));
+vi.mock("@/api/client", () => ({
+  ApiResponseError: class extends Error {},
+  describeTransportError: (_error: unknown, fallback: string) => fallback
+}));
 
 import AgentPanel from "@/components/AgentPanel.vue";
 import CoomiClaudeTurn from "@/components/CoomiClaudeTurn.vue";
@@ -520,6 +523,12 @@ describe("AgentPanel", () => {
     expect(retry.find(".material-symbols-rounded").text()).toBe("refresh");
     await retry.trigger("click");
     expect(wrapper.emitted("retry")?.[0]).toEqual([failedRun]);
+
+    const feedback = wrapper.find('button[aria-label="反馈报错"]');
+    expect(feedback.attributes("title")).toBe("反馈报错");
+    expect(feedback.find(".material-symbols-rounded").text()).toBe("send");
+    await feedback.trigger("click");
+    expect(wrapper.emitted("feedback")?.[0]).toEqual([failedRun]);
 
     await wrapper.setProps({ actionsBusy: true });
     expect(wrapper.find("button.cct-error-retry").attributes("disabled")).toBeDefined();

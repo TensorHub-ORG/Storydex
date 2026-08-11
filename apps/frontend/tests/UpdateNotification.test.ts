@@ -12,6 +12,7 @@ function updaterState(patch: Partial<StorydexDesktopUpdaterState> = {}): Storyde
     progress: null,
     error: "",
     feedUrl: "https://updates.example.test/",
+    diagnosticLog: "",
     ...patch
   };
 }

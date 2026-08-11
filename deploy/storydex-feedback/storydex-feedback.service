@@ -1,0 +1,21 @@
+[Unit]
+Description=Storydex feedback receiver
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+Group=__SERVICE_GROUP__
+WorkingDirectory=__CURRENT__
+ExecStart=/usr/bin/python3 __CURRENT__/server.py --root __ROOT__ --host 127.0.0.1 --port 18766
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=__ROOT__/data
+
+[Install]
+WantedBy=multi-user.target

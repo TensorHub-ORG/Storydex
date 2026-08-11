@@ -59,7 +59,7 @@
                   <span class="material-symbols-rounded" aria-hidden="true">{{ section.icon }}</span>
                   <h2 class="system-settings-card-title">{{ section.label }}</h2>
                 </div>
-                <div class="system-settings-card-actions">
+                <div v-if="section.id !== 'feedback' && section.id !== 'about'" class="system-settings-card-actions">
                   <button
                     class="system-settings-icon-action"
                     type="button"
@@ -249,6 +249,19 @@
                 </section>
               </div>
 
+              <div v-else-if="section.id === 'feedback'" class="system-settings-card-body">
+                <section class="system-settings-block">
+                  <div class="system-settings-block-title">问题与建议</div>
+                  <div class="system-settings-inline-note">可主动提交功能异常、稳定性问题或建议，并附加最多 4 张截图。</div>
+                  <div class="system-settings-update-actions">
+                    <button class="system-settings-update-btn primary" type="button" @click="feedbackOpen = true">
+                      <span class="material-symbols-rounded">send</span>
+                      提交反馈
+                    </button>
+                  </div>
+                </section>
+              </div>
+
               <div v-else-if="section.id === 'about'" class="system-settings-card-body">
                 <section class="system-settings-block">
                   <div class="system-settings-block-title">软件更新</div>
@@ -395,6 +408,13 @@
         <span class="system-settings-footer-key">Esc 关闭</span>
       </footer>
     </div>
+    <FeedbackDialog
+      :open="feedbackOpen"
+      source="settings"
+      :diagnostics="settingsFeedbackDiagnostics"
+      @close="feedbackOpen = false"
+      @submitted="feedbackOpen = false"
+    />
   </section>
 </template>
 
@@ -402,13 +422,14 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { themeOptions } from "@/constants/themes";
 import { fetchAgentSettings, updateAgentSettings } from "@/api/system";
+import FeedbackDialog from "@/components/FeedbackDialog.vue";
 import type { ThemeCode } from "@/constants/themes";
 import { editorFontOptions, useUiStore } from "@/stores/ui";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type { StorySegmentExtension } from "@/types/workspace";
 import { MAX_PANE_FONT_SCALE, MIN_PANE_FONT_SCALE, PANE_FONT_SCALE_STEP } from "@/utils/paneFontScale";
 
-type SettingsSectionId = "appearance" | "layout" | "agent" | "project" | "about";
+type SettingsSectionId = "appearance" | "layout" | "agent" | "project" | "feedback" | "about";
 
 interface SettingsSection {
   id: SettingsSectionId;
@@ -448,6 +469,13 @@ const sections: SettingsSection[] = [
     keywords: "剧情 片段 章节 自动命名 扩展名 提交 commit git agent"
   },
   {
+    id: "feedback",
+    label: "反馈与支持",
+    icon: "support_agent",
+    description: "",
+    keywords: "反馈 报错 截图 建议 支持 bug feedback support"
+  },
+  {
     id: "about",
     label: "更新与关于",
     icon: "system_update_alt",
@@ -475,6 +503,7 @@ const errorMessage = ref("");
 const successMessage = ref("");
 const searchKeyword = ref("");
 const activeSection = ref<SettingsSectionId>("appearance");
+const feedbackOpen = ref(false);
 
 const segmentExtension = ref<StorySegmentExtension>(".md");
 const maxSegmentsPerChapter = ref(3);
@@ -493,9 +522,16 @@ const updaterState = ref<StorydexDesktopUpdaterState>({
   releaseNotes: "",
   progress: null,
   error: "",
-  feedUrl: ""
+  feedUrl: "",
+  diagnosticLog: ""
 });
 const updaterBridgeAvailable = computed(() => Boolean(window.storydexDesktop?.updater));
+const settingsFeedbackDiagnostics = computed<Record<string, unknown>>(() => ({
+  storydexVersion: updaterState.value.currentVersion,
+  platform: window.storydexDesktop?.platform || navigator.platform,
+  updateState: updaterState.value.status,
+  runtime: "storydex-desktop"
+}));
 const updaterBusy = computed(() => updaterState.value.status === "checking" || updaterState.value.status === "downloading");
 const updaterStatusText = computed(() => {
   switch (updaterState.value.status) {
@@ -690,7 +726,14 @@ async function installDesktopUpdate(): Promise<void> {
   if (!bridge) {
     return;
   }
-  await bridge.install();
+  const installed = await bridge.install();
+  if (!installed) {
+    updaterState.value = {
+      ...updaterState.value,
+      status: "error",
+      error: updaterState.value.error || "未能启动更新安装，请重试。"
+    };
+  }
 }
 
 function formatUpdateBytes(value: number): string {

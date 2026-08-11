@@ -42,6 +42,7 @@ interface StorydexDesktopUpdaterState {
   progress: StorydexDesktopUpdaterProgress | null;
   error: string;
   feedUrl: string;
+  diagnosticLog: string;
 }
 
 interface StorydexDesktopUpdaterBridge {

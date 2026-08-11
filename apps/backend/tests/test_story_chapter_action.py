@@ -23,6 +23,8 @@ from services.story_chapter_action_service import (
     CHAPTER_ACTION_CREATE_SPECIFIC_CHAPTER,
     CHAPTER_ACTION_REWRITE_EXISTING,
     CHAPTER_ACTIONS,
+    MAX_CHAPTER_RANGE_SIZE,
+    parse_chapter_range,
     resolve_chapter_action,
     validate_chapter_plan,
 )
@@ -32,6 +34,28 @@ from services.story_project_service import (
     SINGLE_FILE_CONTENT_MODE,
     get_story_project_service,
 )
+
+
+@pytest.mark.parametrize(
+    ("prompt", "expected"),
+    [
+        ("生成第121章到第125章", (121, 122, 123, 124, 125)),
+        ("请写 3-5章", (3, 4, 5)),
+        ("创作第十章至第十二章", (10, 11, 12)),
+        ("分析第3章到第5章", ()),
+        ("重写第62章到第63章", ()),
+    ],
+)
+def test_parse_chapter_range_only_expands_generation_requests(
+    prompt: str,
+    expected: tuple[int, ...],
+) -> None:
+    assert parse_chapter_range(prompt) == expected
+
+
+def test_parse_chapter_range_rejects_oversized_batches() -> None:
+    with pytest.raises(ValueError, match=str(MAX_CHAPTER_RANGE_SIZE + 1)):
+        parse_chapter_range(f"生成第1章到第{MAX_CHAPTER_RANGE_SIZE + 1}章")
 
 
 def _write_chapter(root: Path, name: str, *, segment: str = "001.md", text: str = "正文") -> str:

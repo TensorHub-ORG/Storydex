@@ -1,14 +1,15 @@
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { launchUpdateHelper, readActiveInstallLock } = require("../electron/update-installer.cjs");
+const { findCachedInstaller, launchUpdateHelper, readActiveInstallLock, verifyCachedInstaller } = require("../electron/update-installer.cjs");
 
 function createFixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "storydex-update-launcher-"));
-  return {
+  const fixture = {
     root,
     lockPath: path.join(root, "installing.json"),
     logPath: path.join(root, "install.log"),
@@ -16,7 +17,73 @@ function createFixture() {
     installerPath: path.join(root, "installer.exe"),
     appPath: path.join(root, "Storydex.exe")
   };
+  for (const target of [fixture.helperScript, fixture.installerPath, fixture.appPath]) {
+    fs.writeFileSync(target, "fixture");
+  }
+  return fixture;
 }
+
+test("cached installer survives an application restart", () => {
+  const fixture = createFixture();
+  try {
+    const pending = path.join(fixture.root, "pending");
+    fs.mkdirSync(pending);
+    const fileName = "StorydexSetup-x64-2.0.4.exe";
+    const installer = Buffer.from("installer");
+    const sha512 = crypto.createHash("sha512").update(installer).digest("base64");
+    fs.writeFileSync(path.join(pending, fileName), installer);
+    fs.writeFileSync(path.join(pending, "update-info.json"), JSON.stringify({ fileName, sha512 }));
+    assert.deepEqual(findCachedInstaller(fixture.root), {
+      installerPath: path.join(pending, fileName),
+      metadataPath: path.join(pending, "update-info.json"),
+      fileName,
+      version: "2.0.4",
+      sha512
+    });
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("cached installer checksum is verified before execution", async () => {
+  const fixture = createFixture();
+  try {
+    const installer = Buffer.from("verified installer");
+    fs.writeFileSync(fixture.installerPath, installer);
+    const cached = {
+      installerPath: fixture.installerPath,
+      sha512: crypto.createHash("sha512").update(installer).digest("base64")
+    };
+    assert.equal(await verifyCachedInstaller(cached), true);
+    fs.appendFileSync(fixture.installerPath, "tampered");
+    assert.equal(await verifyCachedInstaller(cached), false);
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("helper launch validates files and records diagnostics before spawning", async () => {
+  const fixture = createFixture();
+  const child = fakeChild();
+  try {
+    const launched = launchUpdateHelper({
+      ...fixture,
+      parentPid: process.pid,
+      readyTimeoutMs: 250,
+      pollIntervalMs: 5,
+      spawnProcess: () => {
+        queueMicrotask(() => child.emit("exit", 0, null));
+        return child;
+      }
+    });
+    assert.equal(await launched, child);
+    const diagnostic = JSON.parse(fs.readFileSync(path.join(fixture.root, "launch.json"), "utf8"));
+    assert.equal(diagnostic.installerPath, fixture.installerPath);
+    assert.equal(diagnostic.helperScript, fixture.helperScript);
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
 
 function fakeChild() {
   const child = new EventEmitter();

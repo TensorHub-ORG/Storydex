@@ -686,13 +686,28 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
         &provider_config.model,
         &cwd,
     )?;
+    let mut checkpoint_persisted = true;
     if request.checkpoint_context.is_some()
         && session.checkpoint_context != request.checkpoint_context
     {
         session.checkpoint_context = request.checkpoint_context.clone();
-        store
-            .save(&session)
-            .context("failed to persist structured checkpoint context before execution")?;
+        if let Err(error) = store.save(&session) {
+            if !store.path(session.id).is_file() {
+                return Err(error)
+                    .context("failed to persist structured checkpoint context before execution");
+            }
+            checkpoint_persisted = false;
+            emitter.event(
+                "session_persistence_warning",
+                json!({
+                    "runtimeSessionId": session.id,
+                    "sessionPath": store.path(session.id),
+                    "operation": "checkpoint_context",
+                    "retryable": true,
+                    "message": format!("checkpoint persistence was deferred; execution will continue and retry after the run: {error:#}"),
+                }),
+            );
+        }
     }
     let session_init_ms = session_started.elapsed().as_secs_f64() * 1000.0;
     emitter.event(
@@ -703,6 +718,7 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
             "sessionPath": store.path(session.id),
             "sessionSchemaVersion": SESSION_SCHEMA_VERSION,
             "persisted": true,
+            "checkpointPersisted": checkpoint_persisted,
         }),
     );
 

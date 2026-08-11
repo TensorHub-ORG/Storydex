@@ -85,6 +85,7 @@
             @rollback-edit="handleRollbackEdit"
             @rollback-delete="handleRollbackDelete"
             @retry="handleRetryRun"
+            @feedback="handleErrorFeedback"
             @markdown-click="handleMarkdownLinkClick"
           />
         </article>
@@ -588,6 +589,16 @@
         </div>
       </section>
     </div>
+    <FeedbackDialog
+      :open="feedbackRun !== null"
+      source="error"
+      :error-message="feedbackRun?.errorMessage || ''"
+      :error-type="feedbackRun?.errorCode || 'AgentError'"
+      :error-details="feedbackErrorDetails"
+      :diagnostics="feedbackDiagnostics"
+      @close="feedbackRun = null"
+      @submitted="feedbackRun = null"
+    />
   </aside>
 </template>
 
@@ -596,6 +607,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import AgentExecutionFloatBar from "@/components/AgentExecutionFloatBar.vue";
 import CoomiClaudeTurn from "@/components/CoomiClaudeTurn.vue";
 import CoomiConfigPanel from "@/components/CoomiConfigPanel.vue";
+import FeedbackDialog from "@/components/FeedbackDialog.vue";
 import { useAgentStore } from "@/stores/agent";
 import { useGitStore } from "@/stores/git";
 import { useWorkspaceStore } from "@/stores/workspace";
@@ -655,6 +667,24 @@ const TOOL_CHUNK_SIZE = 5;
 const agentStore = useAgentStore();
 const gitStore = useGitStore();
 const workspaceStore = useWorkspaceStore();
+const feedbackRun = ref<AgentExecutionRun | null>(null);
+const feedbackErrorDetails = computed<Record<string, unknown>>(() => {
+  const run = feedbackRun.value;
+  if (!run) return {};
+  const event = [...run.events].reverse().find((item) => item.event === "AgentError");
+  const details = event?.data?.details;
+  return details && typeof details === "object" && !Array.isArray(details)
+    ? details as Record<string, unknown>
+    : {};
+});
+const feedbackDiagnostics = computed<Record<string, unknown>>(() => ({
+  platform: window.storydexDesktop?.platform || navigator.platform,
+  provider: feedbackRun.value?.llmProvider || agentStore.coomiStatus?.providerId || "",
+  model: feedbackRun.value?.llmModel || agentStore.coomiStatus?.model || "",
+  traceId: feedbackRun.value?.traceId || "",
+  sessionId: feedbackRun.value?.sessionId || agentStore.currentSessionId || "",
+  runtime: agentStore.coomiStatus?.runtime || feedbackRun.value?.route || "coomi"
+}));
 const configPanelOpen = ref(false);
 const sessionMenuOpen = ref(false);
 const dockRef = ref<HTMLElement | null>(null);
@@ -1492,6 +1522,10 @@ async function handleRetryRun(run: AgentExecutionRun): Promise<void> {
     return;
   }
   await agentStore.retryFailedRun(run);
+}
+
+function handleErrorFeedback(run: AgentExecutionRun): void {
+  feedbackRun.value = run;
 }
 
 async function handleRollbackEdit(run: AgentExecutionRun): Promise<void> {

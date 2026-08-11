@@ -53,7 +53,7 @@ from services.story_call_accounting import (
     STORY_SECOND_DRAFT_PURPOSE,
     StoryCallAccounting,
 )
-from services.story_chapter_action_service import validate_chapter_plan
+from services.story_chapter_action_service import parse_chapter_range, validate_chapter_plan
 from services.story_generation_pipeline import get_story_generation_pipeline
 from services.story_length_calibration_service import (
     INITIAL_ATTEMPT_KIND,
@@ -2822,6 +2822,19 @@ def _bounded_story_generation_gate(
     }
 
 
+def _safe_exception_diagnostic(exc: Exception) -> str:
+    message = str(exc).strip()
+    if not message:
+        return ""
+    message = re.sub(
+        r"(?i)(authorization|api[_-]?key|access[_-]?token|bearer)[\"']?\s*[:=]?\s*[\"']?[^\s,;\"'}]+",
+        r"\1=[redacted]",
+        message,
+    )
+    message = re.sub(r"(?i)\bsk-[a-z0-9_-]{12,}\b", "[redacted-api-key]", message)
+    return message[:2000]
+
+
 async def _execute_bounded_story_generation(
     *,
     prompt: str,
@@ -2882,6 +2895,14 @@ async def _execute_bounded_story_generation(
             for item in list(getattr(exc, "issues", ()) or ())
             if str(item)
         ]
+        diagnostic_message = _safe_exception_diagnostic(exc)
+        retryable = isinstance(exc, (TimeoutError, ConnectionError, OSError)) or any(
+            marker in diagnostic_message.casefold()
+            for marker in (
+                "timeout", "timed out", "connection", "temporarily unavailable",
+                "http 429", "http 500", "http 502", "http 503", "http 504",
+            )
+        )
         return {
             "ok": False,
             "result": {},
@@ -2889,6 +2910,8 @@ async def _execute_bounded_story_generation(
             "error": {
                 "type": "StoryDraftGenerationFailed",
                 "causeType": type(exc).__name__,
+                **({"message": diagnostic_message} if diagnostic_message else {}),
+                "retryable": retryable,
                 **({"reason": rejection_reason} if rejection_reason else {}),
                 **({"issues": rejection_issues} if rejection_issues else {}),
             },
@@ -6926,12 +6949,64 @@ async def _stream_agent_chat_with_followups_sse(
 ) -> AsyncIterator[str]:
     """Run one accepted request and drain durable FIFO follow-ups in-band."""
 
-    current_payload = payload
+    workspace_root = _resolve_agent_workspace_root(payload)
+    original_range_prompt = payload.prompt
+    try:
+        requested_chapter_range = parse_chapter_range(payload.prompt)
+    except ValueError as error:
+        _release_agent_generation_slot()
+        yield _encode_sse(
+            "AgentError",
+            {
+                "_type": "AgentError",
+                "_version": 1,
+                "error_type": "ChapterRangeTooLarge",
+                "message": f"章节范围过大：{error}",
+                "details": {"maximumChapters": 20},
+                "traceId": trace_id,
+            },
+        )
+        yield _encode_sse("done", {"type": "done"})
+        return
+
+    existing_chapters = {
+        state.chapter_number
+        for state in story_project_service.list_chapter_states(workspace_root)
+    } if requested_chapter_range else set()
+    pending_range_targets = [
+        number for number in requested_chapter_range if number not in existing_chapters
+    ]
+    if requested_chapter_range and not pending_range_targets:
+        _release_agent_generation_slot()
+        yield _encode_sse(
+            "ChapterRangeCompleted",
+            {
+                "_type": "ChapterRangeCompleted",
+                "_version": 1,
+                "traceId": trace_id,
+                "chapters": list(requested_chapter_range),
+                "skippedExisting": list(requested_chapter_range),
+            },
+        )
+        yield _encode_sse("done", {"type": "done"})
+        return
+
+    def range_prompt(chapter_number: int) -> str:
+        return (
+            f"请只完成第{chapter_number}章，并确认正文已写入项目后结束本轮。"
+            f"这是多章节顺序任务的一部分；不要生成其他章节。\n\n原始要求：{original_range_prompt}"
+        )
+
+    current_range_target = pending_range_targets.pop(0) if pending_range_targets else 0
+    current_payload = (
+        payload.model_copy(update={"prompt": range_prompt(current_range_target)})
+        if current_range_target
+        else payload
+    )
     current_trace_id = trace_id
     current_token = cancellation_token
     source_message: Dict[str, Any] | None = initial_source_message
     current_replacement = replacement
-    workspace_root = _resolve_agent_workspace_root(payload)
     final_done = _encode_sse("done", {"type": "done"})
 
     while True:
@@ -7011,6 +7086,90 @@ async def _stream_agent_chat_with_followups_sse(
         )
         if saw_error or saw_cancel or bool(state.get("paused")):
             break
+
+        if current_range_target:
+            persisted_chapters = {
+                chapter.chapter_number
+                for chapter in story_project_service.list_chapter_states(workspace_root)
+            }
+            if current_range_target not in persisted_chapters:
+                followup_mailbox_service.pause(
+                    workspace_root=workspace_root,
+                    session_id=session_id,
+                    reason="chapter_range_not_persisted",
+                )
+                yield _encode_sse(
+                    "AgentError",
+                    {
+                        "_type": "AgentError",
+                        "_version": 1,
+                        "error_type": "ChapterRangeProgressNotPersisted",
+                        "message": f"第{current_range_target}章未在项目中落盘，已暂停后续章节。",
+                        "details": {
+                            "targetChapterNumber": current_range_target,
+                            "remainingChapters": list(pending_range_targets),
+                        },
+                        "traceId": current_trace_id,
+                    },
+                )
+                break
+            if pending_range_targets:
+                if not _try_acquire_agent_generation_slot():
+                    followup_mailbox_service.pause(
+                        workspace_root=workspace_root,
+                        session_id=session_id,
+                        reason="chapter_range_continuation_busy",
+                    )
+                    yield _encode_sse(
+                        "AgentError",
+                        {
+                            "_type": "AgentError",
+                            "_version": 1,
+                            "error_type": "ChapterRangeContinuationBusy",
+                            "message": "章节范围任务被另一项执行占用，请重新发送原范围；已写入章节会自动跳过。",
+                            "details": {"remainingChapters": list(pending_range_targets)},
+                            "traceId": current_trace_id,
+                        },
+                    )
+                    break
+                next_trace_id = str(uuid4())
+                next_target = pending_range_targets.pop(0)
+                yield _encode_sse(
+                    "ContinuationStarted",
+                    {
+                        "_type": "ContinuationStarted",
+                        "_version": 1,
+                        "traceId": next_trace_id,
+                        "previousTraceId": current_trace_id,
+                        "continuationMode": "chapter_range",
+                        "targetChapterNumber": next_target,
+                        "remainingChapters": list(pending_range_targets),
+                    },
+                )
+                current_payload = AgentChatRequest(
+                    prompt=range_prompt(next_target),
+                    activeFile=current_payload.active_file,
+                    workspaceRoot=workspace_root.as_posix(),
+                    reasoningEffort=current_payload.reasoning_effort,
+                    storyGeneration=dict(current_payload.story_generation),
+                )
+                current_trace_id = next_trace_id
+                current_token = _CancellationToken()
+                source_message = None
+                current_replacement = None
+                current_range_target = next_target
+                continue
+            yield _encode_sse(
+                "ChapterRangeCompleted",
+                {
+                    "_type": "ChapterRangeCompleted",
+                    "_version": 1,
+                    "traceId": current_trace_id,
+                    "chapters": list(requested_chapter_range),
+                    "skippedExisting": sorted(existing_chapters.intersection(requested_chapter_range)),
+                },
+            )
+            current_range_target = 0
 
         # Reserve before claiming so an unrelated user request cannot create an
         # agent_busy race between current finalization and FIFO continuation.

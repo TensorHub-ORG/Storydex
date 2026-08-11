@@ -132,6 +132,16 @@
             >
               <span class="material-symbols-rounded" :class="{ spinning: actionsBusy }">refresh</span>
             </button>
+            <button
+              v-if="entry.id === retryEntryId"
+              class="cct-error-retry"
+              type="button"
+              title="反馈报错"
+              aria-label="反馈报错"
+              @click="emit('feedback', run)"
+            >
+              <span class="material-symbols-rounded">send</span>
+            </button>
           </div>
         </div>
       </template>
@@ -194,6 +204,7 @@ const emit = defineEmits<{
   (event: "rollback-edit", run: AgentExecutionRun): void;
   (event: "rollback-delete", run: AgentExecutionRun): void;
   (event: "retry", run: AgentExecutionRun): void;
+  (event: "feedback", run: AgentExecutionRun): void;
   (event: "markdown-click", payload: MouseEvent): void;
 }>();
 

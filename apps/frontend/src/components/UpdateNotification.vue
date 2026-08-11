@@ -85,7 +85,8 @@ const defaultUpdaterState = (): StorydexDesktopUpdaterState => ({
   releaseNotes: "",
   progress: null,
   error: "",
-  feedUrl: ""
+  feedUrl: "",
+  diagnosticLog: ""
 });
 
 const updaterState = ref<StorydexDesktopUpdaterState>(defaultUpdaterState());

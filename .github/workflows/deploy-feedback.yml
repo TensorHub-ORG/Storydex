@@ -1,0 +1,91 @@
+name: Deploy Storydex feedback service
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: storydex-feedback-production
+  cancel-in-progress: false
+
+jobs:
+  test-and-deploy:
+    name: Test and deploy feedback receiver
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_HOST: ${{ secrets.STORYDEX_DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ secrets.STORYDEX_DEPLOY_PORT }}
+      DEPLOY_USER: ${{ secrets.STORYDEX_DEPLOY_USER }}
+      DEPLOY_PATH: ${{ secrets.STORYDEX_DEPLOY_PATH }}
+      DEPLOY_SSH_KEY: ${{ secrets.STORYDEX_DEPLOY_SSH_KEY }}
+      DEPLOY_KNOWN_HOSTS: ${{ secrets.STORYDEX_DEPLOY_KNOWN_HOSTS }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test receiver package
+        run: python3 -m unittest discover -s deploy/storydex-feedback/tests -v
+
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in DEPLOY_HOST DEPLOY_PORT DEPLOY_USER DEPLOY_PATH DEPLOY_SSH_KEY; do
+            [[ -n "${!name:-}" ]] || { echo "Missing required secret: $name" >&2; exit 1; }
+          done
+          deploy_path="${DEPLOY_PATH%/}"
+          [[ "$deploy_path" == */storydex/windows ]]
+          install -d -m 700 "$RUNNER_TEMP/storydex-feedback-ssh"
+          key_path="$RUNNER_TEMP/storydex-feedback-ssh/id_ed25519"
+          known_hosts_path="$RUNNER_TEMP/storydex-feedback-ssh/known_hosts"
+          printf '%s\n' "$DEPLOY_SSH_KEY" | tr -d '\r' > "$key_path"
+          chmod 600 "$key_path"
+          if [[ -n "${DEPLOY_KNOWN_HOSTS:-}" ]]; then
+            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" | tr -d '\r' > "$known_hosts_path"
+            strict_mode=yes
+          else
+            : > "$known_hosts_path"
+            strict_mode=accept-new
+          fi
+          {
+            echo "KEY_PATH=$key_path"
+            echo "KNOWN_HOSTS_PATH=$known_hosts_path"
+            echo "STRICT_MODE=$strict_mode"
+            echo "FEEDBACK_ROOT=${deploy_path%/windows}/feedback"
+          } >> "$GITHUB_ENV"
+
+      - name: Upload and install release
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/storydex-feedback-$GITHUB_SHA.tar.gz"
+          tar -C deploy -czf "$archive" storydex-feedback
+          target="$DEPLOY_USER@$DEPLOY_HOST"
+          remote_archive="/tmp/storydex-feedback-$GITHUB_SHA.tar.gz"
+          remote_package="/tmp/storydex-feedback-$GITHUB_SHA"
+          ssh_opts=(-i "$KEY_PATH" -p "$DEPLOY_PORT" -o "UserKnownHostsFile=$KNOWN_HOSTS_PATH" -o "StrictHostKeyChecking=$STRICT_MODE")
+          scp_opts=(-i "$KEY_PATH" -P "$DEPLOY_PORT" -o "UserKnownHostsFile=$KNOWN_HOSTS_PATH" -o "StrictHostKeyChecking=$STRICT_MODE")
+          scp "${scp_opts[@]}" "$archive" "$target:$remote_archive"
+          release_id="$GITHUB_SHA-$GITHUB_RUN_ID"
+          ssh "${ssh_opts[@]}" "$target" \
+            "set -eu; rm -rf '$remote_package'; mkdir -p '$remote_package'; tar -xzf '$remote_archive' -C '$remote_package' --strip-components=1; bash '$remote_package/install.sh' '$FEEDBACK_ROOT' '$release_id' '$remote_package'; rm -rf '$remote_package' '$remote_archive'"
+
+      - name: Verify public service
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="https://updates.septemc.com/storydex/feedback"
+          curl --fail --silent --show-error "$base/health?sha=$GITHUB_SHA" | grep -F 'storydex-feedback'
+          curl --fail --silent --show-error "$base/admin?sha=$GITHUB_SHA" | grep -F 'Storydex 反馈管理'
+          status="$(curl --silent --show-error --output /tmp/invalid-feedback.json --write-out '%{http_code}' \
+            -H 'Content-Type: application/json' -d '{"source":"settings","description":"bad"}' "$base/api")"
+          [[ "$status" == 422 ]]
+          probe="$(curl --fail --silent --show-error -H 'Content-Type: application/json' \
+            -d '{"source":"settings","category":"deployment-check","description":"Automated production deployment verification.","diagnostics":{"runtime":"github-actions"}}' "$base/api")"
+          grep -F '"ok":true' <<< "$probe"
+
+      - name: Remove temporary SSH key
+        if: always()
+        shell: bash
+        run: rm -f "${KEY_PATH:-}" "${KNOWN_HOSTS_PATH:-}"

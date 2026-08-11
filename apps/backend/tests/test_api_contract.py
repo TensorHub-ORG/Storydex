@@ -207,6 +207,7 @@ def test_help_contract_and_validation_error_envelope(client):
     invalid = client.get("/api/v1/help/guide/search?limit=0", headers={"x-trace-id": "trace-validation"})
     assert invalid.status_code == 422
     assert invalid.json()["error"]["code"] == "request_validation_error"
+    assert invalid.json()["error"]["message"] == "query.limit 不能小于 1。"
     assert invalid.json()["trace"]["traceId"] == "trace-validation"
 
 

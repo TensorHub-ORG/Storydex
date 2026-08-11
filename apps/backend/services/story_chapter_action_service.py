@@ -27,6 +27,7 @@ CHAPTER_ACTION_CONTINUE_CHAPTER = "continue_current_chapter"
 CHAPTER_ACTION_CREATE_NEXT_CHAPTER = "create_next_chapter"
 CHAPTER_ACTION_CREATE_SPECIFIC_CHAPTER = "create_specific_chapter"
 CHAPTER_ACTION_REWRITE_EXISTING = "rewrite_existing"
+MAX_CHAPTER_RANGE_SIZE = 20
 
 # The write path branches on these names, so the vocabulary is closed and
 # ordered. A new action must be added here and handled explicitly rather than
@@ -65,6 +66,16 @@ _REWRITE_RE = re.compile(
     re.IGNORECASE,
 )
 _CHAPTER_NUMBER_RE = re.compile(r"第\s*([0-9一二三四五六七八九十百千万两零〇]+)\s*章")
+_CHAPTER_RANGE_RE = re.compile(
+    r"第?\s*([0-9一二三四五六七八九十百千万两零〇]+)\s*章?\s*"
+    r"(?:到|至|~|～|-|—)\s*"
+    r"第?\s*([0-9一二三四五六七八九十百千万两零〇]+)\s*章",
+    re.IGNORECASE,
+)
+_CHAPTER_GENERATION_RE = re.compile(
+    r"(?:写|生成|创作|撰写|续写|write|generate|draft)",
+    re.IGNORECASE,
+)
 # "下一章"/"新的一章" name no number, so they resolve against the current maximum.
 _NEXT_CHAPTER_RE = re.compile(r"(?:下一章|下1章|新的一章|新一章|开新章|新开一章|开一章|次章)")
 _NEW_CHAPTER_HINT_RE = re.compile(r"(?:新|另)(?:起|开|建|写)?(?:一)?章")
@@ -118,6 +129,27 @@ def chapter_number_from_path(value: Any) -> int:
 def _requested_chapter_number(prompt: str) -> int:
     match = _CHAPTER_NUMBER_RE.search(str(prompt or ""))
     return parse_chapter_number(match.group(1)) if match else 0
+
+
+def parse_chapter_range(prompt: str) -> tuple[int, ...]:
+    """Return an explicit generation range, or an empty tuple for a normal turn."""
+
+    text = str(prompt or "")
+    if _REWRITE_RE.search(text) or not _CHAPTER_GENERATION_RE.search(text):
+        return ()
+    match = _CHAPTER_RANGE_RE.search(text)
+    if not match:
+        return ()
+    start = parse_chapter_number(match.group(1))
+    end = parse_chapter_number(match.group(2))
+    if start <= 0 or end < start:
+        return ()
+    size = end - start + 1
+    if size > MAX_CHAPTER_RANGE_SIZE:
+        raise ValueError(
+            f"chapter range contains {size} chapters; maximum is {MAX_CHAPTER_RANGE_SIZE}"
+        )
+    return tuple(range(start, end + 1))
 
 
 def _rewrite_chapter_number(prompt: str) -> int:

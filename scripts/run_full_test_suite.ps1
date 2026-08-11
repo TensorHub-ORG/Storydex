@@ -59,6 +59,9 @@ Invoke-Step "CI policy regressions" {
     (Join-Path $repoRoot "scripts/tests/resolve-ci-scope.test.cjs") `
     (Join-Path $repoRoot "scripts/tests/ci-preflight.test.cjs")
 }
+Invoke-Step "Feedback receiver regressions" {
+  & $python -m unittest discover -s (Join-Path $repoRoot "deploy/storydex-feedback/tests") -v
+}
 Invoke-Step "Conflict markers" {
   $conflicts = & git -C $repoRoot grep -n -E '^(<<<<<<< .+|=======|>>>>>>> .+)$' -- . `
     ':(exclude)apps/desktop/app/**' `

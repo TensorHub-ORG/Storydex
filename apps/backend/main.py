@@ -125,10 +125,29 @@ async def handle_validation_error(request: Request, exc: RequestValidationError)
     trace_logger = with_trace(app_logger, trace_id)
     trace_logger.warning("Request validation failed")
 
+    errors = exc.errors()
+    first = errors[0] if errors else {}
+    location = ".".join(str(item) for item in first.get("loc", ()) if item != "body") or "请求内容"
+    error_type = str(first.get("type") or "")
+    context = first.get("ctx") if isinstance(first.get("ctx"), dict) else {}
+    if error_type == "string_too_long":
+        summary = f"{location} 过长，最多允许 {context.get('max_length', '规定')} 个字符。"
+    elif error_type == "string_too_short":
+        summary = f"{location} 过短，至少需要 {context.get('min_length', '规定')} 个字符。"
+    elif error_type == "missing":
+        summary = f"缺少必填字段：{location}。"
+    elif error_type == "greater_than_equal":
+        summary = f"{location} 不能小于 {context.get('ge', '规定的最小值')}。"
+    elif error_type == "less_than_equal":
+        summary = f"{location} 不能大于 {context.get('le', '规定的最大值')}。"
+    elif error_type == "string_pattern_mismatch":
+        summary = f"{location} 格式不符合要求。"
+    else:
+        summary = f"{location} 参数无效：{first.get('msg') or '请检查输入。'}"
     envelope = error_response(
         code="request_validation_error",
-        message="Request payload validation failed.",
-        details={"errors": exc.errors()},
+        message=summary,
+        details={"errors": errors},
         trace=ApiTrace(traceId=trace_id),
     )
     return JSONResponse(status_code=422, content=envelope.model_dump(by_alias=True))

@@ -4,6 +4,7 @@ import asyncio
 import copy
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -125,6 +126,106 @@ def test_fifo_followups_are_drained_once_with_one_transport_terminal(monkeypatch
     assert releases == [True]
     state = mailbox.list_mailbox(workspace_root=tmp_path, session_id="session-1")
     assert [message["status"] for message in state["messages"]] == ["sent", "sent"]
+
+
+def test_chapter_range_skips_existing_and_runs_each_missing_chapter(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    mailbox = FollowupMailboxService()
+    chapters = {121}
+    prompts: list[str] = []
+
+    class StoryProject:
+        def list_chapter_states(self, workspace_root: Path) -> list[SimpleNamespace]:
+            assert workspace_root == tmp_path
+            return [SimpleNamespace(chapter_number=number) for number in sorted(chapters)]
+
+    async def fake_turn(**kwargs: Any):
+        prompt = kwargs["payload"].prompt
+        prompts.append(prompt)
+        target = 122 if "第122章" in prompt else 123
+        chapters.add(target)
+        yield routes._encode_sse("AgentCompleted", {"_type": "AgentCompleted"})
+        yield routes._encode_sse("done", {"type": "done"})
+
+    monkeypatch.setattr(routes, "story_project_service", StoryProject())
+    monkeypatch.setattr(routes, "followup_mailbox_service", mailbox)
+    monkeypatch.setattr(routes, "_resolve_agent_workspace_root", lambda payload: tmp_path)
+    monkeypatch.setattr(routes, "_stream_agent_chat_request_sse", fake_turn)
+    monkeypatch.setattr(routes, "_try_acquire_agent_generation_slot", lambda: True)
+    monkeypatch.setattr(routes, "_release_agent_generation_slot", lambda: None)
+
+    async def collect() -> list[tuple[str, dict[str, Any]]]:
+        return [
+            _decode(chunk)
+            async for chunk in routes._stream_agent_chat_with_followups_sse(
+                payload=routes.AgentChatRequest(
+                    prompt="生成第121章到第123章，保持既定剧情",
+                    workspaceRoot=str(tmp_path),
+                ),
+                request=_ConnectedRequest(),
+                trace_id="trace-range",
+                session_id="session-range",
+                cancellation_token=routes._CancellationToken(),
+            )
+        ]
+
+    packets = asyncio.run(collect())
+    assert len(prompts) == 2
+    assert "第122章" in prompts[0]
+    assert "第123章" in prompts[1]
+    assert [payload["targetChapterNumber"] for event, payload in packets if event == "ContinuationStarted"] == [123]
+    completed = [payload for event, payload in packets if event == "ChapterRangeCompleted"]
+    assert completed[0]["chapters"] == [121, 122, 123]
+    assert completed[0]["skippedExisting"] == [121]
+    assert [event for event, _ in packets].count("done") == 1
+
+
+def test_chapter_range_reports_contention_instead_of_silently_finishing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    mailbox = FollowupMailboxService()
+    chapters: set[int] = set()
+
+    class StoryProject:
+        def list_chapter_states(self, workspace_root: Path) -> list[SimpleNamespace]:
+            return [SimpleNamespace(chapter_number=number) for number in sorted(chapters)]
+
+    async def fake_turn(**kwargs: Any):
+        chapters.add(1)
+        yield routes._encode_sse("AgentCompleted", {"_type": "AgentCompleted"})
+        yield routes._encode_sse("done", {"type": "done"})
+
+    monkeypatch.setattr(routes, "story_project_service", StoryProject())
+    monkeypatch.setattr(routes, "followup_mailbox_service", mailbox)
+    monkeypatch.setattr(routes, "_resolve_agent_workspace_root", lambda payload: tmp_path)
+    monkeypatch.setattr(routes, "_stream_agent_chat_request_sse", fake_turn)
+    monkeypatch.setattr(routes, "_try_acquire_agent_generation_slot", lambda: False)
+
+    async def collect() -> list[tuple[str, dict[str, Any]]]:
+        return [
+            _decode(chunk)
+            async for chunk in routes._stream_agent_chat_with_followups_sse(
+                payload=routes.AgentChatRequest(
+                    prompt="生成第1章到第2章",
+                    workspaceRoot=str(tmp_path),
+                ),
+                request=_ConnectedRequest(),
+                trace_id="trace-range-busy",
+                session_id="session-range-busy",
+                cancellation_token=routes._CancellationToken(),
+            )
+        ]
+
+    packets = asyncio.run(collect())
+    errors = [payload for event, payload in packets if event == "AgentError"]
+    assert errors[0]["error_type"] == "ChapterRangeContinuationBusy"
+    assert errors[0]["details"]["remainingChapters"] == [2]
+    state = mailbox.list_mailbox(workspace_root=tmp_path, session_id="session-range-busy")
+    assert state["paused"] is True
+    assert state["pauseReason"] == "chapter_range_continuation_busy"
 
 
 def test_manual_stop_pauses_fifo_without_losing_pending_message(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

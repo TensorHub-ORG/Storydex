@@ -373,6 +373,7 @@ impl HttpModelProvider {
                         PROVIDER_STREAM_ATTEMPTS,
                         state.emitted_text_characters(),
                     );
+                    grow_output_token_budget(&mut body, "max_tokens");
                     tokio::time::sleep(provider_stream_retry_delay(attempt)).await;
                 }
                 Ok(())
@@ -401,6 +402,7 @@ impl HttpModelProvider {
                                 PROVIDER_STREAM_ATTEMPTS,
                                 reset_text_characters,
                             );
+                            grow_output_token_budget(&mut body, "max_tokens");
                             tokio::time::sleep(provider_stream_retry_delay(attempt)).await;
                         }
                         Err(error) => return Err(error),
@@ -740,6 +742,7 @@ impl HttpModelProvider {
                         PROVIDER_STREAM_ATTEMPTS,
                         state.emitted_text_characters(),
                     );
+                    grow_output_token_budget(&mut body, "max_output_tokens");
                     tokio::time::sleep(provider_stream_retry_delay(attempt)).await;
                 }
                 Ok(())
@@ -768,6 +771,7 @@ impl HttpModelProvider {
                                 PROVIDER_STREAM_ATTEMPTS,
                                 reset_text_characters,
                             );
+                            grow_output_token_budget(&mut body, "max_output_tokens");
                             tokio::time::sleep(provider_stream_retry_delay(attempt)).await;
                         }
                         Err(error) => return Err(error),
@@ -3254,12 +3258,12 @@ fn openai_messages(messages: &[ChatMessage]) -> Result<Vec<Value>> {
                 output.push(provider_message.clone());
                 continue;
             }
-            if message.role == Role::Assistant
-                && message.content.is_empty()
-                && message.tool_calls.is_empty()
-            {
-                continue;
-            }
+        }
+        if message.role == Role::Assistant
+            && message.content.is_empty()
+            && message.tool_calls.is_empty()
+        {
+            continue;
         }
         let value = match message.role {
             Role::System => json!({"role": "system", "content": message.content}),
@@ -3534,9 +3538,19 @@ fn gemini_messages(messages: &[ChatMessage]) -> Result<(String, Vec<Value>)> {
 }
 
 fn is_openai_chat_assistant_message(value: &Value) -> bool {
+    let has_content = value.get("content").is_some_and(|content| match content {
+        Value::Null => false,
+        Value::String(text) => !text.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        _ => true,
+    });
+    let has_tool_calls = value
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty());
     value.get("type").is_none()
         && value.get("role").and_then(Value::as_str) == Some("assistant")
-        && value.get("content").is_some()
+        && (has_content || has_tool_calls)
 }
 
 fn is_openai_responses_item(value: &Value) -> bool {
@@ -5237,7 +5251,9 @@ mod tests {
             {
                 let (mut socket, _) = listener.accept().expect("accept second request");
                 let mut request = [0_u8; 2048];
-                let _ = socket.read(&mut request).expect("read second request");
+                let bytes = socket.read(&mut request).expect("read second request");
+                let request_text = String::from_utf8_lossy(&request[..bytes]);
+                assert!(request_text.contains("\"max_tokens\":32768"));
                 let body = concat!(
                     "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"write_file\",\"arguments\":\"{\\\"path\\\":\\\"x\\\",\\\"content\\\":\\\"ok\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
                     "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
@@ -5610,6 +5626,26 @@ mod tests {
             rendered[0].pointer("/tool_calls/0/function/name"),
             Some(&Value::String("read_file".into()))
         );
+    }
+
+    #[test]
+    fn skips_reasoning_only_openai_assistant_history() {
+        let mut assistant = ChatMessage::assistant("", Vec::new());
+        assistant.provider_items.push(json!({
+            "role": "assistant",
+            "content": null,
+            "reasoning_content": "opaque reasoning without a deliverable message"
+        }));
+
+        let rendered = openai_messages(&[assistant]).expect("render messages");
+        assert!(rendered.is_empty());
+    }
+
+    #[test]
+    fn skips_empty_openai_assistant_history_without_provider_items() {
+        let rendered = openai_messages(&[ChatMessage::assistant("", Vec::new())])
+            .expect("render messages");
+        assert!(rendered.is_empty());
     }
 
     #[test]

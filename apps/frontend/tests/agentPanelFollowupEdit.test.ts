@@ -34,7 +34,10 @@ vi.mock("@/stores/git", () => ({ useGitStore: () => git }));
 vi.mock("@/stores/workspace", () => ({ useWorkspaceStore: () => workspace }));
 vi.mock("@/utils/filePreview", () => ({ openFilePreviewWindow: vi.fn().mockResolvedValue(true) }));
 vi.mock("@/api/workspace", () => ({ fetchStoryChapterTemplates: vi.fn().mockResolvedValue({ data: { items: [] } }) }));
-vi.mock("@/api/client", () => ({ describeTransportError: (_error: unknown, fallback: string) => fallback }));
+vi.mock("@/api/client", () => ({
+  ApiResponseError: class extends Error {},
+  describeTransportError: (_error: unknown, fallback: string) => fallback
+}));
 
 import AgentPanel from "@/components/AgentPanel.vue";
 import { useAgentStore } from "@/stores/agent";

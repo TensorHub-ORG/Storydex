@@ -18,10 +18,13 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
 use uuid::Uuid;
 
 pub const SESSION_SCHEMA_VERSION: u32 = 1;
 pub const COMPACTION_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
+const SESSION_PUBLISH_ATTEMPTS: usize = 5;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ToolCallCheckpoint {
@@ -292,7 +295,7 @@ impl SessionStore {
                 )
             })?;
             drop(file);
-            fs::rename(&temporary_path, &path)
+            publish_session_file(&temporary_path, &path)
                 .with_context(|| format!("failed to publish session {}", path.display()))?;
             Ok(())
         })();
@@ -394,6 +397,47 @@ impl SessionStore {
     pub fn path(&self, id: Uuid) -> PathBuf {
         self.directory.join(format!("{id}.json"))
     }
+}
+
+fn publish_session_file(temporary_path: &Path, path: &Path) -> Result<()> {
+    let mut last_error = None;
+    for attempt in 0..SESSION_PUBLISH_ATTEMPTS {
+        match fs::rename(temporary_path, path) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+            }
+        }
+
+        #[cfg(windows)]
+        if path.exists() {
+            let backup_path = path.with_extension(format!("json.{}.bak", Uuid::new_v4()));
+            if fs::rename(path, &backup_path).is_ok() {
+                match fs::rename(temporary_path, path) {
+                    Ok(()) => {
+                        let _ = fs::remove_file(backup_path);
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        let restore_result = fs::rename(&backup_path, path);
+                        if let Err(restore_error) = restore_result {
+                            return Err(anyhow::anyhow!(
+                                "failed to publish replacement ({error}); failed to restore previous session ({restore_error})"
+                            ));
+                        }
+                        last_error = Some(error);
+                    }
+                }
+            }
+        }
+
+        if attempt + 1 < SESSION_PUBLISH_ATTEMPTS {
+            thread::sleep(Duration::from_millis(25 * (attempt as u64 + 1)));
+        }
+    }
+    Err(last_error
+        .map(anyhow::Error::from)
+        .unwrap_or_else(|| anyhow::anyhow!("session publish failed without an I/O error")))
 }
 
 fn compact_preview(value: &str) -> String {
