@@ -46,6 +46,28 @@ if [[ -z "$site_config" ]]; then
 fi
 [[ -n "$site_config" ]] || { echo "updates.septemc.com nginx config not found" >&2; exit 1; }
 
+nginx_args=()
+panel_nginx=0
+if [[ "$site_config" == /www/server/panel/vhost/nginx/* && -x /www/server/nginx/sbin/nginx ]]; then
+  nginx_bin=/www/server/nginx/sbin/nginx
+  nginx_args=(-p /www/server/nginx/ -c conf/nginx.conf)
+  panel_nginx=1
+fi
+
+nginx_test() {
+  "$nginx_bin" "${nginx_args[@]}" -t
+}
+
+nginx_reload() {
+  if [[ $panel_nginx -eq 1 && -x /etc/init.d/nginx ]]; then
+    /etc/init.d/nginx reload
+  elif systemctl is-active --quiet nginx.service; then
+    systemctl reload nginx.service
+  else
+    "$nginx_bin" "${nginx_args[@]}" -s reload
+  fi
+}
+
 service_user=www
 if ! id "$service_user" >/dev/null 2>&1; then
   service_user=www-data
@@ -101,7 +123,7 @@ rollback() {
       rm -f "$current_link"
       systemctl stop storydex-feedback.service || true
     fi
-    "$nginx_bin" -t && "$nginx_bin" -s reload || true
+    nginx_test && nginx_reload || true
   fi
   rm -f "$config_backup" "$snippet_backup"
   exit "$status"
@@ -109,7 +131,7 @@ rollback() {
 trap rollback EXIT
 
 python3 "$release_dir/install_nginx_include.py" "$site_config" "$snippet_path"
-"$nginx_bin" -t
+nginx_test
 
 ln -sfn "$release_dir" "$current_link.next"
 mv -Tf "$current_link.next" "$current_link"
@@ -135,7 +157,7 @@ for _ in $(seq 1 20); do
 done
 [[ $healthy -eq 1 ]] || { journalctl -u storydex-feedback.service -n 80 --no-pager >&2; exit 1; }
 
-"$nginx_bin" -s reload
+nginx_reload
 find "$feedback_root/releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' \
   | sort -nr | tail -n +4 | cut -d' ' -f2- | xargs -r rm -rf
 

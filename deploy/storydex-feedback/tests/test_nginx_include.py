@@ -34,6 +34,11 @@ class NginxIncludeTests(unittest.TestCase):
         self.assertIn('s|__PYTHON__|$python_bin|g', installer)
         self.assertIn('s|__SERVICE_USER__|$service_user|g', installer)
         self.assertIn('s|__SERVICE_GROUP__|$service_group|g', installer)
+        self.assertIn("nginx_bin=/www/server/nginx/sbin/nginx", installer)
+        self.assertIn("nginx_args=(-p /www/server/nginx/ -c conf/nginx.conf)", installer)
+        self.assertIn("/etc/init.d/nginx reload", installer)
+        self.assertGreaterEqual(installer.count("nginx_test"), 3)
+        self.assertGreaterEqual(installer.count("nginx_reload"), 3)
 
 
 if __name__ == "__main__":
