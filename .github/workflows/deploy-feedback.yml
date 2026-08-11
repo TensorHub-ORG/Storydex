@@ -82,8 +82,42 @@ jobs:
             -H 'Content-Type: application/json' -d '{"source":"settings","description":"bad"}' "$base/api")"
           [[ "$status" == 422 ]]
           probe="$(curl --fail --silent --show-error -H 'Content-Type: application/json' \
-            -d '{"source":"settings","category":"deployment-check","description":"Automated production deployment verification.","diagnostics":{"runtime":"github-actions"}}' "$base/api")"
+            -d '{"submissionId":"deployment-'"$GITHUB_RUN_ID"'","source":"settings","category":"deployment-check","description":"Automated production deployment verification.","diagnostics":{"runtime":"github-actions"},"images":[{"name":"verification.png","mimeType":"image/png","dataBase64":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="}]}' "$base/api")"
           grep -F '"ok":true' <<< "$probe"
+          feedback_id="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<< "$probe")"
+
+          target="$DEPLOY_USER@$DEPLOY_HOST"
+          ssh_opts=(-i "$KEY_PATH" -p "$DEPLOY_PORT" -o "UserKnownHostsFile=$KNOWN_HOSTS_PATH" -o "StrictHostKeyChecking=$STRICT_MODE")
+          admin_token="$(
+            ssh "${ssh_opts[@]}" "$target" /usr/bin/python3 - "$FEEDBACK_ROOT" <<'PY'
+          import importlib.util
+          from pathlib import Path
+          import sys
+
+          root = Path(sys.argv[1])
+          module_path = root / "current" / "server.py"
+          spec = importlib.util.spec_from_file_location("storydex_feedback_server", str(module_path))
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          print(module.issue_token(module.FeedbackStore(root)))
+          PY
+          )"
+          [[ -n "$admin_token" ]]
+          echo "::add-mask::$admin_token"
+          auth_header="Authorization: Bearer $admin_token"
+
+          listing="$(curl --fail --silent --show-error -H "$auth_header" --get \
+            --data-urlencode 'q=Automated production deployment verification.' \
+            --data-urlencode 'limit=20' "$base/admin/api/list")"
+          python3 -c 'import json,sys; expected=sys.argv[1]; data=json.load(sys.stdin); assert any(item["id"] == expected for item in data["items"])' \
+            "$feedback_id" <<< "$listing"
+          detail="$(curl --fail --silent --show-error -H "$auth_header" \
+            "$base/admin/api/detail?id=$feedback_id")"
+          image_id="$(python3 -c 'import json,sys; data=json.load(sys.stdin); assert data["id"] == sys.argv[1]; print(data["images"][0]["id"])' \
+            "$feedback_id" <<< "$detail")"
+          curl --fail --silent --show-error -H "$auth_header" \
+            "$base/admin/api/image?id=$image_id" --output /tmp/storydex-feedback-verification.png
+          python3 -c 'from pathlib import Path; assert Path("/tmp/storydex-feedback-verification.png").read_bytes().startswith(b"\x89PNG\r\n\x1a\n")'
 
       - name: Remove temporary SSH key
         if: always()
