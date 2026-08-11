@@ -4,6 +4,7 @@ chcp 65001 >nul
 
 set "ROOT=%~dp0.."
 set "BOOTSTRAP_SCRIPT=%ROOT%\scripts\bootstrap_python39.ps1"
+set "PORT_SELECTOR=%ROOT%\scripts\select_available_port.ps1"
 set "PYTHON_EXE=%ROOT%\.python39\Scripts\python.exe"
 
 echo [Storydex] Cleaning stale Storydex dev processes...
@@ -35,11 +36,19 @@ if errorlevel 1 (
   echo [Storydex] Backend is healthy.
 )
 
+set "STORYDEX_FRONTEND_PORT="
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%PORT_SELECTOR%" -PreferredPort 5173`) do set "STORYDEX_FRONTEND_PORT=%%P"
+if not defined STORYDEX_FRONTEND_PORT (
+  echo [Storydex] No available frontend development port was found.
+  goto :error
+)
+set "STORYDEX_DESKTOP_URL=http://127.0.0.1:%STORYDEX_FRONTEND_PORT%"
+
 echo [Storydex] Launching frontend dev window (npm run dev)...
 start "Storydex Frontend Dev" /D "%ROOT%\apps\frontend" cmd /k "npm install && npm run dev"
 
 echo [Storydex] Dev stack started.
-echo [Storydex] Frontend: http://127.0.0.1:5173
+echo [Storydex] Frontend: %STORYDEX_DESKTOP_URL%
 echo [Storydex] Backend : http://127.0.0.1:18081
 exit /b 0
 

@@ -5,6 +5,11 @@ import type { Plugin, Rule } from "postcss";
 import { isMaterialSymbolSelector, transformPaneRelativePixelValue } from "./src/utils/paneFontScale";
 
 const apiProxyTarget = process.env.STORYDEX_API_PROXY_TARGET || "http://127.0.0.1:18081";
+const frontendPort = Number(process.env.STORYDEX_FRONTEND_PORT || 5173);
+
+if (!Number.isInteger(frontendPort) || frontendPort < 1 || frontendPort > 65535) {
+  throw new Error(`Invalid STORYDEX_FRONTEND_PORT: ${process.env.STORYDEX_FRONTEND_PORT}`);
+}
 
 function paneFontScalePlugin(): Plugin {
   return {
@@ -36,8 +41,9 @@ export default defineConfig({
     }
   },
   server: {
-    port: 5173,
+    port: frontendPort,
     host: "127.0.0.1",
+    strictPort: true,
     proxy: {
       "/api/v1": {
         target: apiProxyTarget,

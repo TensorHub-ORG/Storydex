@@ -8,6 +8,7 @@ const {
   shouldCopyPythonEnv,
   shouldCopyPythonRuntime
 } = require("../scripts/sync-app-assets.cjs");
+const { resolveFrontendResource } = require("../scripts/wait-for-dev-frontend.cjs");
 
 test("backend packaging excludes tests, coverage, caches, logs, and environment files", () => {
   const rejected = [
@@ -116,6 +117,23 @@ test("Python bootstrap prefers standard Python 3.9 before Conda fallback", () =>
   const candidateSource = source.slice(functionStart, functionEnd);
   assert.ok(candidateSource.indexOf('$candidates = @(') < candidateSource.indexOf("Get-CondaPython39Candidate"));
   assert.match(candidateSource, /STORYDEX_PYTHON_SOURCE/);
+});
+
+test("desktop development uses one dynamically selected frontend port", () => {
+  const packageJson = require("../package.json");
+  const viteConfig = fs.readFileSync(path.resolve(__dirname, "../../frontend/vite.config.ts"), "utf8");
+  const launcher = fs.readFileSync(path.resolve(__dirname, "../../../scripts/run_desktop_dev.bat"), "utf8");
+
+  assert.equal(resolveFrontendResource({}), "tcp:127.0.0.1:5173");
+  assert.equal(
+    resolveFrontendResource({ STORYDEX_DESKTOP_URL: "http://127.0.0.1:5174" }),
+    "tcp:127.0.0.1:5174"
+  );
+  assert.match(packageJson.scripts["dev:electron"], /wait-for-dev-frontend\.cjs/);
+  assert.match(viteConfig, /process\.env\.STORYDEX_FRONTEND_PORT/);
+  assert.match(viteConfig, /strictPort:\s*true/);
+  assert.match(launcher, /select_available_port\.ps1/);
+  assert.match(launcher, /STORYDEX_DESKTOP_URL=http:\/\/127\.0\.0\.1:%STORYDEX_FRONTEND_PORT%/);
 });
 
 test("Python bootstrap verifies every locked runtime dependency version", () => {

@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "concurrently -k -n FRONTEND,ELECTRON -c cyan,green \"npm:dev:frontend\" \"npm:dev:electron\"",
     "dev:frontend": "npm --prefix ../frontend run dev",
-    "dev:electron": "wait-on tcp:127.0.0.1:5173 && electron .",
+    "dev:electron": "node scripts/wait-for-dev-frontend.cjs && electron .",
     "build:frontend": "npm --prefix ../frontend run build",
     "build:coomi-runtime": "node scripts/build-coomi-runtime.cjs",
     "sync:assets": "node scripts/sync-app-assets.cjs",
