@@ -1,0 +1,4 @@
+interface:
+  display_name: "连续性与事实溯源"
+  short_description: "检查玩家与角色状态关系物品地点时间世界规则及人物知情范围的一致性"
+  default_prompt: "Use $story-continuity to audit this adventure turn against established player state, world rules, causality, and provenance."

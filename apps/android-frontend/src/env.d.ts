@@ -15,6 +15,8 @@ interface Window {
     importFilesForRequest?(requestId: string): void
     authorizeFolder?(): void
     exportFile?(path: string, suggestedName: string): void
+    /** Open Android's save-as picker for in-memory UTF-8 content. */
+    exportText?(content: string, suggestedName: string, mimeType: string): void
     exportFileForRequest?(requestId: string, path: string, suggestedName: string): void
     openFile?(path: string): void
     /** 保存图片（data URL）到相册或下载目录。 */

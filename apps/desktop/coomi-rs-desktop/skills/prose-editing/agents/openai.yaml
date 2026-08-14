@@ -1,0 +1,4 @@
+interface:
+  display_name: "文风与文字润色"
+  short_description: "依照项目文风预设润色正文并保持正典时间线人物声线视角和作者意图"
+  default_prompt: "Use $prose-editing to revise this manuscript passage under the author's active style, viewpoint, and canon constraints."

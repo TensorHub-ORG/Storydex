@@ -146,6 +146,28 @@
         </div>
       </template>
 
+      <div v-if="toolFeedbackVisible" class="cct-tool-feedback" role="status">
+        <span class="material-symbols-rounded cct-tool-feedback-icon">warning_amber</span>
+        <div class="cct-tool-feedback-copy">
+          <strong>本轮有 {{ toolFailureCount }} 次工具调用失败</strong>
+          <span>{{ toolFeedbackMessage }}</span>
+          <small v-if="toolFeedbackError">{{ toolFeedbackError }}</small>
+        </div>
+        <button
+          v-if="toolFeedbackState !== 'complete'"
+          type="button"
+          :disabled="toolFeedbackBusy"
+          @click="handleToolFailureFeedback"
+        >
+          <span class="material-symbols-rounded">{{ toolFeedbackBusy ? "progress_activity" : "send" }}</span>
+          {{ toolFeedbackButtonLabel }}
+        </button>
+        <span v-else class="cct-tool-feedback-done">
+          <span class="material-symbols-rounded">check_circle</span>
+          已完成
+        </span>
+      </div>
+
       <!-- 底部元信息：耗时 · token · 状态 · 无恢复点，纯文字不重复头部；右侧为完成时刻 -->
       <div class="cct-meta">
         <span class="cct-meta-text" :title="tokenTooltip || undefined">{{ metaLine }}</span>
@@ -166,8 +188,11 @@
 
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import { analyzeToolFailures, submitFeedback } from "@/api/system";
 import type { AgentExecutionRun, CoomiWaterfallItem, CoomiWaterfallItemStatus } from "@/types/agent";
+import type { ToolFailureAnalysisResponse } from "@/types/system";
 import { createMarkdownRenderer } from "@/utils/markdown";
+import { buildToolFailureTrace } from "@/utils/toolFailureFeedback";
 
 type FlowEntry =
   | { kind: "reasoning"; id: string; text: string; lines: number; live: boolean }
@@ -185,6 +210,8 @@ type ToolChunk = {
   end: number;
   tools: CoomiWaterfallItem[];
 };
+
+type ToolFeedbackState = "consent" | "analyzing" | "ready" | "uploading" | "analysis_failed" | "upload_failed" | "complete";
 
 const TOOL_CHUNK_SIZE = 5;
 
@@ -211,6 +238,9 @@ const emit = defineEmits<{
 const md = createMarkdownRenderer({}, { linkifyWorkspaceMarkdownFiles: true });
 
 const foldState = ref<Record<string, boolean>>({});
+const toolFeedbackState = ref<ToolFeedbackState>("consent");
+const toolFeedbackError = ref("");
+const toolAnalysis = ref<ToolFailureAnalysisResponse | null>(null);
 
 function isOpen(id: string, fallback: boolean): boolean {
   return foldState.value[id] ?? fallback;
@@ -286,6 +316,86 @@ const retryEntryId = computed(() => {
   const error = [...entries.value].reverse().find((entry) => entry.kind === "error");
   return error?.id || "";
 });
+
+const toolFailureTrace = computed(() => buildToolFailureTrace(props.run));
+const toolFailureCount = computed(() => toolFailureTrace.value.filter((item) => item.status === "error").length);
+const toolFeedbackVisible = computed(() => !isRunning.value && toolFailureCount.value >= 3);
+const toolFeedbackBusy = computed(() => ["analyzing", "uploading"].includes(toolFeedbackState.value));
+const toolFeedbackButtonLabel = computed(() => {
+  if (toolFeedbackState.value === "analyzing") return "正在本地整理";
+  if (toolFeedbackState.value === "uploading") return "正在上传";
+  if (toolFeedbackState.value === "analysis_failed") return "重新整理并反馈";
+  if (toolFeedbackState.value === "upload_failed") return "重新上传";
+  return "同意脱敏分析并反馈";
+});
+const toolFeedbackMessage = computed(() => {
+  if (toolFeedbackState.value === "consent") {
+    return "确认后才会额外调用一次当前 Provider（low、无工具），只分析脱敏工具轨迹并自动上传。";
+  }
+  if (toolFeedbackState.value === "analyzing") return "正在本机通过当前 Provider 生成脱敏工程分析，可以继续工作。";
+  if (toolFeedbackState.value === "ready" || toolFeedbackState.value === "uploading") return "脱敏分析已生成，正在提交反馈。";
+  if (toolFeedbackState.value === "analysis_failed") return "分析失败，未上传任何内容。";
+  if (toolFeedbackState.value === "upload_failed") return "分析已保留；重新上传不会再次调用模型。";
+  return "脱敏分析与反馈均已完成。";
+});
+
+async function handleToolFailureFeedback(): Promise<void> {
+  if (toolFeedbackBusy.value || toolFeedbackState.value === "complete") return;
+  toolFeedbackError.value = "";
+  if (!toolAnalysis.value) {
+    toolFeedbackState.value = "analyzing";
+    try {
+      const result = await analyzeToolFailures({
+        providerId: props.run.llmProvider || undefined,
+        trace: toolFailureTrace.value
+      });
+      toolAnalysis.value = result.data;
+      toolFeedbackState.value = "ready";
+    } catch (error) {
+      toolFeedbackState.value = "analysis_failed";
+      toolFeedbackError.value = error instanceof Error ? error.message : String(error);
+      return;
+    }
+  }
+
+  const analysis = toolAnalysis.value;
+  if (!analysis) return;
+  toolFeedbackState.value = "uploading";
+  try {
+    await submitFeedback({
+      source: "error",
+      category: "tool_failure_analysis",
+      description: `本轮工具调用失败 ${analysis.failureCount} 次，已由本地模型生成脱敏工程分析。`,
+      errorMessage: "Multiple tool calls failed in one agent turn.",
+      errorType: "ToolFailureAnalysis",
+      errorDetails: {
+        feedbackType: "tool_failure_analysis",
+        analysisStatus: "ready",
+        failureCount: analysis.failureCount,
+        analysisReport: analysis.analysis,
+        programEvidence: analysis.programEvidence,
+        redactionVersion: analysis.redactionVersion
+      },
+      diagnostics: {
+        platform: window.storydexDesktop?.platform || navigator.platform,
+        provider: props.run.llmProvider,
+        model: props.run.llmModel,
+        traceId: props.run.traceId,
+        sessionId: props.run.sessionId,
+        runtime: props.run.route || "coomi",
+        analysisRequestId: analysis.requestId,
+        analysisElapsedMs: analysis.elapsedMs,
+        analysisResponseCategory: analysis.responseCategory,
+        redactionVersion: analysis.redactionVersion,
+        failureCount: analysis.failureCount
+      }
+    });
+    toolFeedbackState.value = "complete";
+  } catch (error) {
+    toolFeedbackState.value = "upload_failed";
+    toolFeedbackError.value = error instanceof Error ? error.message : String(error);
+  }
+}
 
 // 运行中不显示 phase 之外的活动提示；完成后 store 会把 phase 内容覆盖为终态
 function toolChunks(entry: Extract<FlowEntry, { kind: "tools" }>): ToolChunk[] {
@@ -822,6 +932,97 @@ function compactText(value: unknown, limit = 1200): string {
 .cct-info-text strong {
   font-size: 12px;
   font-weight: 650;
+}
+
+.cct-tool-feedback {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+  padding: 10px 0;
+  border-block: 1px solid color-mix(in srgb, var(--warning) 28%, transparent);
+  color: var(--warning);
+}
+
+.cct-tool-feedback-icon {
+  margin-top: 1px;
+  font-size: 18px;
+}
+
+.cct-tool-feedback-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.cct-tool-feedback-copy strong {
+  color: var(--text-main);
+  font-size: 13px;
+}
+
+.cct-tool-feedback-copy span,
+.cct-tool-feedback-copy small {
+  overflow-wrap: anywhere;
+}
+
+.cct-tool-feedback-copy small {
+  color: var(--danger);
+}
+
+.cct-tool-feedback button,
+.cct-tool-feedback-done {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 30px;
+  padding: 0 9px;
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border-subtle));
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-main);
+  font: inherit;
+  font-size: 12px;
+}
+
+.cct-tool-feedback button {
+  cursor: pointer;
+}
+
+.cct-tool-feedback button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--warning) 9%, transparent);
+}
+
+.cct-tool-feedback button:disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+
+.cct-tool-feedback button .material-symbols-rounded,
+.cct-tool-feedback-done .material-symbols-rounded {
+  font-size: 16px;
+}
+
+.cct-tool-feedback button:disabled .material-symbols-rounded {
+  animation: cct-spin 1s linear infinite;
+}
+
+.cct-tool-feedback-done {
+  border-color: color-mix(in srgb, var(--success) 45%, var(--border-subtle));
+  color: var(--success);
+}
+
+@media (max-width: 560px) {
+  .cct-tool-feedback {
+    grid-template-columns: 20px minmax(0, 1fr);
+  }
+
+  .cct-tool-feedback button,
+  .cct-tool-feedback-done {
+    grid-column: 2;
+    justify-self: start;
+  }
 }
 
 /* 底部元信息：纯文字，承载状态与时间，不与顶部重复 */

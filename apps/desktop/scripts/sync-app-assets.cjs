@@ -33,8 +33,9 @@ const requirementsSource = path.join(repoRoot, "requirements.txt");
 const requirementsLockSource = path.join(repoRoot, "requirements.lock");
 const coomiBridgeSource = path.join(
   repoRoot,
-  "vendor",
-  "coomi-rs",
+  "apps",
+  "desktop",
+  "coomi-rs-desktop",
   "target",
   "release",
   process.platform === "win32" ? "storydex-coomi-bridge.exe" : "storydex-coomi-bridge"
@@ -42,8 +43,9 @@ const coomiBridgeSource = path.join(
 const coomiBridgeTarget = path.join(appRoot, "backend", "runtime", path.basename(coomiBridgeSource));
 const coomiBuildMetadataSource = path.join(
   repoRoot,
-  "vendor",
-  "coomi-rs",
+  "apps",
+  "desktop",
+  "coomi-rs-desktop",
   "target",
   "release",
   "storydex-coomi-build.json"

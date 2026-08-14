@@ -146,8 +146,9 @@ Invoke-Step "Conflict markers" {
 $packageVersion = (Get-Content -Raw -LiteralPath (Join-Path $desktop "package.json") | ConvertFrom-Json).version
 Invoke-Step "Version consistency" { node (Join-Path $repoRoot "scripts/validate_version_consistency.cjs") $(if ($Mode -eq "Release") { "--expected=$packageVersion" }) }
 if ($runCoomi) {
-  Invoke-Step "Rust Coomi workspace tests" { cargo test --manifest-path (Join-Path $repoRoot "vendor/coomi-rs/Cargo.toml") --locked --workspace }
-  Invoke-Step "Build Storydex Coomi runtime" { cargo build --manifest-path (Join-Path $repoRoot "vendor/coomi-rs/Cargo.toml") --release --locked -p storydex-coomi-bridge }
+  Invoke-Step "Rust Coomi desktop workspace tests" { cargo test --manifest-path (Join-Path $repoRoot "apps/desktop/coomi-rs-desktop/Cargo.toml") --locked --workspace }
+  Invoke-Step "Rust Coomi Android workspace tests" { cargo test --manifest-path (Join-Path $repoRoot "apps/desktop/coomi-rs-android/Cargo.toml") --locked --workspace }
+  Invoke-Step "Build Storydex Coomi desktop runtime" { cargo build --manifest-path (Join-Path $repoRoot "apps/desktop/coomi-rs-desktop/Cargo.toml") --release --locked -p storydex-coomi-bridge }
   Invoke-Step "Pinned Coomi runtime" { & $python (Join-Path $repoRoot "scripts/verify_coomi_runtime.py") }
 }
 if ($runBackend) {

@@ -78,16 +78,16 @@
     <color name="coomi_theme_default_accent_press">#B6562D</color>
     <color name="coomi_theme_default_accent_soft">#FBECE4</color>
 
-    <color name="coomi_theme_snow_bg">#F7FBFF</color>
-    <color name="coomi_theme_snow_page">#EDF4FF</color>
-    <color name="coomi_theme_snow_fill">#EEF4FF</color>
-    <color name="coomi_theme_snow_border">#DCE7F7</color>
-    <color name="coomi_theme_snow_text">#16315E</color>
-    <color name="coomi_theme_snow_text_2">#42638F</color>
-    <color name="coomi_theme_snow_text_3">#6F8BB2</color>
-    <color name="coomi_theme_snow_accent">#4E79EF</color>
-    <color name="coomi_theme_snow_accent_press">#325DDD</color>
-    <color name="coomi_theme_snow_accent_soft">#E8F0FF</color>
+    <color name="coomi_theme_snow_bg">#FFFFFF</color>
+    <color name="coomi_theme_snow_page">#F4F6FA</color>
+    <color name="coomi_theme_snow_fill">#F5F7FB</color>
+    <color name="coomi_theme_snow_border">#E2E7EF</color>
+    <color name="coomi_theme_snow_text">#172033</color>
+    <color name="coomi_theme_snow_text_2">#526079</color>
+    <color name="coomi_theme_snow_text_3">#8490A4</color>
+    <color name="coomi_theme_snow_accent">#2D61C6</color>
+    <color name="coomi_theme_snow_accent_press">#24509F</color>
+    <color name="coomi_theme_snow_accent_soft">#EAF0FC</color>
 
     <color name="coomi_theme_book_bg">#FFFAF2</color>
     <color name="coomi_theme_book_page">#EFE7DD</color>

@@ -1,0 +1,4 @@
+interface:
+  display_name: "情节与人物创作"
+  short_description: "为长篇小说设计人物世界情节对白动作场景并维护文风视角节奏与因果"
+  default_prompt: "Use $story-craft to develop this novel material while preserving the author's intent, canon, viewpoint, pacing, and causality."

@@ -29,7 +29,26 @@ export interface QuestionCard {
   options?: string[]; allowFreeText: boolean; answered: boolean; answer?: string
 }
 
-export interface NoticeItem { kind: 'notice'; id: string; tone: 'info' | 'warn' | 'error' | 'success'; text: string; detail?: string }
+export interface ToolDiagnosticTrace {
+  callId?: string
+  sequence: number
+  tool: string
+  argumentShape: unknown
+  status: 'running' | 'success' | 'error'
+  elapsedMs?: number
+  category?: string
+  errorSummary?: string
+}
+
+export type FeedbackAnalysisStatus = 'consent' | 'analyzing' | 'ready' | 'failed' | 'complete'
+
+export interface NoticeItem {
+  kind: 'notice'; id: string; tone: 'info' | 'warn' | 'error' | 'success'; text: string; detail?: string
+  feedbackEligible?: boolean
+  analysisStatus?: FeedbackAnalysisStatus
+  analysisTrace?: ToolDiagnosticTrace[]
+  failureCount?: number
+}
 
 export type Timelineitem = UserMessage | AssistantMessage | ReasoningBlock | ToolCard | QuestionCard | NoticeItem
 

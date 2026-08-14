@@ -287,17 +287,12 @@ public class AuthFragment extends Fragment implements CoomiSetupActivity.StepFra
 
     @Override
     public boolean handleNext() {
-        // 演示包无条件放行：没有 key 也能「完成」。
-        if (CoomiDemo.isEnabled()) return false;
-        // Ensure at least API key was entered
-        if (CoomiConfig.hasApiKey(mSelectedProvider) || !TextUtils.isEmpty(mApiKeyInput.getText())) {
-            // Save if not already saved
-            if (!CoomiConfig.hasApiKey(mSelectedProvider)) {
-                verifyAndSave();
-            }
-            return false; // let activity advance
+        // Provider setup is optional during onboarding. Only save when the user supplied a key.
+        if (!CoomiDemo.isEnabled()
+            && !CoomiConfig.hasApiKey(mSelectedProvider)
+            && !TextUtils.isEmpty(mApiKeyInput.getText())) {
+            verifyAndSave();
         }
-        setStatus(R.string.coomi_auth_need_key, R.color.coomi_danger);
-        return true; // block
+        return false;
     }
 }

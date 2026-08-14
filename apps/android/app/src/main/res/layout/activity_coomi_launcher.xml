@@ -203,74 +203,6 @@
                     <View style="@style/Coomi.Divider"/>
                 </LinearLayout>
 
-                <!-- Root 权限（可选增强权限，标红提示风险） -->
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:layout_marginTop="@dimen/coomi_space_m">
-
-                    <TextView
-                        style="@style/Coomi.Text.Body"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:textStyle="bold"
-                        android:textColor="@color/coomi_danger"
-                        android:text="@string/coomi_root_title"/>
-
-                    <TextView
-                        style="@style/Coomi.Text.Caption"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="3dp"
-                        android:textColor="@color/coomi_danger"
-                        android:text="@string/coomi_root_desc"/>
-
-                    <Button
-                        android:id="@+id/btn_root_permission"
-                        style="@style/Coomi.Button.Pill"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="6dp"
-                        android:background="@drawable/coomi_bg_pill_outline_danger"
-                        android:textColor="@color/coomi_danger"
-                    android:text="@string/coomi_root_grant"/>
-                </LinearLayout>
-
-                <!-- Shizuku 权限（可选增强能力） -->
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:layout_marginTop="@dimen/coomi_space_m">
-
-                    <TextView
-                        style="@style/Coomi.Text.Body"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:textStyle="bold"
-                        android:textColor="?attr/coomiBlue"
-                        android:text="@string/coomi_shizuku_title"/>
-
-                    <TextView
-                        style="@style/Coomi.Text.Caption"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="3dp"
-                        android:textColor="?attr/coomiBlue"
-                        android:text="@string/coomi_shizuku_desc"/>
-
-                    <Button
-                        android:id="@+id/btn_shizuku_permission"
-                        style="@style/Coomi.Button.Pill"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="6dp"
-                        android:background="@drawable/coomi_bg_pill_outline"
-                        android:textColor="?attr/coomiBlue"
-                        android:text="@string/coomi_shizuku_grant"/>
-                </LinearLayout>
-
                 <TextView
                     style="@style/Coomi.Text.Caption"
                     android:layout_width="match_parent"
@@ -301,7 +233,7 @@
                 style="@style/Coomi.Button"
                 android:layout_width="match_parent"
                 android:layout_height="@dimen/coomi_button_height"
-                android:enabled="false"
+                android:enabled="true"
                 android:text="@string/coomi_continue"/>
 
             <TextView

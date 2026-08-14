@@ -1,0 +1,4 @@
+interface:
+  display_name: "连续性与事实溯源"
+  short_description: "跨章节检查角色时间线伏笔项目正典来源与人物知情范围的一致性"
+  default_prompt: "Use $story-continuity to audit this manuscript material against project canon, chronology, viewpoint knowledge, and source provenance."

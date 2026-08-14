@@ -33,7 +33,7 @@ const tabs: Array<{ id: Tab; label: string; icon: string }> = [
   { id: 'scripts', label: '剧本管理', icon: 'fileWrite' },
   { id: 'memory', label: '记忆系统', icon: 'cpu' },
   { id: 'time', label: '时间系统', icon: 'clock' },
-  { id: 'theme', label: '主题外观', icon: 'moon' },
+  { id: 'theme', label: '主题外观', icon: 'palette' },
 ]
 const requestedTab = String(route.query.tab ?? 'basic') as Tab
 const activeTab = ref<Tab>(tabs.some(tab => tab.id === requestedTab) ? requestedTab : 'basic')
@@ -54,6 +54,22 @@ const GENDERS: Array<{ value: CharacterGenderMode; label: string }> = [
   { value: 'random', label: '随机' }, { value: 'male', label: '男性' }, { value: 'female', label: '女性' },
 ]
 const LIBRARY_KINDS: KeywordLibraryKind[] = ['event', 'male', 'female']
+const effortStats = computed(() => session.usage?.project.reasoning_efforts ?? {})
+
+function formatAverageTokens(effort: ReasoningEffort) {
+  const value = effortStats.value[effort]
+  if (!value?.turns) return '--'
+  const tokens = value.average_tokens
+  return tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : String(tokens)
+}
+
+function formatAverageDuration(effort: ReasoningEffort) {
+  const value = effortStats.value[effort]
+  if (!value?.turns) return '--'
+  const seconds = Math.round(value.average_duration_ms / 1000)
+  if (seconds < 60) return `${seconds}s`
+  return `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, '0')}s`
+}
 
 function selectTab(tab: Tab) {
   activeTab.value = tab
@@ -237,7 +253,7 @@ async function correctTime(choice: 'record' | 'rollback' | 'snapshot') {
 }
 
 onMounted(async () => {
-  await Promise.all([project.initialize(), libraries.initialize()])
+  await Promise.all([project.initialize(), libraries.initialize(), session.refreshProjectUsage()])
   timeDraft.value = project.currentTimeLabel
   window.addEventListener('coomi:files-imported', onNativeImport)
 })
@@ -267,6 +283,11 @@ onBeforeUnmount(() => window.removeEventListener('coomi:files-imported', onNativ
         <section class="group compact">
           <div class="field"><span>叙事自由度</span><div class="segments"><button v-for="item in NARRATIVE_MODES" :key="item.mode" :class="{ on: story.narrativeMode === item.mode }" @click="story.setNarrativeMode(item.mode)">{{ item.label }}</button></div></div>
           <div class="field"><span>推理强度</span><div class="segments five"><button v-for="item in REASONING" :key="item.value" :class="{ on: story.reasoningEffort === item.value }" @click="session.setReasoningEffort(item.value)">{{ item.label }}</button></div></div>
+          <div class="reasoning-metrics" aria-label="当前故事项目推理强度均轮统计">
+            <div class="metric-head"><span>推理强度</span><b v-for="item in REASONING" :key="item.value">{{ item.label }}</b></div>
+            <div><span>均轮消耗</span><b v-for="item in REASONING" :key="item.value">{{ formatAverageTokens(item.value) }}</b></div>
+            <div class="metric-reference"><span>均轮耗时</span><b v-for="item in REASONING" :key="item.value">{{ formatAverageDuration(item.value) }}</b></div>
+          </div>
           <label class="field"><span>最近完整正文</span><input type="number" min="1" max="20" :value="project.settings.recentFragments" @change="patchProjectSettings({ recentFragments: Math.min(20, Math.max(1, Number(($event.target as HTMLInputElement).value))) })" /></label>
           <div class="field"><span>记忆检查点</span><div class="segments five"><button v-for="n in [5,10,15,20,30]" :key="n" :class="{ on: project.settings.memoryCheckpoint === n }" @click="patchProjectSettings({ memoryCheckpoint: n as 5|10|15|20|30 })">{{ n }}</button></div></div>
           <label class="field"><span>片段字数</span><span class="dual"><input type="number" :value="story.fragmentMin" @change="story.setFragmentLength(Number(($event.target as HTMLInputElement).value), story.fragmentMax)" /><i>至</i><input type="number" :value="story.fragmentMax" @change="story.setFragmentLength(story.fragmentMin, Number(($event.target as HTMLInputElement).value))" /></span></label>
@@ -335,7 +356,7 @@ onBeforeUnmount(() => window.removeEventListener('coomi:files-imported', onNativ
           <label class="field"><span>历法</span><select v-model="project.time.calendar" @change="project.patchTime({ calendar: project.time.calendar })"><option value="relative">相对历</option><option value="gregorian">公历</option><option value="custom">自定义历法</option></select></label>
           <label v-if="project.time.calendar === 'custom'" class="field"><span>历法名称</span><input v-model="project.time.calendarName" @change="project.patchTime({ calendarName: project.time.calendarName })" /></label>
           <label class="field"><span>显示时间</span><span class="inline-input"><input v-model="timeDraft" /><button @click="saveTimeDisplay">保存</button></span></label>
-          <div class="field"><span>时间精度</span><div class="segments"><button :class="{ on: project.time.precision === 'day' }" @click="project.patchTime({ precision: 'day' })">天</button><button :class="{ on: project.time.precision === 'hour' }" @click="project.patchTime({ precision: 'hour' })">小时</button></div></div>
+          <div class="field"><span>时间精度</span><div class="segments"><button :class="{ on: project.time.precision === 'fuzzy' }" @click="project.patchTime({ precision: 'fuzzy' })">模糊</button><button :class="{ on: project.time.precision === 'day' }" @click="project.patchTime({ precision: 'day' })">天</button><button :class="{ on: project.time.precision === 'hour' }" @click="project.patchTime({ precision: 'hour' })">小时</button></div></div>
           <button class="switch-row" @click="project.patchTime({ locked: !project.time.locked })"><span><b>锁定当前时间</b><small>禁止模型自动修改</small></span><i :class="{ on: project.time.locked }" /></button>
           <button class="switch-row" @click="project.patchTime({ flashback: project.time.flashback ? null : { active: true, at: project.currentTimeLabel, returnTo: project.currentTimeLabel } })"><span><b>闪回状态</b><small>第一版支持完整闪回，不创建并行时间线</small></span><i :class="{ on: !!project.time.flashback }" /></button>
         </section>
@@ -397,6 +418,13 @@ input,select,textarea { border:1px solid var(--border-strong); border-radius:6px
 .segments.five { grid-template-columns:repeat(5,minmax(0,1fr)); width:min(260px,68vw); }
 .segments button { min-height:31px; padding:0 5px; border-radius:4px; color:var(--text-3); font-size:11.5px; }
 .segments button.on { background:var(--bg); color:var(--blue); box-shadow:var(--shadow-1); }
+.reasoning-metrics { padding:9px 8px 10px; overflow:hidden; }
+.reasoning-metrics > div { display:grid; grid-template-columns:58px repeat(5,minmax(0,1fr)); align-items:center; min-height:22px; column-gap:2px; text-align:center; }
+.reasoning-metrics span { color:var(--text-3); font-size:10px; text-align:left; white-space:nowrap; }
+.reasoning-metrics b { min-width:0; overflow:hidden; color:var(--text-2); font-size:10.5px; font-weight:600; letter-spacing:0; text-overflow:ellipsis; white-space:nowrap; }
+.reasoning-metrics .metric-head { padding-bottom:4px; border-bottom:1px solid var(--border); }
+.reasoning-metrics .metric-head b { color:var(--text-3); font-size:10px; font-weight:500; }
+.reasoning-metrics .metric-reference b,.reasoning-metrics .metric-reference span { color:var(--text-3); font-size:9.5px; font-weight:500; }
 .dual { display:flex; align-items:center; gap:5px; }.dual input { width:68px; min-height:34px; padding:0 7px; }.dual i { color:var(--text-3); font-style:normal; }
 .footnote { margin:9px 3px; color:var(--text-3); font-size:11.5px; line-height:1.6; }
 .notice { margin:0 0 10px; padding:9px 11px; border-radius:6px; font-size:12px; }.notice.ok { background:var(--ok-soft); color:var(--ok); }.notice.err { background:var(--danger-soft); color:var(--danger); }

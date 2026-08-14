@@ -2,11 +2,14 @@
 import { computed, ref } from 'vue'
 import type { NoticeItem } from '@/stores/viewModel'
 import { useConfigStore } from '@/stores/config'
+import { useSessionStore } from '@/stores/session'
 import CoomiIcon from './CoomiIcon.vue'
+import { submitAndroidFeedback } from '@/utils/feedback'
 
 const props = defineProps<{ notice: NoticeItem }>()
 
 const config = useConfigStore()
+const session = useSessionStore()
 const open = ref(false)
 const confirm = ref(false)
 const sending = ref(false)
@@ -24,45 +27,6 @@ const icon = computed(() => {
 
 function toggle() { if (props.notice.detail) open.value = !open.value }
 
-/** 原生桥上传回调注册表（callbackId -> resolve）。 */
-type FeedbackCb = (result: { ok: boolean; error?: string; detail?: string }) => void
-const feedbackCbs = new Map<string, FeedbackCb>()
-let feedbackSeq = 0
-
-/**
- * 上报报错：仅上传报错日志 + 设备诊断，不含任何对话内容。
- * 优先走原生桥（绕过 WebView CORS，最可靠）；无桥时降级为 fetch。
- */
-function sendViaBridge(payload: object): Promise<{ ok: boolean; error?: string; detail?: string }> {
-  const native = window.CoomiAndroid
-  if (!native?.sendFeedback) return Promise.resolve({ ok: false, error: 'no bridge' })
-  return new Promise((resolve) => {
-    const id = `fb${++feedbackSeq}_${Date.now()}`
-    feedbackCbs.set(id, resolve)
-    // 超时兜底：8s 无回调按失败处理。
-    setTimeout(() => {
-      if (feedbackCbs.delete(id)) resolve({ ok: false, error: 'timeout' })
-    }, 10000)
-    try {
-      ;(native.sendFeedback as (json: string, id: string) => void)(JSON.stringify(payload), id)
-    } catch (e) {
-      feedbackCbs.delete(id)
-      resolve({ ok: false, error: e instanceof Error ? e.message : String(e) })
-    }  })
-}
-// 原生桥完成后回调（在 JS 全局注册一次）。
-;(window as unknown as { __coomiFeedbackResult?: (id: string, resultJson: string) => void }).__coomiFeedbackResult =
-  (id: string, resultJson: string) => {
-    const cb = feedbackCbs.get(id)
-    if (!cb) return
-    feedbackCbs.delete(id)
-    try {
-      cb(JSON.parse(resultJson))
-    } catch {
-      cb({ ok: false, error: 'bad result' })
-    }
-  }
-
 /**
  * 上报报错：仅上传报错日志 + 设备诊断，不含任何对话内容。
  * 双通道：自建端点（国内可达）优先，随后尝试 GitHub issue（失败静默）。
@@ -72,49 +36,35 @@ async function sendFeedback() {
   sending.value = true
   sent.value = null
   failReason.value = ''
-  const now = new Date().toISOString()
-  let diagnostics = '{}'
-  try {
-    const raw = window.CoomiAndroid?.getDiagnostics?.()
-    if (raw) diagnostics = raw
-  } catch { /* 原生桥不可用时忽略 */ }
-  const payload = {
-    message: props.notice.text,
-    detail: props.notice.detail ?? '',
-    diagnostics,
-    provider: config.currentProviderId,
-    model: config.currentModel,
-    permission_mode: config.permissionMode,
-    time: now,
-  }
-  // 主通道：优先原生桥（绕过 WebView CORS），无桥时降级为 fetch。
-  const viaBridge = !!window.CoomiAndroid?.sendFeedback
-  let ok = false
-  let reason = ''
-  if (viaBridge) {
-    const result = await sendViaBridge(payload)
-    ok = result.ok
-    reason = result.error ?? ''
-  } else {
-    try {
-    const res = await fetch('https://updates.septemc.com/storydex/feedback/api', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      })
-      ok = res.ok
-      if (!ok) reason = `HTTP ${res.status}`
-    } catch (e) {
-      ok = false
-      reason = e instanceof Error ? e.message : String(e)
-    }
-  }
+  const result = await submitAndroidFeedback({
+    source: 'error', category: 'bug', description: props.notice.text,
+    error: { message: props.notice.text, detail: props.notice.detail ?? '' },
+    diagnostics: { provider: config.currentProviderId, model: config.currentModel, permissionMode: config.permissionMode },
+  })
+  const ok = result.ok
+  const reason = result.error ?? ''
   // 仅使用自建服务器通道（用户决定不用 GitHub issue）。
   sending.value = false
   sent.value = ok ? 'ok' : 'fail'
   failReason.value = reason
   // 已发送提示停留片刻后自动收起
   if (ok) setTimeout(() => { sent.value = null; confirm.value = false }, 2600)
+}
+
+async function sendToolFailureFeedback() {
+  if (sending.value) return
+  sending.value = true; sent.value = null; failReason.value = ''
+  let detail = props.notice.detail ?? ''
+  if (props.notice.analysisStatus !== 'ready') detail = await session.consentToolFailureFeedback(props.notice.id)
+  if (!detail) { sending.value = false; return }
+  const result = await submitAndroidFeedback({
+    source: 'error', category: 'tool_failure_analysis',
+    description: `本轮工具调用失败 ${props.notice.failureCount ?? 3} 次，已由本地模型生成脱敏工程分析。`,
+    error: { feedbackType: 'tool_failure_analysis', analysisStatus: 'ready', failureCount: props.notice.failureCount ?? 3, detail },
+    diagnostics: { provider: config.currentProviderId, model: config.currentModel, permissionMode: config.permissionMode, failureCount: props.notice.failureCount ?? 3 },
+  })
+  sending.value = false; sent.value = result.ok ? 'ok' : 'fail'; failReason.value = result.error ?? ''
+  session.finishToolFailureFeedback(props.notice.id, result.ok, result.error)
 }
 </script>
 
@@ -126,6 +76,21 @@ async function sendFeedback() {
   </div>
   <div v-if="notice.detail && open" class="notice-detail cascade">
     <pre>{{ notice.detail }}</pre>
+  </div>
+
+  <div v-if="notice.analysisStatus" class="fb analysis-feedback">
+    <button
+      v-if="notice.feedbackEligible"
+      class="fb-btn"
+      :disabled="sending"
+      @click.stop="sendToolFailureFeedback"
+    >
+      <CoomiIcon name="send" :size="13" />
+      <span>{{ notice.analysisStatus === 'ready' ? '重新上传' : notice.analysisStatus === 'failed' ? '重新整理并反馈' : '同意反馈' }}</span>
+    </button>
+    <span v-else-if="notice.analysisStatus === 'analyzing'" class="fb-result">正在本地脱敏整理</span>
+    <span v-else-if="notice.analysisStatus === 'complete'" class="fb-result ok">已完成</span>
+    <span v-if="sent === 'fail' && failReason" class="fb-reason">{{ failReason }}</span>
   </div>
 
   <div v-if="notice.tone === 'error'" class="fb">

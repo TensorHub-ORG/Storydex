@@ -98,9 +98,9 @@
 }
 
 :root[data-theme='snow'] {
-  --blue: #4e79ef; --blue-press: #325ddd; --blue-soft: #e8f0ff; --blue-soft-2: #d7e5ff; --blue-border: #bfd3fb;
-  --bg: #f7fbff; --page: #edf4ff; --fill: #eef4ff; --fill-strong: #e2ecfd; --fill-press: #d7e4f8;
-  --border: #dce7f7; --border-strong: #c8d8ef; --text: #16315e; --text-2: #42638f; --text-3: #6f8bb2;
+  --blue: #2d61c6; --blue-press: #24509f; --blue-soft: #eaf0fc; --blue-soft-2: #dce7f9; --blue-border: #c6d7f4;
+  --bg: #ffffff; --page: #f4f6fa; --fill: #f5f7fb; --fill-strong: #eaf0f8; --fill-press: #dfe7f2;
+  --border: #e2e7ef; --border-strong: #ced7e5; --text: #172033; --text-2: #526079; --text-3: #8490a4;
 }
 
 :root[data-theme='book'] {

@@ -135,7 +135,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         if: ${{ inputs.full || needs.changes.outputs.coomi == 'true' }}
         with:
-          workspaces: vendor/coomi-rs -> target
+          workspaces: |
+            apps/desktop/coomi-rs-desktop -> target
+            apps/desktop/coomi-rs-android -> target
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
@@ -153,8 +155,9 @@ jobs:
       - name: Test and build Storydex Coomi Rust runtime
         if: ${{ inputs.full || needs.changes.outputs.coomi == 'true' }}
         run: |
-          cargo test --manifest-path vendor/coomi-rs/Cargo.toml --locked --workspace
-          cargo build --manifest-path vendor/coomi-rs/Cargo.toml --release --locked -p storydex-coomi-bridge
+          cargo test --manifest-path apps/desktop/coomi-rs-desktop/Cargo.toml --locked --workspace
+          cargo test --manifest-path apps/desktop/coomi-rs-android/Cargo.toml --locked --workspace
+          cargo build --manifest-path apps/desktop/coomi-rs-desktop/Cargo.toml --release --locked -p storydex-coomi-bridge
       - name: Verify pinned Coomi runtime
         if: ${{ inputs.full || needs.changes.outputs.coomi == 'true' }}
         run: python scripts/verify_coomi_runtime.py

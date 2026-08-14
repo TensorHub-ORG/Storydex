@@ -1,4 +1,4 @@
-# Approved Python dependency pins. Coomi is the vendored Rust runtime under vendor/coomi-rs.
+# Approved Python dependency pins. Coomi runtimes live under apps/desktop/coomi-rs-{desktop,android}.
 # Regenerate requirements.lock with pip-compile --generate-hashes --no-strip-extras after any change.
 annotated-types==0.7.0
 anthropic==0.104.0

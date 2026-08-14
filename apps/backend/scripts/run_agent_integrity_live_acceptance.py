@@ -304,7 +304,7 @@ def assert_complete_file_reads(transcript: list[dict[str, Any]]) -> dict[str, An
 
 async def run_live(args: argparse.Namespace, *, workspace: Path, coomi_home: Path) -> dict[str, Any]:
     os.environ["STORYDEX_COOMI_HOME"] = str(coomi_home)
-    bridge = REPOSITORY_ROOT / "vendor" / "coomi-rs" / "target" / "debug" / "storydex-coomi-bridge.exe"
+    bridge = REPOSITORY_ROOT / "apps" / "desktop" / "coomi-rs-desktop" / "target" / "debug" / "storydex-coomi-bridge.exe"
     if not bridge.is_file():
         raise AcceptanceError(f"debug bridge is missing: {bridge}")
     os.environ["STORYDEX_COOMI_BRIDGE"] = str(bridge)

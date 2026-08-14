@@ -46,7 +46,7 @@ Storydex 采用分两次切换的渐进式重构：
 | 后端测试收集 | 946 项 |
 | 后端覆盖率基线 | 行 84.7%，分支 70.8% |
 | 关键大模块 | `story_project_service.py` 约 7,200 行；`story_wiki_service.py` 约 4,200 行；`routes_agent.py` 超过 6,600 行 |
-| Agent Runtime | `vendor/coomi-rs` Rust workspace，经 JSONL bridge 调用 |
+| Agent Runtime | `apps/desktop/coomi-rs-desktop` Rust workspace，经 JSONL bridge 调用 |
 | 正式桌面运行时 | Electron 40 + 内嵌 Python 3.9 + MinGit + Rust bridge |
 
 本次盘点中，API、Rust bridge、SSE、工作区和 WIKI 边界子集为 `64 passed`。完整 946 项测试在本地 5 分钟观察上限内未结束，因此 M0 必须先建立可重复、可完整结束的规范测试基线；在此之前不得将“当前全套通过”作为迁移前提。
@@ -99,7 +99,7 @@ storydex-agentd (独立 Rust 进程)
         +-- domain       Story、Knowledge、WIKI、Preset 等强类型规则
         +-- infrastructure
         |      文件事务、Git、索引、配置、日志、HTTP provider
-        +-- coomi        复用 vendor/coomi-rs 的稳定接口
+        +-- coomi        复用 apps/desktop/coomi-rs-desktop 的稳定接口
 
 迁移阶段桌面壳：Electron
 最终桌面壳：Tauri 2，仅负责窗口、更新、权限、系统集成和 sidecar 生命周期

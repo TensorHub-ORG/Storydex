@@ -1,0 +1,4 @@
+interface:
+  display_name: "情节与人物创作"
+  short_description: "生成角色扮演文字冒险场景并维护玩家选择权角色声线世界规则和故事因果"
+  default_prompt: "Use $story-craft to advance this text-adventure scene without deciding the player's actions, thoughts, dialogue, or consent."

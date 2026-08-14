@@ -42,7 +42,7 @@ export interface TimeState {
   calendarName: string
   current: string
   display: string
-  precision: 'day' | 'hour'
+  precision: 'fuzzy' | 'day' | 'hour'
   locked: boolean
   flashback: { active: boolean; at: string; returnTo: string } | null
   revisionSnapshots: Array<{ id: string; createdAt: string; from: string; to: string }>

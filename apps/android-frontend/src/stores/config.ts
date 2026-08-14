@@ -30,7 +30,7 @@ export type ThemeMode = 'white' | 'default' | 'snow' | 'book' | 'dark'
 export const THEME_MODES: { mode: ThemeMode; label: string; desc: string }[] = [
   { mode: 'white', label: '纯白工作台', desc: '纯白画布与暖橙强调色' },
   { mode: 'default', label: '现代浅色', desc: '清爽浅色工作台' },
-  { mode: 'snow', label: '雪纸蓝白', desc: '当前移动端默认蓝白配色' },
+  { mode: 'snow', label: '经典蓝白', desc: '简洁明快的蓝白配色' },
   { mode: 'book', label: '沉浸书卷', desc: '适合小说阅读的暖纸色' },
   { mode: 'dark', label: '纯净暗色', desc: '低亮度沉浸界面' },
 ]

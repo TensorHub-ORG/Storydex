@@ -22,6 +22,8 @@ import android.text.TextUtils;
 import android.util.Base64;
 import android.view.View;
 import android.webkit.JavascriptInterface;
+import android.webkit.ValueCallback;
+import android.webkit.WebChromeClient;
 import android.content.res.Configuration;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
@@ -72,6 +74,7 @@ public class CoomiActivity extends Activity {
     private static final int REQUEST_AUTHORIZE_TREE = 2102;
     private static final int REQUEST_EXPORT_FILE = 2103;
     private static final int REQUEST_SAVE_IMAGE = 2104;
+    private static final int REQUEST_WEB_FILE_CHOOSER = 2105;
     /** 旧系统（API < 29）走 SAF 保存对话框时的待写图片数据。 */
     private byte[] mPendingImageBytes;
     private String mPendingImageName;
@@ -94,8 +97,10 @@ public class CoomiActivity extends Activity {
     private int mAutomaticRecoveryAttempts;
     private String mPendingExportPath;
     private String mPendingExportName;
+    private byte[] mPendingExportBytes;
     private String mPendingImportRequestId;
     private String mPendingExportRequestId;
+    private ValueCallback<Uri[]> mPendingFileChooser;
 
     private final ServiceConnection mConnection = new ServiceConnection() {
         @Override
@@ -265,6 +270,31 @@ public class CoomiActivity extends Activity {
         // 调试端口仅在 debug 构建开启：release 构建不经调试端口暴露页面内存中的令牌/密钥。
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG);
         mWebView.addJavascriptInterface(new AndroidBridge(), "CoomiAndroid");
+        mWebView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onShowFileChooser(
+                WebView webView,
+                ValueCallback<Uri[]> filePathCallback,
+                FileChooserParams fileChooserParams
+            ) {
+                if (mPendingFileChooser != null) mPendingFileChooser.onReceiveValue(null);
+                mPendingFileChooser = filePathCallback;
+                Intent intent;
+                try {
+                    intent = fileChooserParams.createIntent();
+                } catch (Exception error) {
+                    mPendingFileChooser = null;
+                    return false;
+                }
+                try {
+                    startActivityForResult(intent, REQUEST_WEB_FILE_CHOOSER);
+                    return true;
+                } catch (Exception error) {
+                    mPendingFileChooser = null;
+                    return false;
+                }
+            }
+        });
 
         mWebView.setWebViewClient(new WebViewClient() {
             /** 演示包用假域名装本地文件；正式包不拦，让它照常走 loopback。 */
@@ -524,6 +554,15 @@ public class CoomiActivity extends Activity {
             launchExportPicker(path, suggestedName);
         }
 
+        /** Open the system save-as picker for generated text without staging it in the project. */
+        @JavascriptInterface
+        public void exportText(String content, String suggestedName, String mimeType) {
+            mPendingExportRequestId = null;
+            byte[] bytes = (content == null ? "" : content)
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            launchExportContentPicker(bytes, suggestedName, mimeType);
+        }
+
         /** 用系统其它 app 打开文件（图片/文档等），走 FileProvider 授权。 */
         @JavascriptInterface
         public void openFile(String path) {
@@ -659,10 +698,24 @@ public class CoomiActivity extends Activity {
                     return;
                 }
                 mPendingExportPath = source.getAbsolutePath();
+                mPendingExportBytes = null;
                 mPendingExportName = TextUtils.isEmpty(suggestedName) ? source.getName() : suggestedName;
                 Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
                 intent.addCategory(Intent.CATEGORY_OPENABLE);
                 intent.setType("application/octet-stream");
+                intent.putExtra(Intent.EXTRA_TITLE, mPendingExportName);
+                startActivityForResult(intent, REQUEST_EXPORT_FILE);
+            });
+        }
+
+        private void launchExportContentPicker(byte[] bytes, String suggestedName, String mimeType) {
+            runOnUiThread(() -> {
+                mPendingExportPath = null;
+                mPendingExportBytes = bytes;
+                mPendingExportName = TextUtils.isEmpty(suggestedName) ? "storydex-export.txt" : suggestedName;
+                Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                intent.addCategory(Intent.CATEGORY_OPENABLE);
+                intent.setType(TextUtils.isEmpty(mimeType) ? "text/plain" : mimeType);
                 intent.putExtra(Intent.EXTRA_TITLE, mPendingExportName);
                 startActivityForResult(intent, REQUEST_EXPORT_FILE);
             });
@@ -680,12 +733,25 @@ public class CoomiActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_WEB_FILE_CHOOSER) {
+            ValueCallback<Uri[]> callback = mPendingFileChooser;
+            mPendingFileChooser = null;
+            if (callback != null) {
+                callback.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(resultCode, data));
+            }
+            return;
+        }
         if (resultCode != RESULT_OK || data == null) {
             if (requestCode == REQUEST_IMPORT_FILES && mPendingImportRequestId != null) {
                 emitFilesImported(new JSONArray(), mPendingImportRequestId);
                 mPendingImportRequestId = null;
-            } else if (requestCode == REQUEST_EXPORT_FILE && mPendingExportRequestId != null) {
-                emitFileExported(mPendingExportRequestId, null);
+            } else if (requestCode == REQUEST_EXPORT_FILE) {
+                if (mPendingExportRequestId != null) {
+                    emitFileExported(mPendingExportRequestId, null);
+                }
+                mPendingExportPath = null;
+                mPendingExportName = null;
+                mPendingExportBytes = null;
                 mPendingExportRequestId = null;
             }
             return;
@@ -778,14 +844,19 @@ public class CoomiActivity extends Activity {
     }
 
     private void exportToUri(Uri target) {
-        File source = new File(mPendingExportPath == null ? "" : mPendingExportPath);
-        try (InputStream input = new FileInputStream(source);
-             OutputStream output = getContentResolver().openOutputStream(target, "w")) {
+        File source = mPendingExportPath == null ? null : new File(mPendingExportPath);
+        try (OutputStream output = getContentResolver().openOutputStream(target, "w")) {
             if (output == null) throw new IllegalStateException("无法写入目标文件");
-            emitTransferProgress("正在导出 " + source.getName(), 10);
-            copyStream(input, output);
+            emitTransferProgress("正在导出 " + mPendingExportName, 10);
+            if (mPendingExportBytes != null) {
+                output.write(mPendingExportBytes);
+                output.flush();
+            } else {
+                if (source == null || !source.isFile()) throw new IllegalStateException("源文件不存在");
+                try (InputStream input = new FileInputStream(source)) { copyStream(input, output); }
+            }
             emitTransferProgress("文件已导出", 100);
-            emitFileExported(mPendingExportRequestId, source.getAbsolutePath());
+            emitFileExported(mPendingExportRequestId, source == null ? mPendingExportName : source.getAbsolutePath());
         } catch (Exception error) {
             Logger.logError(LOG_TAG, "File export failed: " + error.getMessage());
             emitTransferProgress("导出失败：" + error.getMessage(), 0);
@@ -793,6 +864,7 @@ public class CoomiActivity extends Activity {
         } finally {
             mPendingExportPath = null;
             mPendingExportName = null;
+            mPendingExportBytes = null;
             mPendingExportRequestId = null;
         }
     }

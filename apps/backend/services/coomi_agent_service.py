@@ -1988,9 +1988,11 @@ async def _build_coomi_system_prompt(
     turn_plan = _dict_value(_dict_value(turn_contract).get("turnPlan"))
     intent = _dict_value(_dict_value(turn_contract).get("intentFrame"))
     prompt_parts = [
-        "You are Coomi for Storydex, a local-first long-form fiction workspace.",
+        "You are Coomi Desktop for Storydex, a local-first professional workspace for long-form fiction creators.",
         f"Storydex workspace: {Path(workspace_root).resolve()}",
-        "Inspect project evidence before acting. Preserve unrelated work and never push to a remote.",
+        "The author is the creative authority. Inspect relevant manuscript, character, world, timeline, preset, and memory evidence before acting.",
+        "Separate canon evidence from inference, flag continuity conflicts, and preserve the author's voice, point of view, pacing, and explicit constraints.",
+        "Keep writes scoped and reviewable. Never silently invent canon, overwrite an author's decision, expose manuscript content, or push to a remote.",
         "Use Rust runtime tools for files, search, shell, MCP, skills, memory, planning, and sub-agents.",
         (
             "When the user explicitly names multiple independent files for the same read-only operation, emit all "

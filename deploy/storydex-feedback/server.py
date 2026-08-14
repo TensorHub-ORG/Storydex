@@ -26,7 +26,8 @@ from uuid import uuid4
 
 
 BASE_PATH = "/storydex/feedback"
-MAX_REQUEST_BYTES = 24 * 1024 * 1024
+# Four 5 MB images expand to about 26.7 MB after Base64 encoding.
+MAX_REQUEST_BYTES = 32 * 1024 * 1024
 MAX_IMAGES = 4
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_TEXT = 5000
@@ -110,12 +111,38 @@ def validate_feedback(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise FeedbackError("error 必须是对象或 null。")
     if not isinstance(diagnostics, dict):
         raise FeedbackError("diagnostics 必须是对象。")
+    category = bounded_text(payload.get("category"), 40) or "bug"
+    if category == "tool_failure_analysis":
+        if source != "error" or not isinstance(error_value, dict):
+            raise FeedbackError("工具故障分析必须使用 error source 和结构化 error。")
+        analysis_fields = error_value.get("details")
+        if not isinstance(analysis_fields, dict):
+            analysis_fields = error_value
+        if bounded_text(analysis_fields.get("feedbackType"), 60) != "tool_failure_analysis":
+            raise FeedbackError("工具故障分析缺少有效 feedbackType。")
+        if bounded_text(analysis_fields.get("analysisStatus"), 30) != "ready":
+            raise FeedbackError("工具故障分析必须处于 ready 状态。")
+        try:
+            failure_count = int(analysis_fields.get("failureCount") or diagnostics.get("failureCount") or 0)
+        except (TypeError, ValueError):
+            failure_count = 0
+        report = bounded_text(
+            analysis_fields.get("analysisReport") or analysis_fields.get("detail"),
+            MAX_TEXT,
+        )
+        if failure_count < 3 or not report:
+            raise FeedbackError("工具故障分析至少需要三次失败和非空分析报告。")
+
+    platform = bounded_text(payload.get("platform") or diagnostics.get("platform"), 20).lower()
+    if platform not in {"windows", "android"}:
+        platform = "windows"
 
     return {
         "submission_id": bounded_text(payload.get("submissionId"), 120) or str(uuid4()),
         "submitted_at": bounded_text(payload.get("submittedAt"), 80) or utc_now(),
         "source": source,
-        "category": bounded_text(payload.get("category"), 40) or "bug",
+        "platform": platform,
+        "category": category,
         "description": description,
         "contact": bounded_text(payload.get("contact"), 200),
         "error": sanitize_structured_value(error_value or {}),
@@ -148,6 +175,7 @@ class FeedbackStore:
                     received_at TEXT NOT NULL,
                     submitted_at TEXT NOT NULL,
                     source TEXT NOT NULL,
+                    platform TEXT NOT NULL DEFAULT 'windows',
                     category TEXT NOT NULL,
                     description TEXT NOT NULL,
                     contact TEXT NOT NULL,
@@ -184,6 +212,13 @@ class FeedbackStore:
                     VALUES ('android_downloads', 28);
                 """
             )
+            columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(feedback)").fetchall()
+            }
+            if "platform" not in columns:
+                connection.execute(
+                    "ALTER TABLE feedback ADD COLUMN platform TEXT NOT NULL DEFAULT 'windows'"
+                )
         if not self.secret_path.exists():
             self.secret_path.write_text(secrets.token_hex(48), encoding="ascii")
             try:
@@ -282,13 +317,13 @@ class FeedbackStore:
             with self.connect() as connection:
                 connection.execute(
                     """INSERT INTO feedback (
-                        id, submission_id, received_at, submitted_at, source, category,
+                        id, submission_id, received_at, submitted_at, source, platform, category,
                         description, contact, error_json, diagnostics_json, privacy_json,
                         client_ip, user_agent
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         feedback_id, data["submission_id"], utc_now(), data["submitted_at"],
-                        data["source"], data["category"], data["description"], data["contact"],
+                        data["source"], data["platform"], data["category"], data["description"], data["contact"],
                         compact_json(data["error"]), compact_json(data["diagnostics"]),
                         compact_json(data["privacy"]), normalized_ip,
                         bounded_text(user_agent, 500),
@@ -310,18 +345,20 @@ class FeedbackStore:
                     pass
             raise
 
-    def list(self, query: str, limit: int) -> List[Dict[str, Any]]:
+    def list(self, query: str, limit: int, platform: str = "", category: str = "") -> List[Dict[str, Any]]:
         limit = max(1, min(limit, 200))
         pattern = f"%{query[:200]}%"
         with self.connect() as connection:
             rows = connection.execute(
-                """SELECT f.id, f.received_at, f.source, f.category, f.description,
+                """SELECT f.id, f.received_at, f.source, f.platform, f.category, f.description,
                           f.contact, f.client_ip, COUNT(i.id) AS image_count
                    FROM feedback f LEFT JOIN images i ON i.feedback_id = f.id
-                   WHERE ? = '' OR f.description LIKE ? OR f.contact LIKE ?
-                         OR f.category LIKE ? OR f.id LIKE ?
+                   WHERE (? = '' OR f.platform = ?)
+                     AND (? = '' OR f.category = ?)
+                     AND (? = '' OR f.description LIKE ? OR f.contact LIKE ?
+                         OR f.category LIKE ? OR f.id LIKE ?)
                    GROUP BY f.id ORDER BY f.received_at DESC LIMIT ?""",
-                (query, pattern, pattern, pattern, pattern, limit),
+                (platform, platform, category, category, query, pattern, pattern, pattern, pattern, limit),
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -491,11 +528,17 @@ class FeedbackHandler(BaseHTTPRequestHandler):
             return
         if path == f"{BASE_PATH}/admin/api/list":
             query = bounded_text(params.get("q", [""])[0], 200)
+            platform = bounded_text(params.get("platform", [""])[0], 20).lower()
+            if platform not in {"windows", "android"}:
+                platform = ""
+            category = bounded_text(params.get("category", [""])[0], 40)
+            if category not in {"tool_failure_analysis"}:
+                category = ""
             try:
                 limit = int(params.get("limit", ["100"])[0])
             except ValueError:
                 limit = 100
-            self.send_json(HTTPStatus.OK, {"items": self.store.list(query, limit)})
+            self.send_json(HTTPStatus.OK, {"items": self.store.list(query, limit, platform, category)})
             return
         if path == f"{BASE_PATH}/admin/api/detail":
             detail = self.store.detail(bounded_text(params.get("id", [""])[0], 120))

@@ -54,10 +54,12 @@ export async function deleteProjectFile(relative: string): Promise<void> {
 }
 
 export async function exportProjectContent(relative: string, content: string, suggestedName: string): Promise<void> {
-  const staging = `.storydex/exports/${safeFilename(suggestedName)}`
-  const path = await writeProjectText(staging, content)
+  if (window.CoomiAndroid?.exportText) {
+    window.CoomiAndroid.exportText(content, suggestedName, mimeForFilename(suggestedName))
+    return
+  }
   if (window.CoomiAndroid?.exportFile) {
-    window.CoomiAndroid.exportFile(path, suggestedName)
+    window.CoomiAndroid.exportFile(projectFile(relative), suggestedName)
     return
   }
   const url = URL.createObjectURL(new Blob([content], { type: 'application/octet-stream' }))
@@ -66,6 +68,12 @@ export async function exportProjectContent(relative: string, content: string, su
   anchor.download = suggestedName
   anchor.click()
   URL.revokeObjectURL(url)
+}
+
+function mimeForFilename(filename: string): string {
+  if (/\.json$/i.test(filename)) return 'application/json'
+  if (/\.(md|markdown)$/i.test(filename)) return 'text/markdown'
+  return 'text/plain'
 }
 
 export function safeFilename(value: string): string {

@@ -8,7 +8,7 @@
     :root { color-scheme: dark; --bg:#11151b; --panel:#191f27; --line:#343c47; --text:#eef2f6; --dim:#9ba7b4; --accent:#38a3a5; --danger:#ef6a67; }
     * { box-sizing:border-box; }
     body { margin:0; min-height:100vh; background:var(--bg); color:var(--text); font:14px/1.55 system-ui,"Microsoft YaHei",sans-serif; }
-    button,input { font:inherit; }
+    button,input,select { font:inherit; }
     button { cursor:pointer; }
     .shell { width:min(1120px,100%); margin:auto; padding:24px 18px 48px; }
     header { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:20px; }
@@ -16,12 +16,15 @@
     .sub,.muted { color:var(--dim); }
     .login { width:min(380px,100%); margin:12vh auto; padding:24px; border:1px solid var(--line); border-radius:8px; background:var(--panel); }
     .login h2 { margin:0 0 18px; font-size:18px; }
-    input { width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:6px; background:#0f1318; color:var(--text); }
+    input,select { width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:6px; background:#0f1318; color:var(--text); }
     button { min-height:38px; padding:0 14px; border:1px solid var(--line); border-radius:6px; background:#202833; color:var(--text); }
     button.primary { border-color:var(--accent); background:var(--accent); color:#071415; font-weight:700; }
     .login button { width:100%; margin-top:12px; }
     .error { margin-top:10px; color:var(--danger); }
-    .toolbar { display:grid; grid-template-columns:minmax(220px,1fr) auto auto; gap:10px; margin-bottom:14px; }
+    .toolbar { display:grid; grid-template-columns:auto minmax(170px,1fr) minmax(150px,auto) auto auto; gap:10px; margin-bottom:14px; }
+    .platform-filter { display:flex; gap:2px; padding:2px; border:1px solid var(--line); border-radius:6px; background:#0f1318; }
+    .platform-filter button { min-height:32px; padding:0 10px; border:0; background:transparent; color:var(--dim); }
+    .platform-filter button.active { background:#2a3743; color:var(--text); }
     .grid { display:grid; grid-template-columns:minmax(320px,.9fr) minmax(420px,1.35fr); min-height:620px; border:1px solid var(--line); background:var(--panel); }
     .list { border-right:1px solid var(--line); overflow:auto; }
     .item { width:100%; min-height:0; padding:13px 15px; border:0; border-bottom:1px solid var(--line); border-radius:0; background:transparent; text-align:left; }
@@ -39,7 +42,7 @@
     .images img { width:100%; aspect-ratio:4/3; object-fit:contain; border:1px solid var(--line); background:#0b0e12; }
     .empty { padding:48px 20px; color:var(--dim); text-align:center; }
     [hidden] { display:none !important; }
-    @media (max-width:780px) { .grid { grid-template-columns:1fr; }.list { max-height:340px; border-right:0; border-bottom:1px solid var(--line); }.toolbar { grid-template-columns:1fr auto; }.toolbar .logout { grid-column:1/-1; }.images { grid-template-columns:1fr; } }
+    @media (max-width:780px) { .grid { grid-template-columns:1fr; }.list { max-height:340px; border-right:0; border-bottom:1px solid var(--line); }.toolbar { grid-template-columns:1fr auto; }.platform-filter { grid-column:1/-1; }.toolbar .logout { grid-column:1/-1; }.images { grid-template-columns:1fr; } }
   </style>
 </head>
 <body>
@@ -54,7 +57,16 @@
     <section id="app" hidden>
       <header><div><h1>Storydex 反馈管理</h1><div class="sub">错误上报、主动反馈与截图</div></div></header>
       <div class="toolbar">
+        <div class="platform-filter" role="group" aria-label="平台筛选">
+          <button class="active" data-platform="">全部</button>
+          <button data-platform="windows">Win 桌面端</button>
+          <button data-platform="android">Android 移动端</button>
+        </div>
         <input id="query" type="search" placeholder="搜索描述、分类、联系方式或 ID">
+        <select id="category" aria-label="反馈类型筛选">
+          <option value="">全部类型</option>
+          <option value="tool_failure_analysis">工具故障分析</option>
+        </select>
         <button id="refresh">刷新</button>
         <button id="logout" class="logout">退出登录</button>
       </div>
@@ -69,6 +81,8 @@
     const tokenKey = 'storydex_feedback_admin_token';
     let token = localStorage.getItem(tokenKey) || '';
     let selected = '';
+    let platform = '';
+    let category = '';
     const el = id => document.getElementById(id);
     const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     async function api(path, options = {}) {
@@ -92,8 +106,8 @@
     async function loadList() {
       const query = encodeURIComponent(el('query').value.trim());
       try {
-        const body = await api(`${base}/admin/api/list?q=${query}&limit=200`);
-        el('list').innerHTML = body.items.length ? body.items.map(item => `<button class="item ${selected===item.id?'active':''}" data-id="${escapeHtml(item.id)}"><div class="item-top"><span class="tag">${escapeHtml(item.category)} · ${escapeHtml(item.source)}</span><span class="muted">${escapeHtml(new Date(item.received_at).toLocaleString())}</span></div><div class="desc">${escapeHtml(item.description.slice(0,180))}</div><div class="muted">${item.image_count} 张图片 · ${escapeHtml(item.contact || '未留联系方式')}</div></button>`).join('') : '<div class="empty">暂无反馈</div>';
+        const body = await api(`${base}/admin/api/list?q=${query}&platform=${encodeURIComponent(platform)}&category=${encodeURIComponent(category)}&limit=200`);
+        el('list').innerHTML = body.items.length ? body.items.map(item => `<button class="item ${selected===item.id?'active':''}" data-id="${escapeHtml(item.id)}"><div class="item-top"><span class="tag">${escapeHtml(item.platform === 'android' ? 'Android 移动端' : 'Win 桌面端')} · ${escapeHtml(item.category)} · ${escapeHtml(item.source)}</span><span class="muted">${escapeHtml(new Date(item.received_at).toLocaleString())}</span></div><div class="desc">${escapeHtml(item.description.slice(0,180))}</div><div class="muted">${item.image_count} 张图片 · ${escapeHtml(item.contact || '未留联系方式')}</div></button>`).join('') : '<div class="empty">暂无反馈</div>';
         document.querySelectorAll('.item').forEach(node => node.addEventListener('click', () => loadDetail(node.dataset.id)));
       } catch (error) { el('list').innerHTML = `<div class="empty error">${escapeHtml(error.message)}</div>`; }
     }
@@ -106,7 +120,11 @@
       selected=id; await loadList();
       try {
         const data = await api(`${base}/admin/api/detail?id=${encodeURIComponent(id)}`);
-        el('detail').innerHTML = `<h2>${escapeHtml(data.category)} · ${escapeHtml(data.source)}</h2><dl><dt>接收时间</dt><dd>${escapeHtml(new Date(data.received_at).toLocaleString())}</dd><dt>反馈 ID</dt><dd>${escapeHtml(data.id)}</dd><dt>提交 ID</dt><dd>${escapeHtml(data.submission_id)}</dd><dt>联系方式</dt><dd>${escapeHtml(data.contact || '未填写')}</dd><dt>客户端 IP</dt><dd>${escapeHtml(data.client_ip)}</dd><dt>描述</dt><dd>${escapeHtml(data.description)}</dd></dl><h3>错误信息</h3><pre>${escapeHtml(JSON.stringify(data.error,null,2))}</pre><h3>诊断信息</h3><pre>${escapeHtml(JSON.stringify(data.diagnostics,null,2))}</pre><h3>截图</h3><div id="images" class="images">${data.images.length?'正在加载...':'无截图'}</div>`;
+        const analysis = data.error?.details || data.error || {};
+        const analysisSections = data.category === 'tool_failure_analysis'
+          ? `<h3>程序证据</h3><pre>${escapeHtml(analysis.programEvidence || '未提供')}</pre><h3>本地模型分析</h3><pre>${escapeHtml(analysis.analysisReport || analysis.detail || '未提供')}</pre>`
+          : `<h3>错误信息</h3><pre>${escapeHtml(JSON.stringify(data.error,null,2))}</pre>`;
+        el('detail').innerHTML = `<h2>${escapeHtml(data.platform === 'android' ? 'Android 移动端' : 'Win 桌面端')} · ${escapeHtml(data.category)} · ${escapeHtml(data.source)}</h2><dl><dt>接收时间</dt><dd>${escapeHtml(new Date(data.received_at).toLocaleString())}</dd><dt>反馈 ID</dt><dd>${escapeHtml(data.id)}</dd><dt>提交 ID</dt><dd>${escapeHtml(data.submission_id)}</dd><dt>联系方式</dt><dd>${escapeHtml(data.contact || '未填写')}</dd><dt>客户端 IP</dt><dd>${escapeHtml(data.client_ip)}</dd><dt>描述</dt><dd>${escapeHtml(data.description)}</dd></dl>${analysisSections}<h3>诊断信息</h3><pre>${escapeHtml(JSON.stringify(data.diagnostics,null,2))}</pre><h3>截图</h3><div id="images" class="images">${data.images.length?'正在加载...':'无截图'}</div>`;
         if (data.images.length) {
           const urls = await Promise.all(data.images.map(image => authImage(image.url)));
           el('images').innerHTML = urls.map((url,index) => `<a href="${url}" target="_blank" rel="noopener"><img src="${url}" alt="${escapeHtml(data.images[index].original_name)}"></a>`).join('');
@@ -116,7 +134,15 @@
     el('loginButton').addEventListener('click', login);
     el('password').addEventListener('keydown', event => { if(event.key==='Enter') login(); });
     el('refresh').addEventListener('click', loadList);
+    el('category').addEventListener('change', event => { category=event.target.value; selected=''; loadList(); });
     el('logout').addEventListener('click', logout);
+    document.querySelectorAll('[data-platform]').forEach(node => node.addEventListener('click', () => {
+      platform = node.dataset.platform;
+      selected = '';
+      document.querySelectorAll('[data-platform]').forEach(button => button.classList.toggle('active', button === node));
+      el('detail').innerHTML = '<div class="empty">选择一条反馈查看详情</div>';
+      loadList();
+    }));
     let searchTimer; el('query').addEventListener('input', () => { clearTimeout(searchTimer); searchTimer=setTimeout(loadList,250); });
     token ? showApp() : showLogin();
   </script>

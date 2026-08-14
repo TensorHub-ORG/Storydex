@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 import base64
 import binascii
@@ -7,6 +8,7 @@ import os
 import re
 import sys
 from time import perf_counter
+from typing import Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
@@ -18,6 +20,7 @@ from core.config import get_settings
 from services.global_config_service import get_global_config_service
 from services.project_service import get_project_service
 from services.coomi_version_service import check_coomi_version
+from services.tool_failure_feedback_service import analyze_tool_failures
 
 router = APIRouter(tags=["sys"])
 
@@ -62,6 +65,25 @@ class FeedbackSubmitRequest(BaseModel):
     images: list[FeedbackImageRequest] = Field(default_factory=list, max_length=_FEEDBACK_MAX_IMAGES)
 
     model_config = ConfigDict(populate_by_name=True)
+
+
+class ToolFailureTraceRequest(BaseModel):
+    sequence: int = Field(ge=1, le=10_000)
+    tool: str = Field(min_length=1, max_length=80)
+    status: str = Field(pattern="^(success|error|unknown)$")
+    argument_shape: object = Field(default_factory=dict, alias="argumentShape")
+    elapsed_ms: Optional[int] = Field(default=None, alias="elapsedMs", ge=0, le=3_600_000)
+    category: Optional[str] = Field(default=None, max_length=80)
+    error_summary: Optional[str] = Field(default=None, alias="errorSummary", max_length=1200)
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+
+class ToolFailureAnalysisRequest(BaseModel):
+    provider_id: str = Field(default="", alias="providerId", max_length=120)
+    trace: list[ToolFailureTraceRequest] = Field(min_length=1, max_length=40)
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
 
 def _sanitize_feedback_value(value, *, depth: int = 0):
@@ -123,12 +145,14 @@ async def submit_feedback(request: FeedbackSubmitRequest) -> ApiEnvelope:
         key: request.diagnostics.get(key)
         for key in (
             "storydexVersion", "coomiVersion", "platform", "provider", "model",
-            "traceId", "sessionId", "updateState", "runtime",
+            "traceId", "sessionId", "updateState", "runtime", "analysisRequestId",
+            "analysisElapsedMs", "analysisResponseCategory", "redactionVersion", "failureCount",
         )
         if request.diagnostics.get(key) not in (None, "")
     }
     remote_payload = {
         "schemaVersion": 1,
+        "platform": "windows",
         "submissionId": trace_id,
         "submittedAt": datetime.now(timezone.utc).isoformat(),
         "source": request.source,
@@ -148,6 +172,27 @@ async def submit_feedback(request: FeedbackSubmitRequest) -> ApiEnvelope:
     data = {"feedbackId": str(result.get("id") or result.get("feedbackId") or trace_id)}
     trace = ApiTrace(traceId=trace_id, durationMs=int((perf_counter() - started) * 1000))
     return success_response(data=data, trace=trace, audit=[{"action": "submit_feedback"}])
+
+
+@router.post("/sys/feedback/tool-analysis", response_model=ApiEnvelope)
+async def analyze_tool_failure_feedback(request: ToolFailureAnalysisRequest) -> ApiEnvelope:
+    trace_id = str(uuid4())
+    if len(request.model_dump_json(by_alias=True).encode("utf-8")) > 32 * 1024:
+        raise HTTPException(status_code=413, detail="脱敏工具轨迹不能超过 32 KB。")
+    try:
+        data = await analyze_tool_failures(
+            provider_id=request.provider_id.strip() or None,
+            trace=[item.model_dump(by_alias=True, exclude_none=True) for item in request.trace],
+            request_id=trace_id,
+        )
+    except asyncio.TimeoutError as error:
+        raise HTTPException(status_code=504, detail="本地工具故障分析超时，未上传任何内容。") from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"本地工具故障分析失败：{error}") from error
+    trace = ApiTrace(traceId=trace_id, durationMs=int(data["elapsedMs"]))
+    return success_response(data=data, trace=trace, audit=[{"action": "analyze_tool_failures"}])
 
 
 class UIPreferencesResponse(BaseModel):

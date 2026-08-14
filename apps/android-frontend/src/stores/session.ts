@@ -10,7 +10,7 @@ import { useConnectionStore } from './connection'
 import { useConfigStore } from './config'
 import { useSessionsStore } from './sessions'
 import { useStoryStore, type ReasoningEffort } from './story'
-import type { AssistantMessage, LoopProgress, QuestionCard, ReasoningBlock, RunState, Timelineitem, ToolCard } from './viewModel'
+import type { AssistantMessage, LoopProgress, QuestionCard, ReasoningBlock, RunState, Timelineitem, ToolCard, ToolDiagnosticTrace } from './viewModel'
 
 export const useSessionStore = defineStore('session', () => {
   const connection = useConnectionStore()
@@ -36,11 +36,30 @@ export const useSessionStore = defineStore('session', () => {
   let currentAssistant: AssistantMessage | null = null
   let connectedSessionId = ''
   let persistTimer: ReturnType<typeof setTimeout> | null = null
+  let turnToolTrace: ToolDiagnosticTrace[] = []
   const transport = shallowRef<Transport | null>(null)
 
   const isBusy = computed(() => runState.value !== 'idle')
   const pendingApproval = computed(() => timeline.value.find((t): t is ToolCard => t.kind === 'tool' && t.status === 'awaiting_approval'))
   const pendingQuestion = computed(() => timeline.value.find((t): t is QuestionCard => t.kind === 'question' && !t.answered))
+
+  async function refreshProjectUsage() {
+    try {
+      const response = await authedFetch('/api/storydex/usage')
+      if (!response.ok) return
+      const project = await response.json() as NonNullable<import('@/protocol/events').UsageInfo['project']>
+      const previous = usage.value
+      usage.value = {
+        total: previous?.total ?? 0, input: previous?.input ?? 0, output: previous?.output ?? 0,
+        contextRatio: previous?.contextRatio ?? 0, contextUsed: previous?.contextUsed ?? 0,
+        contextWindow: previous?.contextWindow ?? 0, cachedInput: previous?.cachedInput ?? 0,
+        reasoning: previous?.reasoning ?? 0, turnInput: previous?.turnInput ?? 0,
+        turnCachedInput: previous?.turnCachedInput ?? 0, turnOutput: previous?.turnOutput ?? 0,
+        turnReasoning: previous?.turnReasoning ?? 0, turnCacheRate: previous?.turnCacheRate ?? 0,
+        categories: previous?.categories ?? {}, mode: previous?.mode ?? story.agentMode, project,
+      }
+    } catch { /* Engine startup and reconnect retries will load this again. */ }
+  }
 
   /** 通知原生层任务状态：更新通知栏常驻通知（执行中 / 已完成）。 */
   function syncTaskStatus(status: 'running' | 'done') {
@@ -114,6 +133,7 @@ export const useSessionStore = defineStore('session', () => {
         if (config.currentProviderId && config.currentModel) {
           t.send({ command: 'select_model', provider_id: config.currentProviderId, model: config.currentModel })
         }
+        void refreshProjectUsage()
       }
     })
     t.onMessage(env => {
@@ -138,6 +158,10 @@ export const useSessionStore = defineStore('session', () => {
       case 'tool_start':
         endAssistantStream()
         timeline.value.push({ kind: 'tool', callId: ev.call_id, toolName: ev.tool_name, arguments: ev.arguments, status: 'starting', expanded: ev.tool_name === 'show_image' })
+        turnToolTrace.push({
+          callId: ev.call_id, sequence: turnToolTrace.length + 1, tool: sanitizeToolName(ev.tool_name),
+          argumentShape: summarizeArguments(ev.arguments), status: 'running',
+        })
         runState.value = 'executing'
         break
       case 'tool_running': patchTool(ev.call_id, c => c.status = 'running'); runState.value = 'executing'; break
@@ -153,8 +177,22 @@ export const useSessionStore = defineStore('session', () => {
         // 工具跑完不等于一轮结束 —— 模型接着想下一步。回 idle 只认 turn_end /
         // 取消 / 致命错误，否则输入区会在循环中途闪回「下达任务」和发送箭头。
         runState.value = 'thinking'
+        {
+          const trace = turnToolTrace.find(item => item.callId === ev.call_id)
+          if (trace) {
+            trace.status = ev.is_error ? 'error' : 'success'
+            trace.elapsedMs = Math.max(0, Math.round(ev.elapsed * 1000))
+            if (ev.is_error) {
+              trace.category = classifyToolError(ev.result_preview)
+              trace.errorSummary = sanitizeDiagnosticText(ev.result_preview)
+            }
+          }
+        }
         break
-      case 'tool_cache_hit': patchTool(ev.call_id, c => c.status = 'cache_hit'); break
+      case 'tool_cache_hit':
+        patchTool(ev.call_id, c => c.status = 'cache_hit')
+        { const trace = turnToolTrace.find(item => item.callId === ev.call_id); if (trace) trace.status = 'success' }
+        break
       case 'tool_approval_request':
         endAssistantStream()
         if (!patchTool(ev.call_id, c => { c.status = 'awaiting_approval'; c.access = ev.access; c.riskSummary = ev.risk_summary; c.expanded = true })) {
@@ -214,6 +252,17 @@ export const useSessionStore = defineStore('session', () => {
         break
       case 'turn_end':
         endAssistantStream(); cancelRunningTools(); connection.setRetry(null); runState.value = 'idle'
+        {
+          const failures = turnToolTrace.filter(item => item.status === 'error').length
+          if (failures >= 3) {
+            timeline.value.push({
+              kind: 'notice', id: nextId(), tone: 'warn', analysisStatus: 'consent', feedbackEligible: true,
+              text: `本轮工具调用失败 ${failures} 次。可在明确同意后，额外轻量调用一次当前模型生成脱敏工程分析并上传。`,
+              analysisTrace: turnToolTrace.map(({ callId: _callId, ...item }) => item), failureCount: failures,
+            })
+          }
+          turnToolTrace = []
+        }
         void story.captureTurn(timeline.value, sessionId.value)
           .then(fragment => { if (fragment && story.fragments.length % 10 === 0) resetStoryContext() })
           .catch(error => pushNotice('error', error instanceof Error ? error.message : '剧情片段写入失败'))
@@ -279,6 +328,7 @@ export const useSessionStore = defineStore('session', () => {
       persistSoon()
       return
     }
+    turnToolTrace = []
     timeline.value.push({ kind: 'user', id: nextId(), content: trimmed })
     runState.value = 'thinking'
     transport.value?.send({ command: 'send_message', text: agentPrompt })
@@ -343,7 +393,7 @@ export const useSessionStore = defineStore('session', () => {
       : []
   }
 
-  /** 待机：清空时间线回到剧情主页（空态首屏），不换会话、不中断后台任务。 */
+  /** 返回剧情首页：清空当前展示，不换会话、不中断后台任务。 */
   function standby() {
     endAssistantStream()
     timeline.value = []
@@ -522,10 +572,80 @@ export const useSessionStore = defineStore('session', () => {
   }
   function pushNotice(tone: 'info' | 'warn' | 'error' | 'success', text: string) { timeline.value.push({ kind: 'notice', id: nextId(), tone, text }) }
 
-  return { sessionId, timeline, runState, usage, cwd, loop, isBusy, pendingApproval, pendingQuestion, connect, disconnect, sendMessage, cancel, approve, answerQuestion, setPermissionMode, togglePlanMode, selectModel, setReasoningEffort, resetStoryContext, completeFileTransfer, newSession, switchAgentMode, continueStory, standby, openSession, deleteSession, setSessionCwd, sendGuide }
+  async function consentToolFailureFeedback(noticeId: string): Promise<string> {
+    const notice = timeline.value.find(item => item.kind === 'notice' && item.id === noticeId)
+    if (notice?.kind !== 'notice' || !notice.analysisTrace?.length) return ''
+    if (!['consent', 'failed'].includes(notice.analysisStatus ?? '')) return notice.detail ?? ''
+    notice.analysisStatus = 'analyzing'; notice.feedbackEligible = false
+    notice.text = '正在本地整理脱敏工具错误；可以继续对话。'
+    try {
+      const response = await authedFetch('/api/tool-failure-analysis', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider_id: config.currentProviderId, trace: notice.analysisTrace }),
+      })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const data = await response.json() as { analysis?: string }
+      const analysis = data.analysis?.trim() ?? ''
+      if (!analysis) throw new Error('分析结果为空')
+      notice.analysisStatus = 'ready'; notice.detail = `${analysis}\n\n${buildLocalEvidence(notice.analysisTrace)}`
+      notice.text = '脱敏分析已完成，正在上传。'
+      return notice.detail
+    } catch (error) {
+      notice.analysisStatus = 'failed'; notice.feedbackEligible = true
+      notice.text = `反馈整理失败，未上传任何内容：${error instanceof Error ? error.message : String(error)}`
+      return ''
+    }
+  }
+
+  function finishToolFailureFeedback(noticeId: string, ok: boolean, reason = '') {
+    const notice = timeline.value.find(item => item.kind === 'notice' && item.id === noticeId)
+    if (notice?.kind !== 'notice') return
+    if (ok) {
+      notice.analysisStatus = 'complete'; notice.feedbackEligible = false; notice.analysisTrace = undefined
+      notice.text = '工具错误已完成脱敏分析并上传，感谢反馈。'
+    } else {
+      notice.analysisStatus = 'ready'; notice.feedbackEligible = true
+      notice.text = `分析已完成，但上传失败${reason ? `：${reason}` : ''}。重试不会再次调用模型。`
+    }
+  }
+
+  return { sessionId, timeline, runState, usage, cwd, loop, isBusy, pendingApproval, pendingQuestion, connect, disconnect, sendMessage, cancel, approve, answerQuestion, setPermissionMode, togglePlanMode, selectModel, setReasoningEffort, refreshProjectUsage, resetStoryContext, completeFileTransfer, newSession, switchAgentMode, continueStory, standby, openSession, deleteSession, setSessionCwd, sendGuide, consentToolFailureFeedback, finishToolFailureFeedback }
 })
 
 function fmtTokens(n: number): string { return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n) }
+
+function sanitizeToolName(name: string): string { return name.replace(/[^a-zA-Z0-9_.:-]/g, '').slice(0, 80) || 'unknown_tool' }
+function classifyToolError(message: string): string {
+  const text = message.toLowerCase()
+  if (/permission|denied|allowed area/.test(text)) return 'permission_or_sandbox'
+  if (/timeout|timed out/.test(text)) return 'timeout'
+  if (/not found|enoent/.test(text)) return 'not_found'
+  if (/invalid|schema|argument|parse/.test(text)) return 'invalid_arguments'
+  if (/network|connect|dns|http/.test(text)) return 'network_or_upstream'
+  return 'execution_error'
+}
+function summarizeArguments(value: unknown, key = '', depth = 0): unknown {
+  if (depth > 4) return '[max_depth]'
+  if (value === null) return '[null]'
+  if (Array.isArray(value)) return value.slice(0, 12).map(item => summarizeArguments(item, key, depth + 1))
+  if (typeof value === 'object') return Object.fromEntries(Object.entries(value as Record<string, unknown>).slice(0, 30).map(([childKey, child]) => [childKey.replace(/[^a-zA-Z0-9_.:-]/g, '').slice(0, 80) || 'field', summarizeArguments(child, childKey, depth + 1)]))
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') return '[number]'
+  if (typeof value !== 'string') return `[${typeof value}]`
+  const text = value.trim(); const lowerKey = key.toLowerCase()
+  if (/key|token|secret|password|authorization|credential/.test(lowerKey)) return '[redacted_secret]'
+  if (/path|file|dir|cwd|destination|source/.test(lowerKey) || /^(?:\/|[a-z]:\\)/i.test(text)) return `[${/^(?:\/|[a-z]:\\)/i.test(text) ? 'absolute' : 'relative'}_path]`
+  if (/command|cmd|script/.test(lowerKey) || /[\s;&|><]/.test(text)) return { kind: 'command_shape', token_count: text.split(/\s+/).filter(Boolean).length, has_shell_operators: /[;&|><]/.test(text) }
+  if (/^https?:\/\//i.test(text)) return '[url_redacted]'
+  if (/^[a-zA-Z][a-zA-Z0-9_.:-]{0,31}$/.test(text)) return text
+  return `[string length=${text.length}]`
+}
+function sanitizeDiagnosticText(message: string): string {
+  return message.slice(0, 1200).replace(/\b(?:sk-|Bearer\s+)[a-zA-Z0-9._-]{8,}\b/gi, '[redacted_secret]').replace(/https?:\/\/[^\s"']+/gi, '[redacted_url]').replace(/(?:[a-zA-Z]:\\|\/data\/|\/storage\/|\/sdcard\/|\/home\/)[^\s"']+/g, '[redacted_path]').replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, '[redacted_email]').replace(/\b[0-9a-f]{24,}\b/gi, '[redacted_identifier]')
+}
+function buildLocalEvidence(items: ToolDiagnosticTrace[]): string {
+  return ['【程序采集的脱敏证据】', '不含玩家消息、小说正文、原始参数值、文件内容、真实路径、URL、密钥或模型隐藏思维。', ...items.map(item => `#${item.sequence} ${item.tool} | ${item.status}${item.category ? ` | ${item.category}` : ''}${item.elapsedMs !== undefined ? ` | ${item.elapsedMs}ms` : ''}\n参数结构: ${JSON.stringify(item.argumentShape)}${item.errorSummary ? `\n错误摘要: ${item.errorSummary}` : ''}`)].join('\n')
+}
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "悬疑与证据链"
+  short_description: "为角色扮演冒险设计公平线索证据链人物知情范围且不泄露未触发剧情"
+  default_prompt: "Use $mystery-writing to resolve this adventure turn with fair clues while preserving player agency and unreached reveals."

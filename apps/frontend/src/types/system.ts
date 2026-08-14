@@ -88,6 +88,31 @@ export interface FeedbackSubmitResponse {
   feedbackId: string;
 }
 
+export interface ToolFailureTracePayload {
+  sequence: number;
+  tool: string;
+  status: "success" | "error" | "unknown";
+  argumentShape: unknown;
+  elapsedMs?: number;
+  category?: string;
+  errorSummary?: string;
+}
+
+export interface ToolFailureAnalysisRequest {
+  providerId?: string;
+  trace: ToolFailureTracePayload[];
+}
+
+export interface ToolFailureAnalysisResponse {
+  analysis: string;
+  programEvidence: string;
+  failureCount: number;
+  requestId: string;
+  elapsedMs: number;
+  responseCategory: string;
+  redactionVersion: string;
+}
+
 export interface SystemBootstrapResponse {
   globalRoot: string;
   uiPreferences: UIPreferencesResponse;

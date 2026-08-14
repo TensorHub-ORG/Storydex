@@ -60,9 +60,9 @@ android {
         applicationId "com.storydex.android"
         minSdkVersion project.properties.minSdkVersion.toInteger()
         targetSdkVersion storydexTargetSdk
-        // v0.1.2: Storydex Android 剧情创作、项目记忆、时间与上下文系统。
-        versionCode 3
-        versionName "0.1.2"
+        // v0.1.3: Storydex Android onboarding and project usage refinements.
+        versionCode 4
+        versionName "0.1.3"
 
         if (appVersionName) versionName = appVersionName
         validateVersionName(versionName)
@@ -194,7 +194,7 @@ dependencies {
 }
 
 def coomiRustTarget = "aarch64-linux-android"
-def coomiRustRoot = rootProject.file("../../vendor/coomi-rs")
+def coomiRustRoot = rootProject.file("../desktop/coomi-rs-android")
 def coomiWebRoot = rootProject.file("../android-frontend")
 def coomiWebArchive = file("src/main/assets/web.zip")
 def coomiNativeDir = file("src/main/jniLibs/arm64-v8a")

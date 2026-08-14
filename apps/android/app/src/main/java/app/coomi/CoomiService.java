@@ -400,7 +400,9 @@ public class CoomiService extends Service {
                 + "exec >>" + shellQuote(CoomiConstants.ENGINE_LOG_PATH) + " 2>&1; "
                 + "exec " + shellQuote(binary.getAbsolutePath())
                 + " --home " + shellQuote(CoomiConstants.COOMI_CONFIG_DIR)
-                + " --cwd " + shellQuote(home())
+                // Storydex file operations span both home/coomi/inbox and files/stories.
+                // Keep the sandbox inside the app-private files directory while allowing both trees.
+                + " --cwd " + shellQuote(getFilesDir().getAbsolutePath())
                 + " serve --port " + port
                 + " --token " + shellQuote(token)
                 + " --static-dir " + shellQuote(web.getAbsolutePath());

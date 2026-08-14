@@ -14,11 +14,11 @@ def test_repository_manifest_matches_rust_bridge_binary() -> None:
 
 
 def test_reads_workspace_version_from_vendored_manifest() -> None:
-    assert version_service.read_expected_coomi_version() == "2.0.0-storydex.2"
+    assert version_service.read_expected_coomi_version() == "2.1.0-storydex-desktop.1"
 
 
 def test_missing_manifest_and_binary_are_reported(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(version_service, "VENDORED_RUNTIME_ROOT", tmp_path / "missing")
+    monkeypatch.setattr(version_service, "DESKTOP_RUNTIME_ROOT", tmp_path / "missing")
     monkeypatch.setattr(
         version_service,
         "_installed_bridge_identity",
@@ -31,7 +31,7 @@ def test_missing_manifest_and_binary_are_reported(monkeypatch, tmp_path) -> None
 
 
 def test_packaged_runtime_uses_embedded_expected_version(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(version_service, "VENDORED_RUNTIME_ROOT", tmp_path / "missing")
+    monkeypatch.setattr(version_service, "DESKTOP_RUNTIME_ROOT", tmp_path / "missing")
     monkeypatch.setattr(
         version_service,
         "_expected_build_identity",

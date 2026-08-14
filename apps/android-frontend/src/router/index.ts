@@ -11,5 +11,6 @@ export const router = createRouter({
     { path: '/runtime', name: 'runtime', component: () => import('@/views/RuntimeView.vue') },
     { path: '/catalog', name: 'catalog', component: () => import('@/views/CatalogView.vue') },
     { path: '/files', name: 'files', component: () => import('@/views/FileManagerView.vue') },
+    { path: '/feedback', name: 'feedback', component: () => import('@/views/FeedbackView.vue') },
   ],
 })

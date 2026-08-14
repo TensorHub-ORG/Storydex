@@ -153,10 +153,10 @@ def output_limit_observation(
 ) -> dict[str, Any]:
     """Compare the resolved capability limit with observed wire values."""
 
-    config_source = (REPOSITORY_ROOT / "vendor" / "coomi-rs" / "services" / "src" / "config.rs").read_text(
+    config_source = (REPOSITORY_ROOT / "apps" / "desktop" / "coomi-rs-desktop" / "services" / "src" / "config.rs").read_text(
         encoding="utf-8"
     )
-    provider_source = (REPOSITORY_ROOT / "vendor" / "coomi-rs" / "services" / "src" / "provider.rs").read_text(
+    provider_source = (REPOSITORY_ROOT / "apps" / "desktop" / "coomi-rs-desktop" / "services" / "src" / "provider.rs").read_text(
         encoding="utf-8"
     )
     capability_match = re.search(r"max_output_tokens\.unwrap_or\((\d[\d_]*)\)", config_source)
@@ -183,8 +183,8 @@ def output_limit_observation(
         "observedWireMaxOutputTokens": observed_values,
         "mismatch": bool(observed_values) and observed_values != [capability],
         "source": {
-            "capability": "vendor/coomi-rs/services/src/config.rs",
-            "wire": "vendor/coomi-rs/services/src/provider.rs",
+            "capability": "apps/desktop/coomi-rs-desktop/services/src/config.rs",
+            "wire": "apps/desktop/coomi-rs-desktop/services/src/provider.rs",
         },
     }
 
@@ -367,7 +367,13 @@ def run_baseline(args: argparse.Namespace) -> dict[str, Any]:
     bridge = (
         Path(args.bridge).resolve()
         if str(args.bridge or "").strip()
-        else REPOSITORY_ROOT / "vendor" / "coomi-rs" / "target" / "debug" / "storydex-coomi-bridge.exe"
+        else REPOSITORY_ROOT
+        / "apps"
+        / "desktop"
+        / "coomi-rs-desktop"
+        / "target"
+        / "debug"
+        / "storydex-coomi-bridge.exe"
     )
     if not bridge.is_file():
         raise AcceptanceError(f"debug bridge is missing: {bridge}")

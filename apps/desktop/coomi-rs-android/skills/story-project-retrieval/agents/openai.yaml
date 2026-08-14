@@ -1,0 +1,4 @@
+interface:
+  display_name: "故事项目检索"
+  short_description: "为当前冒险回合按需检索角色世界记忆剧本与状态并保留明确来源"
+  default_prompt: "Use $story-project-retrieval to retrieve only the established story and player-state evidence needed for this adventure turn."

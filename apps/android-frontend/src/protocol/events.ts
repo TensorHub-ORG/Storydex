@@ -26,6 +26,11 @@ export interface UsageInfo {
       recent_10_cache_rate: number
       categories: Record<string, number>
     }>>
+    reasoning_efforts?: Partial<Record<'auto' | 'low' | 'medium' | 'high' | 'xhigh', {
+      turns: number
+      average_tokens: number
+      average_duration_ms: number
+    }>>
   }
 }
 

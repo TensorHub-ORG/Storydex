@@ -1,0 +1,4 @@
+interface:
+  display_name: "悬疑与证据链"
+  short_description: "为长篇小说设计公平线索合理误导证据链人物知情范围与揭晓节奏"
+  default_prompt: "Use $mystery-writing to design or audit this novel's mystery with traceable clues, provenance, and controlled reveals."

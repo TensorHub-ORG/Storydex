@@ -8,6 +8,8 @@ import type {
   FeedbackSubmitResponse,
   SystemBootstrapResponse,
   SystemHealthResponse,
+  ToolFailureAnalysisRequest,
+  ToolFailureAnalysisResponse,
   UIPreferencesResponse,
   UIPreferencesUpdateRequest
 } from "@/types/system";
@@ -103,6 +105,20 @@ export async function submitFeedback(
     return unwrapEnvelope(response.data, "Feedback submission failed.");
   } catch (error: unknown) {
     rethrowSystemError(error, "Feedback submission failed.");
+  }
+}
+
+export async function analyzeToolFailures(
+  payload: ToolFailureAnalysisRequest
+): Promise<ApiResult<ToolFailureAnalysisResponse>> {
+  try {
+    const response = await apiClient.post<ApiEnvelope<ToolFailureAnalysisResponse>>(
+      "/sys/feedback/tool-analysis",
+      payload
+    );
+    return unwrapEnvelope(response.data, "Tool failure analysis failed.");
+  } catch (error: unknown) {
+    rethrowSystemError(error, "Tool failure analysis failed.");
   }
 }
 

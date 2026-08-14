@@ -118,6 +118,7 @@ public class CoomiDashboardActivity extends Activity {
         findViewById(R.id.btn_create_story_project).setOnClickListener(v -> showCreateStoryDialog());
         findViewById(R.id.btn_appearance_settings).setOnClickListener(v ->
             startActivity(new Intent(this, CoomiAppearanceActivity.class)));
+        findViewById(R.id.btn_feedback).setOnClickListener(v -> openFeedback());
 
         mOpenChatButton.setOnClickListener(v -> openChat());
         mRestartButton.setOnClickListener(v -> restartEngine());
@@ -467,6 +468,12 @@ public class CoomiDashboardActivity extends Activity {
     private void openRuntime() {
         Intent intent = new Intent(this, com.termux.app.CoomiActivity.class);
         intent.putExtra(com.termux.app.CoomiActivity.EXTRA_ROUTE, "#/runtime");
+        startActivity(intent);
+    }
+
+    private void openFeedback() {
+        Intent intent = new Intent(this, com.termux.app.CoomiActivity.class);
+        intent.putExtra(com.termux.app.CoomiActivity.EXTRA_ROUTE, "#/feedback");
         startActivity(intent);
     }
 

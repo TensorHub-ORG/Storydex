@@ -11,9 +11,9 @@ from typing import Any, AsyncIterator, Dict, Iterable
 
 
 BRIDGE_PROTOCOL_VERSION = 1
-STORYDEX_COOMI_RUNTIME_VERSION = "2.0.0-storydex.2"
+STORYDEX_COOMI_RUNTIME_VERSION = "2.1.0-storydex-desktop.1"
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-VENDORED_RUNTIME_ROOT = REPOSITORY_ROOT / "vendor" / "coomi-rs"
+DESKTOP_RUNTIME_ROOT = REPOSITORY_ROOT / "apps" / "desktop" / "coomi-rs-desktop"
 
 
 def _storydex_coomi_home_path() -> Path:
@@ -81,15 +81,15 @@ def bridge_command() -> list[str]:
         Path(configured) if configured else None,
         Path(__file__).resolve().parents[1] / "runtime" / "storydex-coomi-bridge.exe",
         Path(__file__).resolve().parents[1] / "runtime" / "storydex-coomi-bridge",
-        VENDORED_RUNTIME_ROOT / "target" / "release" / "storydex-coomi-bridge.exe",
-        VENDORED_RUNTIME_ROOT / "target" / "release" / "storydex-coomi-bridge",
-        VENDORED_RUNTIME_ROOT / "target" / "debug" / "storydex-coomi-bridge.exe",
-        VENDORED_RUNTIME_ROOT / "target" / "debug" / "storydex-coomi-bridge",
+        DESKTOP_RUNTIME_ROOT / "target" / "release" / "storydex-coomi-bridge.exe",
+        DESKTOP_RUNTIME_ROOT / "target" / "release" / "storydex-coomi-bridge",
+        DESKTOP_RUNTIME_ROOT / "target" / "debug" / "storydex-coomi-bridge.exe",
+        DESKTOP_RUNTIME_ROOT / "target" / "debug" / "storydex-coomi-bridge",
     ]
     for candidate in candidates:
         if candidate is not None and candidate.is_file():
             return [str(candidate)]
-    manifest = VENDORED_RUNTIME_ROOT / "Cargo.toml"
+    manifest = DESKTOP_RUNTIME_ROOT / "Cargo.toml"
     if manifest.is_file():
         return [
             "cargo",

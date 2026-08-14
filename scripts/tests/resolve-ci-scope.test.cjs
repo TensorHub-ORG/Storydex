@@ -34,10 +34,15 @@ test("Coomi bridge and Rust changes restore runtime and packaging checks", () =>
   assert.equal(bridge.backend, true);
   assert.equal(bridge.coomi, true);
 
-  const rust = classifyChangedPaths(["vendor/coomi-rs/storydex-bridge/src/main.rs"]);
+  const rust = classifyChangedPaths(["apps/desktop/coomi-rs-desktop/storydex-bridge/src/main.rs"]);
   assert.equal(rust.backend, true);
   assert.equal(rust.desktop, true);
   assert.equal(rust.coomi, true);
+
+  const android = classifyChangedPaths(["apps/desktop/coomi-rs-android/ui/src/web.rs"]);
+  assert.equal(android.backend, true);
+  assert.equal(android.desktop, true);
+  assert.equal(android.coomi, true);
 });
 
 test("desktop and documentation changes stay scoped", () => {

@@ -94,7 +94,8 @@ function classifyChangedPaths(inputPaths, options = {}) {
     }
 
     const coomiRuntimePath = (
-      filePath.startsWith("vendor/coomi-rs/")
+      filePath.startsWith("apps/desktop/coomi-rs-desktop/")
+      || filePath.startsWith("apps/desktop/coomi-rs-android/")
       || filePath === "scripts/verify_coomi_runtime.py"
       || filePath === "apps/backend/services/coomi_bridge_client.py"
       || filePath === "apps/backend/services/coomi_version_service.py"
@@ -105,7 +106,7 @@ function classifyChangedPaths(inputPaths, options = {}) {
       scope.backend = true;
       scope.coomi = true;
       matched = true;
-      if (filePath.startsWith("vendor/coomi-rs/") || filePath.startsWith("apps/desktop/")) {
+      if (filePath.startsWith("apps/desktop/")) {
         scope.desktop = true;
       }
     }

@@ -1,0 +1,4 @@
+interface:
+  display_name: "故事项目检索"
+  short_description: "按需检索章节角色世界观设定记忆与大纲并保留项目内来源依据"
+  default_prompt: "Use $story-project-retrieval to retrieve only the project evidence needed for this writing or editorial task."

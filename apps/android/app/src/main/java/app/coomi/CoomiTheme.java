@@ -27,7 +27,7 @@ public final class CoomiTheme {
 
     private CoomiTheme() {}
 
-    /** 当前档位，非法值一律回落到默认的雪纸蓝白。 */
+    /** 当前档位，非法值一律回落到默认的经典蓝白。 */
     @NonNull
     public static String getMode(Context context) {
         SharedPreferences prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE);

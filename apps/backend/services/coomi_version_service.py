@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from services.coomi_bridge_client import (
+    DESKTOP_RUNTIME_ROOT,
     STORYDEX_COOMI_RUNTIME_VERSION,
-    VENDORED_RUNTIME_ROOT,
     bridge_command,
 )
 
@@ -32,7 +32,7 @@ def packaged_build_metadata_path() -> Path:
 
 def read_expected_coomi_version(requirements_path: Path | None = None) -> str:
     del requirements_path
-    manifest = VENDORED_RUNTIME_ROOT / "Cargo.toml"
+    manifest = DESKTOP_RUNTIME_ROOT / "Cargo.toml"
     if not manifest.is_file():
         metadata_path = packaged_build_metadata_path()
         if metadata_path.is_file():
@@ -82,11 +82,11 @@ def _git_bytes(repo_root: Path, arguments: list[str], *, input_bytes: bytes | No
 
 def _repository_source_identity() -> dict[str, str]:
     repo_root = repository_root().resolve()
-    runtime_root = VENDORED_RUNTIME_ROOT.resolve()
+    runtime_root = DESKTOP_RUNTIME_ROOT.resolve()
     try:
         runtime_relative = runtime_root.relative_to(repo_root).as_posix()
     except ValueError as exc:
-        raise RuntimeError(f"vendored runtime is outside repository: {runtime_root}") from exc
+        raise RuntimeError(f"desktop runtime is outside repository: {runtime_root}") from exc
     listed = _git_bytes(
         repo_root,
         [
@@ -130,7 +130,7 @@ def _repository_source_identity() -> dict[str, str]:
 
 
 def _expected_build_identity() -> dict[str, str]:
-    if (VENDORED_RUNTIME_ROOT / "Cargo.toml").is_file():
+    if (DESKTOP_RUNTIME_ROOT / "Cargo.toml").is_file():
         return _repository_source_identity()
     metadata_path = packaged_build_metadata_path()
     if not metadata_path.is_file():

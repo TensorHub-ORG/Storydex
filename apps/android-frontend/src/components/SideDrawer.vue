@@ -204,7 +204,7 @@ function openDashboard() {
           <CoomiIcon name="play" :size="17" /><span>继续故事</span>
         </button>
         <button class="standby" @click="standby">
-          <CoomiIcon name="pause" :size="17" /><span>待机</span>
+          <CoomiIcon name="home" :size="17" /><span>剧情首页</span>
         </button>
       </div>
 
