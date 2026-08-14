@@ -34,6 +34,7 @@ fn build_info() -> Value {
         "version": RUNTIME_VERSION,
         "gitSha": RUNTIME_GIT_SHA,
         "sourceFingerprint": RUNTIME_SOURCE_FINGERPRINT,
+        "protocolVersion": PROTOCOL_VERSION,
     })
 }
 
@@ -1104,6 +1105,14 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_info_exposes_the_public_protocol_version() {
+        let info = build_info();
+
+        assert_eq!(info["runtime"], "storydex-coomi-rs");
+        assert_eq!(info["protocolVersion"], PROTOCOL_VERSION);
+    }
 
     #[test]
     fn bridge_request_accepts_extended_reasoning_efforts() {
