@@ -39,6 +39,7 @@ jobs:
       desktop: ${{ steps.scope.outputs.desktop }}
       android: ${{ steps.scope.outputs.android }}
       coomi: ${{ steps.scope.outputs.coomi }}
+      pc_runtime: ${{ steps.scope.outputs.pc_runtime }}
       docs_only: ${{ steps.scope.outputs.docs_only }}
       changed_count: ${{ steps.scope.outputs.changed_count }}
       reason: ${{ steps.scope.outputs.reason }}
@@ -125,7 +126,7 @@ jobs:
     needs: changes
     if: ${{ inputs.full || needs.changes.outputs.backend == 'true' }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: ${{ inputs.full && 30 || 12 }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(inputs.full && '{"include":[{"os":"ubuntu-latest","python":"3.9","coverage_ratchet":false},{"os":"windows-latest","python":"3.9","coverage_ratchet":false},{"os":"windows-latest","python":"3.13","coverage_ratchet":true}]}' || '{"include":[{"os":"ubuntu-latest","python":"3.13","coverage_ratchet":true}]}') }}
@@ -149,17 +150,13 @@ jobs:
         run: |
           python -m pip install --require-hashes -r requirements.lock
           python -m pip install -r apps/backend/requirements-test.txt
-      - name: Test Storydex desktop Agent runtime
-        if: ${{ inputs.full || needs.changes.outputs.coomi == 'true' }}
-        run: cargo test --manifest-path apps/desktop/agent-runtime/Cargo.toml --locked --workspace
-      - name: Build current-commit Storydex desktop Agent runtime
-        run: cargo build --manifest-path apps/desktop/agent-runtime/Cargo.toml --release --locked -p storydex-coomi-bridge
-      - name: Verify pinned Coomi runtime
-        run: python scripts/verify_coomi_runtime.py
+      - name: Build backend contract runtime
+        run: cargo build --manifest-path apps/desktop/agent-runtime/Cargo.toml --locked -p storydex-coomi-bridge
       - name: Run backend tests with coverage
         working-directory: apps/backend
         run: >-
           python -m pytest -q
+          --timeout=120
           --cov=api --cov=core --cov=services --cov-branch
           --cov-fail-under=0
           --cov-report=term-missing
@@ -182,12 +179,33 @@ jobs:
           path: apps/backend/test-results
           if-no-files-found: warn
 
+  pc-runtime-tests:
+    name: pc-runtime-tests
+    needs: changes
+    if: ${{ inputs.full || needs.changes.outputs.pc_runtime == 'true' }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/agent-runtime -> target
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with: { python-version: "3.13" }
+      - name: Test Storydex PC Agent runtime
+        run: cargo test --manifest-path apps/desktop/agent-runtime/Cargo.toml --locked --workspace
+      - name: Build current-commit Storydex PC Agent runtime
+        run: cargo build --manifest-path apps/desktop/agent-runtime/Cargo.toml --release --locked -p storydex-coomi-bridge
+      - name: Verify pinned Coomi runtime
+        run: python scripts/verify_coomi_runtime.py
+
   backend-compatibility:
     name: backend-compatibility
     needs: changes
     if: ${{ !inputs.full && needs.changes.outputs.backend == 'true' }}
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -208,6 +226,7 @@ jobs:
         working-directory: apps/backend
         run: >-
           python -m pytest -q
+          --timeout=120
           tests/test_agent_stream_responsiveness.py
           tests/test_agent_git_autocommit_service.py
           tests/test_storydex_intent_service.py
@@ -381,6 +400,7 @@ jobs:
       - source-policy
       - backend-tests
       - backend-compatibility
+      - pc-runtime-tests
       - frontend-tests
       - desktop-unit-tests
       - android-tests
@@ -394,6 +414,7 @@ jobs:
           FULL: ${{ inputs.full }}
           PACKAGED_CHECKS: ${{ inputs.run_packaged_checks }}
           BACKEND: ${{ needs.changes.outputs.backend }}
+          PC_RUNTIME: ${{ needs.changes.outputs.pc_runtime }}
           FRONTEND: ${{ needs.changes.outputs.frontend }}
           DESKTOP: ${{ needs.changes.outputs.desktop }}
           ANDROID: ${{ needs.changes.outputs.android }}
@@ -408,6 +429,7 @@ jobs:
           full = os.environ["FULL"].lower() == "true"
           packaged_checks = os.environ["PACKAGED_CHECKS"].lower() == "true"
           backend = os.environ["BACKEND"].lower() == "true"
+          pc_runtime = os.environ["PC_RUNTIME"].lower() == "true"
           frontend = os.environ["FRONTEND"].lower() == "true"
           desktop = os.environ["DESKTOP"].lower() == "true"
           android = os.environ["ANDROID"].lower() == "true"
@@ -415,6 +437,8 @@ jobs:
               required.add("backend-tests")
           if backend and not full:
               required.add("backend-compatibility")
+          if full or pc_runtime:
+              required.add("pc-runtime-tests")
           if full or frontend:
               required.add("frontend-tests")
           if full or desktop:

@@ -18,8 +18,11 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
+use std::time::Instant;
 use uuid::Uuid;
 
 pub const SESSION_SCHEMA_VERSION: u32 = 1;
@@ -173,7 +176,7 @@ impl CompactionCheckpoint {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Session {
     pub id: Uuid,
     pub provider_id: String,
@@ -242,6 +245,154 @@ pub struct SessionSummary {
 #[derive(Clone)]
 pub struct SessionStore {
     directory: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CheckpointPriority {
+    Buffered,
+    Immediate,
+}
+
+pub trait CheckpointSink: Send + Sync {
+    fn checkpoint(&self, session: &Session, priority: CheckpointPriority) -> Result<()>;
+    fn flush(&self) -> Result<()>;
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SessionCheckpointStats {
+    pub requested_checkpoints: u64,
+    pub deduplicated_checkpoints: u64,
+    pub coalesced_checkpoints: u64,
+    pub persisted_writes: u64,
+    pub write_attempts: u64,
+    pub flushes: u64,
+    pub write_elapsed: Duration,
+}
+
+#[derive(Default)]
+struct SessionCheckpointState {
+    last_persisted: Option<Session>,
+    pending: Option<Session>,
+    last_write_at: Option<Instant>,
+    stats: SessionCheckpointStats,
+}
+
+#[derive(Clone)]
+pub struct SessionCheckpointBuffer {
+    store: SessionStore,
+    min_write_interval: Duration,
+    state: Arc<Mutex<SessionCheckpointState>>,
+}
+
+impl SessionCheckpointBuffer {
+    pub fn new(store: SessionStore, min_write_interval: Duration) -> Self {
+        Self {
+            store,
+            min_write_interval,
+            state: Arc::new(Mutex::new(SessionCheckpointState::default())),
+        }
+    }
+
+    pub fn checkpoint(&self, session: &Session) -> Result<()> {
+        self.checkpoint_with_priority(session, CheckpointPriority::Buffered)
+    }
+
+    pub fn checkpoint_immediate(&self, session: &Session) -> Result<()> {
+        self.checkpoint_with_priority(session, CheckpointPriority::Immediate)
+    }
+
+    pub fn flush(&self) -> Result<()> {
+        let mut state = self.lock_state()?;
+        state.stats.flushes = state.stats.flushes.saturating_add(1);
+        let Some(pending) = state.pending.take() else {
+            return Ok(());
+        };
+        self.persist_locked(&mut state, pending)
+    }
+
+    pub fn stats(&self) -> Result<SessionCheckpointStats> {
+        Ok(self.lock_state()?.stats)
+    }
+
+    fn checkpoint_with_priority(
+        &self,
+        session: &Session,
+        priority: CheckpointPriority,
+    ) -> Result<()> {
+        let mut state = self.lock_state()?;
+        state.stats.requested_checkpoints = state.stats.requested_checkpoints.saturating_add(1);
+        if state.last_persisted.as_ref() == Some(session) {
+            state.stats.deduplicated_checkpoints =
+                state.stats.deduplicated_checkpoints.saturating_add(1);
+            return Ok(());
+        }
+
+        let write_is_due = state
+            .last_write_at
+            .is_none_or(|last_write| last_write.elapsed() >= self.min_write_interval);
+        if state.pending.as_ref() == Some(session) {
+            if (priority == CheckpointPriority::Immediate || write_is_due)
+                && let Some(pending) = state.pending.take()
+            {
+                return self.persist_locked(&mut state, pending);
+            }
+            state.stats.deduplicated_checkpoints =
+                state.stats.deduplicated_checkpoints.saturating_add(1);
+            return Ok(());
+        }
+        if priority == CheckpointPriority::Immediate || write_is_due {
+            if state.pending.take().is_some() {
+                state.stats.coalesced_checkpoints =
+                    state.stats.coalesced_checkpoints.saturating_add(1);
+            }
+            return self.persist_locked(&mut state, session.clone());
+        }
+
+        if state.pending.replace(session.clone()).is_some() {
+            state.stats.coalesced_checkpoints = state.stats.coalesced_checkpoints.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    fn persist_locked(&self, state: &mut SessionCheckpointState, session: Session) -> Result<()> {
+        if state.last_persisted.as_ref() == Some(&session) {
+            state.stats.deduplicated_checkpoints =
+                state.stats.deduplicated_checkpoints.saturating_add(1);
+            return Ok(());
+        }
+        state.stats.write_attempts = state.stats.write_attempts.saturating_add(1);
+        let started = Instant::now();
+        let result = self.store.save(&session);
+        state.stats.write_elapsed = state.stats.write_elapsed.saturating_add(started.elapsed());
+        match result {
+            Ok(()) => {
+                state.stats.persisted_writes = state.stats.persisted_writes.saturating_add(1);
+                state.last_write_at = Some(Instant::now());
+                state.last_persisted = Some(session);
+                Ok(())
+            }
+            Err(error) => {
+                state.pending = Some(session);
+                Err(error)
+            }
+        }
+    }
+
+    fn lock_state(&self) -> Result<std::sync::MutexGuard<'_, SessionCheckpointState>> {
+        self.state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session checkpoint buffer lock was poisoned"))
+    }
+}
+
+impl CheckpointSink for SessionCheckpointBuffer {
+    fn checkpoint(&self, session: &Session, priority: CheckpointPriority) -> Result<()> {
+        self.checkpoint_with_priority(session, priority)
+    }
+
+    fn flush(&self) -> Result<()> {
+        SessionCheckpointBuffer::flush(self)
+    }
 }
 
 impl SessionStore {
@@ -526,6 +677,127 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
             .count();
         assert_eq!(temporary_files, 0);
+    }
+
+    #[test]
+    fn checkpoint_buffer_deduplicates_and_coalesces_latest_snapshot() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let store = SessionStore::new(home.path());
+        let buffer = SessionCheckpointBuffer::new(store.clone(), Duration::from_secs(60));
+        let mut session = Session::new("provider", "model", home.path().to_path_buf());
+        session.messages.push(ChatMessage::user("first revision"));
+
+        buffer
+            .checkpoint(&session)
+            .expect("persist first checkpoint");
+        for _ in 0..8 {
+            buffer
+                .checkpoint(&session)
+                .expect("deduplicate identical checkpoint");
+        }
+
+        session.messages[0].content = "second revision".into();
+        buffer.checkpoint(&session).expect("buffer second revision");
+        session.messages[0].content = "latest revision".into();
+        buffer
+            .checkpoint(&session)
+            .expect("coalesce latest revision");
+
+        assert_eq!(
+            store
+                .load(session.id)
+                .expect("load first checkpoint")
+                .messages[0]
+                .content,
+            "first revision"
+        );
+        buffer.flush().expect("flush latest checkpoint");
+
+        let restored = store.load(session.id).expect("load latest checkpoint");
+        assert_eq!(restored.messages[0].content, "latest revision");
+        let stats = buffer.stats().expect("checkpoint stats");
+        assert_eq!(stats.persisted_writes, 2);
+        assert_eq!(stats.write_attempts, 2);
+        assert_eq!(stats.deduplicated_checkpoints, 8);
+        assert_eq!(stats.coalesced_checkpoints, 1);
+    }
+
+    #[test]
+    fn immediate_checkpoint_persists_an_identical_pending_snapshot() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let store = SessionStore::new(home.path());
+        let buffer = SessionCheckpointBuffer::new(store.clone(), Duration::from_secs(60));
+        let mut session = Session::new("provider", "model", home.path().to_path_buf());
+        session.messages.push(ChatMessage::user("persisted"));
+        buffer
+            .checkpoint(&session)
+            .expect("persist first checkpoint");
+
+        session.messages[0].content = "pending".into();
+        buffer.checkpoint(&session).expect("buffer checkpoint");
+        buffer
+            .checkpoint_immediate(&session)
+            .expect("force pending checkpoint to disk");
+
+        assert_eq!(
+            store
+                .load(session.id)
+                .expect("load forced checkpoint")
+                .messages[0]
+                .content,
+            "pending"
+        );
+        assert_eq!(
+            buffer.stats().expect("checkpoint stats").persisted_writes,
+            2
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_checkpoint_write_count_and_elapsed_time_regression() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let store = SessionStore::new(home.path());
+        let buffer = SessionCheckpointBuffer::new(store.clone(), Duration::from_secs(60));
+        let mut session = Session::new("provider", "model", home.path().to_path_buf());
+        session.messages.push(ChatMessage::user("revision 0"));
+        let started = Instant::now();
+
+        buffer
+            .checkpoint(&session)
+            .expect("persist initial checkpoint");
+        for revision in 1..=128 {
+            session.messages[0].content = format!("revision {revision}");
+            buffer
+                .checkpoint(&session)
+                .expect("coalesce checkpoint revision");
+        }
+        buffer.flush().expect("flush checkpoint batch");
+        let elapsed = started.elapsed();
+
+        let stats = buffer.stats().expect("checkpoint stats");
+        assert_eq!(stats.requested_checkpoints, 129);
+        assert_eq!(stats.persisted_writes, 2);
+        assert_eq!(stats.write_attempts, 2);
+        assert_eq!(stats.coalesced_checkpoints, 127);
+        assert!(stats.write_elapsed <= elapsed);
+        assert!(
+            stats.write_elapsed < Duration::from_secs(3),
+            "two Windows checkpoint writes took {:?}",
+            stats.write_elapsed
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "batched Windows checkpoint regression took {elapsed:?}"
+        );
+        assert_eq!(
+            store
+                .load(session.id)
+                .expect("load final revision")
+                .messages[0]
+                .content,
+            "revision 128"
+        );
     }
 
     #[test]
