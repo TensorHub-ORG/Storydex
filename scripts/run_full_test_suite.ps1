@@ -123,7 +123,7 @@ Invoke-Step "Environment preflight" {
   if ($runAndroid) {
     Assert-NpmDependencies $androidFrontend
   }
-  if ($runCoomi) {
+  if ($runCoomi -or $runBackend) {
     Assert-CommandAvailable "cargo"
   }
 }
@@ -157,6 +157,10 @@ if ($runCoomi) {
   Invoke-Step "Build Storydex Coomi desktop runtime" { cargo build --manifest-path (Join-Path $repoRoot "apps/desktop/agent-runtime/Cargo.toml") --release --locked -p storydex-coomi-bridge }
   Invoke-Step "Pinned Coomi runtime" { & $python (Join-Path $repoRoot "scripts/verify_coomi_runtime.py") }
 }
+if ($runBackend -and -not $runCoomi) {
+  Invoke-Step "Build current-commit Storydex Coomi desktop runtime" { cargo build --manifest-path (Join-Path $repoRoot "apps/desktop/agent-runtime/Cargo.toml") --release --locked -p storydex-coomi-bridge }
+  Invoke-Step "Pinned Coomi runtime" { & $python (Join-Path $repoRoot "scripts/verify_coomi_runtime.py") }
+}
 if ($runBackend) {
   Invoke-Step "Python compile" { & $python -m compileall -q (Join-Path $backend "api") (Join-Path $backend "core") (Join-Path $backend "services") }
   Invoke-Step "Backend app import" {
@@ -167,8 +171,7 @@ if ($runBackend) {
     Push-Location $backend
     try {
       New-Item -ItemType Directory -Force -Path "test-results" | Out-Null
-      $coomiMarker = if ($runCoomi) { @() } else { @("-m", "not coomi_runtime") }
-      & $python -m pytest -q @coomiMarker --cov=api --cov=core --cov=services --cov-branch --cov-fail-under=0 --cov-report=term-missing --cov-report=json:test-results/coverage.json --cov-report=xml:test-results/coverage.xml --junitxml=test-results/pytest.xml
+      & $python -m pytest -q --cov=api --cov=core --cov=services --cov-branch --cov-fail-under=0 --cov-report=term-missing --cov-report=json:test-results/coverage.json --cov-report=xml:test-results/coverage.xml --junitxml=test-results/pytest.xml
       $testExitCode = $LASTEXITCODE
       & node (Join-Path $repoRoot "scripts/check_coverage.cjs") --component=backend --report=test-results/coverage.json --mode=$coverageMode --test-exit-code=$testExitCode
     } finally { Pop-Location }

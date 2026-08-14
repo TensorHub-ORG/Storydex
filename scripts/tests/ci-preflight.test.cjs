@@ -107,6 +107,7 @@ test("hook installer is repository local and agent rules require remote success"
 
 test("local Fast suite covers CI policy regressions and runtime commit identity", () => {
   const suite = read("scripts/run_full_test_suite.ps1");
+  const qualityGate = read(".github/workflows/quality-gate.yml");
   assert.match(suite, /resolve-ci-scope\.test\.cjs/);
   assert.match(suite, /ci-preflight\.test\.cjs/);
   assert.match(suite, /STORYDEX_COOMI_GIT_SHA/);
@@ -114,7 +115,11 @@ test("local Fast suite covers CI policy regressions and runtime commit identity"
   assert.match(suite, /\$Mode -eq "Release"\) \{ "release" \} else \{ "advisory" \}/);
   assert.match(suite, /Environment preflight/);
   assert.match(suite, /Assert-NpmDependencies/);
-  assert.match(suite, /not coomi_runtime/);
+  assert.match(suite, /\$runBackend -and -not \$runCoomi/);
+  assert.match(suite, /Build current-commit Storydex Coomi desktop runtime/);
+  assert.doesNotMatch(suite, /not coomi_runtime/);
+  assert.match(qualityGate, /Build current-commit Storydex desktop Agent runtime/);
+  assert.doesNotMatch(qualityGate, /without unchanged Coomi runtime|not coomi_runtime/);
   assert.ok(
     suite.indexOf('Invoke-Step "Environment preflight"') < suite.indexOf('Invoke-Step "Backend tests and coverage"'),
     "dependency preflight must run before the expensive backend suite",
