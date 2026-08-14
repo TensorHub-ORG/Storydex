@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import main as backend_main
 from core import feature_flags
 from services import coomi_agent_service, retrieval_service, story_wiki_service
 from services.coomi_agent_service import (
@@ -28,6 +29,27 @@ from services.storydex_agent_tools import (
 )
 from services.storydex_context_assembler_service import StorydexContextAssemblerService
 from services.trace_history_service import TraceHistoryService
+
+
+def test_runtime_identity_failure_precedes_workspace_side_effects(monkeypatch) -> None:
+    workspace_requested = False
+
+    def fail_if_workspace_requested():
+        nonlocal workspace_requested
+        workspace_requested = True
+        raise AssertionError("workspace bootstrap must not run")
+
+    monkeypatch.setattr(
+        backend_main,
+        "check_coomi_version",
+        lambda: {"ok": False, "warnings": ["runtime mismatch"]},
+    )
+    monkeypatch.setattr(backend_main, "get_project_service", fail_if_workspace_requested)
+
+    with pytest.raises(RuntimeError, match="runtime mismatch"):
+        backend_main.bootstrap_workspace()
+
+    assert workspace_requested is False
 
 
 def test_passive_retrieval_query_planner_uses_natural_topic_and_explains_trigger() -> None:

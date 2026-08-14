@@ -123,7 +123,7 @@ Invoke-Step "Environment preflight" {
   if ($runAndroid) {
     Assert-NpmDependencies $androidFrontend
   }
-  if ($runCoomi -or $runBackend) {
+  if ($runCoomi) {
     Assert-CommandAvailable "cargo"
   }
 }
@@ -155,11 +155,7 @@ if ($runCoomi) {
   Invoke-Step "Rust Coomi desktop workspace tests" { cargo test --manifest-path (Join-Path $repoRoot "apps/desktop/agent-runtime/Cargo.toml") --locked --workspace }
   Invoke-Step "Rust Coomi Android workspace tests" { cargo test --manifest-path (Join-Path $repoRoot "apps/android/agent-runtime/Cargo.toml") --locked --workspace }
   Invoke-Step "Build Storydex Coomi desktop runtime" { cargo build --manifest-path (Join-Path $repoRoot "apps/desktop/agent-runtime/Cargo.toml") --release --locked -p storydex-coomi-bridge }
-  Invoke-Step "Pinned Coomi runtime" { & $python (Join-Path $repoRoot "scripts/verify_coomi_runtime.py") }
-}
-if ($runBackend -and -not $runCoomi) {
-  Invoke-Step "Build current-commit Storydex Coomi desktop runtime" { cargo build --manifest-path (Join-Path $repoRoot "apps/desktop/agent-runtime/Cargo.toml") --release --locked -p storydex-coomi-bridge }
-  Invoke-Step "Pinned Coomi runtime" { & $python (Join-Path $repoRoot "scripts/verify_coomi_runtime.py") }
+  Invoke-Step "Pinned Coomi runtime and backend contract" { & $python (Join-Path $repoRoot "scripts/verify_coomi_runtime.py") }
 }
 if ($runBackend) {
   Invoke-Step "Python compile" { & $python -m compileall -q (Join-Path $backend "api") (Join-Path $backend "core") (Join-Path $backend "services") }
@@ -171,7 +167,7 @@ if ($runBackend) {
     Push-Location $backend
     try {
       New-Item -ItemType Directory -Force -Path "test-results" | Out-Null
-      & $python -m pytest -q --timeout=120 --cov=api --cov=core --cov=services --cov-branch --cov-fail-under=0 --cov-report=term-missing --cov-report=json:test-results/coverage.json --cov-report=xml:test-results/coverage.xml --junitxml=test-results/pytest.xml
+      & $python -m pytest -q -m "not coomi_runtime" --timeout=120 --cov=api --cov=core --cov=services --cov-branch --cov-fail-under=0 --cov-report=term-missing --cov-report=json:test-results/coverage.json --cov-report=xml:test-results/coverage.xml --junitxml=test-results/pytest.xml
       $testExitCode = $LASTEXITCODE
       & node (Join-Path $repoRoot "scripts/check_coverage.cjs") --component=backend --report=test-results/coverage.json --mode=$coverageMode --test-exit-code=$testExitCode
     } finally { Pop-Location }

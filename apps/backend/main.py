@@ -61,6 +61,17 @@ app.include_router(presets_router, prefix="/api/v1")
 
 @app.on_event("startup")
 def bootstrap_workspace() -> None:
+    coomi_status = check_coomi_version()
+    if not coomi_status["ok"]:
+        detail = "; ".join(coomi_status["warnings"])
+        app_logger.critical("Coomi runtime identity check failed: %s", detail)
+        raise RuntimeError(f"Coomi runtime identity check failed: {detail}")
+    app_logger.info(
+        "Coomi runtime identity check passed: %s source=%s",
+        coomi_status["expected"],
+        coomi_status["expectedFingerprint"],
+    )
+
     project = get_project_service().current_project()
     app_logger.info("Workspace bootstrap completed at %s", project["workspaceRoot"])
     try:
@@ -78,16 +89,6 @@ def bootstrap_workspace() -> None:
             app_logger.warning("Marked %s interrupted execution(s) as unfinished", len(reconciled))
     except Exception as exc:
         app_logger.error("Execution reconciliation failed: %s", exc)
-    coomi_status = check_coomi_version()
-    if not coomi_status["ok"]:
-        detail = "; ".join(coomi_status["warnings"])
-        app_logger.critical("Coomi runtime identity check failed: %s", detail)
-        raise RuntimeError(f"Coomi runtime identity check failed: {detail}")
-    app_logger.info(
-        "Coomi runtime identity check passed: %s source=%s",
-        coomi_status["expected"],
-        coomi_status["expectedFingerprint"],
-    )
 
 
 @app.on_event("shutdown")

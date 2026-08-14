@@ -36,6 +36,26 @@ os.environ.update(
 )
 
 
+def _isolated_coomi_status() -> dict[str, object]:
+    from services.coomi_bridge_client import STORYDEX_COOMI_RUNTIME_VERSION
+
+    version = STORYDEX_COOMI_RUNTIME_VERSION
+    return {
+        "ok": True,
+        "expected": version,
+        "expectedGitSha": "test-runtime",
+        "expectedFingerprint": "test-runtime",
+        "metadataVersion": version,
+        "moduleVersion": version,
+        "binaryVersion": version,
+        "binaryGitSha": "test-runtime",
+        "binaryFingerprint": "test-runtime",
+        "executable": "isolated-test-runtime",
+        "runtime": "storydex-coomi-rs",
+        "warnings": [],
+    }
+
+
 @pytest.fixture(autouse=True)
 def isolated_process_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     home = tmp_path / "home"
@@ -49,6 +69,11 @@ def isolated_process_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     monkeypatch.setenv("STORYDEX_GLOBAL_ROOT", str(global_root))
     monkeypatch.setenv("STORYDEX_DISABLE_NETWORK", "1")
     monkeypatch.setenv("STORYDEX_TESTING", "1")
+    import main as backend_main
+    from api import routes_sys
+
+    monkeypatch.setattr(backend_main, "check_coomi_version", _isolated_coomi_status)
+    monkeypatch.setattr(routes_sys, "check_coomi_version", _isolated_coomi_status)
     yield
 
 
