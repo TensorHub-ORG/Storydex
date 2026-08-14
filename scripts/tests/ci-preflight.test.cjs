@@ -64,6 +64,8 @@ test("development branches use lightweight CI while main keeps the remote full g
   assert.match(developmentCi, /dev\/android/);
   assert.match(developmentCi, /Run basic repository checks/);
   assert.match(developmentCi, /Test CI policies/);
+  assert.match(developmentCi, /windows-tests:[\s\S]*?runs-on: windows-latest/);
+  assert.match(developmentCi, /android-tests:[\s\S]*?runs-on: ubuntu-latest/);
   assert.match(developmentCi, /cargo test --manifest-path apps\/desktop\/agent-runtime\/Cargo\.toml/);
   assert.match(developmentCi, /cargo test --manifest-path apps\/android\/agent-runtime\/Cargo\.toml/);
   assert.doesNotMatch(developmentCi, /pytest|coverage|electron-e2e|package:win/);
