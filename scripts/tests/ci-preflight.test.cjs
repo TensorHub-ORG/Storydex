@@ -41,37 +41,32 @@ test("versioned pre-push hook fails closed through the PowerShell guard", () => 
   assert.match(attributes, /^\.githooks\/\* text eol=lf$/m);
 });
 
-test("pre-push certification is clean-tree and commit specific", () => {
+test("pre-push stays lightweight and leaves component suites to GitHub Actions", () => {
   const guard = read("scripts/run_pre_push_ci.ps1");
-  assert.match(guard, /diff", "--quiet"/);
-  assert.match(guard, /diff", "--cached", "--quiet"/);
-  assert.match(guard, /rev-parse HEAD/);
-  assert.match(guard, /storydex-ci-preflight\.json/);
-  assert.match(guard, /headSha -eq \$headSha/);
-  assert.match(guard, /resolve_ci_scope\.cjs/);
+  assert.match(guard, /validate_text_encoding\.cjs/);
+  assert.match(guard, /validate_version_consistency\.cjs/);
+  assert.match(guard, /Conflict markers/);
   assert.match(guard, /merge-base/);
-  assert.match(guard, /baseSha -eq \$baseIdentity/);
-  assert.match(guard, /scope -eq \$scopeKey/);
-  assert.match(guard, /run_full_test_suite\.ps1/);
-  assert.match(guard, /-Mode Fast/);
-  assert.match(guard, /-Scope \$scopeNames\.ToArray\(\)/);
+  assert.match(guard, /diff --check/);
+  assert.match(guard, /Component test suites run in GitHub Actions/);
+  assert.doesNotMatch(guard, /run_full_test_suite|pytest|cargo test|npm test|storydex-ci-preflight/);
 });
 
-test("development branches use lightweight CI while main keeps the full gate", () => {
+test("development branches use lightweight CI while main keeps the remote full gate", () => {
   const guard = read("scripts/run_pre_push_ci.ps1");
   const ci = read(".github/workflows/ci.yml");
   const developmentCi = read(".github/workflows/dev-ci.yml");
-  assert.match(guard, /dev\/\(\?:windows\|android\)/);
-  assert.match(guard, /feature\|fix/);
-  assert.match(guard, /GitHub Development CI is required/);
-  assert.match(guard, /-and -not \$Force/);
+  assert.match(guard, /full local pre-push gate has been retired/);
   assert.match(ci, /pull_request:\s*\n\s*branches: \[main\]/);
   assert.match(ci, /push:\s*\n\s*branches: \[main\]/);
+  assert.match(developmentCi, /dev-flowby/);
   assert.match(developmentCi, /dev\/windows/);
   assert.match(developmentCi, /dev\/android/);
+  assert.match(developmentCi, /Run basic repository checks/);
+  assert.match(developmentCi, /Test CI policies/);
   assert.match(developmentCi, /cargo test --manifest-path apps\/desktop\/agent-runtime\/Cargo\.toml/);
   assert.match(developmentCi, /cargo test --manifest-path apps\/android\/agent-runtime\/Cargo\.toml/);
-  assert.doesNotMatch(developmentCi, /coverage|electron-e2e|package:win/);
+  assert.doesNotMatch(developmentCi, /pytest|coverage|electron-e2e|package:win/);
 });
 
 test("Agent runtimes are owned by their platforms without cross-source dependencies", () => {
@@ -101,6 +96,8 @@ test("hook installer is repository local and agent rules require remote success"
   assert.match(rules, /run_pre_push_ci\.ps1/);
   assert.match(rules, /install_git_hooks\.ps1/);
   assert.match(rules, /--no-verify/);
+  assert.match(rules, /dev-flowby/);
+  assert.match(rules, /不运行 Backend/);
   assert.match(rules, /GitHub Actions/);
   assert.match(rules, /success/);
 });
