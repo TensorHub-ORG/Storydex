@@ -74,6 +74,11 @@ test("desktop packaging exposes reusable prepared stages without weakening relea
 
 test("local Full and Release suites reuse completed build outputs", () => {
   const suite = fs.readFileSync(path.join(projectRoot, "scripts", "run_full_test_suite.ps1"), "utf8");
+  assert.match(
+    suite,
+    /Build Storydex Coomi desktop runtime[\s\S]*scripts\/build-coomi-runtime\.cjs/,
+    "the reusable package stage must refresh build metadata from the current bridge binary"
+  );
   const frontendPackage = JSON.parse(fs.readFileSync(path.join(projectRoot, "apps", "frontend", "package.json"), "utf8"));
   assert.match(frontendPackage.scripts.build, /vue-tsc[\s\S]*vite build/);
   assert.equal(frontendPackage.scripts["build:bundle"], "vite build");

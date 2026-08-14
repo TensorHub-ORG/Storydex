@@ -154,11 +154,11 @@ Invoke-Step "Version consistency" { node (Join-Path $repoRoot "scripts/validate_
 if ($runCoomi) {
   Invoke-Step "Rust Coomi desktop workspace tests" { cargo test --manifest-path (Join-Path $repoRoot "apps/desktop/agent-runtime/Cargo.toml") --locked --workspace }
   Invoke-Step "Rust Coomi Android workspace tests" { cargo test --manifest-path (Join-Path $repoRoot "apps/android/agent-runtime/Cargo.toml") --locked --workspace }
-  Invoke-Step "Build Storydex Coomi desktop runtime" { cargo build --manifest-path (Join-Path $repoRoot "apps/desktop/agent-runtime/Cargo.toml") --release --locked -p storydex-coomi-bridge }
+  Invoke-Step "Build Storydex Coomi desktop runtime" { node (Join-Path $desktop "scripts/build-coomi-runtime.cjs") }
   Invoke-Step "Pinned Coomi runtime" { & $python (Join-Path $repoRoot "scripts/verify_coomi_runtime.py") }
 }
 if ($runBackend -and -not $runCoomi) {
-  Invoke-Step "Build current-commit Storydex Coomi desktop runtime" { cargo build --manifest-path (Join-Path $repoRoot "apps/desktop/agent-runtime/Cargo.toml") --release --locked -p storydex-coomi-bridge }
+  Invoke-Step "Build current-commit Storydex Coomi desktop runtime" { node (Join-Path $desktop "scripts/build-coomi-runtime.cjs") }
   Invoke-Step "Pinned Coomi runtime" { & $python (Join-Path $repoRoot "scripts/verify_coomi_runtime.py") }
 }
 if ($runBackend) {
