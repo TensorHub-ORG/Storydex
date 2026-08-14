@@ -8,7 +8,8 @@ Set-StrictMode -Version Latest
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $suite = Join-Path $repoRoot "scripts/run_full_test_suite.ps1"
-$schemaVersion = 1
+$scopeResolver = Join-Path $repoRoot "scripts/resolve_ci_scope.cjs"
+$schemaVersion = 2
 
 function Invoke-GitQuietCheck([string[]]$Arguments, [string]$DirtyMessage) {
   & git -C $repoRoot @Arguments
@@ -28,6 +29,12 @@ if ($LASTEXITCODE -ne 0) {
 if (-not (Test-Path -LiteralPath $suite -PathType Leaf)) {
   throw "Storydex CI suite is missing: $suite"
 }
+if (-not (Test-Path -LiteralPath $scopeResolver -PathType Leaf)) {
+  throw "Storydex CI scope resolver is missing: $scopeResolver"
+}
+if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+  throw "Storydex pre-push scope resolution requires Node.js"
+}
 
 Invoke-GitQuietCheck -Arguments @("diff", "--quiet", "--ignore-submodules", "--") `
   -DirtyMessage "Tracked working-tree changes must be committed or reverted before CI certification."
@@ -43,13 +50,68 @@ if ($LASTEXITCODE -ne 0 -or -not $markerPath) {
   throw "Unable to resolve the CI certification marker path"
 }
 
+$upstreamSha = [string](& git -C $repoRoot rev-parse --verify --quiet '@{upstream}^{commit}' 2>$null)
+$upstreamExitCode = $LASTEXITCODE
+$baseSha = ""
+if ($upstreamExitCode -eq 0 -and $upstreamSha.Trim() -match "^[0-9a-f]{40}$") {
+  $baseSha = [string](& git -C $repoRoot merge-base $headSha $upstreamSha.Trim())
+  if ($LASTEXITCODE -ne 0 -or $baseSha.Trim() -notmatch "^[0-9a-f]{40}$") {
+    $baseSha = ""
+  } else {
+    $baseSha = $baseSha.Trim()
+  }
+}
+
+$changedFilesPath = [System.IO.Path]::GetTempFileName()
+try {
+  $forceAllScope = -not $baseSha
+  $changedFiles = @()
+  if (-not $forceAllScope) {
+    $changedFiles = @(& git -C $repoRoot diff --name-only --no-renames $baseSha $headSha --)
+    if ($LASTEXITCODE -ne 0) {
+      throw "Unable to resolve changed files between $baseSha and $headSha"
+    }
+  }
+  [System.IO.File]::WriteAllLines(
+    $changedFilesPath,
+    [string[]]$changedFiles,
+    [System.Text.UTF8Encoding]::new($false)
+  )
+  $resolverArguments = @($scopeResolver, "--files-from", $changedFilesPath)
+  if ($forceAllScope) {
+    $resolverArguments += @("--force-all", "true")
+  }
+  $scopeJson = & node @resolverArguments
+  if ($LASTEXITCODE -ne 0 -or -not $scopeJson) {
+    throw "Storydex CI scope resolution failed"
+  }
+  $scope = $scopeJson | ConvertFrom-Json
+} finally {
+  Remove-Item -LiteralPath $changedFilesPath -Force -ErrorAction SilentlyContinue
+}
+
+$scopeNames = [System.Collections.Generic.List[string]]::new()
+foreach ($component in @("backend", "frontend", "desktop", "coomi")) {
+  if ([bool]$scope.$component) {
+    $scopeNames.Add($component)
+  }
+}
+if ($scopeNames.Count -eq 0) {
+  $scopeNames.Add("source")
+}
+$baseIdentity = if ($baseSha) { $baseSha } else { "none" }
+$scopeKey = $scopeNames -join ","
+Write-Host "Storydex pre-push scope: $scopeKey ($($scope.reason), $($scope.changedCount) changed files)" -ForegroundColor Cyan
+
 if (-not $Force -and (Test-Path -LiteralPath $markerPath -PathType Leaf)) {
   try {
     $marker = Get-Content -Raw -LiteralPath $markerPath | ConvertFrom-Json
     if (
       [int]$marker.schemaVersion -eq $schemaVersion -and
       [string]$marker.headSha -eq $headSha -and
-      [string]$marker.mode -eq "Fast"
+      [string]$marker.mode -eq "Fast" -and
+      [string]$marker.baseSha -eq $baseIdentity -and
+      [string]$marker.scope -eq $scopeKey
     ) {
       Write-Host "Storydex pre-push CI already passed for $headSha" -ForegroundColor Green
       exit 0
@@ -60,7 +122,7 @@ if (-not $Force -and (Test-Path -LiteralPath $markerPath -PathType Leaf)) {
 }
 
 Write-Host "Running Storydex pre-push CI for $headSha" -ForegroundColor Cyan
-& $suite -Mode Fast
+& $suite -Mode Fast -Scope $scopeNames.ToArray()
 if ($LASTEXITCODE -ne 0) {
   throw "Storydex Fast test suite failed with exit code $LASTEXITCODE"
 }
@@ -76,6 +138,10 @@ New-Item -ItemType Directory -Force -Path $markerDirectory | Out-Null
   schemaVersion = $schemaVersion
   headSha = $headSha
   mode = "Fast"
+  baseSha = $baseIdentity
+  scope = $scopeKey
+  reason = [string]$scope.reason
+  changedCount = [int]$scope.changedCount
   completedAt = (Get-Date).ToUniversalTime().ToString("o")
 } | ConvertTo-Json | Set-Content -LiteralPath $markerPath -Encoding UTF8
 

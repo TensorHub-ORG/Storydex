@@ -1,7 +1,9 @@
 [CmdletBinding()]
 param(
   [ValidateSet("Fast", "Full", "Release")]
-  [string]$Mode = "Full"
+  [string]$Mode = "Full",
+  [ValidateSet("all", "source", "backend", "frontend", "desktop", "coomi")]
+  [string[]]$Scope = @("all")
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,6 +18,42 @@ $python = if (Test-Path -LiteralPath $bundledPython) { $bundledPython } else { "
 New-Item -ItemType Directory -Force -Path $results | Out-Null
 $timingsPath = Join-Path $results "pipeline-timings.json"
 $stepTimings = [System.Collections.Generic.List[object]]::new()
+
+$selectedScope = [System.Collections.Generic.HashSet[string]]::new(
+  [System.StringComparer]::OrdinalIgnoreCase
+)
+foreach ($component in $Scope) {
+  [void]$selectedScope.Add($component)
+}
+$runAllComponents = $Mode -ne "Fast" -or $selectedScope.Contains("all")
+$runBackend = $runAllComponents -or $selectedScope.Contains("backend")
+$runFrontend = $runAllComponents -or $selectedScope.Contains("frontend")
+$runDesktop = $runAllComponents -or $selectedScope.Contains("desktop")
+$runCoomi = $runAllComponents -or $selectedScope.Contains("coomi")
+
+function Assert-CommandAvailable([string]$Name) {
+  if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
+    throw "Required command is unavailable: $Name"
+  }
+}
+
+function Assert-ExecutableAvailable([string]$Executable) {
+  if (Test-Path -LiteralPath $Executable -PathType Leaf) {
+    return
+  }
+  Assert-CommandAvailable $Executable
+}
+
+function Assert-NpmDependencies([string]$ProjectRoot) {
+  $nodeModules = Join-Path $ProjectRoot "node_modules"
+  if (-not (Test-Path -LiteralPath $nodeModules -PathType Container)) {
+    throw "Node dependencies are missing in $ProjectRoot. Run npm ci in that directory."
+  }
+  & npm --prefix $ProjectRoot ls --depth=0 --include=dev *> $null
+  if ($LASTEXITCODE -ne 0) {
+    throw "Node dependencies are incomplete in $ProjectRoot. Run npm ci in that directory."
+  }
+}
 
 function Invoke-Step([string]$Name, [scriptblock]$Action) {
   Write-Host "`n== $Name ==" -ForegroundColor Cyan
@@ -52,6 +90,38 @@ if ($LASTEXITCODE -ne 0 -or $headSha -notmatch "^[0-9a-f]{40}$") {
 $env:STORYDEX_COOMI_GIT_SHA = $headSha
 $coverageMode = if ($Mode -eq "Release") { "release" } else { "advisory" }
 
+$enabledComponents = [System.Collections.Generic.List[string]]::new()
+if ($runBackend) { $enabledComponents.Add("backend") }
+if ($runFrontend) { $enabledComponents.Add("frontend") }
+if ($runDesktop) { $enabledComponents.Add("desktop") }
+if ($runCoomi) { $enabledComponents.Add("coomi") }
+$scopeLabel = if ($runAllComponents) { "all" } else { $enabledComponents -join "," }
+if (-not $scopeLabel) {
+  $scopeLabel = "source"
+}
+Write-Host "Storydex $Mode scope: $scopeLabel" -ForegroundColor Cyan
+
+Invoke-Step "Environment preflight" {
+  Assert-CommandAvailable "git"
+  Assert-CommandAvailable "node"
+  Assert-ExecutableAvailable $python
+  if ($runBackend) {
+    & $python -c "import pytest, pytest_cov"
+  }
+  if ($runFrontend -or $runDesktop) {
+    Assert-CommandAvailable "npm"
+  }
+  if ($runFrontend) {
+    Assert-NpmDependencies $frontend
+  }
+  if ($runDesktop) {
+    Assert-NpmDependencies $desktop
+  }
+  if ($runCoomi) {
+    Assert-CommandAvailable "cargo"
+  }
+}
+
 Invoke-Step "Encoding policy" { node (Join-Path $repoRoot "scripts/validate_text_encoding.cjs") }
 Invoke-Step "CI policy regressions" {
   node --test `
@@ -75,33 +145,42 @@ Invoke-Step "Conflict markers" {
 }
 $packageVersion = (Get-Content -Raw -LiteralPath (Join-Path $desktop "package.json") | ConvertFrom-Json).version
 Invoke-Step "Version consistency" { node (Join-Path $repoRoot "scripts/validate_version_consistency.cjs") $(if ($Mode -eq "Release") { "--expected=$packageVersion" }) }
-Invoke-Step "Rust Coomi workspace tests" { cargo test --manifest-path (Join-Path $repoRoot "vendor/coomi-rs/Cargo.toml") --locked --workspace }
-Invoke-Step "Build Storydex Coomi runtime" { cargo build --manifest-path (Join-Path $repoRoot "vendor/coomi-rs/Cargo.toml") --release --locked -p storydex-coomi-bridge }
-Invoke-Step "Pinned Coomi runtime" { & $python (Join-Path $repoRoot "scripts/verify_coomi_runtime.py") }
-Invoke-Step "Python compile" { & $python -m compileall -q (Join-Path $backend "api") (Join-Path $backend "core") (Join-Path $backend "services") }
-Invoke-Step "Backend app import" {
-  Push-Location $backend
-  try { & $python -c "import main; assert main.app.title" } finally { Pop-Location }
+if ($runCoomi) {
+  Invoke-Step "Rust Coomi workspace tests" { cargo test --manifest-path (Join-Path $repoRoot "vendor/coomi-rs/Cargo.toml") --locked --workspace }
+  Invoke-Step "Build Storydex Coomi runtime" { cargo build --manifest-path (Join-Path $repoRoot "vendor/coomi-rs/Cargo.toml") --release --locked -p storydex-coomi-bridge }
+  Invoke-Step "Pinned Coomi runtime" { & $python (Join-Path $repoRoot "scripts/verify_coomi_runtime.py") }
 }
-Invoke-Step "Backend tests and coverage" {
-  Push-Location $backend
-  try {
-    New-Item -ItemType Directory -Force -Path "test-results" | Out-Null
-    & $python -m pytest -q --cov=api --cov=core --cov=services --cov-branch --cov-fail-under=0 --cov-report=term-missing --cov-report=json:test-results/coverage.json --cov-report=xml:test-results/coverage.xml --junitxml=test-results/pytest.xml
-    $testExitCode = $LASTEXITCODE
-    & node (Join-Path $repoRoot "scripts/check_coverage.cjs") --component=backend --report=test-results/coverage.json --mode=$coverageMode --test-exit-code=$testExitCode
-  } finally { Pop-Location }
+if ($runBackend) {
+  Invoke-Step "Python compile" { & $python -m compileall -q (Join-Path $backend "api") (Join-Path $backend "core") (Join-Path $backend "services") }
+  Invoke-Step "Backend app import" {
+    Push-Location $backend
+    try { & $python -c "import main; assert main.app.title" } finally { Pop-Location }
+  }
+  Invoke-Step "Backend tests and coverage" {
+    Push-Location $backend
+    try {
+      New-Item -ItemType Directory -Force -Path "test-results" | Out-Null
+      $coomiMarker = if ($runCoomi) { @() } else { @("-m", "not coomi_runtime") }
+      & $python -m pytest -q @coomiMarker --cov=api --cov=core --cov=services --cov-branch --cov-fail-under=0 --cov-report=term-missing --cov-report=json:test-results/coverage.json --cov-report=xml:test-results/coverage.xml --junitxml=test-results/pytest.xml
+      $testExitCode = $LASTEXITCODE
+      & node (Join-Path $repoRoot "scripts/check_coverage.cjs") --component=backend --report=test-results/coverage.json --mode=$coverageMode --test-exit-code=$testExitCode
+    } finally { Pop-Location }
+  }
 }
-Invoke-Step "Frontend type check" { npm --prefix $frontend run type-check }
-Invoke-Step "Frontend Vitest coverage" { npm --prefix $frontend run test:coverage }
-Invoke-Step "Frontend coverage ratchet" {
-  $frontendCoverageReport = Join-Path $frontend "test-results/coverage/coverage-summary.json"
-  & node (Join-Path $repoRoot "scripts/check_coverage.cjs") --component=frontend "--report=$frontendCoverageReport" --mode=$coverageMode
+if ($runFrontend) {
+  Invoke-Step "Frontend type check" { npm --prefix $frontend run type-check }
+  Invoke-Step "Frontend Vitest coverage" { npm --prefix $frontend run test:coverage }
+  Invoke-Step "Frontend coverage ratchet" {
+    $frontendCoverageReport = Join-Path $frontend "test-results/coverage/coverage-summary.json"
+    & node (Join-Path $repoRoot "scripts/check_coverage.cjs") --component=frontend "--report=$frontendCoverageReport" --mode=$coverageMode
+  }
+  Invoke-Step "Frontend production build" { npm --prefix $frontend run build:bundle }
+  Invoke-Step "Frontend Node regressions" { npm --prefix $frontend run test:regressions }
 }
-Invoke-Step "Frontend production build" { npm --prefix $frontend run build:bundle }
-Invoke-Step "Frontend Node regressions" { npm --prefix $frontend run test:regressions }
-Invoke-Step "Desktop unit tests" { npm --prefix $desktop run test:unit }
-Invoke-Step "Desktop release configuration" { npm --prefix $desktop run check:release }
+if ($runDesktop) {
+  Invoke-Step "Desktop unit tests" { npm --prefix $desktop run test:unit }
+  Invoke-Step "Desktop release configuration" { npm --prefix $desktop run check:release }
+}
 
 if ($Mode -eq "Full") {
   Invoke-Step "Prepare desktop package assets" { npm --prefix $desktop run prepare:package:assets }

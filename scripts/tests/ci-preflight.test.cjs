@@ -30,8 +30,13 @@ test("pre-push certification is clean-tree and commit specific", () => {
   assert.match(guard, /rev-parse HEAD/);
   assert.match(guard, /storydex-ci-preflight\.json/);
   assert.match(guard, /headSha -eq \$headSha/);
+  assert.match(guard, /resolve_ci_scope\.cjs/);
+  assert.match(guard, /merge-base/);
+  assert.match(guard, /baseSha -eq \$baseIdentity/);
+  assert.match(guard, /scope -eq \$scopeKey/);
   assert.match(guard, /run_full_test_suite\.ps1/);
   assert.match(guard, /-Mode Fast/);
+  assert.match(guard, /-Scope \$scopeNames\.ToArray\(\)/);
 });
 
 test("hook installer is repository local and agent rules require remote success", () => {
@@ -53,4 +58,11 @@ test("local Fast suite covers CI policy regressions and runtime commit identity"
   assert.match(suite, /STORYDEX_COOMI_GIT_SHA/);
   assert.match(suite, /import main; assert main\.app\.title/);
   assert.match(suite, /\$Mode -eq "Release"\) \{ "release" \} else \{ "advisory" \}/);
+  assert.match(suite, /Environment preflight/);
+  assert.match(suite, /Assert-NpmDependencies/);
+  assert.match(suite, /not coomi_runtime/);
+  assert.ok(
+    suite.indexOf('Invoke-Step "Environment preflight"') < suite.indexOf('Invoke-Step "Backend tests and coverage"'),
+    "dependency preflight must run before the expensive backend suite",
+  );
 });

@@ -293,6 +293,8 @@ def test_task_planning_phase_is_emitted_before_planner_completes(monkeypatch, tm
 
 
 def test_cold_intent_workers_are_isolated_and_do_not_queue_behind_each_other(monkeypatch):
+    workers_started = threading.Barrier(2)
+
     class BlockingIntentService:
         active = 0
         max_active = 0
@@ -301,7 +303,7 @@ def test_cold_intent_workers_are_isolated_and_do_not_queue_behind_each_other(mon
             self.active += 1
             self.max_active = max(self.max_active, self.active)
             try:
-                time.sleep(0.03)
+                workers_started.wait(timeout=1.0)
                 return {"primary": "general"}
             finally:
                 self.active -= 1
@@ -315,12 +317,9 @@ def test_cold_intent_workers_are_isolated_and_do_not_queue_behind_each_other(mon
             routes_agent._classify_intent_without_blocking_event_loop(prompt="two"),
         )
 
-    started = time.perf_counter()
     results = asyncio.run(run_both())
-    elapsed = time.perf_counter() - started
     assert [item["primary"] for item in results] == ["general", "general"]
     assert service.max_active == 2
-    assert elapsed < 0.055
 
 
 def test_slow_task_planning_runs_in_background_without_blocking_agent_start(monkeypatch, tmp_path):
