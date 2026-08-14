@@ -4,7 +4,7 @@
       <header class="feedback-head">
         <div>
           <h2 id="feedback-title">{{ source === "error" ? "反馈报错" : "提交反馈" }}</h2>
-          <p>不会上传对话正文、小说内容、API Key 或项目文件。</p>
+          <p>提交内容包括你填写的描述、联系方式、所选截图，以及脱敏后的错误日志和基础诊断；不会自动附加对话正文、小说内容、API Key 或项目文件。</p>
         </div>
         <button type="button" title="关闭" aria-label="关闭" @click="emit('close')">
           <span class="material-symbols-rounded">close</span>
@@ -91,6 +91,7 @@ watch(() => props.open, (open) => {
   if (!open) return;
   category.value = props.source === "error" ? "bug" : "suggestion";
   description.value = props.source === "error" ? props.errorMessage.slice(0, 1000) : "";
+  contact.value = "";
   images.value = [];
   statusMessage.value = "";
 });

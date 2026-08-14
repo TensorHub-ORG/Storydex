@@ -20,7 +20,7 @@ from core.config import get_settings
 from services.global_config_service import get_global_config_service
 from services.project_service import get_project_service
 from services.coomi_version_service import check_coomi_version
-from services.tool_failure_feedback_service import analyze_tool_failures
+from services.tool_failure_feedback_service import analyze_tool_failures, sanitize_diagnostic_text
 
 router = APIRouter(tags=["sys"])
 
@@ -98,7 +98,7 @@ def _sanitize_feedback_value(value, *, depth: int = 0):
     if isinstance(value, list):
         return [_sanitize_feedback_value(item, depth=depth + 1) for item in value[:50]]
     if isinstance(value, str):
-        return value[:4000]
+        return sanitize_diagnostic_text(value, 4000)
     if isinstance(value, (bool, int, float)) or value is None:
         return value
     return str(value)[:4000]
@@ -160,7 +160,7 @@ async def submit_feedback(request: FeedbackSubmitRequest) -> ApiEnvelope:
         "description": request.description,
         "contact": request.contact,
         "error": {
-            "message": request.error_message,
+            "message": sanitize_diagnostic_text(request.error_message, 5000),
             "type": request.error_type,
             "details": _sanitize_feedback_value(request.error_details),
         } if request.source == "error" else None,

@@ -66,7 +66,20 @@ describe("FeedbackDialog", () => {
     });
 
     expect(wrapper.find("textarea").element.value).toBe("provider request failed");
-    expect(wrapper.text()).toContain("不会上传对话正文、小说内容、API Key 或项目文件");
+    expect(wrapper.text()).toContain("不会自动附加对话正文、小说内容、API Key 或项目文件");
+  });
+
+  it("clears a previous contact when reopened", async () => {
+    const wrapper = mount(FeedbackDialog, { props: { open: true, source: "settings" } });
+    const contact = wrapper.find<HTMLInputElement>('input[placeholder="邮箱或其他联系方式"]');
+    await contact.setValue("author@example.com");
+
+    await wrapper.setProps({ open: false });
+    await wrapper.setProps({ open: true });
+
+    expect(
+      wrapper.find<HTMLInputElement>('input[placeholder="邮箱或其他联系方式"]').element.value
+    ).toBe("");
   });
 
   it("rejects images larger than five megabytes before upload", async () => {

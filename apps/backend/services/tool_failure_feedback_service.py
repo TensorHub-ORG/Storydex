@@ -27,6 +27,11 @@ _ANALYSIS_PROMPT = """你是 Storydex 的本地故障分析器。输入仅包含
 _SECRET_KEY = re.compile(r"key|token|secret|password|authorization|credential", re.I)
 _SAFE_IDENTIFIER = re.compile(r"[^0-9A-Za-z_.:-]+")
 _SECRET_VALUE = re.compile(r"\b(?:sk-|Bearer\s+)[0-9A-Za-z._-]{8,}\b", re.I)
+_LABELED_SECRET = re.compile(
+    r"\b(api[_-]?key|authorization|access[_-]?token|token|secret|password|credential)"
+    r"(\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+    re.I,
+)
 _URL = re.compile(r"https?://[^\s\"']+", re.I)
 _WINDOWS_PATH = re.compile(r"\b[A-Za-z]:\\[^\s\"']+")
 _UNIX_PATH = re.compile(r"/(?:home|Users|data|storage|sdcard|tmp|var|mnt)/[^\s\"']+", re.I)
@@ -42,6 +47,10 @@ def _identifier(value: Any, limit: int = 80) -> str:
 def sanitize_diagnostic_text(value: Any, limit: int = 600) -> str:
     text = str(value or "")[: max(limit * 2, limit)]
     text = _SECRET_VALUE.sub("[redacted_secret]", text)
+    text = _LABELED_SECRET.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}[redacted_secret]",
+        text,
+    )
     text = _URL.sub("[redacted_url]", text)
     text = _WINDOWS_PATH.sub("[redacted_path]", text)
     text = _UNIX_PATH.sub("[redacted_path]", text)

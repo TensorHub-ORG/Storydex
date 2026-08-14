@@ -22,8 +22,9 @@ def test_feedback_forwards_sanitized_diagnostics_and_image(monkeypatch) -> None:
     response = asyncio.run(routes_sys.submit_feedback(routes_sys.FeedbackSubmitRequest(**{
             "source": "error",
             "category": "stability",
-            "description": "The agent stopped before persisting the chapter.",
-            "errorMessage": "permission denied",
+            "description": "The agent stopped before persisting the chapter at https://user-provided.example.",
+            "contact": "author@example.com",
+            "errorMessage": "permission denied at C:\\Users\\author\\chapter.md via https://private.invalid using sk-verysecret123 api_key=plain-secret",
             "errorType": "SessionPersistenceError",
             "errorDetails": {
                 "operation": "checkpoint",
@@ -34,10 +35,12 @@ def test_feedback_forwards_sanitized_diagnostics_and_image(monkeypatch) -> None:
                     "requestBody": "private provider payload",
                     "safe": True,
                 },
+                "message": "notify author@example.com about C:\\Users\\author\\chapter.md",
             },
             "diagnostics": {
                 "storydexVersion": "2.0.3",
                 "traceId": "trace-1",
+                "runtime": "request failed at https://private.invalid/runtime",
                 "authorization": "secret",
                 "unknown": "not allowlisted",
             },
@@ -50,11 +53,22 @@ def test_feedback_forwards_sanitized_diagnostics_and_image(monkeypatch) -> None:
 
     assert response.data["feedbackId"] == "feedback-123"
     assert captured["platform"] == "windows"
-    assert captured["diagnostics"] == {"storydexVersion": "2.0.3", "traceId": "trace-1"}
+    assert captured["description"] == "The agent stopped before persisting the chapter at https://user-provided.example."
+    assert captured["contact"] == "author@example.com"
+    assert captured["error"]["message"] == (
+        "permission denied at [redacted_path] via [redacted_url] "
+        "using [redacted_secret] api_key=[redacted_secret]"
+    )
+    assert captured["diagnostics"] == {
+        "storydexVersion": "2.0.3",
+        "traceId": "trace-1",
+        "runtime": "request failed at [redacted_url]",
+    }
     assert "apiKey" not in captured["error"]["details"]
     assert "rawPrompt" not in captured["error"]["details"]
     assert "prompt" not in captured["error"]["details"]["nested"]
     assert "requestBody" not in captured["error"]["details"]["nested"]
+    assert captured["error"]["details"]["message"] == "notify [redacted_email] about [redacted_path]"
     assert captured["images"][0]["dataBase64"] == image
     assert captured["privacy"] == {"conversationIncluded": False, "projectFilesIncluded": False}
 
