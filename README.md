@@ -26,7 +26,7 @@
 </table>
 
 <p align="center">
-  <img alt="release" src="https://img.shields.io/badge/release-v2.0.4-2563eb?style=flat-square" />
+  <img alt="release" src="https://img.shields.io/badge/release-v2.0.5-2563eb?style=flat-square" />
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0%20%2B%20Commons%20Clause-0f766e?style=flat-square" />
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-f97316?style=flat-square" />
   <img alt="desktop" src="https://img.shields.io/badge/desktop-Electron%2040-47848f?style=flat-square&logo=electron&logoColor=white" />
@@ -122,6 +122,16 @@ Windows 与 Android 分别在 `dev/windows`、`dev/android` 进行轻量开发�
 ## 作者与版权
 
 Copyright 2026 Septemc and Flowby.
+
+## v2.0.5
+
+v2.0.5 完成 Windows 桌面 Agent 架构重构，并集中提升长篇小说创作任务中的调用稳定性、过程反馈和隐私保护。
+
+- 桌面 Agent 迁移到 `apps/desktop/agent-runtime`，与 Android 运行时彻底分离，使用面向小说创作者工作台的独立提示词、技能目录和 JSONL bridge。
+- 对齐 Coomi 优化后的 Provider 执行逻辑，增强流式响应、连接恢复、重试退避、usage 统计和工具调用链路的稳定性。
+- 补齐 Agent 接受、上下文装配、模型等待、工具执行、完成与异常阶段的可观察反馈，并新增可审阅的工具失败反馈入口。
+- 强化桌面反馈隐私保护，提交前过滤敏感配置、鉴权信息、本地路径和不应离开设备的诊断内容。
+- 优化 Windows 开发分支 CI 与运行时构建校验，确保后端测试使用当前提交对应的 Rust Agent，降低跨平台迭代耦合。
 
 ## v2.0.4
 

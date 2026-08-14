@@ -1,5 +1,5 @@
 (() => {
-  const WINDOWS_URL = 'https://updates.septemc.com/storydex/windows/StorydexSetup-x64-2.0.4.exe'
+  const WINDOWS_URL = 'https://updates.septemc.com/storydex/windows/StorydexSetup-x64-2.0.5.exe'
   const ANDROID_URL = 'https://updates.septemc.com/storydex/android/Storydex-Android-arm64-v0.1.2.apk'
   const ANDROID_STATS_URL = '/api/stats/download-android'
   const GITHUB_URL = 'https://github.com/TensorHub-ORG/Storydex'
