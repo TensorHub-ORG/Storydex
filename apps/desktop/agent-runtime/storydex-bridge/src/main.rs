@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use coomi_engine::{
     Agent, AgentEvent, AgentObserver, ApprovalHandler, ChatMessage, ModelProvider, ModelRequest,
-    ReasoningEffort, Role, SESSION_SCHEMA_VERSION, Session, SessionStore, ToolCall, ToolResult,
-    ToolRuntime, ToolSpec, UserInputRequest, UserInputResponse,
+    ReasoningEffort, Role, SESSION_SCHEMA_VERSION, Session, SessionCheckpointBuffer, SessionStore,
+    ToolCall, ToolResult, ToolRuntime, ToolSpec, UserInputRequest, UserInputResponse,
 };
 use coomi_security::{AccessMode, HookRunner, SecurityPolicy};
 use coomi_services::{
@@ -18,7 +18,7 @@ use std::io::{BufRead, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{Notify, oneshot};
 use uuid::Uuid;
 
@@ -26,6 +26,7 @@ const PROTOCOL_VERSION: u32 = 1;
 const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
 const RUNTIME_GIT_SHA: &str = env!("STORYDEX_COOMI_GIT_SHA");
 const RUNTIME_SOURCE_FINGERPRINT: &str = env!("STORYDEX_COOMI_SOURCE_FINGERPRINT");
+const CHECKPOINT_MIN_WRITE_INTERVAL: Duration = Duration::from_millis(100);
 
 fn build_info() -> Value {
     json!({
@@ -599,12 +600,12 @@ fn resolve_provider(
 }
 
 fn save_session_after_run(
-    store: &SessionStore,
+    checkpoint_buffer: &SessionCheckpointBuffer,
     session: &mut Session,
     outcome: Result<bool, coomi_engine::AgentError>,
 ) -> Result<bool> {
     session.touch();
-    let save_result = store.save(session);
+    let save_result = checkpoint_buffer.checkpoint_immediate(session);
     match (outcome, save_result) {
         (Ok(cancelled), Ok(())) => Ok(cancelled),
         (Ok(_), Err(save_error)) => Err(save_error),
@@ -831,10 +832,11 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
     let provider_started = Instant::now();
     let provider = HttpModelProvider::new(provider_config)?;
     let provider_init_ms = provider_started.elapsed().as_secs_f64() * 1000.0;
-    let checkpoint_store = store.clone();
+    let checkpoint_buffer =
+        SessionCheckpointBuffer::new(store.clone(), CHECKPOINT_MIN_WRITE_INTERVAL);
     let agent = Agent::new(system_prompt)
         .with_reasoning_effort(request.reasoning_effort)
-        .with_compaction_checkpoint_writer(move |session| checkpoint_store.save(session));
+        .with_checkpoint_sink(checkpoint_buffer.clone());
     emitter.event(
         "runtime_initialized",
         json!({
@@ -883,7 +885,22 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
             }
         }
     };
-    let cancelled = save_session_after_run(&store, &mut session, run_outcome)?;
+    let cancelled = save_session_after_run(&checkpoint_buffer, &mut session, run_outcome)?;
+    let checkpoint_stats = checkpoint_buffer.stats()?;
+    emitter.event(
+        "session_checkpoint_stats",
+        json!({
+            "runtimeSessionId": session.id,
+            "requested": checkpoint_stats.requested_checkpoints,
+            "deduplicated": checkpoint_stats.deduplicated_checkpoints,
+            "coalesced": checkpoint_stats.coalesced_checkpoints,
+            "persistedWrites": checkpoint_stats.persisted_writes,
+            "writeAttempts": checkpoint_stats.write_attempts,
+            "flushes": checkpoint_stats.flushes,
+            "writeElapsedMs": checkpoint_stats.write_elapsed.as_secs_f64() * 1000.0,
+            "minWriteIntervalMs": CHECKPOINT_MIN_WRITE_INTERVAL.as_millis(),
+        }),
+    );
     if cancelled {
         emitter.event(
             "cancelled",
@@ -1204,9 +1221,11 @@ mod tests {
         session
             .messages
             .push(ChatMessage::tool("call-probe", "success: probe contents"));
+        let checkpoint_buffer =
+            SessionCheckpointBuffer::new(store.clone(), CHECKPOINT_MIN_WRITE_INTERVAL);
 
         let error = save_session_after_run(
-            &store,
+            &checkpoint_buffer,
             &mut session,
             Err(coomi_engine::AgentError::Provider(anyhow::anyhow!(
                 "provider returned HTTP 402 Payment Required"

@@ -2,6 +2,8 @@ use crate::AgentEvent;
 use crate::AgentObserver;
 use crate::ApprovalHandler;
 use crate::ChatMessage;
+use crate::CheckpointPriority;
+use crate::CheckpointSink;
 use crate::CompactionCheckpoint;
 use crate::CompactionRequest;
 use crate::InputQueue;
@@ -51,7 +53,23 @@ pub struct Agent {
     force_compaction: bool,
     input_queue: Option<Arc<InputQueue>>,
     reasoning_effort: ReasoningEffort,
-    compaction_checkpoint_writer: Option<Arc<dyn Fn(&Session) -> anyhow::Result<()> + Send + Sync>>,
+    checkpoint_sink: Option<Arc<dyn CheckpointSink>>,
+}
+
+type CheckpointWriterFn = dyn Fn(&Session) -> anyhow::Result<()> + Send + Sync;
+
+struct CallbackCheckpointSink {
+    writer: Arc<CheckpointWriterFn>,
+}
+
+impl CheckpointSink for CallbackCheckpointSink {
+    fn checkpoint(&self, session: &Session, _priority: CheckpointPriority) -> anyhow::Result<()> {
+        (self.writer)(session)
+    }
+
+    fn flush(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 impl Agent {
@@ -65,7 +83,7 @@ impl Agent {
             force_compaction: false,
             input_queue: None,
             reasoning_effort: ReasoningEffort::Auto,
-            compaction_checkpoint_writer: None,
+            checkpoint_sink: None,
         }
     }
 
@@ -93,7 +111,17 @@ impl Agent {
     where
         F: Fn(&Session) -> anyhow::Result<()> + Send + Sync + 'static,
     {
-        self.compaction_checkpoint_writer = Some(Arc::new(writer));
+        self.checkpoint_sink = Some(Arc::new(CallbackCheckpointSink {
+            writer: Arc::new(writer),
+        }));
+        self
+    }
+
+    pub fn with_checkpoint_sink<S>(mut self, sink: S) -> Self
+    where
+        S: CheckpointSink + 'static,
+    {
+        self.checkpoint_sink = Some(Arc::new(sink));
         self
     }
 
@@ -138,9 +166,21 @@ impl Agent {
         .await
     }
 
-    fn run_checkpoint(&self, session: &Session) -> Result<(), AgentError> {
-        if let Some(writer) = &self.compaction_checkpoint_writer {
-            writer(session).map_err(AgentError::Checkpoint)?;
+    fn run_checkpoint(
+        &self,
+        session: &Session,
+        priority: CheckpointPriority,
+    ) -> Result<(), AgentError> {
+        if let Some(sink) = &self.checkpoint_sink {
+            sink.checkpoint(session, priority)
+                .map_err(AgentError::Checkpoint)?;
+        }
+        Ok(())
+    }
+
+    fn flush_checkpoints(&self) -> Result<(), AgentError> {
+        if let Some(sink) = &self.checkpoint_sink {
+            sink.flush().map_err(AgentError::Checkpoint)?;
         }
         Ok(())
     }
@@ -200,7 +240,8 @@ impl Agent {
         self.compact(session, provider, &tool_specs, observer, false)
             .await?;
         session.touch();
-        self.run_checkpoint(session)?;
+        self.run_checkpoint(session, CheckpointPriority::Buffered)?;
+        self.flush_checkpoints()?;
         Ok(())
     }
 
@@ -284,7 +325,7 @@ impl Agent {
             session.messages.push(ChatMessage::internal_user(context));
         }
         session.messages.push(prompt);
-        self.run_checkpoint(session)?;
+        self.run_checkpoint(session, CheckpointPriority::Immediate)?;
         let capabilities = provider.capabilities();
         let tool_specs = if capabilities.supports_native_tools {
             tools.specs()
@@ -312,10 +353,11 @@ impl Agent {
                     !(self.force_compaction && round == 1),
                 )
                 .await?;
-                self.run_checkpoint(session)?;
             } else {
                 session.messages = normalized;
             }
+
+            self.flush_checkpoints()?;
 
             observer.on_event(&AgentEvent::ModelStarted {
                 provider: provider.provider_id().to_string(),
@@ -369,17 +411,19 @@ impl Agent {
             observer.on_event(&AgentEvent::ContextUpdated(
                 session.context.status(&capabilities),
             ));
-            self.run_checkpoint(session)?;
-
             if response.tool_calls.is_empty() {
                 if self.accept_queued_input(session, observer) {
+                    self.run_checkpoint(session, CheckpointPriority::Buffered)?;
                     continue;
                 }
                 session.touch();
-                self.run_checkpoint(session)?;
+                self.run_checkpoint(session, CheckpointPriority::Buffered)?;
+                self.flush_checkpoints()?;
                 observer.on_event(&AgentEvent::TurnCompleted(session.usage.clone()));
                 return Ok(response.content);
             }
+
+            self.run_checkpoint(session, CheckpointPriority::Immediate)?;
 
             for call in response.tool_calls {
                 observer.on_event(&AgentEvent::ToolStarted(call.clone()));
@@ -406,11 +450,12 @@ impl Agent {
                 {
                     session.messages.push(ChatMessage::internal_user(context));
                 }
-                self.run_checkpoint(session)?;
+                self.run_checkpoint(session, CheckpointPriority::Buffered)?;
             }
             if self.accept_queued_input(session, observer) {
-                self.run_checkpoint(session)?;
+                self.run_checkpoint(session, CheckpointPriority::Buffered)?;
             }
+            self.flush_checkpoints()?;
         }
 
         session.touch();
@@ -421,7 +466,7 @@ impl Agent {
         session
             .messages
             .push(ChatMessage::assistant(message.clone(), Vec::new()));
-        self.run_checkpoint(session)?;
+        self.run_checkpoint(session, CheckpointPriority::Immediate)?;
         observer.on_event(&AgentEvent::Text(message.clone()));
         observer.on_event(&AgentEvent::TurnCompleted(session.usage.clone()));
         Ok(message)
@@ -445,8 +490,9 @@ impl Agent {
         let tool_call_count = checkpoint.tool_calls.len();
         let evidence_revision_count = checkpoint.evidence_revisions.len();
         session.compaction_checkpoint = Some(checkpoint);
-        if let Some(writer) = &self.compaction_checkpoint_writer {
-            writer(session).map_err(AgentError::Compaction)?;
+        if let Some(sink) = &self.checkpoint_sink {
+            sink.checkpoint(session, CheckpointPriority::Immediate)
+                .map_err(AgentError::Compaction)?;
         }
         observer.on_event(&AgentEvent::CompactionStarted {
             automatic,
@@ -521,7 +567,7 @@ impl Agent {
             after_tokens: status.used_tokens,
         });
         observer.on_event(&AgentEvent::ContextUpdated(status));
-        self.run_checkpoint(session)?;
+        self.run_checkpoint(session, CheckpointPriority::Buffered)?;
         Ok(())
     }
 
