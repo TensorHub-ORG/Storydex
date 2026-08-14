@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
@@ -76,13 +77,25 @@ test("Agent runtimes are owned by their platforms without cross-source dependenc
   const androidRoot = "apps/android/agent-runtime";
   assert.ok(fs.existsSync(path.join(root, desktopRoot, "Cargo.toml")));
   assert.ok(fs.existsSync(path.join(root, androidRoot, "Cargo.toml")));
-  assert.equal(fs.existsSync(path.join(root, "apps/desktop/coomi-rs-desktop")), false);
-  assert.equal(fs.existsSync(path.join(root, "apps/desktop/coomi-rs-android")), false);
+  const legacySources = execFileSync(
+    "git",
+    ["ls-files", "--", "apps/desktop/coomi-rs-desktop", "apps/desktop/coomi-rs-android"],
+    { cwd: root, encoding: "utf8" },
+  ).trim();
+  assert.equal(legacySources, "");
 
   const desktopSources = readSourceTree(desktopRoot);
   const androidSources = readSourceTree(androidRoot);
   assert.doesNotMatch(desktopSources, /apps[\\/]android[\\/]agent-runtime/);
   assert.doesNotMatch(androidSources, /apps[\\/]desktop[\\/]agent-runtime/);
+
+  const desktopUiMain = read(`${desktopRoot}/ui/src/main.rs`);
+  const androidUiMain = read(`${androidRoot}/ui/src/main.rs`);
+  assert.equal(fs.existsSync(path.join(root, desktopRoot, "ui/src/web.rs")), false);
+  assert.ok(fs.existsSync(path.join(root, androidRoot, "ui/src/web.rs")));
+  assert.doesNotMatch(desktopUiMain, /Command::Serve|Android WebView|mod web/);
+  assert.match(androidUiMain, /Command::Serve/);
+  assert.match(read(`${androidRoot}/ui/src/web.rs`), /Coomi Mobile for Storydex/);
 
   const gradle = read("apps/android/app/build.gradle");
   const bridge = read("apps/backend/services/coomi_bridge_client.py");
