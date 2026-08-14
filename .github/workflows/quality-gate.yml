@@ -125,7 +125,7 @@ jobs:
     needs: changes
     if: ${{ inputs.full || needs.changes.outputs.backend == 'true' }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: ${{ inputs.full && 30 || 12 }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(inputs.full && '{"include":[{"os":"ubuntu-latest","python":"3.9","coverage_ratchet":false},{"os":"windows-latest","python":"3.9","coverage_ratchet":false},{"os":"windows-latest","python":"3.13","coverage_ratchet":true}]}' || '{"include":[{"os":"ubuntu-latest","python":"3.13","coverage_ratchet":true}]}') }}
@@ -160,6 +160,7 @@ jobs:
         working-directory: apps/backend
         run: >-
           python -m pytest -q
+          --timeout=120
           --cov=api --cov=core --cov=services --cov-branch
           --cov-fail-under=0
           --cov-report=term-missing
@@ -187,7 +188,7 @@ jobs:
     needs: changes
     if: ${{ !inputs.full && needs.changes.outputs.backend == 'true' }}
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -208,6 +209,7 @@ jobs:
         working-directory: apps/backend
         run: >-
           python -m pytest -q
+          --timeout=120
           tests/test_agent_stream_responsiveness.py
           tests/test_agent_git_autocommit_service.py
           tests/test_storydex_intent_service.py

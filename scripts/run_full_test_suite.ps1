@@ -171,7 +171,7 @@ if ($runBackend) {
     Push-Location $backend
     try {
       New-Item -ItemType Directory -Force -Path "test-results" | Out-Null
-      & $python -m pytest -q --cov=api --cov=core --cov=services --cov-branch --cov-fail-under=0 --cov-report=term-missing --cov-report=json:test-results/coverage.json --cov-report=xml:test-results/coverage.xml --junitxml=test-results/pytest.xml
+      & $python -m pytest -q --timeout=120 --cov=api --cov=core --cov=services --cov-branch --cov-fail-under=0 --cov-report=term-missing --cov-report=json:test-results/coverage.json --cov-report=xml:test-results/coverage.xml --junitxml=test-results/pytest.xml
       $testExitCode = $LASTEXITCODE
       & node (Join-Path $repoRoot "scripts/check_coverage.cjs") --component=backend --report=test-results/coverage.json --mode=$coverageMode --test-exit-code=$testExitCode
     } finally { Pop-Location }

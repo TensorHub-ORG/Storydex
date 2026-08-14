@@ -114,6 +114,7 @@ test("local Fast suite covers CI policy regressions and runtime commit identity"
   assert.match(suite, /Assert-NpmDependencies/);
   assert.match(suite, /\$runBackend -and -not \$runCoomi/);
   assert.match(suite, /Build current-commit Storydex Coomi desktop runtime/);
+  assert.match(suite, /python -m pytest -q --timeout=120/);
   assert.doesNotMatch(suite, /not coomi_runtime/);
   assert.match(qualityGate, /Build current-commit Storydex desktop Agent runtime/);
   assert.doesNotMatch(qualityGate, /without unchanged Coomi runtime|not coomi_runtime/);
