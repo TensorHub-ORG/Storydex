@@ -4,7 +4,7 @@ const { spawnSync } = require("child_process");
 
 const desktopRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(desktopRoot, "..", "..");
-const runtimeRoot = path.join(desktopRoot, "coomi-rs-desktop");
+const runtimeRoot = path.join(desktopRoot, "agent-runtime");
 const manifest = path.join(runtimeRoot, "Cargo.toml");
 const binaryName = process.platform === "win32" ? "storydex-coomi-bridge.exe" : "storydex-coomi-bridge";
 const binary = path.join(runtimeRoot, "target", "release", binaryName);

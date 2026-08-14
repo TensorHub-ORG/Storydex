@@ -35,7 +35,7 @@ const coomiBridgeSource = path.join(
   repoRoot,
   "apps",
   "desktop",
-  "coomi-rs-desktop",
+  "agent-runtime",
   "target",
   "release",
   process.platform === "win32" ? "storydex-coomi-bridge.exe" : "storydex-coomi-bridge"
@@ -45,7 +45,7 @@ const coomiBuildMetadataSource = path.join(
   repoRoot,
   "apps",
   "desktop",
-  "coomi-rs-desktop",
+  "agent-runtime",
   "target",
   "release",
   "storydex-coomi-build.json"

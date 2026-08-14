@@ -37,6 +37,7 @@ jobs:
       backend: ${{ steps.scope.outputs.backend }}
       frontend: ${{ steps.scope.outputs.frontend }}
       desktop: ${{ steps.scope.outputs.desktop }}
+      android: ${{ steps.scope.outputs.android }}
       coomi: ${{ steps.scope.outputs.coomi }}
       docs_only: ${{ steps.scope.outputs.docs_only }}
       changed_count: ${{ steps.scope.outputs.changed_count }}
@@ -135,9 +136,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         if: ${{ inputs.full || needs.changes.outputs.coomi == 'true' }}
         with:
-          workspaces: |
-            apps/desktop/coomi-rs-desktop -> target
-            apps/desktop/coomi-rs-android -> target
+          workspaces: apps/desktop/agent-runtime -> target
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
@@ -155,9 +154,8 @@ jobs:
       - name: Test and build Storydex Coomi Rust runtime
         if: ${{ inputs.full || needs.changes.outputs.coomi == 'true' }}
         run: |
-          cargo test --manifest-path apps/desktop/coomi-rs-desktop/Cargo.toml --locked --workspace
-          cargo test --manifest-path apps/desktop/coomi-rs-android/Cargo.toml --locked --workspace
-          cargo build --manifest-path apps/desktop/coomi-rs-desktop/Cargo.toml --release --locked -p storydex-coomi-bridge
+          cargo test --manifest-path apps/desktop/agent-runtime/Cargo.toml --locked --workspace
+          cargo build --manifest-path apps/desktop/agent-runtime/Cargo.toml --release --locked -p storydex-coomi-bridge
       - name: Verify pinned Coomi runtime
         if: ${{ inputs.full || needs.changes.outputs.coomi == 'true' }}
         run: python scripts/verify_coomi_runtime.py
@@ -296,6 +294,33 @@ jobs:
       - run: npm run check:release
         working-directory: apps/desktop
 
+  android-tests:
+    name: android-tests
+    needs: changes
+    if: ${{ inputs.full || needs.changes.outputs.android == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/android/agent-runtime -> target
+      - name: Test Android Agent runtime
+        if: ${{ inputs.full || needs.changes.outputs.coomi == 'true' }}
+        run: cargo test --manifest-path apps/android/agent-runtime/Cargo.toml --locked --workspace
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/android-frontend/package-lock.json
+      - run: npm ci --prefer-offline --no-audit --fund=false
+        working-directory: apps/android-frontend
+      - run: npm run build
+        working-directory: apps/android-frontend
+      - run: npm run test:random
+        working-directory: apps/android-frontend
+
   desktop-package-smoke:
     name: desktop-package-smoke
     if: inputs.full && inputs.run_packaged_checks
@@ -373,6 +398,7 @@ jobs:
       - backend-compatibility
       - frontend-tests
       - desktop-unit-tests
+      - android-tests
       - desktop-package-smoke
       - electron-e2e
     runs-on: ubuntu-latest
@@ -385,6 +411,7 @@ jobs:
           BACKEND: ${{ needs.changes.outputs.backend }}
           FRONTEND: ${{ needs.changes.outputs.frontend }}
           DESKTOP: ${{ needs.changes.outputs.desktop }}
+          ANDROID: ${{ needs.changes.outputs.android }}
         run: |
           python - <<'PY'
           import json, os, sys
@@ -398,6 +425,7 @@ jobs:
           backend = os.environ["BACKEND"].lower() == "true"
           frontend = os.environ["FRONTEND"].lower() == "true"
           desktop = os.environ["DESKTOP"].lower() == "true"
+          android = os.environ["ANDROID"].lower() == "true"
           if full or backend:
               required.add("backend-tests")
           if backend and not full:
@@ -406,6 +434,8 @@ jobs:
               required.add("frontend-tests")
           if full or desktop:
               required.add("desktop-unit-tests")
+          if full or android:
+              required.add("android-tests")
           if full and packaged_checks:
               required.update({"desktop-package-smoke", "electron-e2e"})
           failed = {

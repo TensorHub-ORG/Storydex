@@ -153,10 +153,10 @@ def output_limit_observation(
 ) -> dict[str, Any]:
     """Compare the resolved capability limit with observed wire values."""
 
-    config_source = (REPOSITORY_ROOT / "apps" / "desktop" / "coomi-rs-desktop" / "services" / "src" / "config.rs").read_text(
+    config_source = (REPOSITORY_ROOT / "apps" / "desktop" / "agent-runtime" / "services" / "src" / "config.rs").read_text(
         encoding="utf-8"
     )
-    provider_source = (REPOSITORY_ROOT / "apps" / "desktop" / "coomi-rs-desktop" / "services" / "src" / "provider.rs").read_text(
+    provider_source = (REPOSITORY_ROOT / "apps" / "desktop" / "agent-runtime" / "services" / "src" / "provider.rs").read_text(
         encoding="utf-8"
     )
     capability_match = re.search(r"max_output_tokens\.unwrap_or\((\d[\d_]*)\)", config_source)
@@ -183,8 +183,8 @@ def output_limit_observation(
         "observedWireMaxOutputTokens": observed_values,
         "mismatch": bool(observed_values) and observed_values != [capability],
         "source": {
-            "capability": "apps/desktop/coomi-rs-desktop/services/src/config.rs",
-            "wire": "apps/desktop/coomi-rs-desktop/services/src/provider.rs",
+            "capability": "apps/desktop/agent-runtime/services/src/config.rs",
+            "wire": "apps/desktop/agent-runtime/services/src/provider.rs",
         },
     }
 
@@ -370,7 +370,7 @@ def run_baseline(args: argparse.Namespace) -> dict[str, Any]:
         else REPOSITORY_ROOT
         / "apps"
         / "desktop"
-        / "coomi-rs-desktop"
+        / "agent-runtime"
         / "target"
         / "debug"
         / "storydex-coomi-bridge.exe"

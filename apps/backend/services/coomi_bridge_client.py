@@ -13,7 +13,7 @@ from typing import Any, AsyncIterator, Dict, Iterable
 BRIDGE_PROTOCOL_VERSION = 1
 STORYDEX_COOMI_RUNTIME_VERSION = "2.1.0-storydex-desktop.1"
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-DESKTOP_RUNTIME_ROOT = REPOSITORY_ROOT / "apps" / "desktop" / "coomi-rs-desktop"
+DESKTOP_RUNTIME_ROOT = REPOSITORY_ROOT / "apps" / "desktop" / "agent-runtime"
 
 
 def _storydex_coomi_home_path() -> Path:

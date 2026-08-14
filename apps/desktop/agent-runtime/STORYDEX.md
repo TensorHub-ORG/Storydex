@@ -17,5 +17,5 @@ Web UI behavior or mobile role-playing prompts into it.
 Build from the repository root with:
 
 ```powershell
-cargo build --manifest-path apps/desktop/coomi-rs-desktop/Cargo.toml --release --locked -p storydex-coomi-bridge
+cargo build --manifest-path apps/desktop/agent-runtime/Cargo.toml --release --locked -p storydex-coomi-bridge
 ```

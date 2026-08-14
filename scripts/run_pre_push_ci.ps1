@@ -36,6 +36,16 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
   throw "Storydex pre-push scope resolution requires Node.js"
 }
 
+$branchName = (& git -C $repoRoot branch --show-current).Trim()
+if ($LASTEXITCODE -ne 0) {
+  throw "Unable to resolve the current Git branch"
+}
+$isDevelopmentBranch = $branchName -match '^(?:dev/(?:windows|android)|(?:feature|fix)/(?:windows|android)/.+)$'
+if ($isDevelopmentBranch -and -not $Force) {
+  Write-Host "Storydex development branch '$branchName': full local pre-push gate skipped; GitHub Development CI is required." -ForegroundColor Cyan
+  exit 0
+}
+
 Invoke-GitQuietCheck -Arguments @("diff", "--quiet", "--ignore-submodules", "--") `
   -DirtyMessage "Tracked working-tree changes must be committed or reverted before CI certification."
 Invoke-GitQuietCheck -Arguments @("diff", "--cached", "--quiet", "--ignore-submodules", "--") `
@@ -91,7 +101,7 @@ try {
 }
 
 $scopeNames = [System.Collections.Generic.List[string]]::new()
-foreach ($component in @("backend", "frontend", "desktop", "coomi")) {
+foreach ($component in @("backend", "frontend", "desktop", "android", "coomi")) {
   if ([bool]$scope.$component) {
     $scopeNames.Add($component)
   }

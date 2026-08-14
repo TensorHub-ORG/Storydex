@@ -194,7 +194,7 @@ dependencies {
 }
 
 def coomiRustTarget = "aarch64-linux-android"
-def coomiRustRoot = rootProject.file("../desktop/coomi-rs-android")
+def coomiRustRoot = rootProject.file("agent-runtime")
 def coomiWebRoot = rootProject.file("../android-frontend")
 def coomiWebArchive = file("src/main/assets/web.zip")
 def coomiNativeDir = file("src/main/jniLibs/arm64-v8a")

@@ -86,11 +86,13 @@ npm --prefix apps/desktop install
 
 ```text
 Storydex/
-├─ apps/frontend/        # Vue 工作台
-├─ apps/backend/         # FastAPI 后端服务
-├─ apps/desktop/         # Electron 桌面壳与平台独立 Agent 运行时
-│  ├─ coomi-rs-desktop/ # 小说创作工作台 Agent（JSONL bridge）
-│  └─ coomi-rs-android/ # 角色扮演文字冒险 Agent（HTTP/WebSocket）
+├─ apps/frontend/                # Vue 小说创作工作台
+├─ apps/backend/                 # Windows FastAPI 编排服务
+├─ apps/desktop/                 # Electron 桌面应用
+│  └─ agent-runtime/             # Windows Agent（JSONL bridge）
+├─ apps/android/                 # Android 原生应用
+│  └─ agent-runtime/             # Android Agent（HTTP/WebSocket）
+├─ apps/android-frontend/        # Android WebView 前端
 ├─ assets/               # 项目 LOGO、吉祥物与组织 LOGO
 ├─ docs/guide/            # 内置使用指南
 ├─ docs/prompts/          # 指令仓库 Markdown 模板
@@ -108,6 +110,8 @@ Storydex/
 - [项目架构说明](docs/项目架构说明.md)
 - [Agent 双运行时架构](docs/agent-runtime-architecture.md)
 - [Rust 后端与 Tauri 桌面重构计划](docs/rust-tauri-migration.md)
+
+Windows 与 Android 分别在 `dev/windows`、`dev/android` 进行轻量开发集成；两个分支不得互相合并，完成后分别进入 `main` 接受完整双端质量门禁。
 
 ## 许可证
 
@@ -148,7 +152,7 @@ v2.0.1 是面向 Windows 安装体验和发行流程的维护版本。
 
 v2.0.0 将 Storydex 的 Agent 基座完整升级为内置的 Storydex 专用 Coomi Rust 运行时，并同步重构创作工作台、项目架构、全文检索、编辑器和本地版本控制体验。
 
-- 旧 Python Coomi 运行时已移除，正式包改为内置 `apps/desktop/coomi-rs-desktop` 构建的 `storydex-coomi-bridge`，Windows Agent 执行不再依赖 asyncio 子进程能力。
+- 旧 Python Coomi 运行时已移除，正式包改为内置 `apps/desktop/agent-runtime` 构建的 `storydex-coomi-bridge`，Windows Agent 执行不再依赖 asyncio 子进程能力。
 - Coomi 上下文窗口支持 128K、256K、512K 和自定义配置，Storydex 默认值统一为 256K。
 - 资源管理器支持文件/文件夹多选与拖动，自由项目架构和规范项目分类视图可按创作习惯切换。
 - 全文搜索覆盖整个项目中的常用文本与源码格式，并补齐顶部高级搜索和文件内查找、高亮、上下定位。
@@ -172,7 +176,7 @@ v0.4.0 为 Storydex 接入基于 Coomi 1.1.2 的专用 usage 适配版，重点�
 
 - 区分 Provider 上游报告、缺失、历史未知和本地估算 usage，避免把字符估算误记为真实用量。
 - 支持 OpenAI-compatible 与 Anthropic usage、缓存与推理 token，并正确折叠流式累计快照。
-- 项目 Python 仅保留 Storydex HTTP/SSE 编排层；桌面 Agent 使用 `apps/desktop/coomi-rs-desktop` 中的 `storydex-coomi-bridge`，Android 使用独立的 `apps/desktop/coomi-rs-android`。
+- 项目 Python 仅保留 Storydex HTTP/SSE 编排层；桌面 Agent 使用 `apps/desktop/agent-runtime` 中的 `storydex-coomi-bridge`，Android 使用独立的 `apps/android/agent-runtime`。
 - Rust bridge、运行时版本、桌面同步和打包资产均由 Cargo lock 与 `--version` 预检统一校验。
 - 真实增长会话连续 3 轮、11 次 Provider 请求通过，usage 覆盖率 100%，录制/回放零差异。
 

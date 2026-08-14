@@ -1,0 +1,76 @@
+name: Development CI
+
+on:
+  push:
+    branches:
+      - dev/windows
+      - dev/android
+  pull_request:
+    branches:
+      - dev/windows
+      - dev/android
+
+concurrency:
+  group: storydex-dev-${{ github.event.pull_request.base.ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  STORYDEX_DISABLE_NETWORK: "1"
+  STORYDEX_TESTING: "1"
+
+jobs:
+  windows-tests:
+    name: Windows development tests
+    if: github.ref == 'refs/heads/dev/windows' || github.base_ref == 'dev/windows'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/agent-runtime -> target
+      - name: Test Windows Agent runtime
+        run: cargo test --manifest-path apps/desktop/agent-runtime/Cargo.toml --locked --workspace
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Install desktop dependencies
+        run: npm ci --prefer-offline --no-audit --fund=false
+        working-directory: apps/desktop
+      - name: Test desktop shell
+        run: npm run test:unit
+        working-directory: apps/desktop
+
+  android-tests:
+    name: Android development tests
+    if: github.ref == 'refs/heads/dev/android' || github.base_ref == 'dev/android'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/android/agent-runtime -> target
+      - name: Test Android Agent runtime
+        run: cargo test --manifest-path apps/android/agent-runtime/Cargo.toml --locked --workspace
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/android-frontend/package-lock.json
+      - name: Install Android frontend dependencies
+        run: npm ci --prefer-offline --no-audit --fund=false
+        working-directory: apps/android-frontend
+      - name: Build Android frontend
+        run: npm run build
+        working-directory: apps/android-frontend
+      - name: Test Android random mechanics
+        run: npm run test:random
+        working-directory: apps/android-frontend

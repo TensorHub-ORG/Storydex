@@ -2,7 +2,7 @@
 param(
   [ValidateSet("Fast", "Full", "Release")]
   [string]$Mode = "Full",
-  [ValidateSet("all", "source", "backend", "frontend", "desktop", "coomi")]
+  [ValidateSet("all", "source", "backend", "frontend", "desktop", "android", "coomi")]
   [string[]]$Scope = @("all")
 )
 
@@ -12,6 +12,7 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $backend = Join-Path $repoRoot "apps/backend"
 $frontend = Join-Path $repoRoot "apps/frontend"
 $desktop = Join-Path $repoRoot "apps/desktop"
+$androidFrontend = Join-Path $repoRoot "apps/android-frontend"
 $results = Join-Path $repoRoot "test-results"
 $bundledPython = Join-Path $repoRoot ".python39/Scripts/python.exe"
 $python = if (Test-Path -LiteralPath $bundledPython) { $bundledPython } else { "python" }
@@ -29,6 +30,7 @@ $runAllComponents = $Mode -ne "Fast" -or $selectedScope.Contains("all")
 $runBackend = $runAllComponents -or $selectedScope.Contains("backend")
 $runFrontend = $runAllComponents -or $selectedScope.Contains("frontend")
 $runDesktop = $runAllComponents -or $selectedScope.Contains("desktop")
+$runAndroid = $runAllComponents -or $selectedScope.Contains("android")
 $runCoomi = $runAllComponents -or $selectedScope.Contains("coomi")
 
 function Assert-CommandAvailable([string]$Name) {
@@ -94,6 +96,7 @@ $enabledComponents = [System.Collections.Generic.List[string]]::new()
 if ($runBackend) { $enabledComponents.Add("backend") }
 if ($runFrontend) { $enabledComponents.Add("frontend") }
 if ($runDesktop) { $enabledComponents.Add("desktop") }
+if ($runAndroid) { $enabledComponents.Add("android") }
 if ($runCoomi) { $enabledComponents.Add("coomi") }
 $scopeLabel = if ($runAllComponents) { "all" } else { $enabledComponents -join "," }
 if (-not $scopeLabel) {
@@ -108,7 +111,7 @@ Invoke-Step "Environment preflight" {
   if ($runBackend) {
     & $python -c "import pytest, pytest_cov"
   }
-  if ($runFrontend -or $runDesktop) {
+  if ($runFrontend -or $runDesktop -or $runAndroid) {
     Assert-CommandAvailable "npm"
   }
   if ($runFrontend) {
@@ -116,6 +119,9 @@ Invoke-Step "Environment preflight" {
   }
   if ($runDesktop) {
     Assert-NpmDependencies $desktop
+  }
+  if ($runAndroid) {
+    Assert-NpmDependencies $androidFrontend
   }
   if ($runCoomi) {
     Assert-CommandAvailable "cargo"
@@ -146,9 +152,9 @@ Invoke-Step "Conflict markers" {
 $packageVersion = (Get-Content -Raw -LiteralPath (Join-Path $desktop "package.json") | ConvertFrom-Json).version
 Invoke-Step "Version consistency" { node (Join-Path $repoRoot "scripts/validate_version_consistency.cjs") $(if ($Mode -eq "Release") { "--expected=$packageVersion" }) }
 if ($runCoomi) {
-  Invoke-Step "Rust Coomi desktop workspace tests" { cargo test --manifest-path (Join-Path $repoRoot "apps/desktop/coomi-rs-desktop/Cargo.toml") --locked --workspace }
-  Invoke-Step "Rust Coomi Android workspace tests" { cargo test --manifest-path (Join-Path $repoRoot "apps/desktop/coomi-rs-android/Cargo.toml") --locked --workspace }
-  Invoke-Step "Build Storydex Coomi desktop runtime" { cargo build --manifest-path (Join-Path $repoRoot "apps/desktop/coomi-rs-desktop/Cargo.toml") --release --locked -p storydex-coomi-bridge }
+  Invoke-Step "Rust Coomi desktop workspace tests" { cargo test --manifest-path (Join-Path $repoRoot "apps/desktop/agent-runtime/Cargo.toml") --locked --workspace }
+  Invoke-Step "Rust Coomi Android workspace tests" { cargo test --manifest-path (Join-Path $repoRoot "apps/android/agent-runtime/Cargo.toml") --locked --workspace }
+  Invoke-Step "Build Storydex Coomi desktop runtime" { cargo build --manifest-path (Join-Path $repoRoot "apps/desktop/agent-runtime/Cargo.toml") --release --locked -p storydex-coomi-bridge }
   Invoke-Step "Pinned Coomi runtime" { & $python (Join-Path $repoRoot "scripts/verify_coomi_runtime.py") }
 }
 if ($runBackend) {
@@ -181,6 +187,10 @@ if ($runFrontend) {
 if ($runDesktop) {
   Invoke-Step "Desktop unit tests" { npm --prefix $desktop run test:unit }
   Invoke-Step "Desktop release configuration" { npm --prefix $desktop run check:release }
+}
+if ($runAndroid) {
+  Invoke-Step "Android frontend production build" { npm --prefix $androidFrontend run build }
+  Invoke-Step "Android random mechanics regressions" { npm --prefix $androidFrontend run test:random }
 }
 
 if ($Mode -eq "Full") {

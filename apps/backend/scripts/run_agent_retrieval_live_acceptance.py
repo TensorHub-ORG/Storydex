@@ -186,7 +186,7 @@ def validate_hit(path: Path, item: dict[str, Any], marker: str) -> dict[str, Any
 
 async def run_live(args: argparse.Namespace, *, workspace: Path, coomi_home: Path) -> dict[str, Any]:
     os.environ["STORYDEX_COOMI_HOME"] = str(coomi_home)
-    bridge = REPOSITORY_ROOT / "apps" / "desktop" / "coomi-rs-desktop" / "target" / "debug" / "storydex-coomi-bridge.exe"
+    bridge = REPOSITORY_ROOT / "apps" / "desktop" / "agent-runtime" / "target" / "debug" / "storydex-coomi-bridge.exe"
     if not bridge.is_file():
         raise AcceptanceError(f"debug bridge is missing: {bridge}")
     os.environ["STORYDEX_COOMI_BRIDGE"] = str(bridge)

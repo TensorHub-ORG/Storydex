@@ -21,5 +21,5 @@ not contain the desktop `storydex-coomi-bridge` crate.
 Check the workspace from the repository root with:
 
 ```powershell
-cargo check --manifest-path apps/desktop/coomi-rs-android/Cargo.toml --locked --workspace
+cargo check --manifest-path apps/android/agent-runtime/Cargo.toml --locked --workspace
 ```

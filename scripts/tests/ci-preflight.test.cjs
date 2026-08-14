@@ -11,6 +11,24 @@ function read(relativePath) {
   return fs.readFileSync(path.join(root, relativePath), "utf8");
 }
 
+function readSourceTree(relativeRoot) {
+  const sourceRoot = path.join(root, relativeRoot);
+  const chunks = [];
+  const visit = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      if (entry.name === "target") continue;
+      const absolute = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        visit(absolute);
+      } else if (/\.(?:rs|toml|json|md)$/i.test(entry.name)) {
+        chunks.push(fs.readFileSync(absolute, "utf8"));
+      }
+    }
+  };
+  visit(sourceRoot);
+  return chunks.join("\n");
+}
+
 test("versioned pre-push hook fails closed through the PowerShell guard", () => {
   const hook = read(".githooks/pre-push");
   const attributes = read(".gitattributes");
@@ -37,6 +55,42 @@ test("pre-push certification is clean-tree and commit specific", () => {
   assert.match(guard, /run_full_test_suite\.ps1/);
   assert.match(guard, /-Mode Fast/);
   assert.match(guard, /-Scope \$scopeNames\.ToArray\(\)/);
+});
+
+test("development branches use lightweight CI while main keeps the full gate", () => {
+  const guard = read("scripts/run_pre_push_ci.ps1");
+  const ci = read(".github/workflows/ci.yml");
+  const developmentCi = read(".github/workflows/dev-ci.yml");
+  assert.match(guard, /dev\/\(\?:windows\|android\)/);
+  assert.match(guard, /feature\|fix/);
+  assert.match(guard, /GitHub Development CI is required/);
+  assert.match(guard, /-and -not \$Force/);
+  assert.match(ci, /pull_request:\s*\n\s*branches: \[main\]/);
+  assert.match(ci, /push:\s*\n\s*branches: \[main\]/);
+  assert.match(developmentCi, /dev\/windows/);
+  assert.match(developmentCi, /dev\/android/);
+  assert.match(developmentCi, /cargo test --manifest-path apps\/desktop\/agent-runtime\/Cargo\.toml/);
+  assert.match(developmentCi, /cargo test --manifest-path apps\/android\/agent-runtime\/Cargo\.toml/);
+  assert.doesNotMatch(developmentCi, /coverage|electron-e2e|package:win/);
+});
+
+test("Agent runtimes are owned by their platforms without cross-source dependencies", () => {
+  const desktopRoot = "apps/desktop/agent-runtime";
+  const androidRoot = "apps/android/agent-runtime";
+  assert.ok(fs.existsSync(path.join(root, desktopRoot, "Cargo.toml")));
+  assert.ok(fs.existsSync(path.join(root, androidRoot, "Cargo.toml")));
+  assert.equal(fs.existsSync(path.join(root, "apps/desktop/coomi-rs-desktop")), false);
+  assert.equal(fs.existsSync(path.join(root, "apps/desktop/coomi-rs-android")), false);
+
+  const desktopSources = readSourceTree(desktopRoot);
+  const androidSources = readSourceTree(androidRoot);
+  assert.doesNotMatch(desktopSources, /apps[\\/]android[\\/]agent-runtime/);
+  assert.doesNotMatch(androidSources, /apps[\\/]desktop[\\/]agent-runtime/);
+
+  const gradle = read("apps/android/app/build.gradle");
+  const bridge = read("apps/backend/services/coomi_bridge_client.py");
+  assert.match(gradle, /rootProject\.file\("agent-runtime"\)/);
+  assert.match(bridge, /"desktop" \/ "agent-runtime"/);
 });
 
 test("hook installer is repository local and agent rules require remote success", () => {

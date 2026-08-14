@@ -6,8 +6,8 @@ Storydex 从同一套经过项目适配的 Coomi Rust 基线派生出两个独�
 
 | 平台 | 源码根目录 | 集成入口 | 产品定位 |
 | --- | --- | --- | --- |
-| Windows 桌面端 | `apps/desktop/coomi-rs-desktop` | `storydex-coomi-bridge` JSONL | 专业长篇小说创作工作台 |
-| Android 手机端 | `apps/desktop/coomi-rs-android` | `coomi-ui` HTTP/WebSocket | 角色扮演文字冒险游戏 |
+| Windows 桌面端 | `apps/desktop/agent-runtime` | `storydex-coomi-bridge` JSONL | 专业长篇小说创作工作台 |
+| Android 手机端 | `apps/android/agent-runtime` | `coomi-ui` HTTP/WebSocket | 角色扮演文字冒险游戏 |
 
 两个 workspace 分别维护版本和 `Cargo.lock`。Provider、engine、security、tools
 的通用稳定性修复应分别验证后同步；提示词、入口 crate、交互协议和平台工具不得混用。
@@ -50,10 +50,27 @@ Android Rust binary 在本机提供 WebView API 和 WebSocket，会话与任务�
 
 服务端按 Windows/Android 和 `tool_failure_analysis` 分类检索，分别展示程序证据与本地模型分析。
 
-## 6. 标准验证入口
+## 6. 分支与源码所有权
+
+- `main` 同时保存 Windows 和 Android 的稳定实现，并执行完整质量门禁。
+- `dev/windows` 只集成 Windows 桌面端改动，`dev/android` 只集成 Android 改动；两个分支只从 `main` 同步，不得互相合并。
+- Windows runtime 不得依赖 `apps/android/agent-runtime`，Android runtime 不得依赖 `apps/desktop/agent-runtime`。
+- Provider 事件、反馈载荷和 session 版本等跨端兼容要求通过文档、Schema 和契约 fixture 同步，不通过共享运行时源码实现。
+- 开发分支只运行对应平台的 Development CI。合入 `main` 时必须重新执行完整双端质量门禁。
+
+平台主要所有权如下：
+
+| 分支 | 主要路径 |
+| --- | --- |
+| `dev/windows` | `apps/desktop`、`apps/frontend`、`apps/backend` |
+| `dev/android` | `apps/android`、`apps/android-frontend` |
+
+`.github`、`scripts`、`deploy`、根级依赖和跨端协议属于集成范围，最终以 `main` 的完整 CI 为准。
+
+## 7. 标准验证入口
 
 ```powershell
-cargo test --manifest-path apps/desktop/coomi-rs-desktop/Cargo.toml --locked --workspace
-cargo test --manifest-path apps/desktop/coomi-rs-android/Cargo.toml --locked --workspace
+cargo test --manifest-path apps/desktop/agent-runtime/Cargo.toml --locked --workspace
+cargo test --manifest-path apps/android/agent-runtime/Cargo.toml --locked --workspace
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_full_test_suite.ps1 -Mode Fast
 ```

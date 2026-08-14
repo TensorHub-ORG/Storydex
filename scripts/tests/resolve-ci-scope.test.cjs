@@ -13,6 +13,7 @@ test("frontend-only changes run only frontend quality checks", () => {
     backend: false,
     frontend: true,
     desktop: false,
+    android: false,
     coomi: false,
     docsOnly: false,
     changedCount: 2,
@@ -26,6 +27,7 @@ test("ordinary backend changes keep full Python checks without unrelated Rust wo
   assert.equal(result.backend, true);
   assert.equal(result.frontend, false);
   assert.equal(result.desktop, false);
+  assert.equal(result.android, false);
   assert.equal(result.coomi, false);
 });
 
@@ -34,14 +36,15 @@ test("Coomi bridge and Rust changes restore runtime and packaging checks", () =>
   assert.equal(bridge.backend, true);
   assert.equal(bridge.coomi, true);
 
-  const rust = classifyChangedPaths(["apps/desktop/coomi-rs-desktop/storydex-bridge/src/main.rs"]);
+  const rust = classifyChangedPaths(["apps/desktop/agent-runtime/storydex-bridge/src/main.rs"]);
   assert.equal(rust.backend, true);
   assert.equal(rust.desktop, true);
   assert.equal(rust.coomi, true);
 
-  const android = classifyChangedPaths(["apps/desktop/coomi-rs-android/ui/src/web.rs"]);
-  assert.equal(android.backend, true);
-  assert.equal(android.desktop, true);
+  const android = classifyChangedPaths(["apps/android/agent-runtime/ui/src/web.rs"]);
+  assert.equal(android.backend, false);
+  assert.equal(android.android, true);
+  assert.equal(android.desktop, false);
   assert.equal(android.coomi, true);
 });
 
@@ -56,6 +59,7 @@ test("desktop and documentation changes stay scoped", () => {
   assert.equal(docs.backend, false);
   assert.equal(docs.frontend, false);
   assert.equal(docs.desktop, false);
+  assert.equal(docs.android, false);
 });
 
 test("workflow, classifier, unknown, empty, and forced scopes fail safe", () => {
@@ -72,6 +76,7 @@ test("workflow, classifier, unknown, empty, and forced scopes fail safe", () => 
     assert.equal(result.backend, true);
     assert.equal(result.frontend, true);
     assert.equal(result.desktop, true);
+    assert.equal(result.android, true);
     assert.equal(result.coomi, true);
   }
 });

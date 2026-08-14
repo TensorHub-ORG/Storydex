@@ -9,6 +9,6 @@
     {"id":"api-design","name":"API Design Principles","description":"Design consistent and evolvable HTTP APIs.","repository":"wshobson/agents","ref":"main","subdir":"plugins/backend-development/skills/api-design-principles"},
     {"id":"git-workflow","name":"Git Advanced Workflows","description":"Use branches, rebase, worktrees, and recovery safely.","repository":"wshobson/agents","ref":"main","subdir":"plugins/developer-essentials/skills/git-advanced-workflows"},
     {"id":"technical-writing","name":"Documentation Writer","description":"Write accurate and actionable developer documentation.","repository":"github/awesome-copilot","ref":"main","subdir":"skills/documentation-writer"},
-    {"id":"shizuku","name":"Shizuku","description":"Check Shizuku authorization before privileged Android operations.","repository":"TensorHub-ORG/Storydex","ref":"main","subdir":"apps/desktop/coomi-rs-android/skills/shizuku"}
+    {"id":"shizuku","name":"Shizuku","description":"Check Shizuku authorization before privileged Android operations.","repository":"TensorHub-ORG/Storydex","ref":"main","subdir":"apps/android/agent-runtime/skills/shizuku"}
   ]
 }

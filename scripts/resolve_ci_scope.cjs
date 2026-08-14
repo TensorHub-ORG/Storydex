@@ -28,6 +28,7 @@ function classifyChangedPaths(inputPaths, options = {}) {
     backend: false,
     frontend: false,
     desktop: false,
+    android: false,
     coomi: false,
   };
   const unknownPaths = [];
@@ -36,6 +37,7 @@ function classifyChangedPaths(inputPaths, options = {}) {
     scope.backend = true;
     scope.frontend = true;
     scope.desktop = true;
+    scope.android = true;
     scope.coomi = true;
   };
 
@@ -87,28 +89,37 @@ function classifyChangedPaths(inputPaths, options = {}) {
       scope.desktop = true;
       matched = true;
     }
+    if (filePath.startsWith("apps/android/") || filePath.startsWith("apps/android-frontend/")) {
+      scope.android = true;
+      matched = true;
+    }
     if (filePath.startsWith("assets/")) {
       scope.frontend = true;
       scope.desktop = true;
       matched = true;
     }
 
-    const coomiRuntimePath = (
-      filePath.startsWith("apps/desktop/coomi-rs-desktop/")
-      || filePath.startsWith("apps/desktop/coomi-rs-android/")
-      || filePath === "scripts/verify_coomi_runtime.py"
+    const desktopRuntimePath = filePath.startsWith("apps/desktop/agent-runtime/");
+    const androidRuntimePath = filePath.startsWith("apps/android/agent-runtime/");
+    const coomiIntegrationPath = (
+      filePath === "scripts/verify_coomi_runtime.py"
       || filePath === "apps/backend/services/coomi_bridge_client.py"
       || filePath === "apps/backend/services/coomi_version_service.py"
       || filePath.startsWith("apps/backend/tests/contract_coomi/")
       || filePath === "apps/desktop/scripts/build-coomi-runtime.cjs"
     );
-    if (coomiRuntimePath) {
+    if (desktopRuntimePath || coomiIntegrationPath) {
       scope.backend = true;
       scope.coomi = true;
       matched = true;
-      if (filePath.startsWith("apps/desktop/")) {
+      if (desktopRuntimePath || filePath.startsWith("apps/desktop/")) {
         scope.desktop = true;
       }
+    }
+    if (androidRuntimePath) {
+      scope.android = true;
+      scope.coomi = true;
+      matched = true;
     }
 
     if (filePath === "scripts/resolve_ci_scope.cjs" || filePath === "scripts/tests/resolve-ci-scope.test.cjs") {
@@ -133,7 +144,7 @@ function classifyChangedPaths(inputPaths, options = {}) {
     enableAll();
   }
 
-  const selected = scope.backend || scope.frontend || scope.desktop || scope.coomi;
+  const selected = scope.backend || scope.frontend || scope.desktop || scope.android || scope.coomi;
   return {
     ...scope,
     docsOnly: !selected,
@@ -165,6 +176,7 @@ function writeGithubOutputs(filePath, result) {
     backend: result.backend,
     frontend: result.frontend,
     desktop: result.desktop,
+    android: result.android,
     coomi: result.coomi,
     docs_only: result.docsOnly,
     changed_count: result.changedCount,
