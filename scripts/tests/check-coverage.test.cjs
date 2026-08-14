@@ -142,7 +142,9 @@ test("standard CI scopes quality jobs while full CI retains its compatibility ma
   assert.match(workflow, /if:\s*matrix\.coverage_ratchet/);
   assert.equal((workflow.match(/\|\| 'advisory'/g) || []).length, 2);
   assert.match(workflow, /Swatinem\/rust-cache@v2/);
-  assert.match(workflow, /-m "not coomi_runtime"/);
+  assert.match(workflow, /Build current-commit Storydex desktop Agent runtime/);
+  assert.match(workflow, /Verify pinned Coomi runtime/);
+  assert.doesNotMatch(workflow, /-m "not coomi_runtime"|without unchanged Coomi runtime/);
   assert.match(workflow, /backend-compatibility:\s*[\s\S]*?test_agent_stream_responsiveness\.py[\s\S]*?test_storydex_runtime_fixes\.py/);
   assert.doesNotMatch(workflow, /^  integration-tests:/m);
   assert.match(workflow, /BACKEND:\s*\$\{\{ needs\.changes\.outputs\.backend \}\}/);
