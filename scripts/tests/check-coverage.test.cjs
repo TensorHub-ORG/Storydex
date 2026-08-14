@@ -147,6 +147,7 @@ test("standard CI scopes quality jobs while full CI retains its compatibility ma
   assert.match(workflow, /Verify pinned Coomi runtime/);
   const backendJob = workflow.split(/\r?\n  backend-tests:/)[1].split(/\r?\n  pc-runtime-tests:/)[0];
   assert.doesNotMatch(backendJob, /cargo test --manifest-path apps\/desktop\/agent-runtime\/Cargo\.toml/);
+  assert.match(backendJob, /Build backend contract runtime[\s\S]*?cargo build --manifest-path apps\/desktop\/agent-runtime\/Cargo\.toml --locked -p storydex-coomi-bridge/);
   assert.match(workflow, /backend-tests:\s*[\s\S]*?timeout-minutes:\s*\$\{\{ inputs\.full && 30 \|\| 12 \}\}/);
   assert.match(workflow, /backend-compatibility:\s*[\s\S]*?timeout-minutes:\s*10/);
   assert.equal((workflow.match(/--timeout=120/g) || []).length, 2);
