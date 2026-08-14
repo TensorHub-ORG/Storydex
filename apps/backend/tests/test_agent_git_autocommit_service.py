@@ -307,6 +307,32 @@ def test_begin_turn_handles_git_failure_and_existing_repository(tmp_path):
     assert len(snapshot.baseline_fingerprints["chapter.md"]) == 64
 
 
+def test_begin_turn_prefers_prepared_snapshot_contract(tmp_path):
+    chapter = tmp_path / "chapter.md"
+    chapter.write_text("draft", encoding="utf-8")
+
+    class PreparedGitService(ScriptedGitService):
+        def prepare_agent_snapshot(self, root: Path) -> dict:
+            assert root == tmp_path.resolve()
+            return {
+                "changedFiles": [{"relativePath": "chapter.md", "status": "M"}],
+                "initialCommit": {"id": "initial", "shortId": "initial"},
+            }
+
+        def initialize_repository(self, root: Path) -> dict:
+            raise AssertionError("prepared snapshot must avoid the legacy initialization path")
+
+    service = AgentGitAutoCommitService()
+    service.git_service = PreparedGitService()
+
+    snapshot = service.begin_turn(tmp_path)
+
+    assert snapshot.available is True
+    assert snapshot.initial_commit == {"id": "initial", "shortId": "initial"}
+    assert snapshot.baseline_status == {"chapter.md": "M"}
+    assert len(snapshot.baseline_fingerprints["chapter.md"]) == 64
+
+
 def test_finish_turn_all_states(tmp_path):
     service = AgentGitAutoCommitService()
     unavailable = service.begin_turn(_source_repository(tmp_path / "source"))
@@ -508,3 +534,26 @@ def test_helpers_cover_status_fingerprints_messages_and_payload(monkeypatch, tmp
     assert acknowledged["changedFiles"] == ["a/b.md"]
     assert acknowledged["added"] == 0
     assert acknowledged["removed"] == 0
+
+
+def test_format_git_error_preserves_actionable_command_diagnostics():
+    stderr_error = GitServiceError(
+        "commit failed",
+        details={
+            "stderr": "fatal: rejected",
+            "stdout": "ignored when stderr exists",
+            "args": ["commit", "--only", "chapter.md"],
+            "returncode": 128,
+        },
+    )
+    assert AgentGitAutoCommitService._format_git_error(stderr_error) == (
+        "commit failed\n"
+        "stderr: fatal: rejected\n"
+        "command: git commit --only chapter.md\n"
+        "exit code: 128"
+    )
+
+    stdout_error = GitServiceError("status failed", details={"stdout": "working tree unavailable"})
+    assert AgentGitAutoCommitService._format_git_error(stdout_error) == (
+        "status failed\noutput: working tree unavailable"
+    )
