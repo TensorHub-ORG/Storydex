@@ -1,40 +1,13 @@
 from __future__ import annotations
 
-import subprocess
-
 import pytest
 
 from services.coomi_agent_service import _CoomiEventTranslator, _create_storydex_tool_registry
 from services.coomi_bridge_client import (
-    BRIDGE_PROTOCOL_VERSION,
-    STORYDEX_COOMI_RUNTIME_VERSION,
     _decode_lines,
     _wire_messages,
     _wire_tools,
-    bridge_command,
 )
-from services.coomi_version_service import check_coomi_version, read_expected_coomi_version
-
-
-@pytest.mark.coomi_runtime
-def test_vendored_rust_bridge_version_contract() -> None:
-    completed = subprocess.run(
-        [*bridge_command(), "--version"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=30,
-        check=False,
-    )
-    assert completed.returncode == 0
-    assert f"storydex-coomi-bridge {STORYDEX_COOMI_RUNTIME_VERSION}" in completed.stdout
-    assert " git=" in completed.stdout
-    assert " source=" in completed.stdout
-    assert read_expected_coomi_version() == STORYDEX_COOMI_RUNTIME_VERSION
-    status = check_coomi_version()
-    assert status["expectedFingerprint"] == status["binaryFingerprint"]
-    assert BRIDGE_PROTOCOL_VERSION == 1
 
 
 def test_jsonl_and_wire_contract_preserve_tool_history() -> None:

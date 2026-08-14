@@ -89,6 +89,11 @@ def bridge_command() -> list[str]:
     for candidate in candidates:
         if candidate is not None and candidate.is_file():
             return [str(candidate)]
+    if str(os.getenv("STORYDEX_TESTING") or "").strip().lower() in {"1", "true", "yes"}:
+        raise CoomiBridgeError(
+            "Storydex Coomi Rust bridge must be built explicitly in test mode; "
+            "implicit cargo run is disabled"
+        )
     manifest = DESKTOP_RUNTIME_ROOT / "Cargo.toml"
     if manifest.is_file():
         return [

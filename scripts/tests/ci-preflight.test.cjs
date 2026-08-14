@@ -120,6 +120,7 @@ test("hook installer is repository local and agent rules require remote success"
 test("local Fast suite covers CI policy regressions and runtime commit identity", () => {
   const suite = read("scripts/run_full_test_suite.ps1");
   const qualityGate = read(".github/workflows/quality-gate.yml");
+  const runtimeVerifier = read("scripts/verify_coomi_runtime.py");
   assert.match(suite, /resolve-ci-scope\.test\.cjs/);
   assert.match(suite, /ci-preflight\.test\.cjs/);
   assert.match(suite, /STORYDEX_COOMI_GIT_SHA/);
@@ -127,14 +128,17 @@ test("local Fast suite covers CI policy regressions and runtime commit identity"
   assert.match(suite, /\$Mode -eq "Release"\) \{ "release" \} else \{ "advisory" \}/);
   assert.match(suite, /Environment preflight/);
   assert.match(suite, /Assert-NpmDependencies/);
-  assert.match(suite, /\$runBackend -and -not \$runCoomi/);
-  assert.match(suite, /Build current-commit Storydex Coomi desktop runtime/);
-  assert.match(suite, /python -m pytest -q --timeout=120/);
-  assert.doesNotMatch(suite, /not coomi_runtime/);
-  assert.match(qualityGate, /pc-runtime-tests:[\s\S]*?Build current-commit Storydex PC Agent runtime/);
+  assert.doesNotMatch(suite, /\$runBackend -and -not \$runCoomi|Build current-commit Storydex Coomi desktop runtime/);
+  assert.match(suite, /python -m pytest -q -m "not coomi_runtime" --timeout=120/);
+  assert.match(suite, /Pinned Coomi runtime and backend contract[\s\S]*?verify_coomi_runtime\.py/);
+  assert.match(qualityGate, /pc-runtime-tests:[\s\S]*?Build current-commit Storydex PC Agent runtime[\s\S]*?Verify pinned runtime and backend contract/);
+  assert.match(runtimeVerifier, /BRIDGE_PROTOCOL_VERSION/);
+  assert.match(runtimeVerifier, /protocolVersion/);
+  assert.match(runtimeVerifier, /bridge_command\(\)/);
   const backendJob = qualityGate.split(/\r?\n  backend-tests:/)[1].split(/\r?\n  pc-runtime-tests:/)[0];
-  assert.doesNotMatch(backendJob, /cargo test --manifest-path apps\/desktop\/agent-runtime\/Cargo\.toml/);
-  assert.doesNotMatch(qualityGate, /without unchanged Coomi runtime|not coomi_runtime/);
+  assert.doesNotMatch(backendJob, /rust-toolchain|rust-cache|cargo (?:build|run|test)/);
+  assert.match(backendJob, /-m "not coomi_runtime"/);
+  assert.doesNotMatch(qualityGate, /without unchanged Coomi runtime/);
   assert.ok(
     suite.indexOf('Invoke-Step "Environment preflight"') < suite.indexOf('Invoke-Step "Backend tests and coverage"'),
     "dependency preflight must run before the expensive backend suite",

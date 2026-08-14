@@ -3,16 +3,6 @@ from __future__ import annotations
 from services import coomi_version_service as version_service
 
 
-def test_repository_manifest_matches_rust_bridge_binary() -> None:
-    status = version_service.check_coomi_version()
-    assert status["ok"] is True
-    assert status["runtime"] == "storydex-coomi-rs"
-    assert status["expected"] == status["binaryVersion"]
-    assert status["expectedFingerprint"] == status["binaryFingerprint"]
-    assert status["expectedGitSha"] == status["binaryGitSha"]
-    assert status["executable"]
-
-
 def test_reads_workspace_version_from_vendored_manifest() -> None:
     assert version_service.read_expected_coomi_version() == "2.1.0-storydex-desktop.1"
 

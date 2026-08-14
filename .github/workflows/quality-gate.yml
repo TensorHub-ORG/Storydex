@@ -132,10 +132,6 @@ jobs:
       matrix: ${{ fromJSON(inputs.full && '{"include":[{"os":"ubuntu-latest","python":"3.9","coverage_ratchet":false},{"os":"windows-latest","python":"3.9","coverage_ratchet":false},{"os":"windows-latest","python":"3.13","coverage_ratchet":true}]}' || '{"include":[{"os":"ubuntu-latest","python":"3.13","coverage_ratchet":true}]}') }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.95.0
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: apps/desktop/agent-runtime -> target
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
@@ -150,12 +146,11 @@ jobs:
         run: |
           python -m pip install --require-hashes -r requirements.lock
           python -m pip install -r apps/backend/requirements-test.txt
-      - name: Build backend contract runtime
-        run: cargo build --manifest-path apps/desktop/agent-runtime/Cargo.toml --locked -p storydex-coomi-bridge
       - name: Run backend tests with coverage
         working-directory: apps/backend
         run: >-
           python -m pytest -q
+          -m "not coomi_runtime"
           --timeout=120
           --cov=api --cov=core --cov=services --cov-branch
           --cov-fail-under=0
@@ -197,7 +192,7 @@ jobs:
         run: cargo test --manifest-path apps/desktop/agent-runtime/Cargo.toml --locked --workspace
       - name: Build current-commit Storydex PC Agent runtime
         run: cargo build --manifest-path apps/desktop/agent-runtime/Cargo.toml --release --locked -p storydex-coomi-bridge
-      - name: Verify pinned Coomi runtime
+      - name: Verify pinned runtime and backend contract
         run: python scripts/verify_coomi_runtime.py
 
   backend-compatibility:

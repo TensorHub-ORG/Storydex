@@ -93,6 +93,15 @@ def test_reasoning_effort_normalization_accepts_max_and_rejects_unknown_values()
         bridge._normalize_reasoning_effort("ultra")
 
 
+def test_bridge_command_never_implicitly_compiles_in_test_mode(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("STORYDEX_COOMI_BRIDGE", raising=False)
+    monkeypatch.setenv("STORYDEX_TESTING", "1")
+    monkeypatch.setattr(bridge, "DESKTOP_RUNTIME_ROOT", tmp_path / "missing-runtime")
+
+    with pytest.raises(bridge.CoomiBridgeError, match="must be built explicitly"):
+        bridge.bridge_command()
+
+
 @pytest.mark.asyncio
 async def test_bridge_stream_contract_emits_content_tools_and_usage(monkeypatch) -> None:
     monkeypatch.setattr(

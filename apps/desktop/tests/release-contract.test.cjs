@@ -76,7 +76,7 @@ test("local Full and Release suites reuse completed build outputs", () => {
   const suite = fs.readFileSync(path.join(projectRoot, "scripts", "run_full_test_suite.ps1"), "utf8");
   assert.match(
     suite,
-    /Build Storydex Coomi desktop runtime[\s\S]*scripts\/build-coomi-runtime\.cjs/,
+    /\$Mode -eq "Release"[\s\S]*Refresh Storydex Coomi package identity[^\r\n]*scripts\/build-coomi-runtime\.cjs[\s\S]*run prepare:package:assets/,
     "the reusable package stage must refresh build metadata from the current bridge binary"
   );
   const frontendPackage = JSON.parse(fs.readFileSync(path.join(projectRoot, "apps", "frontend", "package.json"), "utf8"));
