@@ -65,9 +65,59 @@ function Handle-UpdateFailure([string]$Message) {
   Remove-InstallLock
 }
 
+function Invoke-UpdateInstallation {
+  try {
+    $deadline = if ($TestMode) { (Get-Date).AddSeconds(1) } else { (Get-Date).AddMinutes(2) }
+    while ((Get-Process -Id $ParentPid -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {
+      if ($script:Form) { [Windows.Forms.Application]::DoEvents() }
+      Start-Sleep -Milliseconds 200
+    }
+    if (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue) {
+      throw "Storydex did not exit within the allowed time. Installation was cancelled."
+    }
+
+    if ($script:Form) {
+      $title.Text = "Installing Storydex"
+      $detail.Text = "The installer is open. Do not start Storydex until installation is complete."
+    }
+    Set-InstallLock "installing"
+    if ($script:Form) { [Windows.Forms.Application]::DoEvents() }
+    if ([IO.Path]::GetExtension($InstallerPath) -ieq ".cmd") {
+      $installer = Start-Process -FilePath $env:ComSpec -ArgumentList @("/d", "/c", $InstallerPath, "--updated") -PassThru -WindowStyle Hidden
+    } else {
+      $installer = Start-Process -FilePath $InstallerPath -ArgumentList "--updated" -PassThru
+    }
+    if (-not $installer.WaitForExit(900000)) {
+      try { $installer.Kill() } catch {}
+      throw "Installation timed out after 15 minutes."
+    }
+    if ($installer.ExitCode -ne 0) { throw "Installer exit code: $($installer.ExitCode)" }
+
+    Set-InstallLock "completed"
+    Write-UpdateLog "Installer completed successfully."
+    if ($script:Form) {
+      $progress.Style = "Blocks"; $progress.Value = 100
+      $title.Text = "Storydex update completed"
+      $detail.Text = "The new version is installed. Start Storydex now?"
+      [Windows.Forms.Application]::DoEvents()
+      $choice = [Windows.Forms.MessageBox]::Show($detail.Text, "Storydex Update", "YesNo", "Information")
+    }
+    Remove-InstallLock
+    if ($script:Form -and $choice -eq [Windows.Forms.DialogResult]::Yes) {
+      Start-Process -FilePath $AppPath | Out-Null
+    }
+    $script:ExitCode = 0
+    if ($script:Form) { $script:Form.Close() }
+  } catch {
+    Handle-UpdateFailure $_.Exception.Message
+  }
+}
+
 try {
-  Add-Type -AssemblyName System.Windows.Forms
-  Add-Type -AssemblyName System.Drawing
+  if (-not $TestMode) {
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+  }
 
   # Publish the readiness handshake before creating the UI/message loop. The
   # parent process must be able to observe this even if the installer exits
@@ -75,79 +125,41 @@ try {
   Set-InstallLock "waiting-for-app-exit"
   Write-UpdateLog "Helper process started. parent=$ParentPid installer=$InstallerPath"
 
-  $form = New-Object Windows.Forms.Form
-  $script:Form = $form
-  $form.Text = "Storydex Update"
-  $form.Width = 480
-  $form.Height = 190
-  $form.StartPosition = "CenterScreen"
-  $form.FormBorderStyle = "FixedDialog"
-  $form.MaximizeBox = $false
-  $form.MinimizeBox = $false
-  if ($TestMode) { $form.ShowInTaskbar = $false; $form.Opacity = 0 }
+  if ($TestMode) {
+    # CI runners do not guarantee an interactive desktop. Exercise the same
+    # install state machine without depending on a WinForms Shown event.
+    Invoke-UpdateInstallation
+  } else {
+    $form = New-Object Windows.Forms.Form
+    $script:Form = $form
+    $form.Text = "Storydex Update"
+    $form.Width = 480
+    $form.Height = 190
+    $form.StartPosition = "CenterScreen"
+    $form.FormBorderStyle = "FixedDialog"
+    $form.MaximizeBox = $false
+    $form.MinimizeBox = $false
 
-  $title = New-Object Windows.Forms.Label
-  $title.Left = 24; $title.Top = 20; $title.Width = 420; $title.Height = 28
-  $title.Font = New-Object Drawing.Font("Microsoft YaHei UI", 12, [Drawing.FontStyle]::Bold)
-  $title.Text = "Preparing the Storydex update"
-  $form.Controls.Add($title)
+    $title = New-Object Windows.Forms.Label
+    $title.Left = 24; $title.Top = 20; $title.Width = 420; $title.Height = 28
+    $title.Font = New-Object Drawing.Font("Microsoft YaHei UI", 12, [Drawing.FontStyle]::Bold)
+    $title.Text = "Preparing the Storydex update"
+    $form.Controls.Add($title)
 
-  $detail = New-Object Windows.Forms.Label
-  $detail.Left = 24; $detail.Top = 58; $detail.Width = 420; $detail.Height = 38
-  $detail.Font = New-Object Drawing.Font("Microsoft YaHei UI", 9)
-  $detail.Text = "Waiting for Storydex to exit safely. Do not start the app again."
-  $form.Controls.Add($detail)
+    $detail = New-Object Windows.Forms.Label
+    $detail.Left = 24; $detail.Top = 58; $detail.Width = 420; $detail.Height = 38
+    $detail.Font = New-Object Drawing.Font("Microsoft YaHei UI", 9)
+    $detail.Text = "Waiting for Storydex to exit safely. Do not start the app again."
+    $form.Controls.Add($detail)
 
-  $progress = New-Object Windows.Forms.ProgressBar
-  $progress.Left = 24; $progress.Top = 108; $progress.Width = 420; $progress.Height = 18
-  $progress.Style = "Marquee"; $progress.MarqueeAnimationSpeed = 28
-  $form.Controls.Add($progress)
+    $progress = New-Object Windows.Forms.ProgressBar
+    $progress.Left = 24; $progress.Top = 108; $progress.Width = 420; $progress.Height = 18
+    $progress.Style = "Marquee"; $progress.MarqueeAnimationSpeed = 28
+    $form.Controls.Add($progress)
 
-  $form.Add_Shown({
-    try {
-      $deadline = if ($TestMode) { (Get-Date).AddSeconds(1) } else { (Get-Date).AddMinutes(2) }
-      while ((Get-Process -Id $ParentPid -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {
-        [Windows.Forms.Application]::DoEvents()
-        Start-Sleep -Milliseconds 200
-      }
-      if (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue) {
-        throw "Storydex did not exit within the allowed time. Installation was cancelled."
-      }
-
-      $title.Text = "Installing Storydex"
-      $detail.Text = "The installer is open. Do not start Storydex until installation is complete."
-      Set-InstallLock "installing"
-      [Windows.Forms.Application]::DoEvents()
-      if ([IO.Path]::GetExtension($InstallerPath) -ieq ".cmd") {
-        $installer = Start-Process -FilePath $env:ComSpec -ArgumentList @("/d", "/c", $InstallerPath, "--updated") -PassThru -WindowStyle Hidden
-      } else {
-        $installer = Start-Process -FilePath $InstallerPath -ArgumentList "--updated" -PassThru
-      }
-      if (-not $installer.WaitForExit(900000)) {
-        try { $installer.Kill() } catch {}
-        throw "Installation timed out after 15 minutes."
-      }
-      if ($installer.ExitCode -ne 0) { throw "Installer exit code: $($installer.ExitCode)" }
-
-      Set-InstallLock "completed"
-      Write-UpdateLog "Installer completed successfully."
-      $progress.Style = "Blocks"; $progress.Value = 100
-      $title.Text = "Storydex update completed"
-      $detail.Text = "The new version is installed. Start Storydex now?"
-      [Windows.Forms.Application]::DoEvents()
-      $choice = if ($TestMode) { [Windows.Forms.DialogResult]::No } else { [Windows.Forms.MessageBox]::Show($detail.Text, "Storydex Update", "YesNo", "Information") }
-      Remove-InstallLock
-      if ($choice -eq [Windows.Forms.DialogResult]::Yes) {
-        Start-Process -FilePath $AppPath | Out-Null
-      }
-      $script:ExitCode = 0
-      $form.Close()
-    } catch {
-      Handle-UpdateFailure $_.Exception.Message
-    }
-  })
-
-  [Windows.Forms.Application]::Run($form)
+    $form.Add_Shown({ Invoke-UpdateInstallation })
+    [Windows.Forms.Application]::Run($form)
+  }
 } catch {
   Handle-UpdateFailure $_.Exception.Message
 } finally {

@@ -7,6 +7,14 @@ const test = require("node:test");
 
 const helper = path.resolve(__dirname, "..", "electron", "update-helper.ps1");
 
+test("update helper test mode bypasses the WinForms message loop", () => {
+  const source = fs.readFileSync(helper, "utf8");
+  assert.match(
+    source,
+    /if \(\$TestMode\) \{\s*(?:#[^\r\n]*\r?\n\s*)*Invoke-UpdateInstallation\s*\} else \{\s*\$form = New-Object Windows\.Forms\.Form/
+  );
+});
+
 function runHelper(exitCode, { invalidLogPath = false, parentPid = 999999 } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "storydex-update-helper-"));
   const installer = path.join(root, "fake-installer.cmd");
