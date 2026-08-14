@@ -20,6 +20,8 @@ use coomi_engine::ModelRequest;
 use coomi_engine::ModelResponse;
 use coomi_engine::ModelResponseMetadata;
 use coomi_engine::ModelStreamObserver;
+use coomi_engine::ProviderStreamEvent;
+use coomi_engine::ProviderStreamPhase;
 use coomi_engine::ReasoningEffort;
 use coomi_engine::Role;
 use coomi_engine::TokenUsage;
@@ -35,6 +37,7 @@ use serde_json::Value;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::time::Duration;
+use std::time::Instant;
 
 const PROVIDER_REQUEST_ATTEMPTS: usize = 3;
 const PROVIDER_RETRY_DELAYS: [Duration; 2] =
@@ -82,6 +85,45 @@ fn provider_stream_retry_delay(attempt: usize) -> Duration {
         .get(attempt)
         .copied()
         .unwrap_or(Duration::ZERO)
+}
+
+fn serialized_bytes(value: &Value) -> u64 {
+    serde_json::to_vec(value)
+        .map(|bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn observe_provider_stream(
+    observer: &dyn ModelStreamObserver,
+    attempt: usize,
+    phase: ProviderStreamPhase,
+    started: Instant,
+    request_bytes: u64,
+    response_bytes: u64,
+    max_output_tokens: u64,
+    parallel_tool_calls: Option<bool>,
+    http_status: u16,
+) {
+    observer.on_provider_stream(&ProviderStreamEvent {
+        attempt,
+        phase,
+        elapsed_ms: elapsed_ms(started),
+        request_bytes,
+        response_bytes,
+        max_output_tokens,
+        parallel_tool_calls,
+        http_status,
+    });
+}
+
+fn apply_parallel_tool_calls(body: &mut Value, enabled: bool, has_tools: bool) {
+    if enabled && has_tools {
+        body["parallel_tool_calls"] = Value::Bool(true);
+    }
 }
 
 pub struct HttpModelProvider {
@@ -242,6 +284,11 @@ impl HttpModelProvider {
             );
             body["tool_choice"] = openai_chat_tool_choice(request.required_tool.as_deref());
         }
+        apply_parallel_tool_calls(
+            &mut body,
+            self.config.capabilities.supports_parallel_tool_calls,
+            !request.tools.is_empty(),
+        );
         body["max_tokens"] = Value::from(
             request
                 .max_output_tokens
@@ -311,6 +358,11 @@ impl HttpModelProvider {
             );
             body["tool_choice"] = openai_chat_tool_choice(request.required_tool.as_deref());
         }
+        apply_parallel_tool_calls(
+            &mut body,
+            self.config.capabilities.supports_parallel_tool_calls,
+            !request.tools.is_empty(),
+        );
         body["max_tokens"] = Value::from(
             request
                 .max_output_tokens
@@ -324,6 +376,24 @@ impl HttpModelProvider {
             request.max_output_tokens,
         )?;
         for attempt in 0..PROVIDER_STREAM_ATTEMPTS {
+            let attempt_number = attempt + 1;
+            let attempt_started = Instant::now();
+            let request_bytes = serialized_bytes(&body);
+            let max_output_tokens = body["max_tokens"]
+                .as_u64()
+                .unwrap_or(PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS);
+            let parallel_tool_calls = body.get("parallel_tool_calls").and_then(Value::as_bool);
+            observe_provider_stream(
+                observer,
+                attempt_number,
+                ProviderStreamPhase::RequestStarted,
+                attempt_started,
+                request_bytes,
+                0,
+                max_output_tokens,
+                parallel_tool_calls,
+                0,
+            );
             let (response, effective_body) = match tokio::time::timeout(
                 PROVIDER_RESPONSE_HEAD_TIMEOUT,
                 self.send_openai_chat(&endpoint, &body, required_tool.as_deref()),
@@ -357,13 +427,41 @@ impl HttpModelProvider {
             // a later transport-level retry.
             body = effective_body;
             let status = response.status();
+            let request_bytes = serialized_bytes(&body);
+            let max_output_tokens = body["max_tokens"]
+                .as_u64()
+                .unwrap_or(PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS);
+            let parallel_tool_calls = body.get("parallel_tool_calls").and_then(Value::as_bool);
+            observe_provider_stream(
+                observer,
+                attempt_number,
+                ProviderStreamPhase::ResponseHead,
+                attempt_started,
+                request_bytes,
+                0,
+                max_output_tokens,
+                parallel_tool_calls,
+                status.as_u16(),
+            );
             if !status.is_success() {
                 return checked_json(response)
                     .await
                     .map(|_| ModelResponse::default());
             }
             let mut state = ChatStreamState::default();
-            match read_sse(response, |value| state.consume(&value, observer)).await {
+            match read_sse_observed(
+                response,
+                observer,
+                attempt_number,
+                attempt_started,
+                request_bytes,
+                max_output_tokens,
+                parallel_tool_calls,
+                status.as_u16(),
+                |value| state.consume(&value, observer),
+            )
+            .await
+            {
                 Ok(())
                     if is_truncated_tool_call_stream(&state)
                         && attempt + 1 < PROVIDER_STREAM_ATTEMPTS =>
@@ -577,6 +675,11 @@ impl HttpModelProvider {
             body["tools"] = Value::Array(provider_tools);
             body["tool_choice"] = openai_responses_tool_choice(request.required_tool.as_deref());
         }
+        apply_parallel_tool_calls(
+            &mut body,
+            self.config.capabilities.supports_parallel_tool_calls,
+            !request.tools.is_empty(),
+        );
         body["max_output_tokens"] = Value::from(
             request
                 .max_output_tokens
@@ -668,6 +771,11 @@ impl HttpModelProvider {
             body["tools"] = Value::Array(provider_tools);
             body["tool_choice"] = openai_responses_tool_choice(request.required_tool.as_deref());
         }
+        apply_parallel_tool_calls(
+            &mut body,
+            self.config.capabilities.supports_parallel_tool_calls,
+            !request.tools.is_empty(),
+        );
         body["max_output_tokens"] = Value::from(
             request
                 .max_output_tokens
@@ -681,6 +789,24 @@ impl HttpModelProvider {
             request.max_output_tokens,
         )?;
         for attempt in 0..PROVIDER_STREAM_ATTEMPTS {
+            let attempt_number = attempt + 1;
+            let attempt_started = Instant::now();
+            let request_bytes = serialized_bytes(&body);
+            let max_output_tokens = body["max_output_tokens"]
+                .as_u64()
+                .unwrap_or(PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS);
+            let parallel_tool_calls = body.get("parallel_tool_calls").and_then(Value::as_bool);
+            observe_provider_stream(
+                observer,
+                attempt_number,
+                ProviderStreamPhase::RequestStarted,
+                attempt_started,
+                request_bytes,
+                0,
+                max_output_tokens,
+                parallel_tool_calls,
+                0,
+            );
             let response = match tokio::time::timeout(
                 PROVIDER_RESPONSE_HEAD_TIMEOUT,
                 self.authenticated(self.client.post(&endpoint))
@@ -726,13 +852,41 @@ impl HttpModelProvider {
                 body = fallback;
             }
             let status = response.status();
+            let request_bytes = serialized_bytes(&body);
+            let max_output_tokens = body["max_output_tokens"]
+                .as_u64()
+                .unwrap_or(PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS);
+            let parallel_tool_calls = body.get("parallel_tool_calls").and_then(Value::as_bool);
+            observe_provider_stream(
+                observer,
+                attempt_number,
+                ProviderStreamPhase::ResponseHead,
+                attempt_started,
+                request_bytes,
+                0,
+                max_output_tokens,
+                parallel_tool_calls,
+                status.as_u16(),
+            );
             if !status.is_success() {
                 return checked_json(response)
                     .await
                     .map(|_| ModelResponse::default());
             }
             let mut state = ResponsesStreamState::default();
-            match read_sse(response, |value| state.consume(&value, observer)).await {
+            match read_sse_observed(
+                response,
+                observer,
+                attempt_number,
+                attempt_started,
+                request_bytes,
+                max_output_tokens,
+                parallel_tool_calls,
+                status.as_u16(),
+                |value| state.consume(&value, observer),
+            )
+            .await
+            {
                 Ok(())
                     if is_truncated_tool_call_stream(&state)
                         && attempt + 1 < PROVIDER_STREAM_ATTEMPTS =>
@@ -2186,16 +2340,80 @@ impl ModelProvider for HttpModelProvider {
     }
 }
 
-async fn read_sse(response: Response, mut consume: impl FnMut(Value) -> Result<()>) -> Result<()> {
+struct ProviderStreamObservation<'a> {
+    observer: &'a dyn ModelStreamObserver,
+    attempt: usize,
+    started: Instant,
+    request_bytes: u64,
+    max_output_tokens: u64,
+    parallel_tool_calls: Option<bool>,
+    http_status: u16,
+}
+
+impl ProviderStreamObservation<'_> {
+    fn emit(&self, phase: ProviderStreamPhase, response_bytes: u64) {
+        observe_provider_stream(
+            self.observer,
+            self.attempt,
+            phase,
+            self.started,
+            self.request_bytes,
+            response_bytes,
+            self.max_output_tokens,
+            self.parallel_tool_calls,
+            self.http_status,
+        );
+    }
+}
+
+async fn read_sse(response: Response, consume: impl FnMut(Value) -> Result<()>) -> Result<()> {
+    read_sse_inner(response, None, consume).await
+}
+
+async fn read_sse_observed(
+    response: Response,
+    observer: &dyn ModelStreamObserver,
+    attempt: usize,
+    started: Instant,
+    request_bytes: u64,
+    max_output_tokens: u64,
+    parallel_tool_calls: Option<bool>,
+    http_status: u16,
+    consume: impl FnMut(Value) -> Result<()>,
+) -> Result<()> {
+    let observation = ProviderStreamObservation {
+        observer,
+        attempt,
+        started,
+        request_bytes,
+        max_output_tokens,
+        parallel_tool_calls,
+        http_status,
+    };
+    read_sse_inner(response, Some(&observation), consume).await
+}
+
+async fn read_sse_inner(
+    response: Response,
+    observation: Option<&ProviderStreamObservation<'_>>,
+    mut consume: impl FnMut(Value) -> Result<()>,
+) -> Result<()> {
     let mut stream = response.bytes_stream();
     let mut buffer = Vec::new();
     let mut saw_completion_event = false;
     let mut first_byte_received = false;
+    let mut first_event_received = false;
+    let mut response_bytes = 0_u64;
     loop {
         let next_chunk = if saw_completion_event {
             match tokio::time::timeout(PROVIDER_COMPLETION_GRACE_TIMEOUT, stream.next()).await {
                 Ok(chunk) => chunk,
-                Err(_) => return Ok(()),
+                Err(_) => {
+                    if let Some(observation) = observation {
+                        observation.emit(ProviderStreamPhase::Completed, response_bytes);
+                    }
+                    return Ok(());
+                }
             }
         } else if !first_byte_received {
             // Gateways that accept a streaming request but never send any body
@@ -2226,6 +2444,11 @@ async fn read_sse(response: Response, mut consume: impl FnMut(Value) -> Result<(
         match chunk {
             Ok(chunk) => {
                 if !chunk.is_empty() {
+                    response_bytes = response_bytes
+                        .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+                    if !first_byte_received && let Some(observation) = observation {
+                        observation.emit(ProviderStreamPhase::FirstByte, response_bytes);
+                    }
                     first_byte_received = true;
                 }
                 buffer.extend_from_slice(&chunk)
@@ -2240,8 +2463,17 @@ async fn read_sse(response: Response, mut consume: impl FnMut(Value) -> Result<(
             }
             match parse_provider_sse_line(&line)? {
                 ProviderSseLine::Ignore => {}
-                ProviderSseLine::Done => return Ok(()),
+                ProviderSseLine::Done => {
+                    if let Some(observation) = observation {
+                        observation.emit(ProviderStreamPhase::Completed, response_bytes);
+                    }
+                    return Ok(());
+                }
                 ProviderSseLine::Value(value) => {
+                    if !first_event_received && let Some(observation) = observation {
+                        observation.emit(ProviderStreamPhase::FirstEvent, response_bytes);
+                    }
+                    first_event_received = true;
                     let completed = provider_sse_value_completed(&value);
                     consume(value)?;
                     if completed {
@@ -2258,8 +2490,16 @@ async fn read_sse(response: Response, mut consume: impl FnMut(Value) -> Result<(
     if !buffer.is_empty() {
         match parse_provider_sse_line(&buffer)? {
             ProviderSseLine::Ignore => {}
-            ProviderSseLine::Done => return Ok(()),
+            ProviderSseLine::Done => {
+                if let Some(observation) = observation {
+                    observation.emit(ProviderStreamPhase::Completed, response_bytes);
+                }
+                return Ok(());
+            }
             ProviderSseLine::Value(value) => {
+                if !first_event_received && let Some(observation) = observation {
+                    observation.emit(ProviderStreamPhase::FirstEvent, response_bytes);
+                }
                 let completed = provider_sse_value_completed(&value);
                 consume(value)?;
                 saw_completion_event |= completed;
@@ -2271,6 +2511,9 @@ async fn read_sse(response: Response, mut consume: impl FnMut(Value) -> Result<(
         saw_completion_event,
         "provider stream failed: stream ended before [DONE], finish_reason, or response.completed"
     );
+    if let Some(observation) = observation {
+        observation.emit(ProviderStreamPhase::Completed, response_bytes);
+    }
     Ok(())
 }
 
@@ -5018,12 +5261,20 @@ mod tests {
     struct CountingRetryObserver {
         retries: std::sync::Arc<std::sync::Mutex<usize>>,
         reset_text_characters: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
+        stream_events: std::sync::Arc<std::sync::Mutex<Vec<ProviderStreamEvent>>>,
     }
 
     impl ModelStreamObserver for CountingRetryObserver {
         fn on_text_delta(&self, _delta: &str) {}
 
         fn on_reasoning_delta(&self, _delta: &str) {}
+
+        fn on_provider_stream(&self, event: &ProviderStreamEvent) {
+            self.stream_events
+                .lock()
+                .expect("provider stream event lock")
+                .push(event.clone());
+        }
 
         fn on_provider_retry(
             &self,
@@ -5121,6 +5372,35 @@ mod tests {
             1,
             "observer must be notified exactly once for the retry"
         );
+        let stream_events = observer
+            .stream_events
+            .lock()
+            .expect("provider stream event lock");
+        let second_attempt = stream_events
+            .iter()
+            .filter(|event| event.attempt == 2)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            second_attempt
+                .iter()
+                .map(|event| event.phase)
+                .collect::<Vec<_>>(),
+            vec![
+                ProviderStreamPhase::RequestStarted,
+                ProviderStreamPhase::ResponseHead,
+                ProviderStreamPhase::FirstByte,
+                ProviderStreamPhase::FirstEvent,
+                ProviderStreamPhase::Completed,
+            ]
+        );
+        let completed = second_attempt.last().expect("completed stream event");
+        assert_eq!(completed.http_status, 200);
+        assert_eq!(
+            completed.max_output_tokens,
+            PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS
+        );
+        assert!(completed.request_bytes > 0);
+        assert!(completed.response_bytes > 0);
     }
 
     fn spawn_content_then_truncate_then_success() -> (String, JoinHandle<()>) {
@@ -5643,8 +5923,8 @@ mod tests {
 
     #[test]
     fn skips_empty_openai_assistant_history_without_provider_items() {
-        let rendered = openai_messages(&[ChatMessage::assistant("", Vec::new())])
-            .expect("render messages");
+        let rendered =
+            openai_messages(&[ChatMessage::assistant("", Vec::new())]).expect("render messages");
         assert!(rendered.is_empty());
     }
 
@@ -6161,6 +6441,21 @@ mod tests {
         assert_eq!(input.last(), Some(&json!({"type": "compaction_trigger"})));
         assert_eq!(body["parallel_tool_calls"], true);
         assert_eq!(body["tools"][0]["name"], "read_file");
+    }
+
+    #[test]
+    fn parallel_tool_calls_are_sent_only_when_enabled_with_tools() {
+        let mut enabled = json!({"tools": [{"type": "function"}]});
+        apply_parallel_tool_calls(&mut enabled, true, true);
+        assert_eq!(enabled["parallel_tool_calls"], true);
+
+        let mut disabled = json!({"tools": [{"type": "function"}]});
+        apply_parallel_tool_calls(&mut disabled, false, true);
+        assert!(disabled.get("parallel_tool_calls").is_none());
+
+        let mut no_tools = json!({});
+        apply_parallel_tool_calls(&mut no_tools, true, false);
+        assert!(no_tools.get("parallel_tool_calls").is_none());
     }
 
     #[test]

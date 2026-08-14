@@ -46,9 +46,18 @@ class AgentGitAutoCommitService:
             )
 
         try:
-            summary = self.git_service.initialize_repository(root)
-            initial_commit = self._commit_initial_snapshot_if_needed(root, summary)
-            baseline = self.git_service.read_summary(root)
+            prepare_snapshot = getattr(self.git_service, "prepare_agent_snapshot", None)
+            if callable(prepare_snapshot):
+                baseline = prepare_snapshot(root)
+                initial_commit = (
+                    dict(baseline["initialCommit"])
+                    if isinstance(baseline.get("initialCommit"), dict)
+                    else None
+                )
+            else:
+                summary = self.git_service.initialize_repository(root)
+                initial_commit = self._commit_initial_snapshot_if_needed(root, summary)
+                baseline = self.git_service.read_summary(root)
             baseline_status = self._status_map(baseline.get("changedFiles"))
             return AgentGitSnapshot(
                 workspace_root=root,

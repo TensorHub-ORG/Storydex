@@ -297,7 +297,7 @@ impl Agent {
                 model: provider.model().to_string(),
                 messages,
                 tools: tool_specs.clone(),
-                max_output_tokens: None,
+                max_output_tokens: Some(capabilities.max_output_tokens),
                 required_tool: None,
                 reasoning_effort: self.reasoning_effort,
             };
@@ -456,7 +456,7 @@ impl Agent {
                     model: provider.model().to_string(),
                     messages: compact_input,
                     tools: Vec::new(),
-                    max_output_tokens: None,
+                    max_output_tokens: Some(capabilities.max_output_tokens),
                     required_tool: None,
                     reasoning_effort: self.reasoning_effort,
                 })
@@ -555,6 +555,11 @@ impl ModelStreamObserver for ObserverStream<'_> {
             .on_event(&AgentEvent::ReasoningDelta(delta.to_owned()));
     }
 
+    fn on_provider_stream(&self, event: &crate::ProviderStreamEvent) {
+        self.observer
+            .on_event(&AgentEvent::ProviderStream(event.clone()));
+    }
+
     fn on_provider_retry(&self, attempt: usize, max_attempts: usize, reset_text_characters: usize) {
         self.observer.on_event(&AgentEvent::ProviderRetry {
             attempt,
@@ -639,6 +644,10 @@ mod tests {
         }
 
         async fn complete(&self, request: ModelRequest) -> Result<ModelResponse> {
+            assert_eq!(
+                request.max_output_tokens,
+                Some(ModelCapabilities::default().max_output_tokens)
+            );
             let mut calls = self.calls.lock().expect("lock mock call count");
             *calls += 1;
             if *calls == 1 {

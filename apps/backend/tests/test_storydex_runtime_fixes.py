@@ -53,6 +53,38 @@ def test_passive_retrieval_query_planner_distinguishes_greeting_and_chapter_refe
     assert "第3章" in chapter["terms"]
 
 
+def test_worldbook_relevance_scoring_keeps_deterministic_selection_with_parallel_reads(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    service = get_story_project_service()
+    service.ensure_project_structure(tmp_path)
+    worldbook = tmp_path / ".storydex" / "worldbook"
+    for index in range(12):
+        (worldbook / f"entry-{index:02d}.md").write_text(
+            f"# entry {index}\n\nsetting {index}\n",
+            encoding="utf-8",
+        )
+
+    calls: list[str] = []
+    original = service._score_worldbook_path_relevance
+
+    def scored(path, keywords):
+        calls.append(path.name)
+        return original(path, keywords)
+
+    monkeypatch.setattr(service, "_score_worldbook_path_relevance", scored)
+    result = service._build_worldbook_hard_constraints_context(
+        tmp_path,
+        max_files=4,
+        prompt="entry-03",
+    )
+
+    assert "entry-03.md" in result
+    assert len(calls) == 12
+    assert sorted(calls) == [f"entry-{index:02d}.md" for index in range(12)]
+
+
 def _write_providers_config(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

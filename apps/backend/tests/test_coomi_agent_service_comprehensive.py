@@ -259,6 +259,40 @@ def test_translator_preserves_reasoning_plan_and_model_response_evidence() -> No
     assert payload["reasoningRequestPlan"]["promptApplied"] is True
 
 
+def test_translator_preserves_redacted_provider_stream_metrics() -> None:
+    translator = coomi._CoomiEventTranslator(session_id="provider-stream-session")
+
+    translated = translator.translate(
+        {
+            "type": "provider_stream",
+            "data": {
+                "attempt": 1,
+                "phase": "first_byte",
+                "elapsedMs": 234,
+                "requestBytes": 1234,
+                "responseBytes": 64,
+                "maxOutputTokens": 8192,
+                "httpStatus": 200,
+            },
+        }
+    )
+
+    assert translated == (
+        "ProviderStream",
+        {
+            "_type": "ProviderStream",
+            "_version": 1,
+            "attempt": 1,
+            "phase": "first_byte",
+            "elapsedMs": 234,
+            "requestBytes": 1234,
+            "responseBytes": 64,
+            "maxOutputTokens": 8192,
+            "httpStatus": 200,
+        },
+    )
+
+
 def test_bridge_status_cache_reloads_when_provider_or_runtime_changes(monkeypatch, tmp_path) -> None:
     config = tmp_path / "providers.json"
     config.write_text("{}\n", encoding="utf-8")
@@ -962,3 +996,25 @@ def test_system_prompt_assigns_core_and_domain_tool_ownership(tmp_path) -> None:
     assert "routing guidance, not a permission boundary" in prompt
     assert "call StorydexSyncWiki before reading project files" in prompt
     assert "status=ready and noChanges=true" in prompt
+
+
+def test_system_prompt_batches_only_explicit_independent_read_file_calls(tmp_path) -> None:
+    prompt = asyncio.run(
+        coomi._build_coomi_system_prompt(
+            workspace_root=tmp_path,
+            prompt="read chapters/a.md, chapters/b.md, and chapters/c.md",
+            turn_contract={
+                "intentFrame": {
+                    "primary": "general",
+                    "operationType": "inquiry",
+                    "effect": "respond_only",
+                    "canWrite": False,
+                },
+                "executionPolicy": {"directFileWrites": False},
+            },
+        )
+    )
+
+    assert "explicitly names multiple independent files for the same read-only operation" in prompt
+    assert "emit all independent read_file calls in one model response" in prompt
+    assert "unless a later path or decision depends on earlier content" in prompt

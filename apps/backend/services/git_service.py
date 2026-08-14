@@ -7,15 +7,17 @@ import re
 import threading
 import time
 from collections import Counter, defaultdict, deque
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import lru_cache, wraps
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, TypeVar
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, TypeVar
 
 from core.exceptions import GitServiceError
 
 _WORKTREE_LOCKS: Dict[str, threading.RLock] = {}
 _WORKTREE_LOCKS_GUARD = threading.Lock()
+_TRUSTED_REPOSITORY_ROOTS = threading.local()
 
 _T = TypeVar("_T")
 
@@ -47,6 +49,42 @@ def workspace_git_lock(workspace_root: Path) -> threading.RLock:
     reading a projection while its publisher replaces the same path.
     """
     return _worktree_lock(Path(workspace_root))
+
+
+def _trusted_repository_counts() -> Counter[str]:
+    counts = getattr(_TRUSTED_REPOSITORY_ROOTS, "counts", None)
+    if counts is None:
+        counts = Counter()
+        _TRUSTED_REPOSITORY_ROOTS.counts = counts
+    return counts
+
+
+def _repository_root_key(workspace_root: Path) -> str:
+    return os.path.normcase(os.path.realpath(os.fspath(workspace_root)))
+
+
+@contextmanager
+def _trusted_repository_root(workspace_root: Path) -> Iterator[None]:
+    """Avoid repeating the same repository-boundary subprocess inside one locked operation.
+
+    The caller must verify the repository top-level before entering. The marker
+    is thread-local and nestable, so unrelated worktrees and concurrent calls
+    still perform their own boundary checks.
+    """
+
+    key = _repository_root_key(workspace_root)
+    counts = _trusted_repository_counts()
+    counts[key] += 1
+    try:
+        yield
+    finally:
+        counts[key] -= 1
+        if counts[key] <= 0:
+            del counts[key]
+
+
+def _is_trusted_repository_root(workspace_root: Path) -> bool:
+    return _trusted_repository_counts()[_repository_root_key(workspace_root)] > 0
 
 
 def _serialized(method: Callable[..., _T]) -> Callable[..., _T]:
@@ -403,6 +441,78 @@ class GitService:
         self._ensure_gitignore(root)
         self._ensure_internal_paths_untracked(root)
         return self.read_summary(root)
+
+    @_serialized
+    def prepare_agent_snapshot(self, workspace_root: Path) -> Dict[str, Any]:
+        """Prepare the turn restore point without loading UI history and graph data.
+
+        Agent preflight only needs a valid repository boundary, an optional
+        first local commit, and the current changed-file status. Reusing
+        ``initialize_repository`` plus two full ``read_summary`` calls caused
+        dozens of redundant Git subprocesses on Windows, including history and
+        graph queries that are irrelevant to rollback safety.
+        """
+
+        root = self._resolve_workspace_root(workspace_root)
+        self._ensure_git_installed()
+        repository_root = self._repository_top_level(root)
+        created_repository = repository_root is None
+        if created_repository:
+            self._run_git_process(root, ["init"])
+            repository_root = self._repository_top_level(root)
+        if repository_root is None:
+            raise GitServiceError(
+                "The Storydex project Git repository could not be initialized.",
+                details={"projectRoot": str(root)},
+            )
+        if not self._paths_refer_to_same_location(root, repository_root):
+            self._raise_repository_boundary_error(root, repository_root)
+
+        initial_commit: Dict[str, Any] | None = None
+        with _trusted_repository_root(root):
+            self._ensure_branch_name(root)
+            self._ensure_local_identity(root)
+            self._ensure_gitignore(root)
+            # A repository created above has no index entries yet. Existing
+            # repositories, including unborn ones with staged files, still need
+            # the legacy internal-path cleanup before any initial commit.
+            if not created_repository:
+                self._ensure_internal_paths_untracked(root)
+
+            has_head = self._has_head_commit(root)
+            branch, changed_files = self._read_agent_snapshot_status(root)
+            if not has_head and changed_files:
+                self._run_git(root, ["add", "-A"])
+                if not self._is_worktree_clean(root):
+                    self._run_git(
+                        root,
+                        [
+                            "commit",
+                            "--no-gpg-sign",
+                            "-m",
+                            "workspace: initial local snapshot",
+                        ],
+                    )
+                    initial_commit = self._read_head_commit(root)
+                branch, changed_files = self._read_agent_snapshot_status(root)
+
+        return {
+            "available": True,
+            "initialized": True,
+            "branch": branch,
+            "changedFiles": changed_files,
+            "initialCommit": initial_commit,
+        }
+
+    def _read_agent_snapshot_status(
+        self,
+        workspace_root: Path,
+    ) -> tuple[str, List[Dict[str, Any]]]:
+        output = self._run_git(
+            self._resolve_workspace_root(workspace_root),
+            ["-c", "core.quotePath=false", "status", "--porcelain=v1", "--branch", "-uall"],
+        )
+        return self._parse_status(output)
 
     @_serialized
     def list_branches(self, workspace_root: Path) -> Dict[str, Any]:
@@ -1742,7 +1852,8 @@ class GitService:
     @classmethod
     def _run_git(cls, workspace_root: Path, args: List[str], *, check: bool = True) -> str:
         root = cls._resolve_workspace_root(workspace_root)
-        cls._assert_repository_root(root)
+        if not _is_trusted_repository_root(root):
+            cls._assert_repository_root(root)
         return cls._run_git_process(root, args, check=check)
 
     @classmethod

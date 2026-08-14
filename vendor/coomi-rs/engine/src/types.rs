@@ -460,6 +460,39 @@ pub struct UserInputRequest {
 
 pub type UserInputResponse = BTreeMap<String, String>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderStreamPhase {
+    RequestStarted,
+    ResponseHead,
+    FirstByte,
+    FirstEvent,
+    Completed,
+}
+
+impl ProviderStreamPhase {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RequestStarted => "request_started",
+            Self::ResponseHead => "response_head",
+            Self::FirstByte => "first_byte",
+            Self::FirstEvent => "first_event",
+            Self::Completed => "completed",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderStreamEvent {
+    pub attempt: usize,
+    pub phase: ProviderStreamPhase,
+    pub elapsed_ms: u64,
+    pub request_bytes: u64,
+    pub response_bytes: u64,
+    pub max_output_tokens: u64,
+    pub parallel_tool_calls: Option<bool>,
+    pub http_status: u16,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum AgentEvent {
     ModelStarted {
@@ -508,6 +541,7 @@ pub enum AgentEvent {
         /// the replacement attempt.
         reset_text_characters: usize,
     },
+    ProviderStream(ProviderStreamEvent),
 }
 
 pub trait AgentObserver: Send + Sync {
@@ -554,6 +588,10 @@ pub trait ModelProvider: Send + Sync {
 pub trait ModelStreamObserver: Send + Sync {
     fn on_text_delta(&self, delta: &str);
     fn on_reasoning_delta(&self, delta: &str);
+
+    /// Reports redaction-safe HTTP/SSE timing and byte counters. No headers,
+    /// prompts, response bodies, reasoning text, or tool arguments are exposed.
+    fn on_provider_stream(&self, _event: &ProviderStreamEvent) {}
 
     /// Notifies that a provider stream was retried (slow first byte, truncated
     /// stream, or read interruption). Defaults to a no-op so existing observers

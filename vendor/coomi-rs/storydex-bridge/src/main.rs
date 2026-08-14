@@ -238,6 +238,19 @@ impl AgentObserver for StorydexObserver {
                     "resetTextCharacters": reset_text_characters,
                 }),
             ),
+            AgentEvent::ProviderStream(event) => (
+                "provider_stream",
+                json!({
+                    "attempt": event.attempt,
+                    "phase": event.phase.as_str(),
+                    "elapsedMs": event.elapsed_ms,
+                    "requestBytes": event.request_bytes,
+                    "responseBytes": event.response_bytes,
+                    "maxOutputTokens": event.max_output_tokens,
+                    "parallelToolCalls": event.parallel_tool_calls,
+                    "httpStatus": event.http_status,
+                }),
+            ),
         };
         self.emitter.event(kind, data);
     }
@@ -674,7 +687,7 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
         &provider_config,
         &provider_config.model,
         request.reasoning_effort,
-        None,
+        Some(provider_config.capabilities.max_output_tokens),
     );
     emit_reasoning_plan(&emitter, &provider_config, &reasoning_plan);
     let session_started = Instant::now();

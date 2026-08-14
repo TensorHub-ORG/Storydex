@@ -1600,6 +1600,21 @@ class _CoomiEventTranslator:
             return "TextChunk", {"_type": "TextChunk", "_version": 1, "content": str(data.get("text") or "")}
         if name == "reasoning_delta":
             return None
+        if name == "provider_stream":
+            payload = {
+                "_type": "ProviderStream",
+                "_version": 1,
+                "attempt": max(1, int(data.get("attempt") or 1)),
+                "phase": str(data.get("phase") or ""),
+                "elapsedMs": max(0, int(data.get("elapsedMs") or 0)),
+                "requestBytes": max(0, int(data.get("requestBytes") or 0)),
+                "responseBytes": max(0, int(data.get("responseBytes") or 0)),
+                "maxOutputTokens": max(0, int(data.get("maxOutputTokens") or 0)),
+                "httpStatus": max(0, int(data.get("httpStatus") or 0)),
+            }
+            if isinstance(data.get("parallelToolCalls"), bool):
+                payload["parallelToolCalls"] = bool(data["parallelToolCalls"])
+            return "ProviderStream", payload
         if name == "model_started":
             return "TurnPhase", {
                 "_type": "TurnPhase",
@@ -1977,6 +1992,11 @@ async def _build_coomi_system_prompt(
         f"Storydex workspace: {Path(workspace_root).resolve()}",
         "Inspect project evidence before acting. Preserve unrelated work and never push to a remote.",
         "Use Rust runtime tools for files, search, shell, MCP, skills, memory, planning, and sub-agents.",
+        (
+            "When the user explicitly names multiple independent files for the same read-only operation, emit all "
+            "independent read_file calls in one model response, preserving the requested order. Do not wait for one "
+            "read result before requesting the next unless a later path or decision depends on earlier content."
+        ),
         "Only use read_skill for a Skill listed by list_skills as installed. Project-local skill documents under "
         "`.storydex/.agent/skills/` are ordinary workspace files and must be read with read_file; if list_skills "
         "reports no installed skills, do not call read_skill for a project skill name.",

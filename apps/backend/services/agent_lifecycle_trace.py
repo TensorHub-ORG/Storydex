@@ -114,6 +114,87 @@ def _is_model_start(event: Mapping[str, Any]) -> bool:
     )
 
 
+def _provider_stream_phase(event: Mapping[str, Any]) -> str:
+    if _event_name(event) != "ProviderStream":
+        return ""
+    return str(_value(event, "phase") or "").strip()
+
+
+def _first_provider_stream_event(
+    events: Sequence[Mapping[str, Any]],
+    phase: str,
+    *,
+    start: int = 0,
+    end: int | None = None,
+) -> tuple[int, Mapping[str, Any]] | None:
+    limit = len(events) if end is None else min(len(events), end)
+    for index in range(max(0, start), limit):
+        event = events[index]
+        if _provider_stream_phase(event) == phase:
+            return index, event
+    return None
+
+
+def _provider_attempt_records(events: Sequence[Mapping[str, Any]]) -> list[Dict[str, Any]]:
+    attempts: dict[int, Dict[str, Any]] = {}
+    for event in events:
+        phase = _provider_stream_phase(event)
+        if not phase:
+            continue
+        attempt = max(1, _nonnegative_int(_value(event, "attempt")))
+        record = attempts.setdefault(
+            attempt,
+            {
+                "attempt": attempt,
+                "requestBytes": 0,
+                "responseBytes": 0,
+                "wireMaxOutputTokens": 0,
+                "wireParallelToolCalls": None,
+                "httpStatus": 0,
+                "responseHeadMs": 0,
+                "firstByteMs": 0,
+                "firstEventMs": 0,
+                "lastObservedMs": 0,
+                "durationMs": 0,
+                "completed": False,
+            },
+        )
+        record["requestBytes"] = max(
+            _nonnegative_int(record.get("requestBytes")),
+            _nonnegative_int(_value(event, "requestBytes")),
+        )
+        record["responseBytes"] = max(
+            _nonnegative_int(record.get("responseBytes")),
+            _nonnegative_int(_value(event, "responseBytes")),
+        )
+        record["wireMaxOutputTokens"] = max(
+            _nonnegative_int(record.get("wireMaxOutputTokens")),
+            _nonnegative_int(_value(event, "maxOutputTokens")),
+        )
+        parallel_tool_calls = _value(event, "parallelToolCalls")
+        if isinstance(parallel_tool_calls, bool):
+            record["wireParallelToolCalls"] = parallel_tool_calls
+        record["httpStatus"] = max(
+            _nonnegative_int(record.get("httpStatus")),
+            _nonnegative_int(_value(event, "httpStatus")),
+        )
+        elapsed = _nonnegative_int(_value(event, "elapsedMs"))
+        record["lastObservedMs"] = max(
+            _nonnegative_int(record.get("lastObservedMs")),
+            elapsed,
+        )
+        if phase == "response_head":
+            record["responseHeadMs"] = elapsed
+        elif phase == "first_byte":
+            record["firstByteMs"] = elapsed
+        elif phase == "first_event":
+            record["firstEventMs"] = elapsed
+        elif phase == "completed":
+            record["durationMs"] = elapsed
+            record["completed"] = True
+    return [attempts[key] for key in sorted(attempts)]
+
+
 def _first_event(
     events: Sequence[Mapping[str, Any]],
     names: Iterable[str],
@@ -163,7 +244,13 @@ def _round_records(events: Sequence[Mapping[str, Any]], request_started: datetim
             start_index = 0
             started_at = _event_timestamp(completion) or request_started
         completed_at = _event_timestamp(completion)
-        first_byte = _first_event(
+        raw_first_byte = _first_provider_stream_event(
+            events,
+            "first_byte",
+            start=start_index,
+            end=completion_index + 1,
+        )
+        first_byte = raw_first_byte or _first_event(
             events,
             {
                 "ProviderFirstByte",
@@ -193,13 +280,22 @@ def _round_records(events: Sequence[Mapping[str, Any]], request_started: datetim
         )
         payload = _event_data(completion)
         usage = _usage(payload)
+        provider_attempts = _provider_attempt_records(events[start_index : completion_index + 1])
+        completed_attempt = next(
+            (item for item in reversed(provider_attempts) if bool(item.get("completed"))),
+            provider_attempts[-1] if provider_attempts else {},
+        )
         records.append(
             {
                 "round": completion_round or len(records) + 1,
+                "status": "completed",
                 "startedAt": _format_timestamp(started_at),
                 "firstByteAt": _format_timestamp(output_time),
                 "completedAt": _format_timestamp(completed_at),
                 "timeToFirstByteMs": _duration_ms(started_at, output_time),
+                "firstByteSource": (
+                    "provider_raw_stream" if raw_first_byte is not None else "decoded_event_fallback"
+                ),
                 "durationMs": _duration_ms(started_at, completed_at),
                 "toolCalls": round_tools,
                 "retryCount": round_retries,
@@ -215,6 +311,116 @@ def _round_records(events: Sequence[Mapping[str, Any]], request_started: datetim
                 ),
                 "outputTokens": _usage_value(usage, "output_tokens", "completion_tokens", "outputTokens"),
                 "reasoningTokens": _usage_value(usage, "reasoning_tokens", "reasoningTokens"),
+                "providerResponseHeadMs": _nonnegative_int(completed_attempt.get("responseHeadMs")),
+                "providerFirstByteMs": _nonnegative_int(completed_attempt.get("firstByteMs")),
+                "providerFirstEventMs": _nonnegative_int(completed_attempt.get("firstEventMs")),
+                "providerGenerationMs": max(
+                    0,
+                    _nonnegative_int(completed_attempt.get("durationMs"))
+                    - _nonnegative_int(completed_attempt.get("firstByteMs")),
+                ),
+                "providerRequestBytes": sum(
+                    _nonnegative_int(item.get("requestBytes")) for item in provider_attempts
+                ),
+                "providerResponseBytes": sum(
+                    _nonnegative_int(item.get("responseBytes")) for item in provider_attempts
+                ),
+                "wireMaxOutputTokens": _nonnegative_int(
+                    completed_attempt.get("wireMaxOutputTokens")
+                ),
+                "wireParallelToolCalls": completed_attempt.get("wireParallelToolCalls"),
+                "providerAttempts": provider_attempts,
+            }
+        )
+
+    last_completion_index = completions[-1][0] if completions else -1
+    pending_provider_events = [
+        (index, event)
+        for index, event in enumerate(events)
+        if index > last_completion_index and _provider_stream_phase(event)
+    ]
+    if pending_provider_events:
+        first_provider_index = pending_provider_events[0][0]
+        pending_start = next(
+            (
+                (index, event)
+                for index, event in reversed(starts)
+                if last_completion_index < index < first_provider_index
+            ),
+            None,
+        )
+        if pending_start is not None:
+            start_index, start = pending_start
+            started_at = (
+                _payload_timestamp(start, "startedAt")
+                or _event_timestamp(start)
+                or request_started
+            )
+        else:
+            start_index = first_provider_index
+            started_at = _event_timestamp(pending_provider_events[0][1]) or request_started
+        terminal_event = next(
+            (
+                event
+                for event in events[first_provider_index:]
+                if _event_name(event) in _TERMINAL_EVENTS
+            ),
+            None,
+        )
+        finished_at = (
+            _event_timestamp(terminal_event)
+            if terminal_event is not None
+            else _event_timestamp(pending_provider_events[-1][1])
+        )
+        provider_attempts = _provider_attempt_records(events[start_index:])
+        last_attempt = provider_attempts[-1] if provider_attempts else {}
+        round_retries = sum(
+            1
+            for item in events[start_index:]
+            if _event_name(item) in {"ConnectionRetry", "ProviderRetry"}
+        )
+        records.append(
+            {
+                "round": _nonnegative_int(
+                    _value(start, "round") or _value(start, "current")
+                )
+                if pending_start is not None
+                else len(records) + 1,
+                "status": "failed",
+                "startedAt": _format_timestamp(started_at),
+                "firstByteAt": "",
+                "completedAt": _format_timestamp(finished_at),
+                "timeToFirstByteMs": 0,
+                "firstByteSource": "unavailable_after_response_head",
+                "durationMs": _duration_ms(started_at, finished_at),
+                "toolCalls": 0,
+                "retryCount": round_retries,
+                "responseModel": "",
+                "finishReason": "",
+                "nativeReasoning": False,
+                "inputTokens": 0,
+                "cachedInputTokens": 0,
+                "outputTokens": 0,
+                "reasoningTokens": 0,
+                "providerResponseHeadMs": sum(
+                    _nonnegative_int(item.get("responseHeadMs"))
+                    for item in provider_attempts
+                ),
+                "providerFirstByteMs": 0,
+                "providerFirstEventMs": 0,
+                "providerGenerationMs": 0,
+                "providerRequestBytes": sum(
+                    _nonnegative_int(item.get("requestBytes")) for item in provider_attempts
+                ),
+                "providerResponseBytes": sum(
+                    _nonnegative_int(item.get("responseBytes")) for item in provider_attempts
+                ),
+                "wireMaxOutputTokens": _nonnegative_int(
+                    last_attempt.get("wireMaxOutputTokens")
+                ),
+                "wireParallelToolCalls": last_attempt.get("wireParallelToolCalls"),
+                "failureHttpStatus": _nonnegative_int(last_attempt.get("httpStatus")),
+                "providerAttempts": provider_attempts,
             }
         )
     return records
@@ -308,7 +514,8 @@ def build_agent_lifecycle_trace(
     started = _parse_timestamp(request_started_at) or (timestamps[0] if timestamps else None)
     finished = _parse_timestamp(request_finished_at) or (timestamps[-1] if timestamps else None)
 
-    explicit_first = _first_event(normalized, {"ProviderFirstByte", "FirstByte"})
+    raw_first = _first_provider_stream_event(normalized, "first_byte")
+    explicit_first = raw_first or _first_event(normalized, {"ProviderFirstByte", "FirstByte"})
     first_output = _first_event(normalized, _OUTPUT_EVENTS)
     first_tool = _first_event(normalized, {"ToolStart", "ToolStarted"})
     first_completed = _first_event(normalized, {"ModelCompleted"})
@@ -377,7 +584,9 @@ def build_agent_lifecycle_trace(
 
     source = ""
     first_name = _event_name(first_byte_item[1]) if first_byte_item else ""
-    if first_name in {"ProviderFirstByte", "FirstByte"}:
+    if raw_first is not None and first_byte_item == raw_first:
+        source = "provider_raw_stream"
+    elif first_name in {"ProviderFirstByte", "FirstByte"}:
         source = "provider_stream"
     elif first_name in {"ReasoningChunk", "TextChunk"}:
         source = "first_output_delta"
@@ -385,8 +594,10 @@ def build_agent_lifecycle_trace(
         source = "tool_call"
     elif first_name == "ModelCompleted":
         source = "model_completed_fallback"
+    elif _first_provider_stream_event(normalized, "response_head") is not None:
+        source = "unavailable_after_response_head"
     elif normalized:
-        source = "model_completed_fallback"
+        source = "unavailable"
 
     return {
         "_type": _LIFECYCLE_TYPE,
@@ -400,10 +611,36 @@ def build_agent_lifecycle_trace(
         "timeToFirstByteMs": _duration_ms(started, first_byte_time),
         "timeToFirstVisibleOutputMs": _duration_ms(started, first_visible_time),
         "durationMs": _duration_ms(started, finished),
-        "providerWaitMs": sum(_nonnegative_int(round_item.get("timeToFirstByteMs")) for round_item in rounds),
+        "providerWaitMs": sum(
+            _nonnegative_int(round_item.get("providerFirstByteMs"))
+            or _nonnegative_int(round_item.get("providerResponseHeadMs"))
+            or _nonnegative_int(round_item.get("timeToFirstByteMs"))
+            for round_item in rounds
+        ),
+        "providerResponseHeadMs": sum(
+            _nonnegative_int(round_item.get("providerResponseHeadMs")) for round_item in rounds
+        ),
+        "providerFirstByteMs": sum(
+            _nonnegative_int(round_item.get("providerFirstByteMs")) for round_item in rounds
+        ),
+        "providerGenerationMs": sum(
+            _nonnegative_int(round_item.get("providerGenerationMs")) for round_item in rounds
+        ),
+        "providerRequestBytes": sum(
+            _nonnegative_int(round_item.get("providerRequestBytes")) for round_item in rounds
+        ),
+        "providerResponseBytes": sum(
+            _nonnegative_int(round_item.get("providerResponseBytes")) for round_item in rounds
+        ),
         "modelGenerationMs": sum(_nonnegative_int(round_item.get("durationMs")) for round_item in rounds),
         "toolExecutionMs": sum(_nonnegative_int(tool.get("durationMs")) for tool in tools),
         "modelRounds": len(rounds),
+        "completedModelRounds": sum(
+            1 for round_item in rounds if round_item.get("status") == "completed"
+        ),
+        "failedModelRounds": sum(
+            1 for round_item in rounds if round_item.get("status") == "failed"
+        ),
         "toolCalls": len(tools),
         "retryCount": len(retries),
         "retryRecoveryMs": sum(_nonnegative_int(item.get("recoveryMs")) for item in retries),

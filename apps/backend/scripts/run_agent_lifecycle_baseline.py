@@ -8,6 +8,7 @@ intended for phase-A/E diagnostics, not as a production health check.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -36,15 +37,39 @@ from scripts.run_graph_live_acceptance import (  # noqa: E402
     provider_config_path,
     redact,
     run_turn,
+    started_tool_names,
+    TurnFailure,
     write_json,
 )
 
 
 MARKER = "STORYDEX_LIFECYCLE_BASELINE_OK"
+MULTI_MARKERS = (
+    "STORYDEX_MULTI_ALPHA_41A7",
+    "STORYDEX_MULTI_BRAVO_82C3",
+    "STORYDEX_MULTI_CHARLIE_D5E9",
+)
 
 
-def prepare_fixture(workspace: Path) -> dict[str, Any]:
+def prepare_fixture(workspace: Path, scenario: str) -> dict[str, Any]:
     prepare_workspace(workspace)
+    if scenario == "strict-multi-read":
+        files = []
+        for name, marker in zip(("alpha", "bravo", "charlie"), MULTI_MARKERS):
+            relative = f"chapters/lifecycle-{name}.md"
+            source = workspace / relative
+            source.write_text(
+                f"# {name.title()} lifecycle evidence\n\n固定验收标记：{marker}\n",
+                encoding="utf-8",
+            )
+            files.append(relative)
+        return {
+            "scenario": scenario,
+            "workspaceFiles": files,
+            "prompt": "固定只读任务：依次读取三个文件并返回各自标记，不修改任何项目文件。",
+            "markers": list(MULTI_MARKERS),
+            "expectedToolNames": ["read_file", "read_file", "read_file"],
+        }
     source = workspace / "chapters" / "lifecycle-baseline.md"
     source.write_text(
         "# Lifecycle baseline\n\n"
@@ -53,20 +78,36 @@ def prepare_fixture(workspace: Path) -> dict[str, Any]:
         encoding="utf-8",
     )
     return {
+        "scenario": scenario,
         "workspaceFiles": ["chapters/lifecycle-baseline.md"],
         "prompt": "固定只读任务：读取该文件并返回标记，不修改任何项目文件。",
-        "marker": MARKER,
+        "markers": [MARKER],
+        "expectedToolNames": ["read_file"],
     }
 
 
-def provider_config_observation(source: Path, provider_id: str) -> dict[str, Any]:
-    document = json.loads(source.read_text(encoding="utf-8-sig"))
-    providers = document.get("providers") if isinstance(document, dict) else {}
-    provider = providers.get(provider_id) if isinstance(providers, Mapping) else None
-    if not isinstance(provider, Mapping):
-        raise AcceptanceError(f"provider {provider_id} is missing from {source}")
+def fixture_prompt(fixture: Mapping[str, Any]) -> str:
+    if fixture.get("scenario") == "strict-multi-read":
+        paths = "、".join(str(item) for item in fixture.get("workspaceFiles") or [])
+        markers = "、".join(str(item) for item in fixture.get("markers") or [])
+        return (
+            "这是一次严格只读多工具生命周期基线测试。只能调用 read_file，并严格按照给定顺序，"
+            f"对每个文件恰好调用一次：{paths}。不要使用其他工具，不要重复读取，不要修改任何文件。"
+            f"全部读取完成后，只按给定顺序返回三个固定标记：{markers}。"
+        )
+    return (
+        "这是一次只读生命周期基线测试。只能调用一次 read_file，读取 "
+        "chapters/lifecycle-baseline.md；不要使用其他工具，不要修改任何文件。"
+        f"读取后只返回固定标记 {MARKER}。"
+    )
+
+
+def provider_config_observation(
+    provider: Mapping[str, Any], provider_id: str, source_format: str
+) -> dict[str, Any]:
     observed: dict[str, Any] = {
         "providerId": provider_id,
+        "sourceFormat": str(source_format or "unknown"),
         "type": str(provider.get("type") or ""),
         "model": str(provider.get("model") or ""),
         "baseUrl": str(provider.get("base_url") or provider.get("baseUrl") or ""),
@@ -82,6 +123,7 @@ def provider_config_observation(source: Path, provider_id: str) -> dict[str, Any
                 "reasoning_effort_map",
                 "reasoning_profiles",
                 "supports_reasoning_effort",
+                "supports_parallel_tool_calls",
                 "reasoning_prompt_fallback",
                 "stream",
                 "stream_options",
@@ -93,20 +135,23 @@ def provider_config_observation(source: Path, provider_id: str) -> dict[str, Any
         value = provider.get(key)
         if str(key).lower() in {"reasoning_effort_map", "reasoning_profiles"} and isinstance(value, Mapping):
             observed[key] = sorted(str(item) for item in value)
-        elif str(key).lower() in {"max_output_tokens", "max_tokens", "supports_reasoning_effort", "reasoning_prompt_fallback"}:
+        elif str(key).lower() in {
+            "max_output_tokens",
+            "max_tokens",
+            "supports_reasoning_effort",
+            "supports_parallel_tool_calls",
+            "reasoning_prompt_fallback",
+        }:
             observed[key] = value
         elif str(key).lower() in {"stream", "stream_options", "tool_protocol"}:
             observed[key] = value
     return observed
 
 
-def output_limit_observation(provider: Mapping[str, Any]) -> dict[str, Any]:
-    """Resolve the configured capability limit and the OpenAI wire default.
-
-    The two values intentionally remain separate: the former is used by the
-    engine's context accounting, while the latter is the value placed in the
-    OpenAI-compatible request when ``ModelRequest.max_output_tokens`` is None.
-    """
+def output_limit_observation(
+    provider: Mapping[str, Any], lifecycle: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Compare the resolved capability limit with observed wire values."""
 
     config_source = (REPOSITORY_ROOT / "vendor" / "coomi-rs" / "services" / "src" / "config.rs").read_text(
         encoding="utf-8"
@@ -122,17 +167,60 @@ def output_limit_observation(provider: Mapping[str, Any]) -> dict[str, Any]:
     capability_default = int(capability_match.group(1).replace("_", ""))
     wire_default = int(wire_match.group(1).replace("_", ""))
     capability = int(configured) if configured is not None else capability_default
+    rounds = lifecycle.get("rounds") if isinstance(lifecycle.get("rounds"), list) else []
+    observed_values = sorted(
+        {
+            int(item.get("wireMaxOutputTokens") or 0)
+            for item in rounds
+            if isinstance(item, Mapping) and int(item.get("wireMaxOutputTokens") or 0) > 0
+        }
+    )
     return {
         "configuredMaxOutputTokens": configured,
         "resolvedCapabilityMaxOutputTokens": capability,
         "wireDefaultMaxTokens": wire_default,
-        "requestOverride": None,
-        "mismatch": capability != wire_default,
+        "wireObserved": bool(observed_values),
+        "observedWireMaxOutputTokens": observed_values,
+        "mismatch": bool(observed_values) and observed_values != [capability],
         "source": {
             "capability": "vendor/coomi-rs/services/src/config.rs",
             "wire": "vendor/coomi-rs/services/src/provider.rs",
         },
     }
+
+
+def parallel_tool_calls_observation(
+    provider: Mapping[str, Any], lifecycle: Mapping[str, Any]
+) -> dict[str, Any]:
+    rounds = lifecycle.get("rounds") if isinstance(lifecycle.get("rounds"), list) else []
+    observed = sorted(
+        {
+            bool(item.get("wireParallelToolCalls"))
+            for item in rounds
+            if isinstance(item, Mapping) and isinstance(item.get("wireParallelToolCalls"), bool)
+        }
+    )
+    configured = bool(provider.get("supports_parallel_tool_calls"))
+    return {
+        "configured": configured,
+        "wireObserved": bool(observed),
+        "observedWireValues": observed,
+        "mismatch": bool(observed) and observed != [configured],
+    }
+
+
+def enable_parallel_tool_calls_in_isolated_config(
+    coomi_home: Path, provider_id: str
+) -> dict[str, Any]:
+    config_path = coomi_home / "config" / "providers.json"
+    document = json.loads(config_path.read_text(encoding="utf-8-sig"))
+    providers = document.get("providers") if isinstance(document, dict) else None
+    provider = providers.get(provider_id) if isinstance(providers, dict) else None
+    if not isinstance(provider, dict):
+        raise AcceptanceError(f"isolated provider {provider_id} is missing")
+    provider["supports_parallel_tool_calls"] = True
+    write_json(config_path, document)
+    return provider
 
 
 def classify_wait_stages(lifecycle: Mapping[str, Any]) -> dict[str, Any]:
@@ -175,6 +263,36 @@ def public_turn(result: Mapping[str, Any], fixture: Mapping[str, Any]) -> dict[s
     protocol = result.get("protocol") if isinstance(result.get("protocol"), Mapping) else {}
     tool_calls = result.get("toolCalls") if isinstance(result.get("toolCalls"), list) else []
     reply_preview = str(result.get("replyPreview") or "")
+    started_calls: list[Mapping[str, Any]] = []
+    seen_call_ids: set[str] = set()
+    for item in tool_calls:
+        if not isinstance(item, Mapping) or str(item.get("event") or "") not in {
+            "ToolCall",
+            "ToolStart",
+            "ToolStarted",
+        }:
+            continue
+        call_id = str(item.get("toolCallId") or "").strip()
+        if call_id and call_id in seen_call_ids:
+            continue
+        if call_id:
+            seen_call_ids.add(call_id)
+        started_calls.append(item)
+    fingerprints = [
+        hashlib.sha256(
+            json.dumps(
+                {
+                    "tool": str(item.get("toolName") or ""),
+                    "arguments": item.get("arguments") if isinstance(item.get("arguments"), Mapping) else {},
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        for item in started_calls
+    ]
+    markers = [str(item) for item in fixture.get("markers") or [] if str(item)]
     return {
         "traceId": str(result.get("traceId") or ""),
         "sessionId": str(result.get("sessionId") or ""),
@@ -188,6 +306,9 @@ def public_turn(result: Mapping[str, Any], fixture: Mapping[str, Any]) -> dict[s
         "lifecycle": dict(lifecycle),
         "protocol": dict(protocol),
         "toolCallCount": int(lifecycle.get("toolCalls") or 0),
+        "toolSequence": started_tool_names(result),
+        "uniqueToolInvocationCount": len(set(fingerprints)),
+        "duplicateToolInvocationCount": len(fingerprints) - len(set(fingerprints)),
         "toolNames": sorted(
             {
                 str(item.get("toolName") or "")
@@ -196,19 +317,23 @@ def public_turn(result: Mapping[str, Any], fixture: Mapping[str, Any]) -> dict[s
             }
         ),
         "visibleReplyChars": len(reply_preview),
-        "markerObserved": MARKER in reply_preview,
+        "markersObserved": all(marker in reply_preview for marker in markers),
         "usage": dict(result.get("usage") or {}) if isinstance(result.get("usage"), Mapping) else {},
         "errors": list(result.get("errors") or []),
-        "fixtureMarker": str(fixture.get("marker") or ""),
     }
 
 
-def validate_baseline_turn(turn: Mapping[str, Any]) -> None:
+def validate_baseline_turn(turn: Mapping[str, Any], fixture: Mapping[str, Any] | None = None) -> None:
     """Reject a baseline that does not follow its deliberately tiny contract."""
 
-    tool_names = [str(name) for name in (turn.get("toolNames") or []) if str(name)]
+    fixture = fixture or {
+        "expectedToolNames": ["read_file"],
+        "markers": [MARKER],
+    }
+    tool_names = [str(name) for name in (turn.get("toolSequence") or turn.get("toolNames") or []) if str(name)]
     tool_count = int(turn.get("toolCallCount") or 0)
-    if tool_names != ["read_file"] or tool_count != 1:
+    expected_tools = [str(name) for name in fixture.get("expectedToolNames") or []]
+    if tool_names != expected_tools or tool_count != len(expected_tools):
         raise AcceptanceError(
             "baseline task used an unexpected tool sequence: "
             f"names={tool_names!r}, count={tool_count}"
@@ -217,8 +342,15 @@ def validate_baseline_turn(turn: Mapping[str, Any]) -> None:
     tools = lifecycle.get("tools") if isinstance(lifecycle.get("tools"), list) else []
     if any(bool(item.get("error")) for item in tools if isinstance(item, Mapping)):
         raise AcceptanceError("baseline task reported a tool error")
-    if not bool(turn.get("markerObserved")):
-        raise AcceptanceError("baseline task did not return the fixed acceptance marker")
+    if int(turn.get("duplicateToolInvocationCount") or 0):
+        raise AcceptanceError("baseline task repeated an identical tool invocation")
+    if int(turn.get("uniqueToolInvocationCount") or 0) != len(expected_tools):
+        raise AcceptanceError("baseline task did not use one unique invocation per expected tool call")
+    markers_observed = turn.get("markersObserved")
+    if markers_observed is None:
+        markers_observed = turn.get("markerObserved")
+    if not bool(markers_observed):
+        raise AcceptanceError("baseline task did not return all fixed acceptance markers")
 
 
 def run_baseline(args: argparse.Namespace) -> dict[str, Any]:
@@ -232,7 +364,11 @@ def run_baseline(args: argparse.Namespace) -> dict[str, Any]:
     report_path = output_root / "baseline-report.json"
     source_config = Path(args.config).resolve() if args.config else provider_config_path()
     original_bridge = os.environ.get("STORYDEX_COOMI_BRIDGE")
-    bridge = REPOSITORY_ROOT / "vendor" / "coomi-rs" / "target" / "debug" / "storydex-coomi-bridge.exe"
+    bridge = (
+        Path(args.bridge).resolve()
+        if str(args.bridge or "").strip()
+        else REPOSITORY_ROOT / "vendor" / "coomi-rs" / "target" / "debug" / "storydex-coomi-bridge.exe"
+    )
     if not bridge.is_file():
         raise AcceptanceError(f"debug bridge is missing: {bridge}")
     try:
@@ -240,17 +376,29 @@ def run_baseline(args: argparse.Namespace) -> dict[str, Any]:
             root = Path(temporary)
             workspace = root / "workspace"
             coomi_home = root / "coomi-home"
-            fixture = prepare_fixture(workspace)
+            fixture = prepare_fixture(workspace, args.scenario)
             provider = load_isolated_provider(
                 source_config,
                 coomi_home,
                 args.provider_id,
                 args.model,
             )
-            config_observation = provider_config_observation(source_config, args.provider_id)
-            config_observation["outputLimit"] = output_limit_observation(
-                json.loads(source_config.read_text(encoding="utf-8-sig"))["providers"][args.provider_id]
+            isolated_provider = json.loads(
+                (coomi_home / "config" / "providers.json").read_text(encoding="utf-8-sig")
+            )["providers"][args.provider_id]
+            if args.enable_parallel_tool_calls:
+                isolated_provider = enable_parallel_tool_calls_in_isolated_config(
+                    coomi_home, args.provider_id
+                )
+            config_observation = provider_config_observation(
+                isolated_provider,
+                args.provider_id,
+                str(provider.get("sourceFormat") or ""),
             )
+            if args.enable_parallel_tool_calls:
+                config_observation["temporaryOverrides"] = {
+                    "supports_parallel_tool_calls": True,
+                }
             os.environ["STORYDEX_COOMI_BRIDGE"] = str(bridge)
             port = free_port()
             backend = BackendProcess(
@@ -258,36 +406,90 @@ def run_baseline(args: argparse.Namespace) -> dict[str, Any]:
                 coomi_home=coomi_home,
                 log_path=output_root / "backend.log",
                 port=port,
+                repository_root=(
+                    Path(args.backend_repository_root).resolve()
+                    if str(args.backend_repository_root or "").strip()
+                    else REPOSITORY_ROOT
+                ),
             )
             client = httpx.Client()
             try:
                 backend.start()
-                prompt = (
-                    "这是一次只读生命周期基线测试。只能调用一次 read_file，读取 "
-                    "chapters/lifecycle-baseline.md；不要使用其他工具，不要修改任何文件。"
-                    f"读取后只返回固定标记 {MARKER}。"
-                )
-                result = run_turn(
-                    client,
-                    base_url=backend.base_url,
-                    workspace=workspace,
-                    session_id="lifecycle-baseline-" + uuid.uuid4().hex[:10],
-                    prompt=prompt,
-                    reasoning_effort=args.reasoning_effort,
-                    label="lifecycle-baseline",
-                    expected_provider=args.provider_id,
-                    expected_model=args.model,
-                    timeout_seconds=args.turn_timeout,
-                )
+                try:
+                    result = run_turn(
+                        client,
+                        base_url=backend.base_url,
+                        workspace=workspace,
+                        session_id="lifecycle-baseline-" + uuid.uuid4().hex[:10],
+                        prompt=fixture_prompt(fixture),
+                        reasoning_effort=args.reasoning_effort,
+                        label="lifecycle-baseline",
+                        expected_provider=args.provider_id,
+                        expected_model=args.model,
+                        timeout_seconds=args.turn_timeout,
+                    )
+                except TurnFailure as exc:
+                    failed_turn = public_turn(exc.result, fixture)
+                    config_observation["outputLimit"] = output_limit_observation(
+                        isolated_provider,
+                        failed_turn["lifecycle"],
+                    )
+                    config_observation["parallelToolCalls"] = parallel_tool_calls_observation(
+                        isolated_provider,
+                        failed_turn["lifecycle"],
+                    )
+                    report = {
+                        "_type": "AgentLifecycleBaseline",
+                        "_version": 2,
+                        "status": "failed",
+                        "startedAt": started_at,
+                        "finishedAt": now_iso(),
+                        "provider": redact(provider),
+                        "configObservation": redact(config_observation),
+                        "fixture": fixture,
+                        "turn": failed_turn,
+                        "classification": {
+                            **classify_wait_stages(failed_turn["lifecycle"]),
+                            "evidence": {
+                                "timeToFirstByteMs": failed_turn["lifecycle"].get(
+                                    "timeToFirstByteMs", 0
+                                ),
+                                "timeToFirstVisibleOutputMs": failed_turn["lifecycle"].get(
+                                    "timeToFirstVisibleOutputMs", 0
+                                ),
+                                "providerWaitMs": failed_turn["lifecycle"].get(
+                                    "providerWaitMs", 0
+                                ),
+                                "modelGenerationMs": failed_turn["lifecycle"].get(
+                                    "modelGenerationMs", 0
+                                ),
+                                "toolExecutionMs": failed_turn["lifecycle"].get(
+                                    "toolExecutionMs", 0
+                                ),
+                                "retryCount": failed_turn["lifecycle"].get("retryCount", 0),
+                            },
+                        },
+                        "error": str(exc),
+                    }
+                    write_json(report_path, redact(report))
+                    raise AcceptanceError(f"{exc}; report={report_path.as_posix()}") from exc
             finally:
                 client.close()
                 backend.stop()
 
             turn = public_turn(result, fixture)
-            validate_baseline_turn(turn)
+            validate_baseline_turn(turn, fixture)
+            config_observation["outputLimit"] = output_limit_observation(
+                isolated_provider,
+                turn["lifecycle"],
+            )
+            config_observation["parallelToolCalls"] = parallel_tool_calls_observation(
+                isolated_provider,
+                turn["lifecycle"],
+            )
             report = {
                 "_type": "AgentLifecycleBaseline",
-                "_version": 1,
+                "_version": 2,
                 "status": "passed",
                 "startedAt": started_at,
                 "finishedAt": now_iso(),
@@ -323,9 +525,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--provider-id", default="OPENCODE")
     parser.add_argument("--model", default="deepseek-v4-flash")
     parser.add_argument("--reasoning-effort", default="low", choices=("auto", "low", "medium", "high", "xhigh", "max"))
-    parser.add_argument("--config", default="")
+    parser.add_argument(
+        "--config",
+        default="",
+        help="Storydex providers.json or OpenCode opencode.json; only the selected provider is copied",
+    )
     parser.add_argument("--turn-timeout", type=int, default=300)
     parser.add_argument("--output-dir", default="")
+    parser.add_argument("--bridge", default="")
+    parser.add_argument("--backend-repository-root", default="")
+    parser.add_argument(
+        "--enable-parallel-tool-calls",
+        action="store_true",
+        help="Enable parallel tool calls only in the temporary isolated provider copy",
+    )
+    parser.add_argument(
+        "--scenario",
+        default="strict-single-read",
+        choices=("strict-single-read", "strict-multi-read"),
+    )
     return parser.parse_args()
 
 

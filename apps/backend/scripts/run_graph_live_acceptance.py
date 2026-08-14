@@ -90,20 +90,68 @@ def provider_config_path() -> Path:
     return user_root / ".storydex" / ".coomi" / "config" / "providers.json"
 
 
+def _provider_from_source(
+    document: Mapping[str, Any], provider_id: str, model: str
+) -> tuple[Dict[str, Any], str]:
+    providers = document.get("providers") if isinstance(document.get("providers"), dict) else None
+    if isinstance(providers, dict) and isinstance(providers.get(provider_id), dict):
+        provider = dict(providers[provider_id])
+        configured_model = str(provider.get("model") or "").strip()
+        if configured_model != model:
+            raise AcceptanceError(
+                f"provider {provider_id} is configured for {configured_model or '<empty>'}, expected {model}"
+            )
+        return provider, "storydex"
+
+    opencode_providers = (
+        document.get("provider") if isinstance(document.get("provider"), dict) else None
+    )
+    source_provider = (
+        opencode_providers.get(provider_id)
+        if isinstance(opencode_providers, dict)
+        else None
+    )
+    if not isinstance(source_provider, dict):
+        raise AcceptanceError(f"provider {provider_id} is missing from source config")
+    models = source_provider.get("models") if isinstance(source_provider.get("models"), dict) else {}
+    if not isinstance(models.get(model), dict):
+        raise AcceptanceError(f"model {model} is not declared by OpenCode provider {provider_id}")
+    npm = str(source_provider.get("npm") or "").strip()
+    if npm != "@ai-sdk/openai-compatible":
+        raise AcceptanceError(
+            f"OpenCode provider {provider_id} uses unsupported npm adapter {npm or '<empty>'}"
+        )
+    options = source_provider.get("options") if isinstance(source_provider.get("options"), dict) else {}
+    base_url = str(options.get("baseURL") or options.get("baseUrl") or "").strip()
+    api_key = str(options.get("apiKey") or "")
+    if not base_url:
+        raise AcceptanceError(f"OpenCode provider {provider_id} has no baseURL")
+    provider: Dict[str, Any] = {
+        "type": "openai_compatible",
+        "display": provider_id,
+        "api_key": api_key,
+        "base_url": base_url,
+        "model": model,
+        "tool_protocol": "auto",
+    }
+    model_config = models[model]
+    limit = model_config.get("limit") if isinstance(model_config.get("limit"), dict) else {}
+    if int(limit.get("context") or 0) > 0:
+        provider["context_window"] = int(limit["context"])
+    if int(limit.get("output") or 0) > 0:
+        provider["max_output_tokens"] = int(limit["output"])
+    return provider, "opencode"
+
+
 def load_isolated_provider(source: Path, destination: Path, provider_id: str, model: str) -> Dict[str, Any]:
     try:
         document = json.loads(source.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         raise AcceptanceError(f"cannot read provider config: {exc}") from exc
-    providers = document.get("providers") if isinstance(document, dict) else None
-    if not isinstance(providers, dict) or not isinstance(providers.get(provider_id), dict):
-        raise AcceptanceError(f"provider {provider_id} is missing from {source}")
-    provider = dict(providers[provider_id])
+    if not isinstance(document, dict):
+        raise AcceptanceError(f"provider config must be a JSON object: {source}")
+    provider, source_format = _provider_from_source(document, provider_id, model)
     configured_model = str(provider.get("model") or "").strip()
-    if configured_model != model:
-        raise AcceptanceError(
-            f"provider {provider_id} is configured for {configured_model or '<empty>'}, expected {model}"
-        )
     isolated = {
         "version": int(document.get("version") or 1),
         "active": provider_id,
@@ -118,6 +166,7 @@ def load_isolated_provider(source: Path, destination: Path, provider_id: str, mo
         "display": str(provider.get("display") or ""),
         "baseUrl": str(provider.get("base_url") or ""),
         "toolProtocol": str(provider.get("tool_protocol") or ""),
+        "sourceFormat": source_format,
         "sourceConfig": source.as_posix(),
         "isolatedConfig": config_path.as_posix(),
         "isolatedConfigRetained": False,
@@ -205,11 +254,20 @@ def free_port() -> int:
 
 
 class BackendProcess:
-    def __init__(self, *, workspace: Path, coomi_home: Path, log_path: Path, port: int) -> None:
+    def __init__(
+        self,
+        *,
+        workspace: Path,
+        coomi_home: Path,
+        log_path: Path,
+        port: int,
+        repository_root: Path = REPOSITORY_ROOT,
+    ) -> None:
         self.workspace = workspace
         self.coomi_home = coomi_home
         self.log_path = log_path
         self.port = port
+        self.repository_root = repository_root.resolve()
         self.process: subprocess.Popen[Any] | None = None
 
     @property
@@ -218,18 +276,21 @@ class BackendProcess:
 
     def start(self) -> None:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        backend_root = self.repository_root / "apps" / "backend"
+        if not (backend_root / "main.py").is_file():
+            raise AcceptanceError(f"backend source is missing: {backend_root}")
         env = os.environ.copy()
-        env["PYTHONPATH"] = str(BACKEND_ROOT) + os.pathsep + str(REPOSITORY_ROOT)
+        env["PYTHONPATH"] = str(backend_root) + os.pathsep + str(self.repository_root)
         env["STORYDEX_FORCE_WORKSPACE_ROOT"] = str(self.workspace)
         env["STORYDEX_COOMI_HOME"] = str(self.coomi_home)
-        bridge = BACKEND_ROOT / "runtime" / "storydex-coomi-bridge.exe"
+        bridge = backend_root / "runtime" / "storydex-coomi-bridge.exe"
         if bridge.is_file():
             env["STORYDEX_COOMI_BRIDGE"] = str(bridge)
         log_stream = self.log_path.open("w", encoding="utf-8")
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         self.process = subprocess.Popen(
             [sys.executable, "-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", str(self.port), "--log-level", "warning"],
-            cwd=str(BACKEND_ROOT),
+            cwd=str(backend_root),
             env=env,
             stdout=log_stream,
             stderr=subprocess.STDOUT,
@@ -287,7 +348,8 @@ def summarize_event(name: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
         "status", "phase", "message", "error_type", "approvalId", "approval_id",
         "code", "noRestorePoint", "confirmNoSnapshotRequired", "timestamp", "startedAt", "label", "detail",
         "elapsedMs", "round", "current", "attempt", "maxAttempts", "resetTextCharacters",
-        "durationMs", "duration_ms",
+        "durationMs", "duration_ms", "requestBytes", "responseBytes", "maxOutputTokens",
+        "parallelToolCalls", "httpStatus",
     ):
         if key in payload and payload[key] not in (None, ""):
             value = payload[key]

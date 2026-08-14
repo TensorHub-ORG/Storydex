@@ -574,6 +574,7 @@ impl AgentObserver for TerminalObserver {
             AgentEvent::TurnCompleted(usage) => print_usage(usage),
             AgentEvent::ModelCompleted { .. } => {}
             AgentEvent::ModelStarted { .. } => {}
+            AgentEvent::ProviderStream(_) => {}
             AgentEvent::ProviderRetry {
                 attempt,
                 max_attempts,

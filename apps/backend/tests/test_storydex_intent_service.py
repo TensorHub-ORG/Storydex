@@ -580,6 +580,113 @@ def test_classify_intent_calls_llm_even_for_clear_keyword_signal(monkeypatch):
     assert frame["method"] == "safe_fallback"
 
 
+def test_first_turn_explicit_no_write_short_circuits_provider_safely(monkeypatch, tmp_path):
+    calls = 0
+
+    class Provider:
+        async def chat(self, messages, options):
+            nonlocal calls
+            calls += 1
+            raise AssertionError("explicit no-write turn must not call the provider")
+
+    _install_fake_provider(monkeypatch, Provider())
+    frame = asyncio.run(
+        StorydexIntentService().classify_intent(
+            prompt="读取 chapters/a.md 并总结，不要修改任何项目文件。",
+            active_file="",
+            workspace_root=tmp_path,
+            session_id="read-only-first-turn",
+        )
+    )
+
+    assert calls == 0
+    assert frame["method"] == "deterministic_no_project_write"
+    assert frame["effect"] == "respond_only"
+    assert frame["operationType"] == "inquiry"
+    assert frame["canWrite"] is False
+    assert frame["explicitConstraints"] == ["no_project_write"]
+
+
+def test_local_no_modify_constraint_does_not_trigger_file_read_shortcut(monkeypatch, tmp_path):
+    calls = 0
+
+    class Provider:
+        async def chat(self, messages, options):
+            nonlocal calls
+            calls += 1
+            return _FakeResponse(
+                _v2_intent_json(
+                    primary="general",
+                    operation_type="inquiry",
+                    effect="respond_only",
+                    artifact="general",
+                    evidence="读取 chapters/a.md",
+                )
+            )
+
+    _install_fake_provider(monkeypatch, Provider())
+    frame = asyncio.run(
+        StorydexIntentService().classify_intent(
+            prompt="读取 chapters/a.md 并总结，不要修改 provider 配置。",
+            workspace_root=tmp_path,
+        )
+    )
+
+    assert calls == 1
+    assert frame["method"] == "llm"
+
+
+def test_custom_intent_keeps_model_path_even_with_explicit_no_write(monkeypatch, tmp_path):
+    registry_path = get_story_project_service().agent_root(tmp_path) / "skills" / "registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "skills": [
+                    {
+                        "id": "poetry",
+                        "name": "写诗",
+                        "intent": "poetry_work",
+                        "assetTargets": [".storydex/poetry/"],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    calls = 0
+
+    class Provider:
+        async def chat(self, messages, options):
+            nonlocal calls
+            calls += 1
+            return _FakeResponse(
+                _v2_intent_json(
+                    primary="poetry_work",
+                    operation_type="inquiry",
+                    effect="respond_only",
+                    artifact="general",
+                    evidence="不要修改任何项目文件",
+                    constraints=["no_project_write"],
+                )
+            )
+
+    _install_fake_provider(monkeypatch, Provider())
+    frame = asyncio.run(
+        StorydexIntentService().classify_intent(
+            prompt="分析出场诗，不要修改任何项目文件。",
+            workspace_root=tmp_path,
+        )
+    )
+
+    assert calls == 1
+    assert frame["method"] == "llm"
+    assert frame["primary"] == "poetry_work"
+    assert frame["canWrite"] is False
+
+
 def test_restructure_request_is_not_forced_to_story_generation(monkeypatch):
     # 用户报告的核心 bug：含"片段/剧情"但实为重构现有文件的请求，不能被关键词
     # 短路判成剧情生成。这里让快速模型判为 modify_existing，验证不走 create_new。

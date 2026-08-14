@@ -117,6 +117,155 @@ def test_lifecycle_trace_uses_observed_clock_when_server_timestamp_is_absent() -
     assert lifecycle["terminal"]["code"] == "provider"
 
 
+def test_lifecycle_trace_prefers_raw_provider_stream_stages() -> None:
+    events = [
+        event("RunAccepted", 0, status="running"),
+        event("TurnPhase", 1, phase="model", status="running", current=1),
+        event(
+            "ProviderStream",
+            1,
+            attempt=1,
+            phase="request_started",
+            elapsedMs=0,
+            requestBytes=4096,
+            responseBytes=0,
+            maxOutputTokens=8192,
+            httpStatus=0,
+        ),
+        event(
+            "ProviderStream",
+            2,
+            attempt=1,
+            phase="response_head",
+            elapsedMs=1000,
+            requestBytes=4096,
+            responseBytes=0,
+            maxOutputTokens=8192,
+            httpStatus=200,
+        ),
+        event(
+            "ProviderStream",
+            4,
+            attempt=1,
+            phase="first_byte",
+            elapsedMs=3000,
+            requestBytes=4096,
+            responseBytes=128,
+            maxOutputTokens=8192,
+            httpStatus=200,
+        ),
+        event(
+            "ProviderStream",
+            5,
+            attempt=1,
+            phase="first_event",
+            elapsedMs=4000,
+            requestBytes=4096,
+            responseBytes=192,
+            maxOutputTokens=8192,
+            httpStatus=200,
+        ),
+        event("TextChunk", 6, content="done"),
+        event(
+            "ProviderStream",
+            7,
+            attempt=1,
+            phase="completed",
+            elapsedMs=6000,
+            requestBytes=4096,
+            responseBytes=256,
+            maxOutputTokens=8192,
+            httpStatus=200,
+        ),
+        event("ModelCompleted", 7, round=1, usage={"input_tokens": 10, "output_tokens": 2}),
+        event("AgentCompleted", 8, status="completed"),
+    ]
+
+    lifecycle = build_agent_lifecycle_trace(events, request_started_at=BASE)
+
+    assert lifecycle["firstByteSource"] == "provider_raw_stream"
+    assert lifecycle["timeToFirstByteMs"] == 4000
+    assert lifecycle["providerWaitMs"] == 3000
+    assert lifecycle["providerResponseHeadMs"] == 1000
+    assert lifecycle["providerFirstByteMs"] == 3000
+    assert lifecycle["providerGenerationMs"] == 3000
+    assert lifecycle["providerRequestBytes"] == 4096
+    assert lifecycle["providerResponseBytes"] == 256
+    assert lifecycle["rounds"][0]["wireMaxOutputTokens"] == 8192
+    assert lifecycle["rounds"][0]["firstByteSource"] == "provider_raw_stream"
+
+
+def test_lifecycle_trace_keeps_failed_provider_round_without_fabricating_first_byte() -> None:
+    events = [
+        event("RunAccepted", 0, status="running"),
+        event("TurnPhase", 1, phase="model", status="running", current=1),
+        event(
+            "ProviderStream",
+            1,
+            attempt=1,
+            phase="request_started",
+            elapsedMs=0,
+            requestBytes=4096,
+            responseBytes=0,
+            maxOutputTokens=8192,
+            httpStatus=0,
+        ),
+        event(
+            "ProviderStream",
+            3,
+            attempt=1,
+            phase="response_head",
+            elapsedMs=2000,
+            requestBytes=4096,
+            responseBytes=0,
+            maxOutputTokens=8192,
+            httpStatus=522,
+        ),
+        event("ProviderRetry", 3, attempt=1, maxAttempts=2, resetTextCharacters=0),
+        event(
+            "ProviderStream",
+            4,
+            attempt=2,
+            phase="request_started",
+            elapsedMs=0,
+            requestBytes=4096,
+            responseBytes=0,
+            maxOutputTokens=8192,
+            httpStatus=0,
+        ),
+        event(
+            "ProviderStream",
+            7,
+            attempt=2,
+            phase="response_head",
+            elapsedMs=3000,
+            requestBytes=4096,
+            responseBytes=0,
+            maxOutputTokens=8192,
+            httpStatus=522,
+        ),
+        event("AgentError", 7, error_type="provider"),
+    ]
+
+    lifecycle = build_agent_lifecycle_trace(events, request_started_at=BASE)
+
+    assert lifecycle["firstByteAt"] == ""
+    assert lifecycle["firstByteSource"] == "unavailable_after_response_head"
+    assert lifecycle["timeToFirstByteMs"] == 0
+    assert lifecycle["modelRounds"] == 1
+    assert lifecycle["completedModelRounds"] == 0
+    assert lifecycle["failedModelRounds"] == 1
+    assert lifecycle["retryCount"] == 1
+    assert lifecycle["providerWaitMs"] == 5000
+    assert lifecycle["providerResponseHeadMs"] == 5000
+    assert lifecycle["rounds"][0]["status"] == "failed"
+    assert lifecycle["rounds"][0]["failureHttpStatus"] == 522
+    assert [item["httpStatus"] for item in lifecycle["rounds"][0]["providerAttempts"]] == [
+        522,
+        522,
+    ]
+
+
 def test_route_trace_exposes_lifecycle_without_exposing_event_content() -> None:
     events = [
         event("RunAccepted", 0, status="running"),

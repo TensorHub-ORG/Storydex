@@ -8387,10 +8387,28 @@ class StoryProjectService:
 
         # P2-d 相关性排序：按 prompt + active_file 中是否提到该条目名/文本内容评分
         relevance_keywords = self._collect_relevance_keywords(root=root, prompt=prompt, active_file=active_file)
-        scored: List[Tuple[int, Path]] = []
-        for path in candidates:
-            score = self._score_worldbook_path_relevance(path, relevance_keywords)
-            scored.append((score, path))
+        # Worldbook entries are independent read-only candidates.  On a large
+        # project the relevance scorer may need to preview dozens of files;
+        # perform those bounded reads concurrently while keeping the original
+        # deterministic sort below.  The scoring function is pure and the
+        # result order is still controlled by the explicit tie-breakers.
+        max_workers = min(8, len(candidates))
+        if max_workers <= 1:
+            scored = [
+                (self._score_worldbook_path_relevance(path, relevance_keywords), path)
+                for path in candidates
+            ]
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+                scored = list(
+                    pool.map(
+                        lambda path: (
+                            self._score_worldbook_path_relevance(path, relevance_keywords),
+                            path,
+                        ),
+                        candidates,
+                    )
+                )
         if any(score > 0 for score, _ in scored):
             scored = [(score, path) for score, path in scored if score > 0]
         scored.sort(key=lambda item: (-item[0], item[1].name.lower()))

@@ -45,6 +45,8 @@ pub use types::NoopObserver;
 pub use types::PlanState;
 pub use types::PlanStep;
 pub use types::PlanStepStatus;
+pub use types::ProviderStreamEvent;
+pub use types::ProviderStreamPhase;
 pub use types::ReasoningEffort;
 pub use types::Role;
 pub use types::TokenUsage;

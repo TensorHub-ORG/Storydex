@@ -3439,6 +3439,7 @@ impl AgentObserver for BrowserObserver {
             }
             AgentEvent::ModelStarted { .. }
             | AgentEvent::ProviderRetry { .. }
+            | AgentEvent::ProviderStream(_)
             | AgentEvent::CompactionStarted { .. }
             | AgentEvent::QueuedInputAccepted(_) => {}
         }

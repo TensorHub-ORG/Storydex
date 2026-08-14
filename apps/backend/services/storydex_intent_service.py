@@ -161,6 +161,15 @@ _BROAD_NO_PROJECT_WRITE_RE = re.compile(
     r"[^.,;!?\n]{0,24}(?:write|modify|save|change)\s+(?:any\s+)?(?:project\s+)?files?",
     re.IGNORECASE,
 )
+_EXPLICIT_GLOBAL_NO_WRITE_RE = re.compile(
+    r"(?:不要|不得|禁止|请勿|无需|无须|不用|不必|别|切勿)"
+    r"[^，,。！？!?；;\n]{0,24}(?:写入|修改|保存|落盘|改变)"
+    r"[^，,。！？!?；;\n]{0,12}(?:任何|全部|所有)(?:项目)?文件|"
+    r"(?:do\s+not|don't|never|must\s+not)\s+"
+    r"[^.,;!?\n]{0,24}(?:write|modify|save|change)\s+"
+    r"(?:any|all)\s+(?:project\s+)?files?",
+    re.IGNORECASE,
+)
 _PROJECT_ORGANIZE_RE = re.compile(
     r"(整理目录|项目目录|整理项目|目录结构|组织方式|资料整理|盘点.*(?:章节|目录)|organize)",
     re.IGNORECASE,
@@ -191,6 +200,15 @@ _OPERATION_CLAUSE_BOUNDARIES = "，,。！？!?；;\n"
 _GREETING_RE = re.compile(
     r"^\s*(你好|您好|hi|hello|hey|在吗|在么|哈喽|嗨|早上好|下午好|晚上好|早安|晚安|"
     r"good\s+(morning|afternoon|evening|night))[\s。.!！?？~～]*$",
+    re.IGNORECASE,
+)
+_EXPLICIT_FILE_READ_RE = re.compile(
+    r"(读取|阅读|查看|检查|打开|总结|概括|read|inspect|review|summari[sz]e)",
+    re.IGNORECASE,
+)
+_FILE_PATH_SIGNAL_RE = re.compile(
+    r"(?:[A-Za-z]:[\\/]|(?:^|[\s（(\[\"'`])(?:\.{0,2}[\\/])?[^\s，,。！？!?；;]+[\\/]"
+    r"|[^\s，,。！？!?；;\\/]+\.(?:md|txt|json|jsonl|yaml|yml|toml|py|rs|ts|tsx|js|jsx|vue))",
     re.IGNORECASE,
 )
 
@@ -459,6 +477,15 @@ def is_advisory_request(prompt: str) -> bool:
     if not normalized or normalized.startswith("/"):
         return False
     return bool(_ADVISORY_RE.search(normalized)) and not bool(_MUTATION_REQUEST_RE.search(normalized))
+
+
+def _is_explicit_read_only_file_request(prompt: str) -> bool:
+    text = str(prompt or "")
+    return bool(
+        _EXPLICIT_GLOBAL_NO_WRITE_RE.search(text)
+        and _EXPLICIT_FILE_READ_RE.search(text)
+        and _FILE_PATH_SIGNAL_RE.search(text)
+    )
 
 
 class _BoundedIntentProvider:
@@ -1150,6 +1177,37 @@ class StorydexIntentService:
             )
             if persisted_turn:
                 previous_turn = {**persisted_turn, **(previous_turn or {})}
+        # A first-turn request that names a concrete file, explicitly asks to
+        # read/inspect/summarize it, and forbids project writes is already a
+        # complete permission decision.  Keep the locally inferred domain but
+        # skip the provider round whose only safety-relevant result would be
+        # the same hard no-write boundary.  Semantic discussions, follow-ups,
+        # and custom project intents still use the model path.
+        deterministic_read_only = heuristic_intent_frame(
+            prompt=normalized_prompt,
+            active_file=active_file,
+        )
+        if (
+            previous_turn is None
+            and _is_explicit_read_only_file_request(normalized_prompt)
+            and set(catalog).issubset(set(INTENT_LABELS))
+        ):
+            frame = deterministic_read_only
+            frame["method"] = "deterministic_no_project_write"
+            frame = _apply_knowledge_write_semantics(
+                frame,
+                prompt=normalized_prompt,
+                previous_turn=None,
+            )
+            frame = _apply_full_prompt_constraints(frame, prompt=normalized_prompt)
+            _enrich_frame(frame, catalog)
+            self._remember(
+                session_key=session_key,
+                prompt=normalized_prompt,
+                primary=str(frame.get("primary") or ""),
+                frame=frame,
+            )
+            return frame
         # The model is the semantic path for every natural-language turn,
         # including short confirmations. previousTurn is evidence, not a local
         # rule that can silently authorise a mutation.

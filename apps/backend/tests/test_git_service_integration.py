@@ -108,6 +108,72 @@ def test_full_local_git_lifecycle_and_restore(git_service: GitService, tmp_path:
     assert no_op["restored"] is False
 
 
+def test_prepare_agent_snapshot_keeps_restore_semantics_without_ui_history(
+    git_service: GitService,
+    monkeypatch,
+    tmp_path: Path,
+):
+    workspace = tmp_path / "agent-snapshot"
+    chapter = workspace / "chapters" / "001.md"
+    chapter.parent.mkdir(parents=True)
+    chapter.write_text("baseline\n", encoding="utf-8")
+    runtime = workspace / ".storydex" / ".agent"
+    runtime.mkdir(parents=True)
+    (runtime / "private.json").write_text("runtime-only", encoding="utf-8")
+
+    monkeypatch.setattr(
+        git_service,
+        "_read_recent_commits",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("Agent restore-point preparation must not load UI history")
+        ),
+    )
+    monkeypatch.setattr(
+        git_service,
+        "_read_graph_lines",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("Agent restore-point preparation must not load graph lines")
+        ),
+    )
+
+    cold = git_service.prepare_agent_snapshot(workspace)
+
+    assert cold["initialCommit"]["subject"] == "workspace: initial local snapshot"
+    assert cold["changedFiles"] == []
+    tracked = set(
+        git_service._run_git(workspace, ["ls-files"]).splitlines()
+    )
+    assert "chapters/001.md" in tracked
+    assert ".storydex/.agent/private.json" not in tracked
+
+    chapter.write_text("baseline\nchanged\n", encoding="utf-8")
+    warm = git_service.prepare_agent_snapshot(workspace)
+
+    assert warm["initialCommit"] is None
+    assert warm["changedFiles"] == [
+        {
+            "status": " M",
+            "relativePath": "chapters/001.md",
+            "staged": False,
+            "unstaged": True,
+        }
+    ]
+    assert git_service._run_git(workspace, ["show", "HEAD:chapters/001.md"]) == "baseline"
+
+
+def test_prepare_agent_snapshot_rejects_parent_repository_boundary(
+    git_service: GitService,
+    tmp_path: Path,
+):
+    parent = tmp_path / "parent"
+    project = parent / "nested-project"
+    project.mkdir(parents=True)
+    git_service.initialize_repository(parent)
+
+    with pytest.raises(GitServiceError, match="does not match"):
+        git_service.prepare_agent_snapshot(project)
+
+
 def test_first_commit_paths_empty_paths_and_validation(git_service: GitService, tmp_path: Path):
     workspace = tmp_path / "repo"
     workspace.mkdir()
