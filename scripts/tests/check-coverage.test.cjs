@@ -134,6 +134,7 @@ test("standard CI scopes quality jobs while full CI retains its compatibility ma
   const workflow = fs.readFileSync(path.resolve(__dirname, "..", "..", ".github", "workflows", "quality-gate.yml"), "utf8");
   assert.match(workflow, /changes:\s*[\s\S]*?resolve_ci_scope\.cjs/);
   assert.match(workflow, /backend-tests:\s*[\s\S]*?needs:\s*changes\s+[\s\S]*?needs\.changes\.outputs\.backend/);
+  assert.match(workflow, /pc-runtime-tests:\s*[\s\S]*?needs:\s*changes\s+[\s\S]*?needs\.changes\.outputs\.pc_runtime/);
   assert.match(workflow, /frontend-tests:\s*[\s\S]*?needs:\s*changes\s+[\s\S]*?needs\.changes\.outputs\.frontend/);
   assert.match(workflow, /desktop-unit-tests:\s*[\s\S]*?needs:\s*changes\s+[\s\S]*?needs\.changes\.outputs\.desktop/);
   assert.match(workflow, /inputs\.full\s*&&/);
@@ -142,8 +143,10 @@ test("standard CI scopes quality jobs while full CI retains its compatibility ma
   assert.match(workflow, /if:\s*matrix\.coverage_ratchet/);
   assert.equal((workflow.match(/\|\| 'advisory'/g) || []).length, 2);
   assert.match(workflow, /Swatinem\/rust-cache@v2/);
-  assert.match(workflow, /Build current-commit Storydex desktop Agent runtime/);
+  assert.match(workflow, /Build current-commit Storydex PC Agent runtime/);
   assert.match(workflow, /Verify pinned Coomi runtime/);
+  const backendJob = workflow.split(/\r?\n  backend-tests:/)[1].split(/\r?\n  pc-runtime-tests:/)[0];
+  assert.doesNotMatch(backendJob, /cargo test --manifest-path apps\/desktop\/agent-runtime\/Cargo\.toml/);
   assert.match(workflow, /backend-tests:\s*[\s\S]*?timeout-minutes:\s*\$\{\{ inputs\.full && 30 \|\| 12 \}\}/);
   assert.match(workflow, /backend-compatibility:\s*[\s\S]*?timeout-minutes:\s*10/);
   assert.equal((workflow.match(/--timeout=120/g) || []).length, 2);
@@ -151,6 +154,8 @@ test("standard CI scopes quality jobs while full CI retains its compatibility ma
   assert.match(workflow, /backend-compatibility:\s*[\s\S]*?test_agent_stream_responsiveness\.py[\s\S]*?test_storydex_runtime_fixes\.py/);
   assert.doesNotMatch(workflow, /^  integration-tests:/m);
   assert.match(workflow, /BACKEND:\s*\$\{\{ needs\.changes\.outputs\.backend \}\}/);
+  assert.match(workflow, /PC_RUNTIME:\s*\$\{\{ needs\.changes\.outputs\.pc_runtime \}\}/);
+  assert.match(workflow, /if full or pc_runtime:\s*required\.add\("pc-runtime-tests"\)/);
   assert.match(workflow, /if backend and not full:\s*required\.add\("backend-compatibility"\)/);
   assert.match(workflow, /desktop-package-smoke:\s*[\s\S]*?if:\s*inputs\.full/);
   assert.match(workflow, /electron-e2e:\s*[\s\S]*?if:\s*inputs\.full/);

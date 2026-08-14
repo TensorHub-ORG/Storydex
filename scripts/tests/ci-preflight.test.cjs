@@ -118,7 +118,9 @@ test("local Fast suite covers CI policy regressions and runtime commit identity"
   assert.match(suite, /Build current-commit Storydex Coomi desktop runtime/);
   assert.match(suite, /python -m pytest -q --timeout=120/);
   assert.doesNotMatch(suite, /not coomi_runtime/);
-  assert.match(qualityGate, /Build current-commit Storydex desktop Agent runtime/);
+  assert.match(qualityGate, /pc-runtime-tests:[\s\S]*?Build current-commit Storydex PC Agent runtime/);
+  const backendJob = qualityGate.split(/\r?\n  backend-tests:/)[1].split(/\r?\n  pc-runtime-tests:/)[0];
+  assert.doesNotMatch(backendJob, /cargo test --manifest-path apps\/desktop\/agent-runtime\/Cargo\.toml/);
   assert.doesNotMatch(qualityGate, /without unchanged Coomi runtime|not coomi_runtime/);
   assert.ok(
     suite.indexOf('Invoke-Step "Environment preflight"') < suite.indexOf('Invoke-Step "Backend tests and coverage"'),

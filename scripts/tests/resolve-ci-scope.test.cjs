@@ -15,6 +15,7 @@ test("frontend-only changes run only frontend quality checks", () => {
     desktop: false,
     android: false,
     coomi: false,
+    pc_runtime: false,
     docsOnly: false,
     changedCount: 2,
     unknownPaths: [],
@@ -29,23 +30,28 @@ test("ordinary backend changes keep full Python checks without unrelated Rust wo
   assert.equal(result.desktop, false);
   assert.equal(result.android, false);
   assert.equal(result.coomi, false);
+  assert.equal(result.pc_runtime, false);
 });
 
-test("Coomi bridge and Rust changes restore runtime and packaging checks", () => {
+test("PC runtime changes use focused runtime checks without backend coverage", () => {
   const bridge = classifyChangedPaths(["apps/backend/services/coomi_bridge_client.py"]);
   assert.equal(bridge.backend, true);
   assert.equal(bridge.coomi, true);
+  assert.equal(bridge.pc_runtime, true);
 
   const rust = classifyChangedPaths(["apps/desktop/agent-runtime/storydex-bridge/src/main.rs"]);
-  assert.equal(rust.backend, true);
+  assert.equal(rust.backend, false);
   assert.equal(rust.desktop, true);
   assert.equal(rust.coomi, true);
+  assert.equal(rust.pc_runtime, true);
+  assert.equal(rust.android, false);
 
   const android = classifyChangedPaths(["apps/android/agent-runtime/ui/src/web.rs"]);
   assert.equal(android.backend, false);
   assert.equal(android.android, true);
   assert.equal(android.desktop, false);
   assert.equal(android.coomi, true);
+  assert.equal(android.pc_runtime, false);
 });
 
 test("desktop and documentation changes stay scoped", () => {
@@ -60,6 +66,7 @@ test("desktop and documentation changes stay scoped", () => {
   assert.equal(docs.frontend, false);
   assert.equal(docs.desktop, false);
   assert.equal(docs.android, false);
+  assert.equal(docs.pc_runtime, false);
 });
 
 test("workflow, classifier, unknown, empty, and forced scopes fail safe", () => {
@@ -78,5 +85,6 @@ test("workflow, classifier, unknown, empty, and forced scopes fail safe", () => 
     assert.equal(result.desktop, true);
     assert.equal(result.android, true);
     assert.equal(result.coomi, true);
+    assert.equal(result.pc_runtime, true);
   }
 });

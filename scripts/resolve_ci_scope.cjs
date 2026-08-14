@@ -30,6 +30,7 @@ function classifyChangedPaths(inputPaths, options = {}) {
     desktop: false,
     android: false,
     coomi: false,
+    pc_runtime: false,
   };
   const unknownPaths = [];
 
@@ -39,6 +40,7 @@ function classifyChangedPaths(inputPaths, options = {}) {
     scope.desktop = true;
     scope.android = true;
     scope.coomi = true;
+    scope.pc_runtime = true;
   };
 
   if (forceAll || paths.length === 0) {
@@ -109,8 +111,8 @@ function classifyChangedPaths(inputPaths, options = {}) {
       || filePath === "apps/desktop/scripts/build-coomi-runtime.cjs"
     );
     if (desktopRuntimePath || coomiIntegrationPath) {
-      scope.backend = true;
       scope.coomi = true;
+      scope.pc_runtime = true;
       matched = true;
       if (desktopRuntimePath || filePath.startsWith("apps/desktop/")) {
         scope.desktop = true;
@@ -144,7 +146,7 @@ function classifyChangedPaths(inputPaths, options = {}) {
     enableAll();
   }
 
-  const selected = scope.backend || scope.frontend || scope.desktop || scope.android || scope.coomi;
+  const selected = scope.backend || scope.frontend || scope.desktop || scope.android || scope.coomi || scope.pc_runtime;
   return {
     ...scope,
     docsOnly: !selected,
@@ -178,6 +180,7 @@ function writeGithubOutputs(filePath, result) {
     desktop: result.desktop,
     android: result.android,
     coomi: result.coomi,
+    pc_runtime: result.pc_runtime,
     docs_only: result.docsOnly,
     changed_count: result.changedCount,
     reason: result.reason,
