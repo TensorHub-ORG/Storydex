@@ -117,6 +117,15 @@ test("hook installer is repository local and agent rules require remote success"
   assert.match(rules, /success/);
 });
 
+test("website overlay deployments invalidate cached Windows download links", () => {
+  const workflow = read(".github/workflows/deploy-android.yml");
+  assert.match(workflow, /overlay_revision:/);
+  assert.match(workflow, /OVERLAY_REVISION: \$\{\{ inputs\.overlay_revision \}\}/);
+  assert.match(workflow, /overlay_url="\/assets\/\$overlay_name\?revision=\$OVERLAY_REVISION"/);
+  assert.match(workflow, /injector_tmp.*\$overlay_url/);
+  assert.match(workflow, /grep -Fq '\$overlay_script_url'/);
+});
+
 test("local Fast suite covers CI policy regressions and runtime commit identity", () => {
   const suite = read("scripts/run_full_test_suite.ps1");
   const qualityGate = read(".github/workflows/quality-gate.yml");

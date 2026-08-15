@@ -11,6 +11,10 @@ on:
         description: Android semantic version
         required: true
         default: 0.1.2
+      overlay_revision:
+        description: Cache-busting revision for the website download overlay
+        required: true
+        default: windows-2.0.5
       asset_name:
         description: Android APK asset filename
         required: true
@@ -34,6 +38,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ inputs.tag }}
       ANDROID_VERSION: ${{ inputs.version }}
+      OVERLAY_REVISION: ${{ inputs.overlay_revision }}
       APK_NAME: ${{ inputs.asset_name }}
       APK_SHA256: ${{ inputs.sha256 }}
       DEPLOY_HOST: ${{ secrets.STORYDEX_DEPLOY_HOST }}
@@ -50,6 +55,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$ANDROID_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$OVERLAY_REVISION" =~ ^[A-Za-z0-9._-]+$ ]]
           [[ "$APK_NAME" =~ ^[A-Za-z0-9._-]+\.apk$ ]]
           [[ "$APK_SHA256" =~ ^[0-9A-Fa-f]{64}$ ]]
           mkdir -p release-assets
@@ -70,6 +76,7 @@ jobs:
           android_dir="$update_root/android"
           website_dir="/www/wwwroot/storydex.septemc.com"
           overlay_name="storydex-android-download-v$ANDROID_VERSION.js"
+          overlay_url="/assets/$overlay_name?revision=$OVERLAY_REVISION"
           overlay_local="apps/website-overlay/$overlay_name"
           injector_local="scripts/inject_storydex_android_download.py"
           [[ -f "$overlay_local" && -f "$injector_local" ]]
@@ -99,7 +106,7 @@ jobs:
           scp "${scp_common[@]}" "$overlay_local" "$target:$overlay_tmp"
           scp "${scp_common[@]}" "$injector_local" "$target:$injector_tmp"
           ssh "${ssh_common[@]}" "$target" \
-            "set -eu; mv -f '$apk_tmp' '$android_dir/$APK_NAME'; mv -f '$overlay_tmp' '$website_dir/assets/$overlay_name'; python3 '$injector_tmp' '$website_dir/index.html' '/assets/$overlay_name' '$ANDROID_VERSION'; chmod 644 '$website_dir/index.html'; rm -f '$injector_tmp'"
+            "set -eu; mv -f '$apk_tmp' '$android_dir/$APK_NAME'; mv -f '$overlay_tmp' '$website_dir/assets/$overlay_name'; python3 '$injector_tmp' '$website_dir/index.html' '$overlay_url' '$ANDROID_VERSION'; chmod 644 '$website_dir/index.html'; rm -f '$injector_tmp'"
 
           rm -f "$key_path"
 
@@ -109,9 +116,10 @@ jobs:
           set -euo pipefail
           apk_url="https://updates.septemc.com/storydex/android/$APK_NAME"
           overlay_name="storydex-android-download-v$ANDROID_VERSION.js"
-          overlay_url="https://storydex.septemc.com/assets/$overlay_name"
+          overlay_script_url="/assets/$overlay_name?revision=$OVERLAY_REVISION"
+          overlay_public_url="https://storydex.septemc.com/assets/$overlay_name"
           curl --fail --silent --show-error --location --head "$apk_url?run=$GITHUB_RUN_ID"
-          overlay_content="$(curl --fail --silent --show-error --location "$overlay_url?run=$GITHUB_RUN_ID")"
+          overlay_content="$(curl --fail --silent --show-error --location "$overlay_public_url?revision=$OVERLAY_REVISION&run=$GITHUB_RUN_ID")"
           grep -F 'Android 版（测试）' <<< "$overlay_content"
           grep -F '去 GitHub 上为我们点颗星 →' <<< "$overlay_content"
 
@@ -144,5 +152,5 @@ jobs:
           ssh -i "$key_path" -p "$DEPLOY_PORT" \
             -o "UserKnownHostsFile=$known_hosts_path" -o "StrictHostKeyChecking=$strict_mode" \
             "$target" \
-            "grep -Fq '/assets/$overlay_name' '$website_dir/index.html' && echo 'website index.html injection verified'"
+            "grep -Fq '$overlay_script_url' '$website_dir/index.html' && echo 'website index.html injection verified'"
           rm -f "$key_path"
