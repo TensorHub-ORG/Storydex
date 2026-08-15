@@ -140,6 +140,24 @@ describe("agent store deterministic helpers", () => {
     expect(message).not.toContain("api_key");
   });
 
+  it("surfaces structured provider HTTP failures without replacing the provider message", () => {
+    const forbidden = u.formatAgentErrorPacket(packet({
+      _type: "AgentError",
+      message: "provider returned HTTP 403: Forbidden",
+      details: { statusCode: 403 }
+    }));
+    const gateway = u.formatAgentErrorPacket(packet({
+      _type: "AgentError",
+      message: "Provider request failed",
+      details: { providerHttpStatus: 502 }
+    }));
+
+    expect(forbidden).toContain("provider returned HTTP 403: Forbidden");
+    expect(forbidden.match(/HTTP 403/g)).toHaveLength(1);
+    expect(gateway).toContain("Provider request failed");
+    expect(gateway).toContain("HTTP 502");
+  });
+
   it("summarizes Git, contracts, presets, context, usage, and compression", () => {
     expect(u.summarizeGitAutoCommitPacket(packet({ _type: "GitCommitPrompt", changedFileCount: 2, workspaceRoot: "C:/story" }))).toContain("2");
     expect(u.summarizeGitAutoCommitPacket(packet({ _type: "GitCommitResult", created: true, shortHash: "abc", changedFileCount: 1 }))).toContain("abc");

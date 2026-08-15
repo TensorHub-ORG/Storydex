@@ -32,6 +32,37 @@ fn trimmed_utf8(value: Vec<u8>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn git_path(repo_root: &Path, name: &str) -> Option<PathBuf> {
+    let value = trimmed_utf8(git_output(repo_root, &["rev-parse", "--git-path", name])?)?;
+    let path = PathBuf::from(value);
+    Some(if path.is_absolute() {
+        path
+    } else {
+        repo_root.join(path)
+    })
+}
+
+fn git_identity_dependencies(repo_root: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(head) = git_path(repo_root, "HEAD") {
+        paths.push(head);
+    }
+    if let Some(reference) = git_output(repo_root, &["symbolic-ref", "-q", "HEAD"])
+        .and_then(trimmed_utf8)
+        .and_then(|reference| git_path(repo_root, &reference))
+    {
+        paths.push(reference);
+    }
+    if let Some(packed_refs) = git_path(repo_root, "packed-refs")
+        && packed_refs.exists()
+    {
+        paths.push(packed_refs);
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
 fn runtime_source_identity(manifest_dir: &Path) -> Option<(PathBuf, Vec<String>, String, String)> {
     let repo_root = trimmed_utf8(git_output(manifest_dir, &["rev-parse", "--show-toplevel"])?)?;
     let repo_root = PathBuf::from(repo_root);
@@ -99,6 +130,9 @@ fn main() {
     if let Some((repo_root, paths, _, _)) = &detected {
         for path in paths {
             println!("cargo:rerun-if-changed={}", repo_root.join(path).display());
+        }
+        for path in git_identity_dependencies(repo_root) {
+            println!("cargo:rerun-if-changed={}", path.display());
         }
     }
     let git_sha = env::var("STORYDEX_COOMI_GIT_SHA")

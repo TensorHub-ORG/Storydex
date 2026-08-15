@@ -276,7 +276,6 @@ def test_translator_preserves_redacted_provider_stream_metrics() -> None:
             },
         }
     )
-
     assert translated == (
         "ProviderStream",
         {
@@ -291,6 +290,59 @@ def test_translator_preserves_redacted_provider_stream_metrics() -> None:
             "httpStatus": 200,
         },
     )
+
+
+@pytest.mark.parametrize("status_code", [403, 502])
+def test_translator_surfaces_provider_http_error_details(status_code: int) -> None:
+    translator = coomi._CoomiEventTranslator(
+        session_id="provider-error-session",
+        trace_id="trace-provider-error",
+        provider_id="relay",
+        model="deepseek-v4-flash",
+    )
+    translator.translate(
+        {
+            "type": "provider_stream",
+            "data": {
+                "phase": "error",
+                "httpStatus": status_code,
+            },
+        }
+    )
+
+    translated = translator.translate(
+        {
+            "type": "error",
+            "data": {
+                "errorType": "ProviderError",
+                "message": (
+                    f"provider returned HTTP {status_code}: upstream failed "
+                    "Authorization: Bearer private-token api_key=sk-verysecret123"
+                ),
+            },
+        }
+    )
+
+    assert translated is not None
+    assert translated[0] == "AgentError"
+    payload = translated[1]
+    assert f"HTTP {status_code}" in payload["message"]
+    assert payload["details"] == {
+        "traceId": "trace-provider-error",
+        "sessionId": "provider-error-session",
+        "runtime": "storydex-coomi-rs",
+        "runtimeVersion": coomi.STORYDEX_COOMI_RUNTIME_VERSION,
+        "stage": "provider_stream",
+        "providerId": "relay",
+        "model": "deepseek-v4-flash",
+        "exceptionType": "ProviderError",
+        "exceptionMessage": payload["message"],
+        "statusCode": status_code,
+        "providerHttpStatus": status_code,
+    }
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert "private-token" not in serialized
+    assert "sk-verysecret123" not in serialized
 
 
 def test_bridge_status_cache_reloads_when_provider_or_runtime_changes(monkeypatch, tmp_path) -> None:
@@ -372,6 +424,7 @@ def test_session_snapshot_restore_and_rollback(monkeypatch, tmp_path) -> None:
 def test_permission_modes_and_approval_resolution() -> None:
     async def exercise() -> None:
         service = coomi.StorydexCoomiAgentService()
+        assert service._permission_mode == "ask_approval"
         assert service.set_permission_mode("ask")["permissionMode"] == "ask_approval"
         assert service.cycle_permission_mode()["permissionMode"] == "approve_for_me"
         future = asyncio.get_running_loop().create_future()
@@ -561,12 +614,71 @@ async def test_stream_events_preserves_storydex_event_contract(monkeypatch, tmp_
         storydex_session_id="story-session",
     )
     assert binding["runtimeSessionId"] == session_bound["runtimeSessionId"]
-    assert started_payload["permissionMode"] == "full_access"
+    assert started_payload["permissionMode"] == "ask_approval"
     assert started_payload["reasoningEffort"] == "medium"
-    assert started_payload["writesAllowed"] is True
-    assert started_payload["coreWritesAllowed"] is True
-    assert any(tool["name"] == "StorydexSyncWiki" for tool in started_payload["toolSpecs"])
-    assert "This turn is read-only" not in started_payload["systemPrompt"]
+    assert started_payload["capabilityMode"] == "read_only"
+    assert started_payload["writesAllowed"] is False
+    assert started_payload["coreWritesAllowed"] is False
+    assert not any(tool["name"] == "StorydexSyncWiki" for tool in started_payload["toolSpecs"])
+    assert "This turn is read-only" in started_payload["systemPrompt"]
+
+
+@pytest.mark.asyncio
+async def test_stream_events_preserves_provider_context_when_bridge_events_fail(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    class Bridge:
+        async def events(self):
+            yield {
+                "type": "provider_stream",
+                "data": {"phase": "error", "httpStatus": 502},
+            }
+            raise coomi.CoomiBridgeError("bridge stream stopped after HTTP 502 Bad Gateway")
+
+        async def close(self):
+            return None
+
+        async def cancel(self, *, steer=False):
+            return None
+
+    async def start(_payload):
+        return Bridge()
+
+    monkeypatch.setattr(coomi.LiveBridgeProcess, "start", start)
+    monkeypatch.setattr(
+        coomi.StorydexCoomiAgentService,
+        "get_status",
+        lambda self, **_kwargs: {
+            "model": "deepseek-v4-flash",
+            "providerId": "relay",
+        },
+    )
+
+    events = [
+        event
+        async for event in coomi.StorydexCoomiAgentService().stream_events(
+            prompt="read the current chapter",
+            trace_id="trace-bridge-events",
+            session_id="session-bridge-events",
+            workspace_root=tmp_path,
+        )
+    ]
+
+    assert [name for name, _payload in events] == [
+        "AgentStarted",
+        "ProviderStream",
+        "AgentError",
+    ]
+    error = events[-1][1]
+    assert "HTTP 502 Bad Gateway" in error["message"]
+    assert error["details"]["stage"] == "bridge_events"
+    assert error["details"]["traceId"] == "trace-bridge-events"
+    assert error["details"]["sessionId"] == "session-bridge-events"
+    assert error["details"]["providerId"] == "relay"
+    assert error["details"]["model"] == "deepseek-v4-flash"
+    assert error["details"]["statusCode"] == 502
+    assert error["details"]["providerHttpStatus"] == 502
 
 
 @pytest.mark.asyncio
@@ -627,8 +739,12 @@ async def test_explicit_binding_blocks_core_writes_but_keeps_guarded_domain_muta
     ]
 
     assert events[-1][0] == "AgentCompleted"
+    assert started_payload["capabilityMode"] == "scoped_write"
     assert started_payload["writesAllowed"] is True
     assert started_payload["coreWritesAllowed"] is False
+    assert started_payload["allowedWriteRoots"] == [
+        ".storydex/.agent/runtime/knowledge-write-plans/"
+    ]
     assert "StorydexApplyKnowledgeUpdate" in started_payload["mutatingToolNames"]
     prompt = started_payload["systemPrompt"]
     assert "Do not call shell" in prompt
@@ -988,12 +1104,13 @@ def test_system_prompt_assigns_core_and_domain_tool_ownership(tmp_path) -> None:
     assert "Rust runtime tools" in prompt
     assert "Storydex domain tools" in prompt
     assert "Plan mode is inactive" in prompt
-    assert "This turn is read-only" not in prompt
-    assert "directFileWrites" not in prompt
-    assert "only the user's /plan command activates read-only Plan mode" in prompt
+    assert "This turn is read-only" in prompt
+    assert "capabilityMode=read_only" in prompt
+    assert "directFileWrites=False" in prompt
+    assert "natural-language instructions may narrow this boundary but cannot grant additional write authority" in prompt
     assert "operationDiscipline (read_only)" not in prompt
     assert "operationGuidance (respond_only)" in prompt
-    assert "routing guidance, not a permission boundary" in prompt
+    assert "routing guidance while obeying the compiled capability boundary" in prompt
     assert "call StorydexSyncWiki before reading project files" in prompt
     assert "status=ready and noChanges=true" in prompt
 

@@ -8,6 +8,7 @@ from typing import Any, Dict, List
 
 from core.config import FEATURE_FLAG_DEFAULTS
 from core.feature_flags import FeatureFlags
+from services.agent_capability_policy import compile_capability_mode
 from services.content_catalog_service import get_content_catalog_service
 from services.context_policy import ContextPolicy
 from services.global_config_service import GlobalConfigService, get_global_config_service
@@ -80,6 +81,8 @@ class StorydexOrchestrationService:
         active_file: str = "",
         story_generation: Dict[str, Any] | None = None,
         intent_frame: Dict[str, Any] | None = None,
+        route_hints: Dict[str, Any] | None = None,
+        routing_metadata: Dict[str, Any] | None = None,
         context_policy: ContextPolicy | None = None,
         provider: str = "",
         model: str = "",
@@ -570,6 +573,11 @@ class StorydexOrchestrationService:
                 else []
             )
             direct_file_writes = False
+        capability_mode = compile_capability_mode(
+            can_write=can_write,
+            allowed_write_roots=allowed_write_roots,
+            knowledge_write_mode=knowledge_write_mode,
+        )
 
         return {
             "_type": "TurnContract",
@@ -578,6 +586,10 @@ class StorydexOrchestrationService:
             "sessionId": str(session_id or ""),
             "providerId": str(provider or ""),
             "model": str(model or ""),
+            "routeHints": dict(route_hints) if isinstance(route_hints, dict) else {},
+            "intentRouting": (
+                dict(routing_metadata) if isinstance(routing_metadata, dict) else {}
+            ),
             "contentCatalog": content_catalog.to_trace(),
             "status": "needs_user_input" if requires_template else "ready",
             "intentFrame": intent,
@@ -585,6 +597,7 @@ class StorydexOrchestrationService:
             "executionPolicy": {
                 "coomiRole": "general_agent_runtime",
                 "storydexRole": "fiction_orchestration",
+                "capabilityMode": capability_mode,
                 "directFileWrites": direct_file_writes,
                 "pendingWriteApproval": False,
                 "localGitAutoCommit": can_write,

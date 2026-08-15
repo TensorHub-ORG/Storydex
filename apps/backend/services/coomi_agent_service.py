@@ -21,6 +21,14 @@ from uuid import UUID, uuid4
 
 import httpx
 
+from services.agent_capability_policy import (
+    FULL_ACCESS,
+    READ_ONLY,
+    SCOPED_WRITE,
+    WORKSPACE_WRITE,
+    AgentCapabilityPolicy,
+    resolve_capability_policy,
+)
 from services.coomi_bridge_client import (
     STORYDEX_COOMI_CONFIG,
     STORYDEX_COOMI_HOME,
@@ -384,7 +392,10 @@ def _atomic_write(path: Path, content: bytes) -> None:
 
 class StorydexCoomiAgentService:
     def __init__(self) -> None:
-        self._permission_mode = "full_access"
+        # Start conservatively. A user may still opt into auto-approval or
+        # full access, but an ordinary backend restart must not silently grant
+        # the broadest session permission.
+        self._permission_mode = "ask_approval"
         self._plan_modes: dict[str, bool] = {}
         self._approval_waiters: dict[str, asyncio.Future[Dict[str, Any]]] = {}
         self._active_lock = threading.Lock()
@@ -568,18 +579,16 @@ class StorydexCoomiAgentService:
             )
 
         plan_mode = self._plan_modes.get(runtime_key, False)
-        # Normal chat stays writable unless /plan is active. Candidate extraction
-        # blocks all writes. Explicit binding keeps only its guarded Storydex
-        # domain mutator writable while hiding/rejecting generic core writes.
-        knowledge_policy = _dict_value(_dict_value(turn_contract).get("knowledgeWritePolicy"))
-        knowledge_mode = str(knowledge_policy.get("mode") or "").strip().lower()
-        writes_allowed = knowledge_mode != "candidate_extraction"
-        core_writes_allowed = knowledge_mode not in {"candidate_extraction", "explicit_binding"}
+        # Plan mode is a persistent session overlay. Keep the turn capability
+        # intact so exit_plan_mode can reveal only the tools this contract
+        # already authorises; exiting plan mode must never broaden it.
+        capability_policy = resolve_capability_policy(turn_contract, plan_mode=False)
         registry = _create_storydex_tool_registry(
             workspace,
             policy=context_policy_from_turn_contract(turn_contract),
             turn_contract=turn_contract,
-            plan_mode=plan_mode,
+            plan_mode=False,
+            capability_mode=capability_policy.mode,
         )
         try:
             binding = _read_coomi_session_binding_for_execution(
@@ -607,12 +616,6 @@ class StorydexCoomiAgentService:
                 "update_loop, and get_loop until the objective reaches a terminal status.\n\n"
                 + (command["body"] or "Continue the active Storydex loop.")
             )
-        execution = _dict_value(_dict_value(turn_contract).get("executionPolicy"))
-        allowed_roots = [
-            str(value).strip()
-            for value in execution.get("allowedWriteRoots", [])
-            if str(value).strip()
-        ] if isinstance(execution.get("allowedWriteRoots"), list) else []
         permission_mode = "plan_mode" if plan_mode else self._permission_mode
         mutating_tool_names = [
             tool.name
@@ -634,10 +637,11 @@ class StorydexCoomiAgentService:
                     "storydexSessionId": normalized_session,
                     "permissionMode": permission_mode,
                     "basePermissionMode": self._permission_mode,
+                    "capabilityMode": capability_policy.mode,
                     "reasoningEffort": reasoning_effort,
-                    "writesAllowed": writes_allowed,
-                    "coreWritesAllowed": core_writes_allowed,
-                    "allowedWriteRoots": allowed_roots,
+                    "writesAllowed": capability_policy.writes_allowed,
+                    "coreWritesAllowed": capability_policy.core_writes_allowed,
+                    "allowedWriteRoots": list(capability_policy.allowed_write_roots),
                     "checkpointContext": _compaction_checkpoint_context(
                         workspace_root=workspace,
                         session_id=normalized_session,
@@ -685,6 +689,8 @@ class StorydexCoomiAgentService:
             workspace_root=workspace,
             usage_baseline=_runtime_session_usage(binding),
             bridge_start_ms=bridge_start_ms,
+            provider_id=str(status.get("providerId") or ""),
+            model=str(status.get("model") or ""),
         )
         resolution_tasks: set[asyncio.Task[Any]] = set()
         terminal_seen = False
@@ -782,7 +788,15 @@ class StorydexCoomiAgentService:
                     yield translated
         except Exception as exc:
             if not terminal_seen:
-                yield "AgentError", _agent_error(trace_id, exc)
+                yield "AgentError", _agent_error(
+                    trace_id,
+                    exc,
+                    stage="bridge_events",
+                    session_id=normalized_session,
+                    provider_id=translator.provider_id,
+                    model=translator.model,
+                    status_code=translator.error_http_status,
+                )
         finally:
             self._unregister_bridge(key, bridge)
             for task in resolution_tasks:
@@ -1517,6 +1531,8 @@ class _CoomiEventTranslator:
         workspace_root: Path | None = None,
         usage_baseline: Dict[str, Any] | None = None,
         bridge_start_ms: float = 0.0,
+        provider_id: str = "",
+        model: str = "",
     ) -> None:
         self.session_id = session_id
         self.trace_id = str(trace_id or "")
@@ -1537,6 +1553,15 @@ class _CoomiEventTranslator:
         self.runtime_metrics: Dict[str, float] = {
             "bridgeStartMs": round(max(0.0, float(bridge_start_ms or 0.0)), 3)
         }
+        self.provider_id = str(provider_id or "")
+        self.model = str(model or "")
+        self.last_http_status: int | None = None
+        self.current_stage = "bridge_events"
+
+    @property
+    def error_http_status(self) -> int | None:
+        status = _http_status_or_none(self.last_http_status)
+        return status if status is not None and status >= 400 else None
 
     def reset_usage_baseline(self) -> None:
         self.usage_baseline = {}
@@ -1601,6 +1626,10 @@ class _CoomiEventTranslator:
         if name == "reasoning_delta":
             return None
         if name == "provider_stream":
+            http_status = _http_status_or_none(data.get("httpStatus"))
+            if http_status is not None:
+                self.last_http_status = http_status
+            self.current_stage = "provider_stream"
             payload = {
                 "_type": "ProviderStream",
                 "_version": 1,
@@ -1610,12 +1639,15 @@ class _CoomiEventTranslator:
                 "requestBytes": max(0, int(data.get("requestBytes") or 0)),
                 "responseBytes": max(0, int(data.get("responseBytes") or 0)),
                 "maxOutputTokens": max(0, int(data.get("maxOutputTokens") or 0)),
-                "httpStatus": max(0, int(data.get("httpStatus") or 0)),
+                "httpStatus": http_status or 0,
             }
             if isinstance(data.get("parallelToolCalls"), bool):
                 payload["parallelToolCalls"] = bool(data["parallelToolCalls"])
             return "ProviderStream", payload
         if name == "model_started":
+            self.provider_id = str(data.get("provider") or self.provider_id)
+            self.model = str(data.get("model") or self.model)
+            self.current_stage = "model"
             return "TurnPhase", {
                 "_type": "TurnPhase",
                 "_version": 1,
@@ -1671,6 +1703,7 @@ class _CoomiEventTranslator:
                 **self.runtime_metrics,
             }
         if name == "tool_started":
+            self.current_stage = "tool_execution"
             call = data.get("call") if isinstance(data.get("call"), dict) else {}
             call_id = str(call.get("id") or f"coomi-{uuid4().hex[:12]}")
             self.started_tools[call_id] = time.perf_counter()
@@ -1812,12 +1845,44 @@ class _CoomiEventTranslator:
                 packet["reasoning_tokens"] = int(usage.get("reasoning_tokens") or 0)
             return "AgentCompleted", packet
         if name == "error":
+            message = _coomi_error_message(data.get("message"))
+            status_code = (
+                _http_error_status_or_none(data.get("httpStatus"))
+                or _http_error_status_or_none(data.get("statusCode"))
+                or _http_error_status_or_none(
+                    _semantic_provider_error_status(data.get("message"))
+                )
+                or self.error_http_status
+            )
+            provider_id = str(
+                data.get("providerId") or data.get("provider") or self.provider_id
+            )
+            model = str(data.get("model") or self.model)
+            exception_type = str(
+                data.get("exceptionType")
+                or data.get("errorType")
+                or "CoomiRustError"
+            )
+            details: Dict[str, Any] = {
+                "traceId": self.trace_id,
+                "sessionId": self.session_id,
+                "runtime": "storydex-coomi-rs",
+                "runtimeVersion": STORYDEX_COOMI_RUNTIME_VERSION,
+                "stage": str(data.get("stage") or self.current_stage or "bridge_events"),
+                "providerId": provider_id,
+                "model": model,
+                "exceptionType": exception_type,
+                "exceptionMessage": message,
+            }
+            if status_code is not None:
+                details["statusCode"] = status_code
+                details["providerHttpStatus"] = status_code
             return "AgentError", {
                 "_type": "AgentError",
                 "_version": 1,
                 "error_type": str(data.get("errorType") or "CoomiRustError"),
-                "message": _coomi_error_message(data.get("message")),
-                "details": {"runtime": "storydex-coomi-rs"},
+                "message": message,
+                "details": details,
             }
         return None
 
@@ -1827,6 +1892,7 @@ def _create_storydex_tool_registry(
     policy: ContextPolicy | None = None,
     turn_contract: Dict[str, Any] | None = None,
     plan_mode: bool = False,
+    capability_mode: str = "",
 ) -> StorydexToolRegistry:
     from services.storydex_agent_tools import (
         StorydexApplyKnowledgeUpdateTool,
@@ -1861,9 +1927,26 @@ def _create_storydex_tool_registry(
             StorydexApplyStoryIncrementTool(workspace_root=root, turn_contract=turn_contract),
         ]
     )
-    if plan_mode:
+    requested_capability = str(capability_mode or "").strip().lower()
+    resolved_capability = (
+        resolve_capability_policy(turn_contract, plan_mode=False).mode
+        if isinstance(turn_contract, dict)
+        else WORKSPACE_WRITE
+    )
+    effective_capability = (
+        READ_ONLY
+        if plan_mode or requested_capability == READ_ONLY or resolved_capability == READ_ONLY
+        else requested_capability
+        if requested_capability in {SCOPED_WRITE, WORKSPACE_WRITE, FULL_ACCESS}
+        else resolved_capability
+    )
+    if effective_capability == SCOPED_WRITE:
+        execution = _dict_value(_dict_value(turn_contract).get("executionPolicy"))
+        if not execution.get("allowedWriteRoots"):
+            effective_capability = READ_ONLY
+    if effective_capability == READ_ONLY:
         tools = [tool for tool in tools if tool.access == ToolAccess.READ_ONLY]
-    elif isinstance(turn_contract, dict):
+    elif effective_capability == SCOPED_WRITE and isinstance(turn_contract, dict):
         execution = _dict_value(turn_contract.get("executionPolicy"))
         knowledge_policy = _dict_value(turn_contract.get("knowledgeWritePolicy"))
         knowledge_mode = str(knowledge_policy.get("mode") or "").strip().lower()
@@ -1978,13 +2061,18 @@ async def _build_coomi_system_prompt(
 
     del prompt
     policy = context_policy_from_turn_contract(turn_contract)
-    tools = _create_storydex_tool_registry(
+    capability_policy = resolve_capability_policy(turn_contract, plan_mode=False)
+    registry = _create_storydex_tool_registry(
         workspace_root,
         policy,
         turn_contract,
-        plan_mode=plan_mode,
-    ).specs()
-    names = ", ".join(f"`{tool['name']}`" for tool in tools)
+        plan_mode=False,
+        capability_mode=capability_policy.mode,
+    )
+    visible_tools = registry.list_tools()
+    if plan_mode:
+        visible_tools = [tool for tool in visible_tools if tool.access == ToolAccess.READ_ONLY]
+    names = ", ".join(f"`{tool.name}`" for tool in visible_tools)
     turn_plan = _dict_value(_dict_value(turn_contract).get("turnPlan"))
     intent = _dict_value(_dict_value(turn_contract).get("intentFrame"))
     prompt_parts = [
@@ -2004,6 +2092,11 @@ async def _build_coomi_system_prompt(
         "reports no installed skills, do not call read_skill for a project skill name.",
         "The canonical relationship graph file is `.storydex/memory/current/relationship_graph.json`; do not probe "
         "the obsolete `.storydex/memory/relationship_graph.json` path.",
+        (
+            "A structure map or matched excerpt in assembled context is location evidence, not a complete file. "
+            "Before modifying any existing file, call read_file for the target path and relevant span, verify the "
+            "returned revision, and continue reading while hasMore=true. Never edit solely from an initial excerpt."
+        ),
         f"Storydex domain tools available this turn: {names}.",
         "For Storydex usage questions, call StorydexHelpGuideSearch before answering.",
         "For continuity facts not present in assembled context, use StorydexProjectSearch or StorydexWikiQuery when available.",
@@ -2031,11 +2124,7 @@ async def _build_coomi_system_prompt(
             "facts or formal Markdown."
         ),
         "Treat .storydex/memory as durable story state only, never as chat or execution-log storage.",
-        (
-            "Plan mode is active. This session is read-only until exit_plan_mode succeeds."
-            if plan_mode
-            else "Plan mode is inactive. This turn is not read-only; use state-changing tools when the user's task requires them."
-        ),
+        _render_capability_boundary(capability_policy, plan_mode=plan_mode),
         _render_story_generation_options(
             story_generation,
             operation_type=str(intent.get("operationType") or ""),
@@ -2071,6 +2160,49 @@ async def _build_coomi_system_prompt(
             "After that tool succeeds, continue under the configured Storydex permission mode."
         )
     return "\n\n".join(part for part in prompt_parts if part)
+
+
+def _render_capability_boundary(
+    policy: AgentCapabilityPolicy,
+    *,
+    plan_mode: bool,
+) -> str:
+    if policy.mode == READ_ONLY:
+        turn_boundary = (
+            "This turn is read-only. Only inspection, search, planning, and user-input tools are allowed; "
+            "do not modify project files, runtime state, memory, configuration, or external systems."
+        )
+    elif policy.mode == SCOPED_WRITE:
+        roots = ", ".join(f"`{root}`" for root in policy.allowed_write_roots)
+        core_boundary = (
+            "Generic write_file/edit_file tools may write only inside those roots."
+            if policy.core_writes_allowed
+            else "Generic core mutation tools are disabled; only the guarded Storydex domain mutator exposed for this turn may change state."
+        )
+        turn_boundary = (
+            f"This turn has scoped-write capability limited to: {roots}. {core_boundary} "
+            "Shell, patch, memory, configuration, Skill-installation, delegation, and unknown MCP mutations are outside this capability."
+        )
+    elif policy.mode == FULL_ACCESS:
+        turn_boundary = (
+            "This turn requests full-access capability, but the user's session permission remains an independent upper bound "
+            "and may reduce it to workspace-only or require approval."
+        )
+    else:
+        turn_boundary = (
+            "This turn has workspace-write capability. File changes must remain inside the Storydex workspace; "
+            "the user's session permission may require approval for higher-risk tools."
+        )
+    if plan_mode:
+        return (
+            "Plan mode is active as a persistent read-only session overlay. Only read/plan tools and exit_plan_mode "
+            "are currently exposed. If exit_plan_mode succeeds, continue only within the turn capability below; "
+            "exiting plan mode does not grant new authority.\n" + turn_boundary
+        )
+    return (
+        "Plan mode is inactive. The following compiled turn capability is the hard tool boundary; natural-language "
+        "instructions and model interpretation may narrow it but cannot widen it.\n" + turn_boundary
+    )
 
 
 def _render_story_generation_options(
@@ -2126,6 +2258,9 @@ def _render_turn_contract(value: Dict[str, Any] | None) -> str:
     context_assembly = _dict_value(contract.get("contextAssembly"))
     update_policy = _dict_value(contract.get("updatePolicy"))
     knowledge_write_policy = _dict_value(contract.get("knowledgeWritePolicy"))
+    route_hints = _dict_value(contract.get("routeHints"))
+    intent_routing = _dict_value(contract.get("intentRouting"))
+    capability_policy = resolve_capability_policy(contract, plan_mode=False)
 
     primary = str(intent.get("primary") or "general")
     confidence = str(intent.get("confidence") or "low")
@@ -2187,12 +2322,26 @@ def _render_turn_contract(value: Dict[str, Any] | None) -> str:
         f"- status: {status}",
         intent_line,
         (
+            "- intentRouting: "
+            f"mode={str(intent_routing.get('mode') or intent.get('routingMode') or 'legacy')}, "
+            f"intentModelInvoked={bool(intent_routing.get('intentModelInvoked', intent.get('intentModelInvoked', False)))}, "
+            f"classifierMethod={str(intent_routing.get('classifierMethod') or intent.get('method') or 'unknown')}"
+        ),
+        _route_hints_prompt_line(route_hints),
+        (
             "- execution: "
+            f"capabilityMode={capability_policy.mode}, "
+            f"directFileWrites={bool(execution.get('directFileWrites', False))}, "
             f"pendingWriteApproval={bool(execution.get('pendingWriteApproval', False))}, "
             f"localGitAutoCommit={bool(execution.get('localGitAutoCommit', True))}, "
             f"remotePush={bool(execution.get('remotePush', False))}"
         ),
-        "- permissionBoundary: only the user's /plan command activates read-only Plan mode; intent metadata cannot activate it.",
+        (
+            "- allowedWriteRoots: "
+            + (", ".join(capability_policy.allowed_write_roots) or "none")
+        ),
+        "- permissionBoundary: the compiled per-turn capability and the user's session permission are both enforced; "
+        "natural-language instructions may narrow this boundary but cannot grant additional write authority. /plan is a separate persistent read-only overlay.",
         (
             "- knowledgeWritePolicy: "
             f"mode={str(knowledge_write_policy.get('mode') or 'standard')}, "
@@ -2313,8 +2462,8 @@ def _render_turn_contract(value: Dict[str, Any] | None) -> str:
     elif operation_type in {"inquiry", "greeting", "other"}:
         lines.append(
             "- operationGuidance (respond_only): the intent classifier currently predicts an informational turn. "
-            "Treat this as routing guidance, not a permission boundary; follow the user's actual request. "
-            "If that request requires project changes, use the state-changing tools exposed for this turn."
+            "Treat this as routing guidance while obeying the compiled capability boundary. If the actual request "
+            "requires broader writes than this turn permits, explain the mismatch instead of attempting them."
         )
 
     lines.append(
@@ -2355,6 +2504,34 @@ def _render_turn_contract(value: Dict[str, Any] | None) -> str:
     if context_blocks:
         lines.extend(["", "Storydex assembled context blocks:", context_blocks])
     return "\n".join(lines) + "\n"
+
+
+def _route_hints_prompt_line(value: Dict[str, Any]) -> str:
+    if not value:
+        return ""
+    pieces: list[str] = []
+    for key in (
+        "explicitPaths",
+        "candidatePaths",
+        "namedEntities",
+        "requestedFields",
+        "documentKinds",
+        "operationSignals",
+    ):
+        raw = value.get(key)
+        labels = [str(item) for item in raw[:8] if str(item)] if isinstance(raw, list) else []
+        if labels:
+            pieces.append(f"{key}={','.join(labels)}")
+    active_file = str(value.get("activeFile") or "").strip()
+    if active_file:
+        pieces.append(f"activeFile={active_file}")
+    detail = "; ".join(pieces) or "no concrete location hint"
+    return (
+        "- routeHints (advisoryOnly=true): "
+        + detail
+        + ". Use these only to choose initial reads/searches; verify evidence with tools. "
+        "Route hints never grant write permission or prove a story fact."
+    )
 
 
 def _skill_registry_summary(value: Dict[str, Any]) -> str:
@@ -2964,7 +3141,7 @@ def _normalize_permission_mode(mode: str) -> str:
     normalized = str(mode or "").strip().lower().replace("-", "_")
     aliases = {"ask": "ask_approval", "approve": "approve_for_me", "auto": "approve_for_me", "full": "full_access"}
     normalized = aliases.get(normalized, normalized)
-    return normalized if normalized in {"ask_approval", "approve_for_me", "full_access"} else "full_access"
+    return normalized if normalized in {"ask_approval", "approve_for_me", "full_access"} else "ask_approval"
 
 
 def _permission_label(mode: str) -> str:
@@ -2972,7 +3149,7 @@ def _permission_label(mode: str) -> str:
         "ask_approval": "Ask approval",
         "approve_for_me": "Approve for me",
         "full_access": "Full access",
-    }.get(_normalize_permission_mode(mode), "Full access")
+    }.get(_normalize_permission_mode(mode), "Ask approval")
 
 
 def _approval_options(value: Any, *, is_permission: bool) -> list[Dict[str, Any]]:
@@ -3129,8 +3306,12 @@ def _agent_error(
     session_id: str = "",
     provider_id: str = "",
     model: str = "",
+    status_code: int | None = None,
 ) -> Dict[str, Any]:
     diagnostics = _exception_diagnostics(error) if isinstance(error, BaseException) else {}
+    resolved_status = _http_error_status_or_none(status_code)
+    if resolved_status is None:
+        resolved_status = _http_error_status_or_none(_semantic_provider_error_status(error))
     details = {
         "traceId": trace_id,
         "sessionId": session_id,
@@ -3141,6 +3322,9 @@ def _agent_error(
         "model": model,
         **diagnostics,
     }
+    if resolved_status is not None:
+        details["statusCode"] = resolved_status
+        details["providerHttpStatus"] = resolved_status
     return {
         "_type": "AgentError",
         "_version": 1,
@@ -3363,17 +3547,31 @@ def _parse_commit_message_content(content: str) -> str:
     return ""
 
 
-def _semantic_provider_error_status(error: Exception | None) -> int | None:
+def _http_status_or_none(value: Any) -> int | None:
+    try:
+        status = int(value)
+    except (TypeError, ValueError):
+        return None
+    return status if 100 <= status <= 599 else None
+
+
+def _http_error_status_or_none(value: Any) -> int | None:
+    status = _http_status_or_none(value)
+    return status if status is not None and status >= 400 else None
+
+
+def _semantic_provider_error_status(error: Any) -> int | None:
     if error is None:
         return None
-    status = getattr(error, "status_code", None)
-    try:
-        if status is not None:
-            return int(status)
-    except (TypeError, ValueError):
-        pass
+    status = _http_status_or_none(getattr(error, "status_code", None))
+    if status is not None:
+        return status
+    response = getattr(error, "response", None)
+    status = _http_status_or_none(getattr(response, "status_code", None))
+    if status is not None:
+        return status
     match = re.search(r"HTTP\s+(\d{3})", str(error), flags=re.IGNORECASE)
-    return int(match.group(1)) if match else None
+    return _http_status_or_none(match.group(1)) if match else None
 
 
 def _semantic_provider_error_retryable(error: Exception) -> bool:

@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Sequence, Set, Tuple
 
 from core.bounded_text_io import read_text_limited as read_bounded_text_limited
 from core.bounded_text_io import read_text_preview as read_bounded_text_preview
+from core.bounded_text_io import TAIL_ANCHOR_MARKER
 from core.config import FEATURE_FLAG_DEFAULTS
 from core.feature_flags import FeatureFlags
 from services.content_catalog_service import ContentCatalogSnapshot
@@ -25,6 +26,7 @@ from services.context_trace_service import (
     create_context_source,
     finalize_context_source,
 )
+from services.document_structure_context_service import get_document_structure_context_service
 from services.context_policy import ContextPolicy
 from services.entity_registry import EntityRegistry
 from services.fact_memory_store import FactMemoryStore
@@ -38,6 +40,8 @@ _WIKI_GRAPH_PATH = ".storydex/wiki/knowledge_graph.json"
 _CHAPTER_DIGITS = "零〇一二两三四五六七八九十百千万亿0123456789"
 _PROJECT_ORGANIZATION_SOURCE_PATH_LIMIT = 512
 _PROJECT_ORGANIZATION_MAX_CHARS = 12000
+_CHARACTER_STRUCTURE_CONTEXT_MAX_CHARS = 2800
+_WORLDBOOK_STRUCTURE_CONTEXT_MAX_CHARS = 2400
 _RETRIEVAL_QUERY_MAX_TERMS = 12
 _RETRIEVAL_QUERY_STOPWORDS = frozenset(
     {
@@ -129,6 +133,26 @@ class StorydexContextAssemblerService:
             catalog_snapshot=catalog_snapshot,
         )
         active_entities = self._infer_active_entities(root, prompt=prompt, active_file=active_file)
+        normalized_active_file = str(active_file or "").strip().replace("\\", "/")
+        normalized_intent_primary = str(intent_primary or "").strip()
+        # If the prompt names an entity but no source matches it, injecting the
+        # first alphabetic cards is actively misleading (especially for a new
+        # character/worldbook entry).  Keep an unmatched directory map only for
+        # broad domain requests or an explicitly active file.
+        allow_unmatched_character_map = (
+            normalized_active_file.startswith(".storydex/characters/")
+            or (
+                normalized_intent_primary == "character_work"
+                and not active_entities
+            )
+        )
+        allow_unmatched_worldbook_map = (
+            normalized_active_file.startswith(".storydex/worldbook/")
+            or (
+                normalized_intent_primary == "worldbook_work"
+                and not active_entities
+            )
+        )
         is_project_organization = str(intent_primary or "").strip() == "project_organization"
         project_inventory_started = time.perf_counter()
         project_inventory, project_inventory_paths = (
@@ -296,74 +320,82 @@ class StorydexContextAssemblerService:
         )
 
         source_started = time.perf_counter()
-        character_block = (
-            self.story_project_service._build_character_hard_constraints_context(  # noqa: SLF001
+        character_block, character_paths, character_diagnostic = (
+            get_document_structure_context_service().build_context(
                 root,
-                max_files=6,
-                max_chars_per_file=520,
-                total_chars=1600,
+                kind="character",
                 prompt=prompt,
                 active_file=active_file,
+                active_entities=active_entities,
+                catalog_snapshot=catalog_snapshot,
+                max_files=4,
+                max_chars_per_file=1100,
+                total_chars=_CHARACTER_STRUCTURE_CONTEXT_MAX_CHARS,
+                allow_unmatched_fallback=allow_unmatched_character_map,
             )
             if effective_policy.base_story_context
-            else ""
+            else ("", [], {})
         )
-        character_paths = self._extract_context_paths(character_block)
         sources.append(
             self._source(
                 "active_characters",
                 character_paths,
                 candidate=character_block,
-                policy="recent_or_relevant_only",
+                policy="structure_map_matched_spans_jit_read",
                 elapsed_ms=(time.perf_counter() - source_started) * 1000,
             )
         )
+        sources[-1].update(character_diagnostic)
         self._append_policy_block(
             blocks,
             enabled=effective_policy.base_story_context,
             block_id="active_characters",
-            title="Relevant character hard constraints",
+            title="Relevant character structure maps and matched evidence",
             kind="character",
             content=character_block,
             source_paths=character_paths,
-            max_chars=1600,
+            max_chars=_CHARACTER_STRUCTURE_CONTEXT_MAX_CHARS,
             max_total_chars=max_total_chars,
             notes=notes,
             trace_source=sources[-1],
         )
 
         source_started = time.perf_counter()
-        worldbook_block = (
-            self.story_project_service._build_worldbook_hard_constraints_context(  # noqa: SLF001
+        worldbook_block, worldbook_paths, worldbook_diagnostic = (
+            get_document_structure_context_service().build_context(
                 root,
-                max_files=4,
-                max_chars_per_file=420,
-                total_chars=1200,
+                kind="worldbook",
                 prompt=prompt,
                 active_file=active_file,
+                active_entities=active_entities,
+                catalog_snapshot=catalog_snapshot,
+                max_files=3,
+                max_chars_per_file=1000,
+                total_chars=_WORLDBOOK_STRUCTURE_CONTEXT_MAX_CHARS,
+                allow_unmatched_fallback=allow_unmatched_worldbook_map,
             )
             if effective_policy.base_story_context
-            else ""
+            else ("", [], {})
         )
-        worldbook_paths = self._extract_context_paths(worldbook_block)
         sources.append(
             self._source(
                 "worldbook",
                 worldbook_paths,
                 candidate=worldbook_block,
-                policy="relevant_only",
+                policy="structure_map_matched_spans_jit_read",
                 elapsed_ms=(time.perf_counter() - source_started) * 1000,
             )
         )
+        sources[-1].update(worldbook_diagnostic)
         self._append_policy_block(
             blocks,
             enabled=effective_policy.base_story_context,
             block_id="worldbook",
-            title="Relevant worldbook hard constraints",
+            title="Relevant worldbook structure maps and matched evidence",
             kind="worldbook",
             content=worldbook_block,
             source_paths=worldbook_paths,
-            max_chars=1200,
+            max_chars=_WORLDBOOK_STRUCTURE_CONTEXT_MAX_CHARS,
             max_total_chars=max_total_chars,
             notes=notes,
             trace_source=sources[-1],
@@ -480,8 +512,11 @@ class StorydexContextAssemblerService:
                 root,
                 prompt=prompt,
                 active_entities=active_entities,
-                # rolling_summaries 块已注入的摘要不再重复召回。
-                exclude_paths={*recent_segment_paths, *rolling_paths, str(active_file or "").replace("\\", "/")},
+                exclude_paths=self._related_passage_excludes(
+                    active_file=active_file if effective_policy.base_story_context else "",
+                    recent_segments=recent_segments,
+                    rolling_paths=rolling_paths,
+                ),
             )
             if effective_policy.passive_fts
             else ("", [], {"status": "disabled", "resultState": "unavailable"})
@@ -986,6 +1021,41 @@ class StorydexContextAssemblerService:
             ]
         )
         return "\n".join(lines).strip(), normalized_candidates, diagnostic
+
+    @staticmethod
+    def _related_passage_excludes(
+        *,
+        active_file: str,
+        recent_segments: Sequence[Dict[str, Any]],
+        rolling_paths: Sequence[str],
+    ) -> Set[str]:
+        """Exclude only context already covered in full by another block.
+
+        Recent chapter context intentionally carries a tail preview. A tail-anchored
+        large file must remain searchable so FTS can surface an exact middle span.
+        Character/worldbook active files are already handled by structure maps.
+        """
+
+        excluded = {
+            str(path).strip().replace("\\", "/")
+            for path in rolling_paths
+            if str(path).strip()
+        }
+        tail_marker = TAIL_ANCHOR_MARKER.strip()
+        for item in recent_segments:
+            if not isinstance(item, dict):
+                continue
+            relative = str(item.get("relativePath") or "").strip().replace("\\", "/")
+            content = str(item.get("content") or "")
+            if relative and content and not content.lstrip().startswith(tail_marker):
+                excluded.add(relative)
+
+        normalized_active = str(active_file or "").strip().replace("\\", "/").strip("/")
+        if normalized_active.startswith(
+            (".storydex/characters/", ".storydex/worldbook/")
+        ):
+            excluded.add(normalized_active)
+        return excluded
 
     _RETRIEVABLE_CONTENT_PREFIXES = (
         "chapters/",

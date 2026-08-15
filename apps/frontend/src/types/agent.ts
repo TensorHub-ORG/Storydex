@@ -364,6 +364,7 @@ export interface AgentStreamPacket {
   mode?: string;
   query?: string;
   error_type?: string;
+  statusCode?: number;
   code?: string;
   message?: string;
   details?: Record<string, unknown>;

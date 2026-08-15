@@ -363,6 +363,9 @@ def summarize_event(name: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
         }
     details = payload.get("details")
     if isinstance(details, Mapping):
+        provider_status = details.get("providerHttpStatus", details.get("statusCode"))
+        if isinstance(provider_status, (int, float)) and not isinstance(provider_status, bool):
+            summary["statusCode"] = int(provider_status)
         if "confirmNoSnapshotRequired" in details:
             summary["confirmNoSnapshotRequired"] = bool(details.get("confirmNoSnapshotRequired"))
         if "available" in details:
@@ -403,6 +406,155 @@ def summarize_event(name: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
                     "thinkingLevels",
                 )
                 if key in plan
+            }
+        )
+    if name == "TurnContract":
+        intent = payload.get("intentFrame") if isinstance(payload.get("intentFrame"), Mapping) else {}
+        execution = (
+            payload.get("executionPolicy")
+            if isinstance(payload.get("executionPolicy"), Mapping)
+            else {}
+        )
+        routing = (
+            payload.get("intentRouting")
+            if isinstance(payload.get("intentRouting"), Mapping)
+            else {}
+        )
+        hints = payload.get("routeHints") if isinstance(payload.get("routeHints"), Mapping) else {}
+        assembly = (
+            payload.get("contextAssembly")
+            if isinstance(payload.get("contextAssembly"), Mapping)
+            else {}
+        )
+        trace = (
+            assembly.get("contextTrace")
+            if isinstance(assembly.get("contextTrace"), Mapping)
+            else {}
+        )
+        trace_totals = (
+            trace.get("totals") if isinstance(trace.get("totals"), Mapping) else {}
+        )
+        context_sources = []
+        for source in trace.get("sources", []) if isinstance(trace.get("sources"), list) else []:
+            if not isinstance(source, Mapping):
+                continue
+            kind = str(source.get("kind") or "")
+            if kind not in {"active_characters", "worldbook", "related_passages"}:
+                continue
+            query_terms = source.get("queryTerms") if isinstance(source.get("queryTerms"), list) else []
+            source_observation = {
+                "kind": kind,
+                "policy": str(source.get("policy") or ""),
+                "candidateChars": int(source.get("candidateChars") or 0),
+                "chars": int(source.get("chars") or 0),
+                "included": bool(source.get("included")),
+                "truncated": bool(source.get("truncated")),
+                "dropReason": str(source.get("dropReason") or ""),
+                "elapsedMs": round(float(source.get("elapsedMs") or 0), 3),
+                "structureMapCount": int(source.get("structureMapCount") or 0),
+                "matchedSpanCount": int(source.get("matchedSpanCount") or 0),
+                "requiresFullReadBeforeWrite": bool(
+                    source.get("requiresFullReadBeforeWrite")
+                ),
+                "relevanceMatched": bool(source.get("relevanceMatched")),
+                "unmatchedFallbackUsed": bool(source.get("unmatchedFallbackUsed")),
+                "queryTermCount": len(query_terms),
+            }
+            if kind == "related_passages":
+                retrieval = (
+                    source.get("retrieval")
+                    if isinstance(source.get("retrieval"), Mapping)
+                    else {}
+                )
+                candidate_spans = (
+                    retrieval.get("candidateSpans")
+                    if isinstance(retrieval.get("candidateSpans"), list)
+                    else []
+                )
+                source_observation.update(
+                    {
+                        "retrievalStatus": str(retrieval.get("status") or ""),
+                        "retrievalResultState": str(
+                            retrieval.get("resultState") or ""
+                        ),
+                        "candidateSpanCount": len(candidate_spans),
+                    }
+                )
+            context_sources.append(source_observation)
+        context_blocks = []
+        for block in (
+            assembly.get("promptBlocks", [])
+            if isinstance(assembly.get("promptBlocks"), list)
+            else []
+        ):
+            if not isinstance(block, Mapping):
+                continue
+            block_id = str(block.get("id") or "")
+            if block_id not in {"active_characters", "worldbook", "related_passages"}:
+                continue
+            content = str(block.get("content") or "")
+            source_paths = (
+                block.get("sourcePaths") if isinstance(block.get("sourcePaths"), list) else []
+            )
+            context_blocks.append(
+                {
+                    "id": block_id,
+                    "title": str(block.get("title") or ""),
+                    "charCount": int(block.get("charCount") or len(content)),
+                    "sourcePathCount": len(source_paths),
+                    "truncated": bool(block.get("truncated")),
+                    "omitted": bool(block.get("omitted")),
+                    "dropReason": str(block.get("dropReason") or ""),
+                    "hasStructureMap": "Structure map" in content,
+                    "hasMatchedEvidence": "Matched evidence span:" in content,
+                    "hasRevisionMetadata": (
+                        "revision=sha256:" in content or "revision sha256:" in content
+                    ),
+                    "hasSpanMetadata": bool(
+                        re.search(r"\blines \d+-\d+ chars \d+-\d+\b", content)
+                    ),
+                    "hasReadBeforeWrite": "Read-before-write:" in content,
+                }
+            )
+        assembly_budget = (
+            assembly.get("budget") if isinstance(assembly.get("budget"), Mapping) else {}
+        )
+        summary["turnContract"] = redact(
+            {
+                "primary": str(intent.get("primary") or ""),
+                "operationType": str(intent.get("operationType") or ""),
+                "canWrite": bool(intent.get("canWrite")),
+                "classifierMethod": str(
+                    intent.get("method") or routing.get("classifierMethod") or ""
+                ),
+                "routingMode": str(routing.get("mode") or intent.get("routingMode") or ""),
+                "intentModelInvoked": bool(
+                    routing.get(
+                        "intentModelInvoked",
+                        intent.get("intentModelInvoked", False),
+                    )
+                ),
+                "capabilityMode": str(execution.get("capabilityMode") or ""),
+                "allowedWriteRoots": list(execution.get("allowedWriteRoots") or []),
+                "routeHints": {
+                    key: list(hints.get(key) or [])
+                    for key in (
+                        "explicitPaths",
+                        "candidatePaths",
+                        "namedEntities",
+                        "requestedFields",
+                        "documentKinds",
+                        "operationSignals",
+                    )
+                },
+                "contextAssembly": {
+                    "maxTotalChars": int(assembly_budget.get("maxTotalChars") or 0),
+                    "totalChars": int(assembly_budget.get("totalChars") or 0),
+                    "blockCount": int(assembly_budget.get("blockCount") or 0),
+                    "assembleMs": round(float(trace_totals.get("assembleMs") or 0), 3),
+                    "sources": context_sources,
+                    "blocks": context_blocks,
+                },
             }
         )
     return redact(summary)

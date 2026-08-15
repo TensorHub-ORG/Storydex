@@ -156,7 +156,7 @@ def test_active_retrieval_policy_removes_only_storydex_retrieval_tools(tmp_path)
     assert "StorydexApplyStoryIncrement" in names
 
 
-def test_intent_metadata_does_not_activate_plan_mode_tool_filtering(tmp_path):
+def test_read_only_turn_capability_filters_mutating_domain_tools(tmp_path):
     from services.coomi_agent_service import _create_storydex_tool_registry
     from services.storydex_tool_types import ToolAccess
 
@@ -179,9 +179,9 @@ def test_intent_metadata_does_not_activate_plan_mode_tool_filtering(tmp_path):
     names = {tool.name for tool in registry.list_tools()}
 
     assert names
-    assert any(tool.access != ToolAccess.READ_ONLY for tool in registry.list_tools())
-    assert "StorydexSyncWiki" in names
-    assert "StorydexApplyStoryIncrement" in names
+    assert all(tool.access == ToolAccess.READ_ONLY for tool in registry.list_tools())
+    assert "StorydexSyncWiki" not in names
+    assert "StorydexApplyStoryIncrement" not in names
 
     plan_registry = _create_storydex_tool_registry(
         tmp_path,

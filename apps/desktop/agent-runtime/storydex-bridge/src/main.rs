@@ -5,7 +5,7 @@ use coomi_engine::{
     ReasoningEffort, Role, SESSION_SCHEMA_VERSION, Session, SessionCheckpointBuffer, SessionStore,
     ToolCall, ToolResult, ToolRuntime, ToolSpec, UserInputRequest, UserInputResponse,
 };
-use coomi_security::{AccessMode, HookRunner, SecurityPolicy};
+use coomi_security::{AccessMode, Decision, HookRunner, SecurityPolicy};
 use coomi_services::{
     HttpModelProvider, McpRuntime, MemoryManager, ProviderConfig, ProviderRegistry,
     reasoning_capability_best_effort, reasoning_request_plan_best_effort,
@@ -100,6 +100,42 @@ impl ControlHub {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TurnCapability {
+    ReadOnly,
+    ScopedWrite,
+    WorkspaceWrite,
+    FullAccess,
+}
+
+impl TurnCapability {
+    fn resolve(raw: &str, writes_allowed: bool, allowed_write_roots: &[PathBuf]) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "read_only" => Self::ReadOnly,
+            "scoped_write" if allowed_write_roots.is_empty() => Self::ReadOnly,
+            "scoped_write" => Self::ScopedWrite,
+            "workspace_write" => Self::WorkspaceWrite,
+            "full_access" => Self::FullAccess,
+            "" if !writes_allowed => Self::ReadOnly,
+            "" if !allowed_write_roots.is_empty() => Self::ScopedWrite,
+            "" => Self::WorkspaceWrite,
+            _ => Self::ReadOnly,
+        }
+    }
+
+    fn allows_writes(self) -> bool {
+        self != Self::ReadOnly
+    }
+
+    fn access_mode(self, base: AccessMode) -> AccessMode {
+        match self {
+            Self::ReadOnly => AccessMode::ReadOnly,
+            Self::ScopedWrite | Self::WorkspaceWrite => AccessMode::WorkspaceWrite,
+            Self::FullAccess => base,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BridgeRequest {
@@ -125,12 +161,14 @@ struct BridgeRequest {
     #[serde(default)]
     base_permission_mode: String,
     #[serde(default)]
+    capability_mode: String,
+    #[serde(default)]
     checkpoint_context: Option<Value>,
     #[serde(default)]
     tool_specs: Vec<ToolSpec>,
     #[serde(default)]
     mutating_tool_names: Vec<String>,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     writes_allowed: bool,
     #[serde(default)]
     core_writes_allowed: Option<bool>,
@@ -307,10 +345,10 @@ impl ApprovalHandler for StorydexApproval {
 
 struct StorydexTools {
     core: CoreTools,
-    cwd: PathBuf,
+    policy: SecurityPolicy,
+    capability: TurnCapability,
     writes_allowed: bool,
     core_writes_allowed: bool,
-    allowed_write_roots: Vec<PathBuf>,
     custom_specs: Vec<ToolSpec>,
     custom_names: HashSet<String>,
     mutating_custom_names: HashSet<String>,
@@ -323,12 +361,17 @@ struct StorydexTools {
 #[async_trait]
 impl ToolRuntime for StorydexTools {
     fn specs(&self) -> Vec<ToolSpec> {
+        let plan_mode_active = self.plan_mode_active.load(Ordering::Acquire);
         let mut specs = self.core.specs();
-        if !self.core_writes_allowed {
-            specs.retain(|spec| !is_mutating_core_tool(&spec.name));
-        }
-        specs.extend(self.custom_specs.clone());
-        if self.plan_mode_active.load(Ordering::Acquire) {
+        specs.retain(|spec| {
+            core_tool_allowed(self.capability, self.core_writes_allowed, &spec.name)
+                && (!plan_mode_active || is_plan_safe_core_tool(&spec.name))
+        });
+        specs.extend(self.custom_specs.iter().filter_map(|spec| {
+            let mutating = self.mutating_custom_names.contains(&spec.name);
+            (!mutating || (self.writes_allowed && !plan_mode_active)).then(|| spec.clone())
+        }));
+        if plan_mode_active {
             specs.push(ToolSpec {
                 name: "exit_plan_mode".into(),
                 description: "Exit Storydex plan/read-only mode and continue this turn using the configured permission mode. Call this when planning is complete and the user's task now requires execution or file changes.".into(),
@@ -363,11 +406,11 @@ impl ToolRuntime for StorydexTools {
                 }),
             );
             return ToolResult::success(
-                "Plan mode disabled. Continue the current task using the configured Storydex permission mode.",
+                "Plan mode disabled. Continue only within the compiled turn capability and configured Storydex permission mode.",
             );
         }
         if !self.custom_names.contains(&call.name) {
-            if let Some(error) = self.rejected_core_write(call) {
+            if let Some(error) = self.rejected_core_call(call) {
                 return ToolResult::error(error);
             }
             return self.core.call(call, approval).await;
@@ -416,7 +459,7 @@ impl ToolRuntime for StorydexTools {
 }
 
 impl StorydexTools {
-    fn rejected_core_write(&self, call: &ToolCall) -> Option<String> {
+    fn rejected_core_call(&self, call: &ToolCall) -> Option<String> {
         let plan_mode_active = self.plan_mode_active.load(Ordering::Acquire);
         if plan_mode_active && !is_plan_safe_core_tool(&call.name) {
             return Some(
@@ -424,18 +467,11 @@ impl StorydexTools {
                     .into(),
             );
         }
-        let mutating = is_mutating_core_tool(&call.name);
-        if mutating && !self.core_writes_allowed {
+        if !core_tool_allowed(self.capability, self.core_writes_allowed, &call.name) {
             return Some("Storydex turn contract blocks state-changing tools".into());
         }
-        if self.allowed_write_roots.is_empty() || !mutating {
+        if self.capability != TurnCapability::ScopedWrite {
             return None;
-        }
-        if matches!(call.name.as_str(), "shell" | "local_shell" | "apply_patch") {
-            return Some(
-                "Storydex scoped-write turns block shell and patch tools; use a path-specific file tool"
-                    .into(),
-            );
         }
         if !matches!(call.name.as_str(), "write_file" | "edit_file") {
             return None;
@@ -443,41 +479,46 @@ impl StorydexTools {
         let Some(path) = call.arguments.get("path").and_then(Value::as_str) else {
             return Some("Storydex scoped write has no target path".into());
         };
-        let candidate = lexical_path(&self.cwd, Path::new(path));
-        if self
-            .allowed_write_roots
-            .iter()
-            .map(|root| lexical_path(&self.cwd, root))
-            .any(|root| candidate == root || candidate.starts_with(root))
-        {
-            None
-        } else {
-            Some(format!(
-                "Storydex turn contract blocks writes outside: {}",
-                self.allowed_write_roots
-                    .iter()
-                    .map(|path| path.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ))
+        let candidate = match self.policy.resolve_path(Path::new(path)) {
+            Ok(candidate) => candidate,
+            Err(error) => return Some(format!("Storydex scoped write path is invalid: {error:#}")),
+        };
+        match self.policy.assess_write(&candidate) {
+            Decision::Allow => None,
+            Decision::Ask(reason) | Decision::Deny(reason) => Some(reason),
         }
     }
 }
 
-fn is_mutating_core_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "write_file"
-            | "edit_file"
-            | "apply_patch"
-            | "shell"
-            | "local_shell"
-            | "memory_write"
-            | "memory_delete"
-            | "configure_mcp"
-            | "install_skill"
-            | "spawn_agent"
-    )
+fn is_workspace_core_tool(name: &str) -> bool {
+    is_plan_safe_core_tool(name)
+        || matches!(
+            name,
+            "write_file"
+                | "edit_file"
+                | "apply_patch"
+                | "shell"
+                | "local_shell"
+                | "create_loop"
+                | "update_loop"
+                | "spawn_agent"
+                | "wait_agent"
+                | "close_agent"
+        )
+}
+
+fn core_tool_allowed(capability: TurnCapability, core_writes_allowed: bool, name: &str) -> bool {
+    match capability {
+        TurnCapability::ReadOnly => is_plan_safe_core_tool(name),
+        TurnCapability::ScopedWrite => {
+            is_plan_safe_core_tool(name)
+                || (core_writes_allowed && matches!(name, "write_file" | "edit_file"))
+        }
+        TurnCapability::WorkspaceWrite => {
+            is_plan_safe_core_tool(name) || (core_writes_allowed && is_workspace_core_tool(name))
+        }
+        TurnCapability::FullAccess => core_writes_allowed || is_plan_safe_core_tool(name),
+    }
 }
 
 fn is_plan_safe_core_tool(name: &str) -> bool {
@@ -498,30 +539,6 @@ fn is_plan_safe_core_tool(name: &str) -> bool {
             | "memory_read"
             | "memory_search"
     )
-}
-
-fn lexical_path(cwd: &Path, value: &Path) -> PathBuf {
-    use std::path::Component;
-    let source = if value.is_absolute() {
-        value.to_path_buf()
-    } else {
-        cwd.join(value)
-    };
-    let mut output = PathBuf::new();
-    for component in source.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                let _ = output.pop();
-            }
-            other => output.push(other.as_os_str()),
-        }
-    }
-    output
-}
-
-const fn default_true() -> bool {
-    true
 }
 
 fn wire_tool_result(result: &ToolResult) -> Value {
@@ -743,10 +760,21 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
         request.base_permission_mode.clone()
     };
     let plan_mode_active = Arc::new(AtomicBool::new(request.permission_mode == "plan_mode"));
-    let access_mode = match base_permission_mode.as_str() {
+    let base_access_mode = match base_permission_mode.as_str() {
         "full_access" => AccessMode::FullAccess,
         _ => AccessMode::WorkspaceWrite,
     };
+    let capability = TurnCapability::resolve(
+        &request.capability_mode,
+        request.writes_allowed,
+        &request.allowed_write_roots,
+    );
+    let writes_allowed = request.writes_allowed && capability.allows_writes();
+    let core_writes_allowed = writes_allowed
+        && request
+            .core_writes_allowed
+            .unwrap_or(request.writes_allowed);
+    let access_mode = capability.access_mode(base_access_mode);
     let mut system_prompt = if request.system_prompt.trim().is_empty() {
         format!(
             "You are Coomi Desktop for Storydex, a local-first professional workspace for long-form fiction creators. Treat the author as the creative authority. Before drafting, revising, reviewing, or changing project state, inspect the relevant manuscript, character, world, timeline, preset, and memory evidence. Distinguish quoted canon from inference, surface continuity conflicts, and preserve the author's voice, point of view, pacing, and explicit constraints. Prefer Storydex narrative tools over generic file mutation, keep every write reviewable and scoped, preserve unrelated work, and report only verified results. Never silently invent canon, overwrite an author's decision, or expose private manuscript content outside the local workspace.\n\nStorydex workspace: {}",
@@ -771,7 +799,10 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
     }
     let memory_init_ms = memory_started.elapsed().as_secs_f64() * 1000.0;
     let security_started = Instant::now();
-    let policy = SecurityPolicy::new(&cwd, access_mode)?;
+    let mut policy = SecurityPolicy::new(&cwd, access_mode)?;
+    if capability == TurnCapability::ScopedWrite {
+        policy = policy.with_allowed_write_roots(request.allowed_write_roots.clone())?;
+    }
     let scheduler = AgentScheduler::new(
         cwd.clone(),
         home.clone(),
@@ -787,7 +818,7 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
     let hooks = Arc::new(HookRunner::load(&home)?);
     let hooks_init_ms = hooks_started.elapsed().as_secs_f64() * 1000.0;
     let tools_started = Instant::now();
-    let core = CoreTools::new(cwd.clone(), policy)
+    let core = CoreTools::new(cwd.clone(), policy.clone())
         .with_skills_directory(home.join("skills"))
         .with_config_home(home.clone())
         .with_session_state(session.plan.clone(), session.loop_state.clone())
@@ -801,17 +832,14 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
         .map(|tool| tool.name.clone())
         .collect();
     let mutating_custom_names = request.mutating_tool_names.into_iter().collect();
-    let core_writes_allowed = request
-        .core_writes_allowed
-        .unwrap_or(request.writes_allowed);
     let controls = Arc::new(ControlHub::default());
     start_control_reader(Arc::clone(&controls), emitter.clone());
     let tools = StorydexTools {
         core,
-        cwd: cwd.clone(),
-        writes_allowed: request.writes_allowed,
+        policy,
+        capability,
+        writes_allowed,
         core_writes_allowed,
-        allowed_write_roots: request.allowed_write_roots,
         custom_specs: request.tool_specs,
         custom_names,
         mutating_custom_names,
@@ -1072,6 +1100,24 @@ fn read_request() -> Result<BridgeRequest> {
     serde_json::from_str(&line).context("invalid bridge request JSON")
 }
 
+fn http_status_from_error_message(message: &str) -> Option<u16> {
+    let mut words = message.split_whitespace();
+    while let Some(word) = words.next() {
+        if word
+            .trim_matches(|character: char| !character.is_ascii_alphabetic())
+            .eq_ignore_ascii_case("http")
+        {
+            let status = words
+                .next()?
+                .trim_matches(|character: char| !character.is_ascii_digit())
+                .parse::<u16>()
+                .ok()?;
+            return (100..=599).contains(&status).then_some(status);
+        }
+    }
+    None
+}
+
 #[tokio::main]
 async fn main() {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
@@ -1091,11 +1137,13 @@ async fn main() {
         Err(error) => Err(error),
     };
     if let Err(error) = result {
+        let message = format!("{error:#}");
         emitter.event(
             "error",
             json!({
-                "message": format!("{error:#}"),
+                "message": message,
                 "errorType": "storydex_coomi_bridge_error",
+                "httpStatus": http_status_from_error_message(&message),
             }),
         );
         std::process::exit(1);
@@ -1112,6 +1160,23 @@ mod tests {
 
         assert_eq!(info["runtime"], "storydex-coomi-rs");
         assert_eq!(info["protocolVersion"], PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn provider_http_status_is_extracted_for_structured_bridge_errors() {
+        assert_eq!(
+            http_status_from_error_message("provider returned HTTP 403: Forbidden"),
+            Some(403)
+        );
+        assert_eq!(
+            http_status_from_error_message("provider returned http 502 Bad Gateway"),
+            Some(502)
+        );
+        assert_eq!(
+            http_status_from_error_message("provider returned HTTP 999 invalid"),
+            None
+        );
+        assert_eq!(http_status_from_error_message("connection reset"), None);
     }
 
     #[test]
@@ -1133,14 +1198,40 @@ mod tests {
     fn bridge_request_accepts_separate_core_write_boundary() {
         let request: BridgeRequest = serde_json::from_value(json!({
             "action": "run",
+            "capabilityMode": "scoped_write",
             "writesAllowed": true,
-            "coreWritesAllowed": false
+            "coreWritesAllowed": false,
+            "allowedWriteRoots": ["chapters/"]
         }))
         .expect("deserialize bridge request");
+        assert_eq!(request.capability_mode, "scoped_write");
         assert!(request.writes_allowed);
         assert_eq!(request.core_writes_allowed, Some(false));
-        assert!(is_mutating_core_tool("write_file"));
-        assert!(!is_mutating_core_tool("read_file"));
+        assert!(!core_tool_allowed(
+            TurnCapability::ScopedWrite,
+            false,
+            "write_file"
+        ));
+        assert!(core_tool_allowed(
+            TurnCapability::ScopedWrite,
+            false,
+            "read_file"
+        ));
+    }
+
+    #[test]
+    fn bridge_request_without_write_contract_fails_closed() {
+        let request: BridgeRequest =
+            serde_json::from_value(json!({"action": "run"})).expect("deserialize bridge request");
+        assert!(!request.writes_allowed);
+        assert_eq!(
+            TurnCapability::resolve(
+                &request.capability_mode,
+                request.writes_allowed,
+                &request.allowed_write_roots,
+            ),
+            TurnCapability::ReadOnly
+        );
     }
 
     #[test]
@@ -1403,21 +1494,31 @@ mod tests {
     }
 
     #[test]
-    fn storydex_permission_modes_map_to_expected_boundaries() {
-        let cases = [
-            ("plan_mode", AccessMode::ReadOnly),
-            ("ask_approval", AccessMode::WorkspaceWrite),
-            ("approve_for_me", AccessMode::WorkspaceWrite),
-            ("full_access", AccessMode::FullAccess),
-        ];
-        for (mode, expected) in cases {
-            let actual = match mode {
-                "plan_mode" => AccessMode::ReadOnly,
-                "full_access" => AccessMode::FullAccess,
-                _ => AccessMode::WorkspaceWrite,
-            };
-            assert_eq!(actual, expected);
-        }
+    fn turn_capability_is_an_upper_bound_on_session_permission() {
+        assert_eq!(
+            TurnCapability::ReadOnly.access_mode(AccessMode::FullAccess),
+            AccessMode::ReadOnly
+        );
+        assert_eq!(
+            TurnCapability::ScopedWrite.access_mode(AccessMode::FullAccess),
+            AccessMode::WorkspaceWrite
+        );
+        assert_eq!(
+            TurnCapability::WorkspaceWrite.access_mode(AccessMode::FullAccess),
+            AccessMode::WorkspaceWrite
+        );
+        assert_eq!(
+            TurnCapability::FullAccess.access_mode(AccessMode::WorkspaceWrite),
+            AccessMode::WorkspaceWrite
+        );
+        assert_eq!(
+            TurnCapability::FullAccess.access_mode(AccessMode::FullAccess),
+            AccessMode::FullAccess
+        );
+        assert_eq!(
+            TurnCapability::resolve("scoped_write", true, &[]),
+            TurnCapability::ReadOnly
+        );
     }
 
     #[test]
@@ -1428,5 +1529,59 @@ mod tests {
         assert!(!is_plan_safe_core_tool("spawn_agent"));
         assert!(!is_plan_safe_core_tool("enter_plan_mode"));
         assert!(!is_plan_safe_core_tool("third_party_mcp_tool"));
+    }
+
+    #[test]
+    fn capability_specific_core_tool_exposure_fails_closed() {
+        assert!(core_tool_allowed(
+            TurnCapability::ReadOnly,
+            false,
+            "read_file"
+        ));
+        assert!(!core_tool_allowed(
+            TurnCapability::ReadOnly,
+            true,
+            "write_file"
+        ));
+        assert!(core_tool_allowed(
+            TurnCapability::ScopedWrite,
+            true,
+            "write_file"
+        ));
+        assert!(!core_tool_allowed(
+            TurnCapability::ScopedWrite,
+            true,
+            "apply_patch"
+        ));
+        assert!(!core_tool_allowed(
+            TurnCapability::ScopedWrite,
+            true,
+            "spawn_agent"
+        ));
+        assert!(core_tool_allowed(
+            TurnCapability::WorkspaceWrite,
+            true,
+            "shell"
+        ));
+        assert!(!core_tool_allowed(
+            TurnCapability::WorkspaceWrite,
+            true,
+            "memory_write"
+        ));
+        assert!(!core_tool_allowed(
+            TurnCapability::WorkspaceWrite,
+            true,
+            "third_party_mcp_tool"
+        ));
+        assert!(!core_tool_allowed(
+            TurnCapability::WorkspaceWrite,
+            false,
+            "write_file"
+        ));
+        assert!(core_tool_allowed(
+            TurnCapability::FullAccess,
+            true,
+            "third_party_mcp_tool"
+        ));
     }
 }

@@ -108,6 +108,13 @@ class FeatureFlags:
         except (TypeError, ValueError):
             return fallback
 
+    def get_str(self, name: str, fallback: str = "") -> str:
+        if name in self._project:
+            value = self._project[name]
+        else:
+            value = os.environ.get(name, self._defaults.get(name, fallback))
+        return str(fallback) if value is None else str(value).strip()
+
     def snapshot(self) -> Dict[str, Any]:
         """返回所有已知 Flag 的当前解析结果。
 
@@ -121,9 +128,7 @@ class FeatureFlags:
                 result[name] = self.get_int(name, fallback=default)
             else:
                 # 未来扩展：直接给 raw fallback
-                result[name] = self._project.get(
-                    name, os.environ.get(name, default)
-                )
+                result[name] = self.get_str(name, fallback=str(default))
         return result
 
     @property

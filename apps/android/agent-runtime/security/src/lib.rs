@@ -40,6 +40,7 @@ pub enum Decision {
 pub struct SecurityPolicy {
     workspace: PathBuf,
     mode: AccessMode,
+    allowed_write_roots: Option<Vec<PathBuf>>,
     blocked: Vec<PathBuf>,
     blocked_aliases: Vec<String>,
 }
@@ -53,9 +54,37 @@ impl SecurityPolicy {
         Ok(Self {
             workspace,
             mode,
+            allowed_write_roots: None,
             blocked: Vec::new(),
             blocked_aliases: Vec::new(),
         })
+    }
+
+    pub fn with_allowed_write_roots(
+        mut self,
+        roots: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<Self> {
+        let mut allowed = Vec::new();
+        for root in roots {
+            anyhow::ensure!(!root.as_os_str().is_empty(), "allowed write root is empty");
+            let joined = if root.is_absolute() {
+                root
+            } else {
+                self.workspace.join(root)
+            };
+            let resolved = resolve_symlinks(&normalize_path(&joined)?)?;
+            anyhow::ensure!(
+                resolved.starts_with(&self.workspace),
+                "allowed write root {} is outside workspace {}",
+                resolved.display(),
+                self.workspace.display()
+            );
+            allowed.push(resolved);
+        }
+        allowed.sort();
+        allowed.dedup();
+        self.allowed_write_roots = Some(allowed);
+        Ok(self)
     }
 
     pub fn with_blocked(mut self, blocked: impl IntoIterator<Item = PathBuf>) -> Self {
@@ -147,6 +176,11 @@ impl SecurityPolicy {
                 "command uses a home-directory alias that may reach private runtime data".into(),
             );
         }
+        if self.allowed_write_roots.is_some() {
+            return Decision::Deny(
+                "shell commands are blocked by the active scoped-write policy".into(),
+            );
+        }
 
         if destructive_command().is_match(trimmed) {
             return match self.mode {
@@ -168,21 +202,13 @@ impl SecurityPolicy {
     }
 
     fn assess_path(&self, path: &Path, write: bool) -> Decision {
-        let Ok(path) = normalize_path(path) else {
+        let Ok(path) = self.resolve_path(path) else {
             return Decision::Deny("path could not be normalized".into());
-        };
-        let path = if path.exists() {
-            path.canonicalize().unwrap_or(path)
-        } else {
-            path
         };
         if self.blocked.iter().any(|blocked| path.starts_with(blocked)) {
             return Decision::Deny("path belongs to a private runtime directory".into());
         }
-        if self.mode == AccessMode::FullAccess {
-            return Decision::Allow;
-        }
-        if !path.starts_with(&self.workspace) {
+        if self.mode != AccessMode::FullAccess && !path.starts_with(&self.workspace) {
             return Decision::Deny(format!(
                 "path is outside workspace {}",
                 self.workspace.display()
@@ -190,6 +216,25 @@ impl SecurityPolicy {
         }
         if write && self.mode == AccessMode::ReadOnly {
             return Decision::Deny("write blocked by read-only policy".into());
+        }
+        if write
+            && let Some(roots) = &self.allowed_write_roots
+            && !roots
+                .iter()
+                .any(|root| path == *root || path.starts_with(root))
+        {
+            return Decision::Deny(if roots.is_empty() {
+                "write blocked because the scoped-write policy has no allowed roots".into()
+            } else {
+                format!(
+                    "write is outside scoped roots: {}",
+                    roots
+                        .iter()
+                        .map(|root| root.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            });
         }
         Decision::Allow
     }
@@ -305,5 +350,56 @@ mod tests {
             policy.assess_shell("cat $HOME/.coomi/sessions/current.json"),
             Decision::Deny(_)
         ));
+    }
+
+    #[test]
+    fn scoped_write_policy_fails_closed_for_empty_roots() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        let policy = SecurityPolicy::new(workspace.path(), AccessMode::WorkspaceWrite)
+            .expect("security policy")
+            .with_allowed_write_roots(Vec::new())
+            .expect("scoped policy");
+        let target = policy.resolve_path("chapter.md").expect("target path");
+        assert!(matches!(policy.assess_write(&target), Decision::Deny(_)));
+        assert!(matches!(
+            policy.assess_shell("git status"),
+            Decision::Deny(_)
+        ));
+    }
+
+    #[test]
+    fn scoped_write_policy_allows_children_and_denies_siblings() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        std::fs::create_dir_all(workspace.path().join("allowed")).expect("allowed directory");
+        let policy = SecurityPolicy::new(workspace.path(), AccessMode::WorkspaceWrite)
+            .expect("security policy")
+            .with_allowed_write_roots([PathBuf::from("allowed")])
+            .expect("scoped policy");
+        let child = policy
+            .resolve_path("allowed/child.md")
+            .expect("allowed child");
+        let sibling = policy.resolve_path("sibling.md").expect("sibling path");
+        assert_eq!(policy.assess_write(&child), Decision::Allow);
+        assert!(matches!(policy.assess_write(&sibling), Decision::Deny(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scoped_write_policy_resolves_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        let outside = tempfile::tempdir().expect("outside directory");
+        let allowed = workspace.path().join("allowed");
+        std::fs::create_dir_all(&allowed).expect("allowed directory");
+        symlink(outside.path(), allowed.join("escape")).expect("create symlink");
+        let policy = SecurityPolicy::new(workspace.path(), AccessMode::WorkspaceWrite)
+            .expect("security policy")
+            .with_allowed_write_roots([PathBuf::from("allowed")])
+            .expect("scoped policy");
+        let escaped = policy
+            .resolve_path("allowed/escape/file.md")
+            .expect("resolved escaped path");
+        assert!(matches!(policy.assess_write(&escaped), Decision::Deny(_)));
     }
 }

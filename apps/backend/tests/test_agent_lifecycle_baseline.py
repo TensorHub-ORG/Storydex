@@ -75,6 +75,162 @@ def test_provider_stream_summary_keeps_only_redacted_metrics() -> None:
     }
 
 
+def test_agent_error_summary_keeps_provider_status_without_error_details() -> None:
+    summary = summarize_event(
+        "AgentError",
+        {
+            "message": "provider returned HTTP 403: Forbidden",
+            "details": {
+                "statusCode": 403,
+                "providerHttpStatus": 403,
+                "exceptionMessage": "Authorization: Bearer should-not-survive",
+            },
+        },
+    )
+
+    assert summary["statusCode"] == 403
+    assert "exceptionMessage" not in summary
+    assert "should-not-survive" not in str(summary)
+
+
+def test_turn_contract_summary_records_structure_context_without_content() -> None:
+    summary = summarize_event(
+        "TurnContract",
+        {
+            "intentFrame": {
+                "primary": "character_work",
+                "operationType": "modify_existing",
+                "canWrite": True,
+            },
+            "executionPolicy": {
+                "capabilityMode": "scoped_write",
+                "allowedWriteRoots": [".storydex/characters/"],
+            },
+            "contextAssembly": {
+                "budget": {
+                    "maxTotalChars": 10_000,
+                    "totalChars": 1_234,
+                    "blockCount": 2,
+                },
+                "contextTrace": {
+                    "totals": {"assembleMs": 87.5},
+                    "sources": [
+                        {
+                            "kind": "active_characters",
+                            "policy": "structure_map_matched_spans_jit_read",
+                            "structureMapCount": 1,
+                            "matchedSpanCount": 1,
+                            "requiresFullReadBeforeWrite": True,
+                            "relevanceMatched": True,
+                            "unmatchedFallbackUsed": False,
+                            "queryTerms": ["must-not-survive"],
+                            "candidateChars": 900,
+                            "chars": 850,
+                            "elapsedMs": 12.5,
+                            "included": True,
+                            "truncated": False,
+                        }
+                    ],
+                },
+                "promptBlocks": [
+                    {
+                        "id": "active_characters",
+                        "title": "Relevant character structure maps and matched evidence",
+                        "content": (
+                            "revision=sha256:secret\nStructure map (Markdown headings):\n"
+                            "Matched evidence span: secret manuscript\nRead-before-write: secret"
+                        ),
+                        "sourcePaths": [".storydex/characters/secret.md"],
+                        "charCount": 850,
+                        "truncated": False,
+                    }
+                ],
+            },
+        },
+    )
+
+    context = summary["turnContract"]["contextAssembly"]
+    assert context["assembleMs"] == 87.5
+    assert context["sources"] == [
+        {
+            "kind": "active_characters",
+            "policy": "structure_map_matched_spans_jit_read",
+            "candidateChars": 900,
+            "chars": 850,
+            "included": True,
+            "truncated": False,
+            "dropReason": "",
+            "elapsedMs": 12.5,
+            "structureMapCount": 1,
+            "matchedSpanCount": 1,
+            "requiresFullReadBeforeWrite": True,
+            "relevanceMatched": True,
+            "unmatchedFallbackUsed": False,
+            "queryTermCount": 1,
+        }
+    ]
+    assert context["blocks"][0]["hasStructureMap"] is True
+    assert context["blocks"][0]["hasMatchedEvidence"] is True
+    assert context["blocks"][0]["hasRevisionMetadata"] is True
+    assert context["blocks"][0]["hasReadBeforeWrite"] is True
+    assert "must-not-survive" not in str(summary)
+    assert "secret manuscript" not in str(summary)
+    assert ".storydex/characters/secret.md" not in str(summary)
+
+
+def test_turn_contract_summary_records_related_span_without_path_or_excerpt() -> None:
+    summary = summarize_event(
+        "TurnContract",
+        {
+            "contextAssembly": {
+                "contextTrace": {
+                    "sources": [
+                        {
+                            "kind": "related_passages",
+                            "policy": "fts5_v3_chunk_bm25",
+                            "candidateChars": 700,
+                            "chars": 650,
+                            "included": True,
+                            "retrieval": {
+                                "status": "ok",
+                                "resultState": "hits",
+                                "query": "must-not-survive",
+                                "candidateSpans": [
+                                    {
+                                        "path": "chapters/secret.md",
+                                        "revision": "sha256:secret",
+                                    }
+                                ],
+                            },
+                        }
+                    ]
+                },
+                "promptBlocks": [
+                    {
+                        "id": "related_passages",
+                        "title": "Related project passages (retrieval)",
+                        "content": (
+                            "### chapters/secret.md lines 20-22 chars 400-520 "
+                            "revision sha256:secret\nsecret manuscript excerpt"
+                        ),
+                        "sourcePaths": ["chapters/secret.md"],
+                    }
+                ],
+            }
+        },
+    )
+
+    context = summary["turnContract"]["contextAssembly"]
+    assert context["sources"][0]["retrievalStatus"] == "ok"
+    assert context["sources"][0]["retrievalResultState"] == "hits"
+    assert context["sources"][0]["candidateSpanCount"] == 1
+    assert context["blocks"][0]["hasRevisionMetadata"] is True
+    assert context["blocks"][0]["hasSpanMetadata"] is True
+    assert "must-not-survive" not in str(summary)
+    assert "chapters/secret.md" not in str(summary)
+    assert "secret manuscript excerpt" not in str(summary)
+
+
 def test_output_limit_observation_uses_real_wire_evidence() -> None:
     observed = output_limit_observation(
         {},
@@ -167,7 +323,9 @@ def test_load_isolated_provider_converts_opencode_config_without_retaining_other
     assert summary["providerId"] == "ds"
     assert summary["model"] == "deepseek-v4-flash"
     isolated = __import__("json").loads(
-        (tmp_path / "coomi-home" / "config" / "providers.json").read_text(encoding="utf-8")
+        (tmp_path / "coomi-home" / "config" / "providers.json").read_text(
+            encoding="utf-8"
+        )
     )
     assert list(isolated["providers"]) == ["ds"]
     assert isolated["providers"]["ds"] == {
@@ -206,3 +364,17 @@ def test_multi_read_fixture_and_validation_require_three_unique_reads(tmp_path) 
     turn["duplicateToolInvocationCount"] = 1
     with pytest.raises(AcceptanceError, match="repeated"):
         validate_baseline_turn(turn, fixture)
+
+
+def test_chapter_middle_fixture_keeps_marker_outside_head_and_tail_previews(
+    tmp_path,
+) -> None:
+    fixture = prepare_fixture(tmp_path, "chapter-middle-read")
+    relative = fixture["workspaceFiles"][0]
+    content = (tmp_path / relative).read_text(encoding="utf-8")
+    marker = fixture["markers"][0]
+
+    assert relative == "chapters/lifecycle-middle.md"
+    assert content.index(marker) > 1_500
+    assert len(content) - content.index(marker) > 1_500
+    assert "中段锚点" in fixture["prompt"]

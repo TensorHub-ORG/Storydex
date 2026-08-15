@@ -50,6 +50,7 @@ def test_feature_flags_project_environment_defaults_snapshot_and_cache(monkeypat
     flags = feature_flags.FeatureFlags(tmp_path, {"A": False, "B": True, "N": 3, "BAD": 4, "RAW": "default"})
     assert flags.get_bool("A") is True and flags.get_bool("B") is False
     assert flags.get_int("N") == 9 and flags.get_int("BAD", fallback=7) == 4
+    assert flags.get_str("RAW") == "project"
     monkeypatch.setenv("ENV_TRUE", "on")
     monkeypatch.setenv("ENV_FALSE", "0")
     monkeypatch.setenv("ENV_BAD", "unknown")
@@ -58,6 +59,7 @@ def test_feature_flags_project_environment_defaults_snapshot_and_cache(monkeypat
     env = feature_flags.FeatureFlags(None, {"ENV_TRUE": False, "ENV_FALSE": True, "ENV_BAD": True, "INT": 1, "INT_BAD": 8, "RAW": "fallback"})
     assert env.get_bool("ENV_TRUE") is True and env.get_bool("ENV_FALSE") is False and env.get_bool("ENV_BAD") is True
     assert env.get_int("INT") == 12 and env.get_int("INT_BAD") == 8
+    assert env.get_str("RAW") == "fallback"
     assert env.snapshot()["RAW"] == "fallback"
     flags_path.write_text("[]", encoding="utf-8")
     assert feature_flags.FeatureFlags(tmp_path, {}).snapshot() == {}

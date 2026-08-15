@@ -49,10 +49,63 @@ MULTI_MARKERS = (
     "STORYDEX_MULTI_BRAVO_82C3",
     "STORYDEX_MULTI_CHARLIE_D5E9",
 )
+CHARACTER_PRESERVE_MARKER = "STORYDEX_CHARACTER_PRESERVE_7F2A"
+CHARACTER_NEW_MOTIVATION = "查明月蚀真相并保护幸存者"
+CHAPTER_MIDDLE_MARKER = "STORYDEX_CHAPTER_MIDDLE_6C4E"
 
 
 def prepare_fixture(workspace: Path, scenario: str) -> dict[str, Any]:
     prepare_workspace(workspace)
+    if scenario == "chapter-middle-read":
+        relative = "chapters/lifecycle-middle.md"
+        source = workspace / relative
+        prefix = "\n".join(
+            f"前段占位 {index:02d}：" + ("甲" * 90) for index in range(24)
+        )
+        suffix = "\n".join(
+            f"后段占位 {index:02d}：" + ("乙" * 90) for index in range(24)
+        )
+        source.write_text(
+            "# Lifecycle middle-span evidence\n\n"
+            f"{prefix}\n\n"
+            "## 中段锚点\n"
+            "月蚀航标只在赤潮退去后的第三夜点亮。\n"
+            f"固定验收标记：{CHAPTER_MIDDLE_MARKER}\n\n"
+            f"{suffix}\n",
+            encoding="utf-8",
+        )
+        return {
+            "scenario": scenario,
+            "workspaceFiles": [relative],
+            "prompt": "只读查找章节中的“中段锚点”，返回其附近的固定验收标记。",
+            "markers": [CHAPTER_MIDDLE_MARKER],
+            "expectedToolNames": ["read_file"],
+        }
+    if scenario == "character-field-edit":
+        relative = ".storydex/characters/Shenyue.md"
+        source = workspace / relative
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(
+            "# 沈月\n\n"
+            "## 身份\n夜港档案员\n\n"
+            "## 核心动机\n守住家族留下的旧档案\n\n"
+            "## 行为边界\n不会主动伤害无辜者\n\n"
+            f"## 验收保留标记\n{CHARACTER_PRESERVE_MARKER}\n",
+            encoding="utf-8",
+        )
+        return {
+            "scenario": scenario,
+            "workspaceFiles": [relative],
+            "prompt": "修改沈月角色卡的核心动机，只修改目标字段并保留其他内容。",
+            "markers": [],
+            "expectedToolNames": ["read_file", "edit_file"],
+            "toolValidation": "contains_in_order",
+            "expectedFileState": {
+                "path": relative,
+                "contains": [CHARACTER_NEW_MOTIVATION, CHARACTER_PRESERVE_MARKER],
+                "notContains": ["守住家族留下的旧档案"],
+            },
+        }
     if scenario == "strict-multi-read":
         files = []
         for name, marker in zip(("alpha", "bravo", "charlie"), MULTI_MARKERS):
@@ -87,6 +140,20 @@ def prepare_fixture(workspace: Path, scenario: str) -> dict[str, Any]:
 
 
 def fixture_prompt(fixture: Mapping[str, Any]) -> str:
+    if fixture.get("scenario") == "chapter-middle-read":
+        return (
+            "这是一次严格只读的章节中段证据测试。只能调用 read_file，读取 "
+            "chapters/lifecycle-middle.md；不要使用其他工具，不要修改任何文件。"
+            "请定位“中段锚点”附近的内容，读取后只返回固定标记 "
+            f"{CHAPTER_MIDDLE_MARKER}。"
+        )
+    if fixture.get("scenario") == "character-field-edit":
+        return (
+            "请修改沈月角色卡的“核心动机”为“"
+            f"{CHARACTER_NEW_MOTIVATION}"
+            "”。先读取目标文件作为证据，只修改这个字段，保留身份、行为边界和验收标记；"
+            "不要创建并行角色卡，不要修改其他文件。"
+        )
     if fixture.get("scenario") == "strict-multi-read":
         paths = "、".join(str(item) for item in fixture.get("workspaceFiles") or [])
         markers = "、".join(str(item) for item in fixture.get("markers") or [])
@@ -258,7 +325,12 @@ def classify_wait_stages(lifecycle: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def public_turn(result: Mapping[str, Any], fixture: Mapping[str, Any]) -> dict[str, Any]:
+def public_turn(
+    result: Mapping[str, Any],
+    fixture: Mapping[str, Any],
+    *,
+    workspace: Path | None = None,
+) -> dict[str, Any]:
     lifecycle = result.get("lifecycle") if isinstance(result.get("lifecycle"), Mapping) else {}
     protocol = result.get("protocol") if isinstance(result.get("protocol"), Mapping) else {}
     tool_calls = result.get("toolCalls") if isinstance(result.get("toolCalls"), list) else []
@@ -293,6 +365,36 @@ def public_turn(result: Mapping[str, Any], fixture: Mapping[str, Any]) -> dict[s
         for item in started_calls
     ]
     markers = [str(item) for item in fixture.get("markers") or [] if str(item)]
+    contract_observation: dict[str, Any] = {}
+    for event in result.get("events", []):
+        if not isinstance(event, Mapping) or event.get("event") != "TurnContract":
+            continue
+        contract_observation = (
+            dict(event.get("turnContract"))
+            if isinstance(event.get("turnContract"), Mapping)
+            else {}
+        )
+        break
+    file_checks: dict[str, Any] = {}
+    expected_file = fixture.get("expectedFileState")
+    if workspace is not None and isinstance(expected_file, Mapping):
+        relative = str(expected_file.get("path") or "").strip()
+        target = workspace / relative
+        content = target.read_text(encoding="utf-8") if target.is_file() else ""
+        file_checks = {
+            "path": relative,
+            "exists": target.is_file(),
+            "contains": {
+                str(value): str(value) in content
+                for value in expected_file.get("contains", [])
+                if str(value)
+            },
+            "notContains": {
+                str(value): str(value) not in content
+                for value in expected_file.get("notContains", [])
+                if str(value)
+            },
+        }
     return {
         "traceId": str(result.get("traceId") or ""),
         "sessionId": str(result.get("sessionId") or ""),
@@ -318,6 +420,8 @@ def public_turn(result: Mapping[str, Any], fixture: Mapping[str, Any]) -> dict[s
         ),
         "visibleReplyChars": len(reply_preview),
         "markersObserved": all(marker in reply_preview for marker in markers),
+        "turnContractObservation": contract_observation,
+        "fileChecks": file_checks,
         "usage": dict(result.get("usage") or {}) if isinstance(result.get("usage"), Mapping) else {},
         "errors": list(result.get("errors") or []),
     }
@@ -333,7 +437,20 @@ def validate_baseline_turn(turn: Mapping[str, Any], fixture: Mapping[str, Any] |
     tool_names = [str(name) for name in (turn.get("toolSequence") or turn.get("toolNames") or []) if str(name)]
     tool_count = int(turn.get("toolCallCount") or 0)
     expected_tools = [str(name) for name in fixture.get("expectedToolNames") or []]
-    if tool_names != expected_tools or tool_count != len(expected_tools):
+    validation_mode = str(fixture.get("toolValidation") or "exact")
+    tool_sequence_ok = tool_names == expected_tools
+    if validation_mode == "contains_in_order":
+        position = 0
+        for name in tool_names:
+            if position < len(expected_tools) and name == expected_tools[position]:
+                position += 1
+        tool_sequence_ok = position == len(expected_tools)
+    tool_count_ok = (
+        tool_count >= len(expected_tools)
+        if validation_mode == "contains_in_order"
+        else tool_count == len(expected_tools)
+    )
+    if not tool_sequence_ok or not tool_count_ok:
         raise AcceptanceError(
             "baseline task used an unexpected tool sequence: "
             f"names={tool_names!r}, count={tool_count}"
@@ -344,13 +461,27 @@ def validate_baseline_turn(turn: Mapping[str, Any], fixture: Mapping[str, Any] |
         raise AcceptanceError("baseline task reported a tool error")
     if int(turn.get("duplicateToolInvocationCount") or 0):
         raise AcceptanceError("baseline task repeated an identical tool invocation")
-    if int(turn.get("uniqueToolInvocationCount") or 0) != len(expected_tools):
-        raise AcceptanceError("baseline task did not use one unique invocation per expected tool call")
+    unique_count = int(turn.get("uniqueToolInvocationCount") or 0)
+    if (
+        validation_mode == "exact"
+        and unique_count != len(expected_tools)
+        or validation_mode == "contains_in_order"
+        and unique_count < len(expected_tools)
+    ):
+        raise AcceptanceError("baseline task did not use the required unique tool invocations")
     markers_observed = turn.get("markersObserved")
     if markers_observed is None:
         markers_observed = turn.get("markerObserved")
     if not bool(markers_observed):
         raise AcceptanceError("baseline task did not return all fixed acceptance markers")
+    file_checks = turn.get("fileChecks") if isinstance(turn.get("fileChecks"), Mapping) else {}
+    if file_checks:
+        if not bool(file_checks.get("exists")):
+            raise AcceptanceError("baseline target file is missing after execution")
+        if not all(bool(value) for value in (file_checks.get("contains") or {}).values()):
+            raise AcceptanceError("baseline target file is missing expected content")
+        if not all(bool(value) for value in (file_checks.get("notContains") or {}).values()):
+            raise AcceptanceError("baseline target file still contains replaced content")
 
 
 def run_baseline(args: argparse.Namespace) -> dict[str, Any]:
@@ -364,6 +495,7 @@ def run_baseline(args: argparse.Namespace) -> dict[str, Any]:
     report_path = output_root / "baseline-report.json"
     source_config = Path(args.config).resolve() if args.config else provider_config_path()
     original_bridge = os.environ.get("STORYDEX_COOMI_BRIDGE")
+    original_routing_mode = os.environ.get("AGENT_INTENT_ROUTING_MODE")
     bridge = (
         Path(args.bridge).resolve()
         if str(args.bridge or "").strip()
@@ -406,6 +538,8 @@ def run_baseline(args: argparse.Namespace) -> dict[str, Any]:
                     "supports_parallel_tool_calls": True,
                 }
             os.environ["STORYDEX_COOMI_BRIDGE"] = str(bridge)
+            if str(args.intent_routing_mode or "").strip():
+                os.environ["AGENT_INTENT_ROUTING_MODE"] = str(args.intent_routing_mode).strip()
             port = free_port()
             backend = BackendProcess(
                 workspace=workspace,
@@ -435,7 +569,7 @@ def run_baseline(args: argparse.Namespace) -> dict[str, Any]:
                         timeout_seconds=args.turn_timeout,
                     )
                 except TurnFailure as exc:
-                    failed_turn = public_turn(exc.result, fixture)
+                    failed_turn = public_turn(exc.result, fixture, workspace=workspace)
                     config_observation["outputLimit"] = output_limit_observation(
                         isolated_provider,
                         failed_turn["lifecycle"],
@@ -483,7 +617,7 @@ def run_baseline(args: argparse.Namespace) -> dict[str, Any]:
                 client.close()
                 backend.stop()
 
-            turn = public_turn(result, fixture)
+            turn = public_turn(result, fixture, workspace=workspace)
             validate_baseline_turn(turn, fixture)
             config_observation["outputLimit"] = output_limit_observation(
                 isolated_provider,
@@ -524,6 +658,10 @@ def run_baseline(args: argparse.Namespace) -> dict[str, Any]:
             os.environ.pop("STORYDEX_COOMI_BRIDGE", None)
         else:
             os.environ["STORYDEX_COOMI_BRIDGE"] = original_bridge
+        if original_routing_mode is None:
+            os.environ.pop("AGENT_INTENT_ROUTING_MODE", None)
+        else:
+            os.environ["AGENT_INTENT_ROUTING_MODE"] = original_routing_mode
 
 
 def parse_args() -> argparse.Namespace:
@@ -541,6 +679,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bridge", default="")
     parser.add_argument("--backend-repository-root", default="")
     parser.add_argument(
+        "--intent-routing-mode",
+        default="",
+        choices=("", "legacy", "direct", "hybrid", "workflow"),
+    )
+    parser.add_argument(
         "--enable-parallel-tool-calls",
         action="store_true",
         help="Enable parallel tool calls only in the temporary isolated provider copy",
@@ -548,7 +691,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--scenario",
         default="strict-single-read",
-        choices=("strict-single-read", "strict-multi-read"),
+        choices=(
+            "strict-single-read",
+            "strict-multi-read",
+            "character-field-edit",
+            "chapter-middle-read",
+        ),
     )
     return parser.parse_args()
 

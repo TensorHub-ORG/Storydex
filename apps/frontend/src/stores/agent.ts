@@ -2222,6 +2222,11 @@ function formatAgentErrorPacket(packet: AgentStreamPacket): string {
   const errorType = String(packet.error_type || details.exceptionType || "CoomiError").trim();
   lines.push(message || errorType);
 
+  const statusCode = asNumber(details.statusCode) ?? asNumber(details.providerHttpStatus) ?? asNumber(packet.statusCode);
+  if (statusCode && !new RegExp(`\\bHTTP\\s+${statusCode}\\b`, "i").test(message)) {
+    lines.push(`HTTP ${statusCode}`);
+  }
+
   const stage = asString(details.stage);
   if (stage) lines.push(`Stage: ${stage}`);
 

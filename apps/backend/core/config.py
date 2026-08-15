@@ -123,4 +123,9 @@ FEATURE_FLAG_DEFAULTS: dict[str, object] = {
     # 段数配额仅保留为显式实验分支；默认使用章级软字符目标和程序硬验收带。
     "PARAGRAPH_QUOTA_GENERATION_ENABLED": False,
     "STREAMING_TOOL_LOOP_PROVIDER_AWARE": True,
+    # B/C/D intent-routing experiment. Hybrid is the default: clear ordinary
+    # turns use deterministic RouteHints, while specialized/ambiguous workflows
+    # can still request structured intent classification. Projects may switch
+    # to legacy/direct/workflow without code changes.
+    "AGENT_INTENT_ROUTING_MODE": "hybrid",
 }

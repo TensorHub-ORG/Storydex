@@ -22,6 +22,12 @@ from api.response import ApiEnvelope, ApiTrace, success_response
 from core.config import FEATURE_FLAG_DEFAULTS
 from core.exceptions import GitServiceError, StorydexError
 from core.feature_flags import FeatureFlags
+from services.agent_intent_routing import (
+    ROUTING_MODE_FLAG,
+    build_route_hints,
+    likely_candidate_paths,
+    normalize_routing_mode,
+)
 from services.agent_git_autocommit_service import AgentGitSnapshot, get_agent_git_autocommit_service
 from services.coomi_agent_service import (
     CoomiStoryGenerationAdapter,
@@ -891,6 +897,8 @@ def _build_turn_contract_with_active_model(
     active_file: str,
     story_generation: Dict[str, Any],
     intent_frame: Dict[str, Any],
+    route_hints: Dict[str, Any] | None,
+    routing_metadata: Dict[str, Any] | None,
     context_policy: ContextPolicy | None,
     trace_id: str = "",
     session_id: str = "",
@@ -909,6 +917,8 @@ def _build_turn_contract_with_active_model(
         active_file=active_file,
         story_generation=story_generation,
         intent_frame=intent_frame,
+        route_hints=route_hints,
+        routing_metadata=routing_metadata,
         context_policy=context_policy,
         provider=provider,
         model=model,
@@ -6630,6 +6640,19 @@ async def _stream_agent_chat_request_sse(
         )
         story_generation = _normalize_story_generation_options(payload.story_generation)
 
+        routing_flags = FeatureFlags(workspace_root, FEATURE_FLAG_DEFAULTS)
+        routing_mode = normalize_routing_mode(
+            routing_flags.get_str(ROUTING_MODE_FLAG, fallback="legacy")
+        )
+        route_hints = build_route_hints(
+            prompt=payload.prompt,
+            active_file=payload.active_file,
+            routing_mode=routing_mode,
+        )
+        resolved_candidates = likely_candidate_paths(workspace_root, route_hints)
+        if resolved_candidates:
+            route_hints["candidatePaths"] = resolved_candidates
+
         intent_started = time.perf_counter()
         yield _encode_sse(
             "TurnPhase",
@@ -6649,6 +6672,7 @@ async def _stream_agent_chat_request_sse(
                     active_file=payload.active_file,
                     workspace_root=workspace_root,
                     session_id=session_id,
+                    routing_mode=routing_mode,
                 )
             )
         while not intent_task.done():
@@ -6671,6 +6695,14 @@ async def _stream_agent_chat_request_sse(
                 ),
             )
         intent_frame = await intent_task
+        routing_metadata = {
+            "_type": "IntentRoutingTrace",
+            "_version": 1,
+            "mode": routing_mode,
+            "classifierMethod": str(intent_frame.get("method") or "unknown"),
+            "intentModelInvoked": bool(intent_frame.get("intentModelInvoked")),
+            "routeHintsSource": str(route_hints.get("source") or "deterministic"),
+        }
         yield _encode_sse(
             "TurnPhase",
             _turn_phase_packet(
@@ -6704,6 +6736,8 @@ async def _stream_agent_chat_request_sse(
                 active_file=payload.active_file,
                 story_generation=story_generation,
                 intent_frame=intent_frame,
+                route_hints=route_hints,
+                routing_metadata=routing_metadata,
                 context_policy=context_policy_override,
                 trace_id=trace_id,
                 session_id=session_id,

@@ -27,6 +27,13 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List
 
+from services.agent_intent_routing import (
+    LEGACY,
+    build_route_hints,
+    normalize_routing_mode,
+    should_invoke_intent_model,
+)
+
 
 INTENT_LABELS: tuple[str, ...] = (
     "story_generation",
@@ -168,6 +175,15 @@ _EXPLICIT_GLOBAL_NO_WRITE_RE = re.compile(
     r"(?:do\s+not|don't|never|must\s+not)\s+"
     r"[^.,;!?\n]{0,24}(?:write|modify|save|change)\s+"
     r"(?:any|all)\s+(?:project\s+)?files?",
+    re.IGNORECASE,
+)
+_SCOPED_NO_WRITE_EXCLUSION_RE = re.compile(
+    r"(?:不要|不得|禁止|请勿|别|切勿)[^，,。！？!?；;\n]{0,12}"
+    r"(?:写入|修改|保存|落盘|改变|创建)[^，,。！？!?；;\n]{0,8}"
+    r"(?:其他|其它|其余|别的|非目标|无关)(?:项目)?(?:文件|字段|内容|角色卡)?|"
+    r"(?:其他|其它|其余|别的|非目标|无关)(?:项目)?(?:文件|字段|内容|角色卡)?"
+    r"[^，,。！？!?；;\n]{0,8}(?:不要|不得|禁止|请勿|别|切勿)"
+    r"[^，,。！？!?；;\n]{0,8}(?:写入|修改|保存|落盘|改变|创建)",
     re.IGNORECASE,
 )
 _PROJECT_ORGANIZE_RE = re.compile(
@@ -486,6 +502,53 @@ def _is_explicit_read_only_file_request(prompt: str) -> bool:
         and _EXPLICIT_FILE_READ_RE.search(text)
         and _FILE_PATH_SIGNAL_RE.search(text)
     )
+
+
+def _apply_deterministic_route_safety(
+    frame: Dict[str, Any],
+    *,
+    route_hints: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Make locally-routed read signals fail closed before tool compilation.
+
+    The legacy heuristic intentionally favors Storydex domains, and therefore
+    may call a bare "查看角色卡" a ``create_new`` operation.  That is useful as
+    a search hint but unsafe as a permission decision.  When deterministic
+    routing has an explicit read/no-write signal without a scoped mutation,
+    compile the frame to inquiry/read-only.  Mixed read+write requests remain
+    untouched and are sent to the semantic classifier when necessary.
+    """
+
+    signals = {str(item or "").strip().lower() for item in route_hints.get("operationSignals", [])}
+    if "scope_exclusion" in signals:
+        return frame
+    if "no_write" not in signals and not (
+        "read" in signals and "write" not in signals
+    ):
+        return frame
+    if not bool(frame.get("canWrite")):
+        return frame
+
+    frame["effect"] = "respond_only"
+    frame["operationType"] = "inquiry"
+    frame["canWrite"] = False
+    frame["assetTargets"] = []
+    frame["matchedSkills"] = []
+    constraints = (
+        list(frame.get("explicitConstraints"))
+        if isinstance(frame.get("explicitConstraints"), list)
+        else []
+    )
+    if "no_project_write" not in constraints:
+        constraints.append("no_project_write")
+    frame["explicitConstraints"] = constraints[:3]
+    existing_signals = (
+        list(frame.get("signals")) if isinstance(frame.get("signals"), list) else []
+    )
+    if "deterministic_read_only" not in existing_signals:
+        existing_signals.append("deterministic_read_only")
+    frame["signals"] = existing_signals
+    return frame
 
 
 class _BoundedIntentProvider:
@@ -1061,7 +1124,10 @@ def _apply_knowledge_write_semantics(
     frame["knowledgeConfirmed"] = confirmation
     prepare_requested = bool(_EXPLICIT_KNOWLEDGE_PREPARE_RE.search(prompt_text))
     apply_requested = bool(_EXPLICIT_KNOWLEDGE_APPLY_RE.search(prompt_text))
-    broad_no_write = bool(_BROAD_NO_PROJECT_WRITE_RE.search(prompt_text))
+    broad_no_write = bool(
+        _BROAD_NO_PROJECT_WRITE_RE.search(prompt_text)
+        and not _SCOPED_NO_WRITE_EXCLUSION_RE.search(prompt_text)
+    )
     model_classified = str(frame.get("method") or "").strip() == "llm"
     explicitly_authorized = bool(
         model_classified
@@ -1096,8 +1162,21 @@ def _apply_knowledge_write_semantics(
 
 
 def _apply_full_prompt_constraints(frame: Dict[str, Any], *, prompt: str) -> Dict[str, Any]:
-    match = _BROAD_NO_PROJECT_WRITE_RE.search(str(prompt or ""))
+    prompt_text = str(prompt or "")
+    match = _BROAD_NO_PROJECT_WRITE_RE.search(prompt_text)
     if match is None:
+        return frame
+    if (
+        _SCOPED_NO_WRITE_EXCLUSION_RE.search(prompt_text)
+        and (
+            _has_positive_operation_match(_MODIFY_EXISTING_RE, prompt_text)
+            or _has_positive_operation_match(_CREATE_NEW_RE, prompt_text)
+        )
+    ):
+        signals = list(frame.get("signals")) if isinstance(frame.get("signals"), list) else []
+        if "scoped_no_write_exclusion" not in signals:
+            signals.append("scoped_no_write_exclusion")
+        frame["signals"] = signals
         return frame
     constraints = (
         list(frame.get("explicitConstraints"))
@@ -1140,8 +1219,10 @@ class StorydexIntentService:
         active_file: str = "",
         workspace_root: Path | None = None,
         session_id: str = "",
+        routing_mode: str = LEGACY,
     ) -> Dict[str, Any]:
         normalized_prompt = str(prompt or "").strip()
+        normalized_routing_mode = normalize_routing_mode(routing_mode)
         session_key = self._session_key(workspace_root=workspace_root, session_id=session_id)
 
         # 唯一保留的零成本短路：slash 命令与空输入。它们语义确定，不需要模型
@@ -1157,6 +1238,8 @@ class StorydexIntentService:
             )
             frame = _apply_full_prompt_constraints(frame, prompt=normalized_prompt)
             _enrich_frame(frame, catalog)
+            frame["routingMode"] = normalized_routing_mode
+            frame["intentModelInvoked"] = False
             self._remember(
                 session_key=session_key,
                 prompt=normalized_prompt,
@@ -1187,6 +1270,15 @@ class StorydexIntentService:
             prompt=normalized_prompt,
             active_file=active_file,
         )
+        route_hints = build_route_hints(
+            prompt=normalized_prompt,
+            active_file=active_file,
+            routing_mode=normalized_routing_mode,
+        )
+        deterministic_read_only = _apply_deterministic_route_safety(
+            deterministic_read_only,
+            route_hints=route_hints,
+        )
         if (
             previous_turn is None
             and _is_explicit_read_only_file_request(normalized_prompt)
@@ -1201,6 +1293,8 @@ class StorydexIntentService:
             )
             frame = _apply_full_prompt_constraints(frame, prompt=normalized_prompt)
             _enrich_frame(frame, catalog)
+            frame["routingMode"] = normalized_routing_mode
+            frame["intentModelInvoked"] = False
             self._remember(
                 session_key=session_key,
                 prompt=normalized_prompt,
@@ -1211,14 +1305,39 @@ class StorydexIntentService:
         # The model is the semantic path for every natural-language turn,
         # including short confirmations. previousTurn is evidence, not a local
         # rule that can silently authorise a mutation.
-        frame = await self._llm_intent_frame(
-            prompt=normalized_prompt,
-            active_file=active_file,
-            catalog=catalog,
-            previous_turn=previous_turn,
+        previous_mode = str((previous_turn or {}).get("knowledgeWriteMode") or "").strip()
+        workflow_confirmation = bool(
+            previous_mode == "explicit_binding"
+            and _EXPLICIT_KNOWLEDGE_CONFIRMATION_RE.match(normalized_prompt)
         )
-        if frame is None:
-            frame = safe_fallback_intent_frame(reason="invalid_or_unavailable_model_output")
+        invoke_model = should_invoke_intent_model(
+            normalized_routing_mode,
+            prompt=normalized_prompt,
+            heuristic_frame=deterministic_read_only,
+            route_hints=route_hints,
+            previous_turn=previous_turn,
+            has_custom_intents=not set(catalog).issubset(set(INTENT_LABELS)),
+            explicit_workflow=is_explicit_knowledge_binding_request(normalized_prompt),
+            workflow_confirmation=workflow_confirmation,
+        )
+        if invoke_model:
+            frame = await self._llm_intent_frame(
+                prompt=normalized_prompt,
+                active_file=active_file,
+                catalog=catalog,
+                previous_turn=previous_turn,
+            )
+            if frame is None:
+                frame = safe_fallback_intent_frame(
+                    reason="invalid_or_unavailable_model_output"
+                )
+        else:
+            frame = deterministic_read_only
+            frame["method"] = f"deterministic_{normalized_routing_mode}"
+            frame["reason"] = (
+                "Deterministic safety and routing signals were sufficient; "
+                "the main model will resolve task details."
+            )
         frame = _apply_knowledge_write_semantics(
             frame,
             prompt=normalized_prompt,
@@ -1226,6 +1345,8 @@ class StorydexIntentService:
         )
         frame = _apply_full_prompt_constraints(frame, prompt=normalized_prompt)
         _enrich_frame(frame, catalog)
+        frame["routingMode"] = normalized_routing_mode
+        frame["intentModelInvoked"] = invoke_model
         self._remember(
             session_key=session_key,
             prompt=normalized_prompt,

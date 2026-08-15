@@ -1868,6 +1868,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scoped_policy_is_enforced_by_real_file_tool_calls() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        std::fs::create_dir_all(workspace.path().join("allowed")).expect("allowed directory");
+        let policy = SecurityPolicy::new(workspace.path(), AccessMode::WorkspaceWrite)
+            .expect("security policy")
+            .with_allowed_write_roots([PathBuf::from("allowed")])
+            .expect("scoped policy");
+        let tools = CoreTools::new(workspace.path().to_path_buf(), policy);
+
+        let allowed = tools
+            .call(
+                &ToolCall {
+                    id: "allowed".into(),
+                    name: "write_file".into(),
+                    arguments: json!({"path": "allowed/inside.txt", "content": "ok"}),
+                },
+                &Deny,
+            )
+            .await;
+        assert!(allowed.success);
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("allowed/inside.txt"))
+                .expect("allowed write"),
+            "ok"
+        );
+
+        let denied = tools
+            .call(
+                &ToolCall {
+                    id: "denied".into(),
+                    name: "write_file".into(),
+                    arguments: json!({"path": "outside.txt", "content": "blocked"}),
+                },
+                &Deny,
+            )
+            .await;
+        assert!(!denied.success);
+        assert!(!workspace.path().join("outside.txt").exists());
+    }
+
+    #[tokio::test]
     async fn rejects_unknown_tools() {
         let workspace = tempfile::tempdir().expect("temporary workspace");
         let policy =
