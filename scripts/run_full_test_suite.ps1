@@ -152,8 +152,11 @@ Invoke-Step "Conflict markers" {
 $packageVersion = (Get-Content -Raw -LiteralPath (Join-Path $desktop "package.json") | ConvertFrom-Json).version
 Invoke-Step "Version consistency" { node (Join-Path $repoRoot "scripts/validate_version_consistency.cjs") $(if ($Mode -eq "Release") { "--expected=$packageVersion" }) }
 if ($runCoomi) {
+  Invoke-Step "Rust storydex-agentd format" { cargo fmt --manifest-path (Join-Path $repoRoot "apps/desktop/agent-runtime/Cargo.toml") --package storydex-agentd -- --check }
+  Invoke-Step "Rust storydex-agentd Clippy" { cargo clippy --manifest-path (Join-Path $repoRoot "apps/desktop/agent-runtime/Cargo.toml") --locked -p storydex-agentd --all-targets --no-deps -- -D warnings }
   Invoke-Step "Rust Coomi desktop workspace tests" { cargo test --manifest-path (Join-Path $repoRoot "apps/desktop/agent-runtime/Cargo.toml") --locked --workspace }
   Invoke-Step "Rust Coomi Android workspace tests" { cargo test --manifest-path (Join-Path $repoRoot "apps/android/agent-runtime/Cargo.toml") --locked --workspace }
+  Invoke-Step "Build isolated storydex-agentd sidecar" { cargo build --manifest-path (Join-Path $repoRoot "apps/desktop/agent-runtime/Cargo.toml") --release --locked -p storydex-agentd }
   Invoke-Step "Build Storydex Coomi desktop runtime" { cargo build --manifest-path (Join-Path $repoRoot "apps/desktop/agent-runtime/Cargo.toml") --release --locked -p storydex-coomi-bridge }
   Invoke-Step "Pinned Coomi runtime and backend contract" { & $python (Join-Path $repoRoot "scripts/verify_coomi_runtime.py") }
 }

@@ -1,0 +1,107 @@
+{
+  "schemaVersion": 1,
+  "targetRuntime": "storydex-agentd",
+  "allowedStates": [
+    "untracked",
+    "captured",
+    "ported",
+    "parity",
+    "release-ready"
+  ],
+  "contracts": [
+    {
+      "id": "agent.sys.health.v1",
+      "method": "GET",
+      "path": "/api/v1/sys/health",
+      "state": "ported",
+      "parityScope": "HTTP 200, Storydex envelope, data.status/service/time, trace and audit shape",
+      "pythonEvidence": [
+        "apps/backend/api/routes_sys.py::health_check"
+      ],
+      "rustEvidence": [
+        "apps/desktop/agent-runtime/storydex-agentd/src/lib.rs::health"
+      ],
+      "differentialRunner": "apps/backend/scripts/run_agent_runtime_contract.py",
+      "remaining": "Workspace, project, Coomi version and memory diagnostic fields remain Python-owned until their M3 slices are ported."
+    },
+    {
+      "id": "agent.coomi.status.v1",
+      "method": "GET",
+      "path": "/api/v1/agent/coomi/status",
+      "state": "ported",
+      "parityScope": "HTTP 200, Storydex envelope, active provider/model/type/display, safe model list, capabilities, reasoning metadata, trace and audit shape",
+      "pythonEvidence": [
+        "apps/backend/api/routes_agent.py::agent_coomi_status"
+      ],
+      "rustEvidence": [
+        "apps/desktop/agent-runtime/storydex-agentd/src/lib.rs::coomi_status",
+        "apps/desktop/agent-runtime/storydex-agentd/src/lib.rs::coomi_status_reads_storydex_provider_config_without_exposing_key"
+      ],
+      "differentialRunner": "apps/backend/scripts/run_agent_runtime_contract.py --contract coomi-status",
+      "remaining": "Session context, permission/plan mode, tool count, missing-config error details and every optional field still require Python/Rust differential coverage before parity."
+    },
+    {
+      "id": "agent.chat.stream.v1",
+      "method": "POST",
+      "path": "/api/v1/agent/chat/stream",
+      "state": "captured",
+      "pythonEvidence": [
+        "apps/backend/api/routes_agent.py::stream_agent_chat"
+      ],
+      "rustEvidence": [
+        "apps/desktop/agent-runtime/storydex-bridge/src/main.rs::run_agent"
+      ],
+      "remaining": "Expose the existing Rust loop through agentd SSE and compare ordered lifecycle events before declaring parity."
+    },
+    {
+      "id": "agent.approval.v1",
+      "method": "POST",
+      "path": "/api/v1/agent/coomi/approval",
+      "state": "captured",
+      "pythonEvidence": [
+        "apps/backend/api/routes_agent.py::agent_resolve_coomi_approval"
+      ],
+      "rustEvidence": [
+        "apps/desktop/agent-runtime/storydex-bridge/src/main.rs::ControlHub"
+      ],
+      "remaining": "Freeze approval request/resolve ordering in the shared black-box suite."
+    },
+    {
+      "id": "agent.followup.v1",
+      "method": "POST",
+      "path": "/api/v1/agent/followups",
+      "state": "captured",
+      "pythonEvidence": [
+        "apps/backend/tests/test_agent_followup_execution.py"
+      ],
+      "rustEvidence": [],
+      "remaining": "Port queue, steer and reconnect state transitions after base SSE parity."
+    },
+    {
+      "id": "agent.cancel.v1",
+      "method": "POST",
+      "path": "/api/v1/agent/executions/stop",
+      "state": "captured",
+      "pythonEvidence": [
+        "apps/backend/api/routes_agent.py::stop_agent_execution"
+      ],
+      "rustEvidence": [
+        "apps/desktop/agent-runtime/storydex-bridge/src/main.rs::ControlHub"
+      ],
+      "remaining": "Compare cancellation deadline, terminal event and persisted session state."
+    },
+    {
+      "id": "agent.resume.v1",
+      "method": "POST",
+      "path": "/api/v1/agent/followups/resume",
+      "state": "captured",
+      "pythonEvidence": [
+        "apps/backend/api/routes_agent.py::resume_agent_followups"
+      ],
+      "rustEvidence": [
+        "apps/desktop/agent-runtime/engine/src/session.rs::SessionStore"
+      ],
+      "remaining": "Add duplicate-process, missing-session and workspace-mismatch black-box cases."
+    }
+  ]
+}
