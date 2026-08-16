@@ -26,6 +26,10 @@ pub const SESSION_SCHEMA_VERSION: u32 = 1;
 pub const COMPACTION_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
 const SESSION_PUBLISH_ATTEMPTS: usize = 5;
 
+fn default_storydex_mode() -> String {
+    "agent".to_owned()
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ToolCallCheckpoint {
     pub id: String,
@@ -179,6 +183,8 @@ pub struct Session {
     pub provider_id: String,
     pub model: String,
     pub cwd: PathBuf,
+    #[serde(default = "default_storydex_mode")]
+    pub storydex_mode: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub messages: Vec<ChatMessage>,
@@ -205,6 +211,7 @@ impl Session {
             provider_id: provider_id.into(),
             model: model.into(),
             cwd,
+            storydex_mode: default_storydex_mode(),
             created_at: now,
             updated_at: now,
             messages: Vec::new(),

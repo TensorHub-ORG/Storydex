@@ -79,7 +79,7 @@ Android 发布提交必须通过：
 - APK 构建命令（在 `apps/android` 下）：
 
 ```powershell
-$env:TERMUX_APP_VERSION_NAME = "0.1.2"   # 可选，build.gradle 已硬编码时省略
+$env:TERMUX_APP_VERSION_NAME = "0.1.3"   # 可选，build.gradle 已硬编码时省略
 .\gradlew.bat :app:assembleRelease
 ```
 
@@ -186,15 +186,15 @@ git push origin v2.0.4
 - Android APK 作为资产挂载到**桌面版对应的 GitHub Release**（例如 `v2.0.4`），与桌面资产一起发布。
 - 发布 APK 由 `.github/workflows/deploy-android.yml` 手动触发（workflow_dispatch），输入 `tag`、`version`、`asset_name`、`sha256`：
   - `tag`：包含 APK 的 GitHub Release 标签（默认 `v2.0.4`）。
-  - `version`：Android 语义化版本（默认 `0.1.2`）。
-  - `asset_name`：APK 资产文件名（默认 `Storydex-Android-arm64-v0.1.2.apk`）。
+  - `version`：Android 语义化版本（默认 `0.1.3`）。
+  - `asset_name`：APK 资产文件名（默认 `Storydex-Android-arm64-v0.1.3.apk`）。
   - `sha256`：APK 的 SHA-256（必填，与 release 资产校验一致）。
 - 触发方式（本地或 Actions 页面）：
 
 ```powershell
-$sha = (Get-FileHash .\Storydex-Android-arm64-v0.1.2.apk -Algorithm SHA256).Hash.ToLower()
-gh release upload v2.0.4 Storydex-Android-arm64-v0.1.2.apk Storydex-Android-arm64-v0.1.2.apk.sha256
-gh workflow run deploy-android.yml -f tag=v2.0.4 -f version=0.1.2 -f asset_name=Storydex-Android-arm64-v0.1.2.apk -f sha256=$sha
+$sha = (Get-FileHash .\Storydex-Android-arm64-v0.1.3.apk -Algorithm SHA256).Hash.ToLower()
+gh release upload v2.0.4 Storydex-Android-arm64-v0.1.3.apk Storydex-Android-arm64-v0.1.3.apk.sha256
+gh workflow run deploy-android.yml -f tag=v2.0.4 -f version=0.1.3 -f asset_name=Storydex-Android-arm64-v0.1.3.apk -f sha256=$sha
 ```
 
 - workflow 会从 GitHub Release 下载 APK、校验 SHA-256、发布到 Android 更新源，并注入官网下载按钮 overlay。
@@ -269,7 +269,7 @@ https://updates.septemc.com/storydex/android/
 同步后必须验证（例如）：
 
 ```powershell
-$apk = 'https://updates.septemc.com/storydex/android/Storydex-Android-arm64-v0.1.2.apk'
+$apk = 'https://updates.septemc.com/storydex/android/Storydex-Android-arm64-v0.1.3.apk'
 Invoke-WebRequest -UseBasicParsing -Method Head "$apk?verify=1"
 ```
 
@@ -307,9 +307,9 @@ Invoke-WebRequest -UseBasicParsing -Method Head "$apk?verify=1"
 
 ### 9.2 Android APK 版
 
-- 版本：`0.1.2`
-- APK：`Storydex-Android-arm64-v0.1.2.apk`
+- 版本：`0.1.3`
+- APK：`Storydex-Android-arm64-v0.1.3.apk`
 - 更新目录：`/www/wwwroot/updates.septemc.com/storydex/android`
-- 更新地址：`https://updates.septemc.com/storydex/android/Storydex-Android-arm64-v0.1.2.apk`
-- 官网下载按钮 overlay：`apps/website-overlay/storydex-android-download-v0.1.2.js`
+- 更新地址：`https://updates.septemc.com/storydex/android/Storydex-Android-arm64-v0.1.3.apk`
+- 官网下载按钮 overlay：`apps/website-overlay/storydex-android-download-v0.1.3.js`
 - 发布工作流：`.github/workflows/deploy-android.yml`（workflow_dispatch）

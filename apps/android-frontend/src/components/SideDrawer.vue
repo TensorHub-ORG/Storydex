@@ -1,8 +1,7 @@
 <script setup lang="ts">
 /**
- * 左侧抽屉：按 Agent 模式分支。
- * - Agent 模式：历史会话抽屉（Coomi 原版设计）——搜索 / 开启新对话 / 分组会话列表 / 行内更多（重命名/置顶/删除）。
- * - 剧情 / 旁白模式：剧情片段抽屉——继续故事、最近/更早片段编辑。
+ * 当前故事项目的模式独立会话抽屉。
+ * sessions store 会按 story / narrator / agent 隔离列表与搜索结果。
  */
 import { computed, nextTick, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
@@ -18,7 +17,8 @@ const session = useSessionStore()
 const sessions = useSessionsStore()
 const story = useStoryStore()
 
-const isAgent = computed(() => story.agentMode === 'agent')
+const modeLabel = computed(() => ({ story: '剧情', narrator: '旁白', agent: 'Agent' })[story.agentMode])
+const drawerView = ref<'sessions' | 'fragments'>('sessions')
 
 // ── 剧情片段抽屉（story / narrator）──
 const editing = ref<StoryFragment | null>(null)
@@ -54,15 +54,15 @@ const renameText = ref('')
 
 const isEmpty = computed(() => sessions.groups.length === 0)
 
-// 抽屉关闭时清掉临时态；打开时刷新数据：Agent 模式刷新会话后台状态，
-// 剧情/旁白模式从项目目录补载已有剧情片段（localStorage 为空时）。
+// 抽屉关闭时清掉临时态；打开时刷新当前模式的项目会话。
 watch(() => props.open, v => {
   if (!v) {
     menuFor.value = null; renamingId.value = ''
     return
   }
-  if (isAgent.value) sessions.refreshRunning()
-  else void story.loadFragmentsFromProject()
+  sessions.setCurrentMode(story.agentMode)
+  drawerView.value = 'sessions'
+  sessions.refreshRunning()
 })
 
 function pick(id: string) {
@@ -122,12 +122,11 @@ function openDashboard() {
   <div class="drawer-root" :class="{ open }">
     <div class="scrim" @click="emit('close')" />
 
-    <!-- Agent 模式：历史会话抽屉（Coomi 原版设计） -->
-    <aside v-if="isAgent" class="panel" role="dialog" aria-label="会话历史">
+    <aside class="panel" role="dialog" :aria-label="`${modeLabel}模式会话历史`">
       <header class="dhead">
         <div class="sfield">
           <CoomiIcon name="search" :size="17" />
-          <input v-model="sessions.query" type="text" placeholder="搜索历史会话" enterkeyhint="search" />
+          <input v-model="sessions.query" type="text" :placeholder="`搜索${modeLabel}记录`" enterkeyhint="search" />
           <button v-if="sessions.query" class="clr" aria-label="清空" @click="sessions.query = ''">
             <CoomiIcon name="close" :size="12" />
           </button>
@@ -137,12 +136,19 @@ function openDashboard() {
         </button>
       </header>
 
-      <button class="newrow" @click="startNew">
+      <p class="mode-heading">{{ modeLabel }}模式 · {{ story.projectPath.split('/').pop() || '默认故事' }}</p>
+
+      <div v-if="story.agentMode !== 'agent'" class="drawer-tabs">
+        <button :class="{ on: drawerView === 'sessions' }" @click="drawerView = 'sessions'">本模式记录</button>
+        <button :class="{ on: drawerView === 'fragments' }" @click="drawerView = 'fragments'; story.loadFragmentsFromProject()">剧情片段</button>
+      </div>
+
+      <button v-if="drawerView === 'sessions'" class="newrow" @click="startNew">
         <span class="nicon"><CoomiIcon name="pencil" :size="17" /></span>
-        <span>开启新对话</span>
+        <span>开启新{{ modeLabel }}对话</span>
       </button>
 
-      <div class="list">
+      <div v-if="drawerView === 'sessions'" class="list">
         <!-- 历史会话列表始终可见；「全局会话记忆」开关只控制模型能否读取这些记录。 -->
         <p v-if="isEmpty" class="empty">
           还没有历史会话。<br />随便说点什么，标题会用你的第一句话。
@@ -182,6 +188,28 @@ function openDashboard() {
         </template>
       </div>
 
+      <template v-else>
+        <div class="story-actions">
+          <button class="continue" @click="continueStory"><CoomiIcon name="play" :size="17" /><span>继续故事</span></button>
+          <button class="standby" @click="standby"><CoomiIcon name="home" :size="17" /><span>剧情首页</span></button>
+        </div>
+        <div class="list">
+          <p v-if="story.fragments.length === 0" class="empty">剧情尚未开始。完成第一轮行动后，剧情片段会按顺序收进这里。</p>
+          <p v-else class="sec-label">最近五条</p>
+          <button v-for="fragment in story.latestFive" :key="fragment.id" class="fragment" @click="edit(fragment)">
+            <span class="filename">{{ fragment.filename }}</span><span class="summary">{{ fragment.summary }}</span><CoomiIcon name="pencil" :size="14" />
+          </button>
+          <template v-if="story.older.length">
+            <button class="older-toggle" @click="story.olderExpanded = !story.olderExpanded">
+              <CoomiIcon :name="story.olderExpanded ? 'chevronDown' : 'chevronRight'" :size="15" /><span>更早的剧情片段（{{ story.older.length }}）</span>
+            </button>
+            <div v-if="story.olderExpanded" class="older-list">
+              <button v-for="fragment in story.older" :key="fragment.id" class="fragment" @click="edit(fragment)"><span class="filename">{{ fragment.filename }}</span><span class="summary">{{ fragment.summary }}</span></button>
+            </div>
+          </template>
+        </div>
+      </template>
+
       <footer class="dfoot">
         <button class="console" @click="openDashboard">
           <CoomiIcon name="terminal" :size="20" /><span>返回控制台</span><CoomiIcon name="chevronRight" :size="17" />
@@ -189,54 +217,7 @@ function openDashboard() {
       </footer>
     </aside>
 
-    <!-- 剧情 / 旁白模式：剧情片段抽屉 -->
-    <aside v-else class="panel" role="dialog" aria-label="剧情片段">
-      <header class="dhead">
-        <div class="project">
-          <span>剧情片段</span>
-          <small>{{ story.projectPath.split('/').pop() || '默认故事' }}</small>
-        </div>
-        <button class="icon-btn" aria-label="设置" @click="go('/settings')"><CoomiIcon name="settings" :size="19" /></button>
-      </header>
-
-      <div class="story-actions">
-        <button class="continue" @click="continueStory">
-          <CoomiIcon name="play" :size="17" /><span>继续故事</span>
-        </button>
-        <button class="standby" @click="standby">
-          <CoomiIcon name="home" :size="17" /><span>剧情首页</span>
-        </button>
-      </div>
-
-      <div class="list">
-        <p v-if="story.fragments.length === 0" class="empty">剧情尚未开始。完成第一轮行动后，剧情片段会按顺序收进这里。</p>
-        <p v-else class="sec-label">最近五条</p>
-        <button v-for="fragment in story.latestFive" :key="fragment.id" class="fragment" @click="edit(fragment)">
-          <span class="filename">{{ fragment.filename }}</span>
-          <span class="summary">{{ fragment.summary }}</span>
-          <CoomiIcon name="pencil" :size="14" />
-        </button>
-
-        <template v-if="story.older.length">
-          <button class="older-toggle" @click="story.olderExpanded = !story.olderExpanded">
-            <CoomiIcon :name="story.olderExpanded ? 'chevronDown' : 'chevronRight'" :size="15" />
-            <span>更早的剧情片段（{{ story.older.length }}）</span>
-          </button>
-          <div v-if="story.olderExpanded" class="older-list">
-            <button v-for="fragment in story.older" :key="fragment.id" class="fragment" @click="edit(fragment)">
-              <span class="filename">{{ fragment.filename }}</span>
-              <span class="summary">{{ fragment.summary }}</span>
-            </button>
-          </div>
-        </template>
-      </div>
-
-      <footer class="dfoot">
-        <button class="console" @click="openDashboard"><CoomiIcon name="terminal" :size="20" /><span>返回控制台</span><CoomiIcon name="chevronRight" :size="17" /></button>
-      </footer>
-    </aside>
-
-    <!-- Agent 模式会话操作 sheet -->
+    <!-- 当前模式会话操作 sheet -->
     <div v-if="menuFor" class="sheet-wrap" @click.self="closeMenu">
       <div class="sheet">
         <p class="sheet-title">{{ menuFor.title }}</p>
@@ -275,6 +256,8 @@ function openDashboard() {
 
 /* 公共头部 */
 .dhead { display: flex; align-items: center; gap: 6px; min-height: 58px; padding: 8px 10px 6px 12px; }
+.mode-heading { margin:0; padding:2px 14px 6px; color:var(--text-3); font-size:11px; }
+.drawer-tabs { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:3px; margin:0 12px 5px; padding:3px; border-radius:6px; background:var(--fill-strong); }.drawer-tabs button { min-height:30px; border-radius:4px; color:var(--text-3); font-size:11.5px; }.drawer-tabs button.on { background:var(--bg); color:var(--blue); box-shadow:var(--shadow-1); }
 .icon-btn {
   display: grid; place-items: center; flex-shrink: 0;
   width: 40px; height: 40px; border: 0; border-radius: 50%; background: none; color: var(--text-2);

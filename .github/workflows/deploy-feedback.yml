@@ -77,7 +77,13 @@ jobs:
           set -euo pipefail
           base="https://updates.septemc.com/storydex/feedback"
           curl --fail --silent --show-error "$base/health?sha=$GITHUB_SHA" | grep -F 'storydex-feedback'
-          curl --fail --silent --show-error "$base/admin?sha=$GITHUB_SHA" | grep -F 'Storydex 反馈管理'
+          curl --fail --silent --show-error "$base/admin?sha=$GITHUB_SHA" | grep -F 'Storydex 运营控制台'
+          for platform in android windows; do
+            dau="$(curl --fail --silent --show-error -X POST \
+              -H 'X-Storydex-Version: deployment-check' "$base/api/stats/dau/$platform")"
+            python3 -c 'import json,sys; expected=sys.argv[1]; data=json.load(sys.stdin); assert data["ok"] is True; assert data["platform"] == expected' \
+              "$platform" <<< "$dau"
+          done
           android_stats="$(curl --fail --silent --show-error \
             'https://storydex.septemc.com/api/stats/download-android')"
           python3 -c 'import json,sys; data=json.load(sys.stdin); assert data["androidDownloads"] >= 28' \
@@ -109,6 +115,11 @@ jobs:
           [[ -n "$admin_token" ]]
           echo "::add-mask::$admin_token"
           auth_header="Authorization: Bearer $admin_token"
+
+          activity_stats="$(curl --fail --silent --show-error -H "$auth_header" \
+            "$base/admin/api/stats?days=30")"
+          python3 -c 'import json,sys; data=json.load(sys.stdin); assert len(data["series"]) == 30; assert set(data["today"]) >= {"date", "windows", "android", "total"}' \
+            <<< "$activity_stats"
 
           listing="$(curl --fail --silent --show-error -H "$auth_header" --get \
             --data-urlencode 'q=Automated production deployment verification.' \

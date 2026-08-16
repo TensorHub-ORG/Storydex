@@ -17,6 +17,8 @@ export const useSessionStore = defineStore('session', () => {
   const config = useConfigStore()
   const sessions = useSessionsStore()
   const story = useStoryStore()
+  sessions.setCurrentMode(story.agentMode)
+  if (story.projectPath) sessions.setCurrentCwd(story.projectPath)
 
   const sessionId = ref(createSessionId())
   const timeline = ref<Timelineitem[]>([])
@@ -45,7 +47,9 @@ export const useSessionStore = defineStore('session', () => {
 
   async function refreshProjectUsage() {
     try {
-      const response = await authedFetch('/api/storydex/usage')
+      const projectPath = story.projectPath
+      const query = projectPath ? `?path=${encodeURIComponent(projectPath)}` : ''
+      const response = await authedFetch(`/api/storydex/usage${query}`)
       if (!response.ok) return
       const project = await response.json() as NonNullable<import('@/protocol/events').UsageInfo['project']>
       const previous = usage.value
@@ -94,7 +98,7 @@ export const useSessionStore = defineStore('session', () => {
       persistTimer = null
       const items = timeline.value.filter(t => t.kind !== 'notice')
       if (items.length === 0) return
-      sessions.touch(sessionId.value, { turns: timeline.value.filter(t => t.kind === 'user').length })
+      sessions.touch(sessionId.value, { turns: timeline.value.filter(t => t.kind === 'user').length, cwd: story.projectPath, mode: story.agentMode })
       sessions.saveTranscript(sessionId.value, timeline.value)
     }, 1200)
   }
@@ -107,7 +111,7 @@ export const useSessionStore = defineStore('session', () => {
     if (isDemoMode()) return
     const items = timeline.value.filter(t => t.kind !== 'notice')
     if (items.length === 0) return
-    sessions.touch(sessionId.value, { turns: timeline.value.filter(t => t.kind === 'user').length })
+    sessions.touch(sessionId.value, { turns: timeline.value.filter(t => t.kind === 'user').length, cwd: story.projectPath, mode: story.agentMode })
     sessions.saveTranscript(sessionId.value, timeline.value)
   }
 
@@ -364,6 +368,7 @@ export const useSessionStore = defineStore('session', () => {
     loop.value = { active: false, currentStep: 0, totalSteps: 0, status: '' }; runState.value = 'idle'
     sessionId.value = createSessionId()
     connect()
+    if (story.projectPath) void setSessionCwd(story.projectPath)
   }
 
   /** 主模式互切必须换引擎会话，确保上下文窗口与旧模式完全隔离。 */
@@ -374,6 +379,7 @@ export const useSessionStore = defineStore('session', () => {
     cancelRunningTools()
     flushPersistence()
     story.setAgentMode(mode)
+    sessions.setCurrentMode(mode)
     config.setPermissionMode(mode === 'agent' ? 'full' : 'auto')
     timeline.value = []
     usage.value = null
@@ -381,6 +387,7 @@ export const useSessionStore = defineStore('session', () => {
     runState.value = 'idle'
     sessionId.value = createSessionId()
     connect()
+    if (story.projectPath) void setSessionCwd(story.projectPath)
   }
 
   /** Return to the latest story fragment without creating or reopening a chat session. */
@@ -443,7 +450,7 @@ export const useSessionStore = defineStore('session', () => {
         continue
       }
       if (m.role === 'user') {
-        items.push({ kind: 'user', id: nextId(), content: m.content })
+        items.push({ kind: 'user', id: nextId(), content: displayUserContent(m.content) })
       } else if (m.role === 'assistant') {
         if (m.content) items.push({ kind: 'assistant', id: nextId(), content: m.content, streaming: false })
         for (const tc of m.tool_calls ?? []) {
@@ -524,6 +531,7 @@ export const useSessionStore = defineStore('session', () => {
       loop.value = { active: false, currentStep: 0, totalSteps: 0, status: '' }; runState.value = 'idle'
       sessionId.value = createSessionId()
       connect()
+      if (story.projectPath) void setSessionCwd(story.projectPath)
     }
     sessions.remove(id)
     try { localStorage.removeItem(`coomi.draft.${id}`) } catch { /* ignore */ }
@@ -536,12 +544,14 @@ export const useSessionStore = defineStore('session', () => {
       const res = await authedFetch(`/api/sessions/${id}/cwd`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cwd: path }),
+        body: JSON.stringify({ cwd: path, mode: story.agentMode }),
       })
       if (!res.ok) return false
       cwd.value = path
-      const meta = sessions.find(id)
-      if (meta) { meta.cwd = path; sessions.setCurrentCwd(path) }
+      sessions.setCurrentCwd(path)
+      sessions.setCurrentMode(story.agentMode)
+      // 新会话只有目录配置时还不算一条会话；首条用户内容会负责创建元数据。
+      if (sessions.find(id)) sessions.touch(id, { cwd: path, mode: story.agentMode })
       return true
     } catch {
       return false
@@ -613,6 +623,14 @@ export const useSessionStore = defineStore('session', () => {
 })
 
 function fmtTokens(n: number): string { return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n) }
+
+function displayUserContent(content: string): string {
+  for (const marker of ['\n玩家行动：', '\n玩家输入：', '\n用户指令：']) {
+    const index = content.lastIndexOf(marker)
+    if (index >= 0) return content.slice(index + marker.length).trim()
+  }
+  return content
+}
 
 function sanitizeToolName(name: string): string { return name.replace(/[^a-zA-Z0-9_.:-]/g, '').slice(0, 80) || 'unknown_tool' }
 function classifyToolError(message: string): string {

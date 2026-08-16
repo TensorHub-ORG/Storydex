@@ -13,7 +13,6 @@ import { useSessionStore } from '@/stores/session'
 import { useSessionsStore } from '@/stores/sessions'
 import { useConfigStore } from '@/stores/config'
 import { useStoryStore } from '@/stores/story'
-import { apiGet } from '@/bridge/http'
 import { DEMO_PROMPT, isUnattended, shouldAutoplay } from '@/bridge/demoMode'
 import { useAutoScroll } from '@/composables/useAutoScroll'
 import type { Timelineitem, ToolCard } from '@/stores/viewModel'
@@ -108,6 +107,8 @@ const currentSuggestions = computed(() => {
 let ro: ResizeObserver | null = null
 
 onMounted(() => {
+  sessions.setCurrentMode(story.agentMode)
+  if (story.projectPath) sessions.setCurrentCwd(story.projectPath)
   session.connect()
   if (story.projectPath) {
     void session.setSessionCwd(story.projectPath).then(bound => {
@@ -117,10 +118,6 @@ onMounted(() => {
   }
   // 导入的已有故事项目：本地无片段数据时从项目目录 chapters/ 扫描加载（幂等）。
   void story.loadFragmentsFromProject()
-  // 记录引擎当前工作目录，会话列表据此把不同项目的会话隔离开。
-  void apiGet<{ cwd?: string }>('/api/runtime/health')
-    .then(h => { if (h?.cwd) sessions.setCurrentCwd(h.cwd) })
-    .catch(() => { /* 引擎未就绪时保持空 cwd，列表退化为全部显示 */ })
   // 以引擎磁盘会话为权威源同步列表，修复“会话记录消失/串会话”。
   void sessions.syncFromEngine()
   if (config.providers.length === 0) void config.fetchProviders()

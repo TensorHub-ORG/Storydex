@@ -4,6 +4,7 @@ import { useConfigStore } from '@/stores/config'
 import { useSessionStore } from '@/stores/session'
 import { useConnectionStore } from '@/stores/connection'
 import { authedFetch } from '@/bridge/http'
+import { currentProjectRoot } from '@/utils/projectFiles'
 import CoomiIcon from './CoomiIcon.vue'
 
 defineEmits<{ menu: [] }>()
@@ -41,7 +42,9 @@ function choose(providerId: string, model: string) { session.selectModel(provide
 function toggleModel() { modelOpen.value = !modelOpen.value; usageOpen.value = false }
 function toggleUsage() { usageOpen.value = !usageOpen.value; modelOpen.value = false; usageNotice.value = ''; periodConfirm.value = false }
 async function newPeriod() {
-  const response = await authedFetch('/api/storydex/usage/new-period', { method: 'POST' })
+  const path = currentProjectRoot()
+  const query = path ? `?path=${encodeURIComponent(path)}` : ''
+  const response = await authedFetch(`/api/storydex/usage/new-period${query}`, { method: 'POST' })
   periodConfirm.value = false
   usageNotice.value = response.ok ? '已新建统计周期，旧账本仍保留' : `新建失败（HTTP ${response.status}）`
   if (response.ok) await session.refreshProjectUsage()

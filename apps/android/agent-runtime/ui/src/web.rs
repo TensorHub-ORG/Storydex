@@ -29,6 +29,7 @@ use coomi_engine::ModelProvider;
 use coomi_engine::ModelRequest;
 use coomi_engine::PlanStepStatus;
 use coomi_engine::ReasoningEffort;
+use coomi_engine::Role;
 use coomi_engine::Session;
 use coomi_engine::SessionStore;
 use coomi_engine::TokenUsage;
@@ -142,6 +143,8 @@ impl AppState {
 struct SessionTask {
     abort: StdMutex<Option<AbortHandle>>,
     running: AtomicBool,
+    /// 新会话在首条消息前只暂存工作目录；切换模式/打开空白页不能产生磁盘记录。
+    pending_cwd: StdMutex<Option<PathBuf>>,
     /// 当前活跃连接的推送通道（None = 断线中）。
     conn_tx: StdMutex<Option<mpsc::UnboundedSender<Message>>>,
     input_queue: Arc<InputQueue>,
@@ -156,6 +159,7 @@ impl SessionTask {
         Self {
             abort: StdMutex::new(None),
             running: AtomicBool::new(false),
+            pending_cwd: StdMutex::new(None),
             conn_tx: StdMutex::new(None),
             input_queue: Arc::new(InputQueue::default()),
             approvals: StdMutex::new(HashMap::new()),
@@ -910,6 +914,52 @@ fn sanitize_generated_analysis(value: &str) -> String {
         .join("\n")
 }
 
+fn normalized_session_mode(value: &str) -> &'static str {
+    match value {
+        "story" => "story",
+        "narrator" => "narrator",
+        _ => "agent",
+    }
+}
+
+fn inferred_session_mode(session: &Session) -> &'static str {
+    let stored = normalized_session_mode(&session.storydex_mode);
+    if stored != "agent" {
+        return stored;
+    }
+    let first_user = session
+        .messages
+        .iter()
+        .find(|message| message.role == Role::User)
+        .map(|message| message.content.as_str())
+        .unwrap_or_default();
+    if first_user.starts_with("[Storydex 剧情模式]") {
+        "story"
+    } else if first_user.starts_with("[Storydex 剧情旁白模式]") {
+        "narrator"
+    } else {
+        "agent"
+    }
+}
+
+fn save_storydex_session_record(session: &Session) -> std::io::Result<()> {
+    if !session.cwd.is_dir() {
+        return Ok(());
+    }
+    let mode = normalized_session_mode(&session.storydex_mode);
+    let path = session
+        .cwd
+        .join(".storydex/sessions")
+        .join(mode)
+        .join(format!("{}.json", session.id));
+    let mut payload = serde_json::to_value(session)?;
+    if let Some(document) = payload.as_object_mut() {
+        document.insert("schema_version".into(), json!(1));
+        document.insert("storydex_mode".into(), json!(mode));
+    }
+    atomic_write_json(&path, &payload)
+}
+
 /// 引擎磁盘上的会话列表（权威源）。前端以此为唯一事实，localStorage 仅作缓存，
 /// 修复“会话记录消失/串会话”问题。
 async fn list_sessions(State(state): State<AppState>) -> Json<Value> {
@@ -922,17 +972,37 @@ async fn list_sessions(State(state): State<AppState>) -> Json<Value> {
     let mut sessions = Vec::with_capacity(summaries.len());
     for summary in summaries {
         let full = store.load(summary.id).ok();
+        // 旧版本会在切换模式或绑定 cwd 时写入零消息会话。它们不是用户会话，
+        // 不能进入任何模式的侧边栏；新版本也不会再创建这类磁盘记录。
+        if full
+            .as_ref()
+            .is_some_and(|session| session.messages.is_empty())
+        {
+            continue;
+        }
         let id = summary.id.to_string();
+        let display_preview = full
+            .as_ref()
+            .and_then(|session| {
+                session
+                    .messages
+                    .iter()
+                    .find(|message| message.role == Role::User)
+            })
+            .map(|message| truncate_chars(story_player_input(&message.content), 180))
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| summary.preview.clone());
         sessions.push(json!({
             "id": id,
             "provider_id": summary.provider_id,
             "model": summary.model,
             "cwd": summary.cwd.display().to_string(),
             "updated_at": summary.updated_at,
-            "preview": summary.preview.clone(),
-            "title": summary.preview.clone(),
-            "summary": summary.preview,
+            "preview": display_preview.clone(),
+            "title": display_preview.clone(),
+            "summary": display_preview,
             "created_at": full.as_ref().map(|s| s.created_at).unwrap_or(summary.updated_at),
+            "mode": full.as_ref().map(|s| inferred_session_mode(s)).unwrap_or("agent"),
             "usage": full.as_ref().map(|s| json!({
                 "input_tokens": s.usage.input_tokens,
                 "output_tokens": s.usage.output_tokens,
@@ -967,9 +1037,19 @@ async fn delete_session(
     let store = SessionStore::new(&state.home);
     let session_id =
         Uuid::parse_str(&id).map_err(|_| ApiError::bad_request("invalid session id"))?;
+    let project_record = store.load(session_id).ok().map(|session| {
+        session
+            .cwd
+            .join(".storydex/sessions")
+            .join(inferred_session_mode(&session))
+            .join(format!("{}.json", session.id))
+    });
     let deleted = store
         .delete(session_id)
         .map_err(|error| ApiError::internal(format!("failed to delete session {id}: {error:#}")))?;
+    if let Some(path) = project_record {
+        let _ = fs::remove_file(path);
+    }
     Ok(Json(json!({ "deleted": deleted })))
 }
 
@@ -1289,41 +1369,39 @@ async fn set_session_cwd(
     let store = SessionStore::new(&state.home);
     let session_id =
         Uuid::parse_str(&id).map_err(|_| ApiError::bad_request("invalid session id"))?;
-    let mut session = match store.load(session_id) {
-        Ok(session) => session,
-        Err(_) => {
-            let registry = ProviderRegistry::load(&providers_path(&state.home)).map_err(|e| {
-                ApiError::internal(format!("failed to load provider for session {id}: {e:#}"))
-            })?;
-            let provider = registry.resolve(None).map_err(|e| {
-                ApiError::internal(format!(
-                    "failed to resolve provider for session {id}: {e:#}"
-                ))
-            })?;
-            let mut session = Session::new(&provider.id, &provider.model, state.cwd.clone());
-            session.id = session_id;
-            session
-        }
-    };
     let cwd = body
         .get("cwd")
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::bad_request("missing cwd"))?
         .trim()
         .to_string();
-    if !cwd.starts_with('/') {
+    let path = std::path::Path::new(&cwd);
+    if !path.is_absolute() {
         return Err(ApiError::bad_request("cwd must be an absolute path"));
     }
-    let path = std::path::Path::new(&cwd);
     if !path.is_dir() {
         return Err(ApiError::bad_request(format!(
             "directory does not exist: {cwd}"
         )));
     }
+    let mode = normalized_session_mode(body.get("mode").and_then(Value::as_str).unwrap_or("agent"));
+    let Ok(mut session) = store.load(session_id) else {
+        // 目录是新会话首轮执行所需的配置，不是会话内容。暂存在连接任务上，
+        // run_turn 会用它创建内存会话，并在产生真实消息后按统一流程落盘。
+        *state
+            .task(&id)
+            .pending_cwd
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(path.to_path_buf());
+        return Ok(Json(json!({ "ok": true, "cwd": cwd, "pending": true })));
+    };
     session.cwd = path.to_path_buf();
+    session.storydex_mode = mode.to_owned();
     store
         .save(&session)
         .map_err(|e| ApiError::internal(format!("failed to save session {id}: {e:#}")))?;
+    save_storydex_session_record(&session)
+        .map_err(|e| ApiError::internal(format!("failed to save project session {id}: {e}")))?;
     Ok(Json(json!({ "ok": true, "cwd": cwd })))
 }
 
@@ -1792,8 +1870,43 @@ async fn fs_write(
     Ok(Json(json!({ "ok": true })))
 }
 
-async fn new_usage_period(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let usage_dir = state.cwd.join(".storydex").join("usage");
+fn requested_story_project(
+    state: &AppState,
+    params: &HashMap<String, String>,
+) -> Result<PathBuf, ApiError> {
+    let requested = params.get("path").map(String::as_str).unwrap_or_default();
+    let root = if requested.trim().is_empty() {
+        state.cwd.clone()
+    } else {
+        abs_path(requested)?
+    };
+    validated_story_project(state, root)
+}
+
+fn validated_story_project(state: &AppState, root: PathBuf) -> Result<PathBuf, ApiError> {
+    if !root.is_dir() {
+        return Err(ApiError::bad_request(
+            "story project directory does not exist",
+        ));
+    }
+    let allowed = state
+        .cwd
+        .canonicalize()
+        .unwrap_or_else(|_| state.cwd.clone());
+    let canonical = root.canonicalize().unwrap_or(root);
+    if !canonical.starts_with(&allowed) {
+        return Err(ApiError::forbidden(
+            "story project is outside the engine workspace",
+        ));
+    }
+    Ok(canonical)
+}
+
+async fn new_usage_period(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
+    let usage_dir = requested_story_project(&state, &params)?.join(".storydex/usage");
     fs::create_dir_all(&usage_dir).map_err(|error| {
         ApiError::internal(format!("failed to create usage directory: {error}"))
     })?;
@@ -1812,8 +1925,11 @@ async fn new_usage_period(State(state): State<AppState>) -> Result<Json<Value>, 
     Ok(Json(json!({ "ok": true, "period_id": period_id })))
 }
 
-async fn get_project_usage(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let usage_dir = state.cwd.join(".storydex").join("usage");
+async fn get_project_usage(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
+    let usage_dir = requested_story_project(&state, &params)?.join(".storydex/usage");
     let entries = usage_ledger_entries(&usage_dir);
     let current_period = current_usage_period(&usage_dir);
     Ok(Json(summarize_usage_entries(&entries, &current_period)))
@@ -2383,6 +2499,14 @@ async fn handle_command(
                     .unwrap_or("agent"),
             );
             *context.storydex_mode.write().await = mode;
+            if let Ok(id) = Uuid::parse_str(session_id) {
+                let store = SessionStore::new(&state.home);
+                if let Ok(mut session) = store.load(id) {
+                    session.storydex_mode = mode.label().to_owned();
+                    let _ = store.save(&session);
+                    let _ = save_storydex_session_record(&session);
+                }
+            }
             context.send_ack(envelope_id);
         }
         "reset_story_context" => {
@@ -2411,6 +2535,7 @@ async fn handle_command(
                         );
                         return;
                     }
+                    let _ = save_storydex_session_record(&session);
                     context.send_ack(envelope_id);
                 }
                 Err(_) => context.send_ack(envelope_id),
@@ -2586,13 +2711,20 @@ async fn run_turn(
         }
         None => prompt.to_owned(),
     };
+    let pending_cwd = context
+        .task
+        .pending_cwd
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
     let mut session = load_or_create_web_session(
         &store,
         requested_id,
         &provider_config.id,
         &provider_config.model,
-        &state.cwd,
+        pending_cwd.as_deref().unwrap_or(&state.cwd),
     )?;
+    session.storydex_mode = storydex_mode.label().to_owned();
 
     // Use the session's own working directory so history and context always belong
     // to the same project; fall back to the engine cwd only when the session's
@@ -2604,7 +2736,9 @@ async fn run_turn(
         state.cwd.clone()
     };
 
-    let assembled = if storydex_mode != StorydexMode::Agent || is_story_prompt(prompt) {
+    let mut assembled = if storydex_mode != StorydexMode::Agent
+        || should_assemble_story_context(prompt)
+    {
         assemble_mobile_story_context(&cwd, storydex_mode, reasoning_effort_rank(reasoning_effort))
     } else {
         StoryContextAssembly::default()
@@ -2647,6 +2781,13 @@ async fn run_turn(
     let instructions = coomi_engine::discover_project_instructions(&cwd)?;
     let prompt_context =
         system_prompt(&state.home, &cwd, policy_mode, &instructions, global_memory);
+    add_runtime_category_weights(
+        &mut assembled.categories,
+        storydex_mode,
+        prompt,
+        &prompt_context,
+        &session,
+    );
     // 注入已配置 MCP 清单：agent 需要知道装了哪些 MCP、状态如何、能调哪些工具。
     let mcp_runtime = Arc::new(McpRuntime::load(&state.home).await);
     let scheduler = AgentScheduler::new(
@@ -2679,6 +2820,7 @@ async fn run_turn(
         turn_started,
     );
     let checkpoint_store = store.clone();
+    let message_count_before_turn = session.messages.len();
     let agent = Agent::new(prompt_context)
         .with_max_tool_rounds(96)
         .with_reasoning_effort(reasoning_effort)
@@ -2705,9 +2847,18 @@ async fn run_turn(
         maybe_degrade_vision(state, session_id, &session, error);
     }
     store.save(&session)?;
+    save_storydex_session_record(&session)?;
     if let Err(error) = turn_result {
         observer.finalize_usage();
         return Err(error.into());
+    }
+    if storydex_mode == StorydexMode::Narrator {
+        archive_narrator_output(
+            &cwd,
+            requested_id,
+            story_player_input(prompt),
+            &session.messages[message_count_before_turn..],
+        )?;
     }
 
     while session
@@ -2723,6 +2874,7 @@ async fn run_turn(
         }
         session.touch();
         store.save(&session)?;
+        save_storydex_session_record(&session)?;
         if let Err(error) = loop_result {
             observer.finalize_usage();
             return Err(error.into());
@@ -2787,7 +2939,8 @@ fn assemble_mobile_story_context(
     assembly.text = String::from(
         "使用顺序：项目正式资料 > 最近剧情正文 > 较早片段摘要 > 会话记忆。若仍有歧义，使用工具在当前项目内继续读取。\n",
     );
-    *assembly.categories.entry("rules".into()).or_default() += 40;
+    *assembly.categories.entry("rules".into()).or_default() +=
+        estimated_text_tokens(&assembly.text);
 
     let mut chapters = collect_markdown_files(&project_root.join("chapters"));
     chapters.sort();
@@ -2844,6 +2997,27 @@ fn assemble_mobile_story_context(
                     &mut budget,
                     category,
                     &format!("{} {}", label, relative_story_path(project_root, &path)),
+                    &text,
+                );
+            }
+        }
+    }
+
+    if mode != StorydexMode::Narrator {
+        let mut narrator_files = collect_markdown_files(&project_root.join(".storydex/narrator"));
+        narrator_files.sort();
+        let start = narrator_files.len().saturating_sub(12);
+        for path in &narrator_files[start..] {
+            if let Some(text) = read_story_text(path, 4_000) {
+                append_context_section(
+                    &mut assembly,
+                    &mut budget,
+                    if mode == StorydexMode::Agent {
+                        "project_files"
+                    } else {
+                        "memory"
+                    },
+                    &format!("旁白动态资料 {}", relative_story_path(project_root, path)),
                     &text,
                 );
             }
@@ -2924,37 +3098,87 @@ fn append_story_index_files(
     let Ok(value) = serde_json::from_str::<Value>(&raw) else {
         return;
     };
+    let canonical_items = value
+        .get("items")
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty());
     let mut entries = value
-        .get("entries")
+        .get(if canonical_items { "items" } else { "entries" })
+        .or_else(|| value.get("items"))
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    entries.sort_by_key(|entry| entry.get("order").and_then(Value::as_i64).unwrap_or(0));
+    if !canonical_items {
+        entries.sort_by_key(|entry| entry.get("order").and_then(Value::as_i64).unwrap_or(0));
+    }
     // UI order is high -> low; inject low -> high so the strongest item is closest to the action.
     entries.reverse();
     for entry in entries {
         let enabled = entry
             .get("enabled")
+            .or_else(|| entry.get("active"))
             .and_then(Value::as_bool)
-            .unwrap_or(false);
+            .unwrap_or(true);
         let status = entry
             .get("status")
             .and_then(Value::as_str)
             .unwrap_or("active");
-        if !enabled || (completed_only && status != "completed") {
+        let is_script = relative_dir.ends_with("scripts");
+        if !enabled
+            || (completed_only && status != "completed")
+            || (!completed_only && is_script && status == "completed")
+        {
             continue;
         }
-        let Some(filename) = entry.get("filename").and_then(Value::as_str) else {
-            continue;
-        };
-        if filename.contains('/') || filename.contains('\\') {
-            continue;
-        }
-        if let Some(text) = read_story_text(&directory.join(filename), 8_000) {
-            let title = entry
-                .get("title")
-                .and_then(Value::as_str)
-                .unwrap_or(filename);
+        let filename = [
+            "filename",
+            "file",
+            "path",
+            "relativePath",
+            "contentFile",
+            "content_file",
+        ]
+        .iter()
+        .find_map(|key| entry.get(*key).and_then(Value::as_str));
+        let file_text = filename
+            .filter(|value| !value.contains('/') && !value.contains('\\'))
+            .and_then(|value| read_story_text(&directory.join(value), 8_000));
+        let inline_text = [
+            "content",
+            "prompt",
+            "body",
+            "text",
+            "instructions",
+            "description",
+        ]
+        .iter()
+        .find_map(|key| entry.get(*key).and_then(Value::as_str))
+        .map(str::to_owned);
+        if let Some(mut text) = file_text.or(inline_text) {
+            let title = ["title", "name", "label", "presetName", "scriptName"]
+                .iter()
+                .find_map(|key| entry.get(*key).and_then(Value::as_str))
+                .or(filename)
+                .unwrap_or("未命名条目");
+            if is_script {
+                let id = entry.get("id").and_then(Value::as_str).unwrap_or("未知");
+                let condition = entry
+                    .get("completionCondition")
+                    .or_else(|| entry.get("completion_condition"))
+                    .or_else(|| entry.get("condition"))
+                    .or_else(|| entry.get("goal"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("由剧情事实判断");
+                let route = entry
+                    .get("defaultRoute")
+                    .or_else(|| entry.get("default_route"))
+                    .or_else(|| entry.get("route"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("未设置默认路线，遇到分叉时标记待处理");
+                text = format!(
+                    "剧本 ID：{id}\n状态：{status}\n完成条件：{condition}\n默认路线：{route}\n\n{text}"
+                );
+            }
             append_context_section(
                 assembly,
                 budget,
@@ -3152,8 +3376,117 @@ fn is_story_prompt(prompt: &str) -> bool {
     prompt.starts_with("[Storydex 剧情模式]") || prompt.starts_with("[Storydex 剧情旁白模式]")
 }
 
+fn should_assemble_story_context(prompt: &str) -> bool {
+    is_story_prompt(prompt) || prompt.starts_with("[Storydex 故事创作 Agent]")
+}
+
+fn estimated_text_tokens(text: &str) -> u64 {
+    if text.trim().is_empty() {
+        return 0;
+    }
+    u64::try_from(text.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(3)
+        / 4
+}
+
+fn archive_narrator_output(
+    project_root: &Path,
+    session_id: Uuid,
+    request: &str,
+    messages: &[coomi_engine::ChatMessage],
+) -> std::io::Result<()> {
+    let Some(output) = messages
+        .iter()
+        .rev()
+        .find(|message| message.role == Role::Assistant && !message.content.trim().is_empty())
+        .map(|message| message.content.trim())
+    else {
+        return Ok(());
+    };
+    let summary = output
+        .split_inclusive(['。', '！', '？', '!', '?', '\n'])
+        .next()
+        .unwrap_or(output)
+        .trim()
+        .chars()
+        .take(120)
+        .collect::<String>();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let path = project_root
+        .join(".storydex/narrator")
+        .join(format!("{nonce}-{session_id}.md"));
+    let body = format!(
+        "---\nschemaVersion: 1\nkind: narrator-reference\nsessionId: {session_id}\ncreatedAt: {}\nsummary: {}\nrequest: {}\n---\n\n{}\n",
+        unix_time(),
+        serde_json::to_string(&summary).unwrap_or_else(|_| "\"\"".into()),
+        serde_json::to_string(request).unwrap_or_else(|_| "\"\"".into()),
+        output,
+    );
+    atomic_write_bytes(&path, body.as_bytes())
+}
+
+fn add_runtime_category_weights(
+    categories: &mut BTreeMap<String, u64>,
+    mode: StorydexMode,
+    prompt: &str,
+    system: &str,
+    session: &Session,
+) {
+    let player = story_player_input(prompt);
+    let player_weight = estimated_text_tokens(player);
+    let wrapper_weight = estimated_text_tokens(prompt).saturating_sub(player_weight);
+    let (wrapper_key, player_key, assistant_key) = match mode {
+        StorydexMode::Story => ("rules", "player_interaction", "story"),
+        StorydexMode::Narrator => ("narration_constraints", "user_request", "narrative_source"),
+        StorydexMode::Agent => ("rules", "user_request", "conversation"),
+    };
+    *categories.entry(wrapper_key.into()).or_default() += wrapper_weight;
+    *categories.entry(player_key.into()).or_default() += player_weight;
+    *categories.entry("capabilities".into()).or_default() += estimated_text_tokens(system);
+
+    for message in &session.messages {
+        if message.role == Role::User {
+            let historical_input = story_player_input(&message.content);
+            let input_weight = estimated_text_tokens(historical_input);
+            let historical_wrapper =
+                estimated_text_tokens(&message.content).saturating_sub(input_weight);
+            *categories.entry(player_key.into()).or_default() += input_weight;
+            *categories.entry(wrapper_key.into()).or_default() += historical_wrapper;
+            continue;
+        }
+        let key = match message.role {
+            Role::User => unreachable!("user messages are handled above"),
+            Role::Assistant => assistant_key,
+            Role::Tool if mode == StorydexMode::Agent => "tool_results",
+            Role::Tool => "capabilities",
+            Role::System => "rules",
+        };
+        *categories.entry(key.into()).or_default() += estimated_text_tokens(&message.content);
+        if !message.tool_calls.is_empty() {
+            let tool_weight = serde_json::to_string(&message.tool_calls)
+                .ok()
+                .map(|value| estimated_text_tokens(&value))
+                .unwrap_or_default();
+            *categories
+                .entry(
+                    if mode == StorydexMode::Agent {
+                        "tool_results"
+                    } else {
+                        "capabilities"
+                    }
+                    .into(),
+                )
+                .or_default() += tool_weight;
+        }
+    }
+}
+
 fn story_player_input(prompt: &str) -> &str {
-    for marker in ["\n玩家行动：", "\n玩家输入："] {
+    for marker in ["\n玩家行动：", "\n玩家输入：", "\n用户指令："] {
         if let Some((_, input)) = prompt.rsplit_once(marker) {
             return input.trim();
         }
@@ -3341,11 +3674,16 @@ fn browser_usage_event(
         (state.context_used_tokens as f64 / state.context_window_tokens as f64).min(1.0)
     };
     let turn_cache_rate = cache_rate(&state.turn_usage);
-    let categories = normalized_usage_categories(
-        mode,
-        category_weights,
-        state.context_used_tokens.max(state.turn_usage.input_tokens),
-    );
+    // The category panel describes the currently assembled context, while
+    // turn_usage.input_tokens may include several model/tool rounds. Using the
+    // accumulated turn input here can make category totals exceed the context
+    // window (for example 146k of categories in a 51k context).
+    let category_total = if state.context_used_tokens > 0 {
+        state.context_used_tokens
+    } else {
+        state.turn_usage.input_tokens
+    };
+    let categories = normalized_usage_categories(mode, category_weights, category_total);
     json!({
         "event_type": "usage_update",
         "usage": {
@@ -3419,10 +3757,9 @@ fn normalized_usage_categories(
     let keys = usage_category_keys(mode);
     let mut weights = BTreeMap::new();
     for key in keys {
-        weights.insert(
-            (*key).to_string(),
-            raw_weights.get(*key).copied().unwrap_or(1).max(1),
-        );
+        if let Some(value) = raw_weights.get(*key).copied().filter(|value| *value > 0) {
+            weights.insert((*key).to_string(), value);
+        }
     }
     if mode == StorydexMode::Narrator {
         for (source, target) in [
@@ -3431,15 +3768,24 @@ fn normalized_usage_categories(
             ("constraints", "narration_constraints"),
         ] {
             if let Some(value) = raw_weights.get(source) {
-                weights.insert(target.to_string(), (*value).max(1));
+                if *value > 0 {
+                    weights.insert(target.to_string(), *value);
+                }
             }
         }
     }
-    if mode == StorydexMode::Agent && !raw_weights.is_empty() {
-        weights.insert(
-            "project_files".into(),
-            raw_weights.values().copied().sum::<u64>().max(1),
-        );
+    if mode == StorydexMode::Agent {
+        let project_weight = raw_weights
+            .iter()
+            .filter(|(key, _)| !keys.contains(&key.as_str()))
+            .map(|(_, value)| *value)
+            .sum::<u64>();
+        if project_weight > 0 {
+            *weights.entry("project_files".into()).or_default() += project_weight;
+        }
+    }
+    if weights.is_empty() || total == 0 {
+        return BTreeMap::new();
     }
     let weight_total = weights.values().copied().sum::<u64>().max(1);
     let mut result = BTreeMap::new();
@@ -3478,6 +3824,7 @@ fn append_project_usage(
         "reasoning_tokens": usage.reasoning_tokens.unwrap_or_default(),
         "reasoning_effort": reasoning_effort_label(reasoning_effort),
         "duration_ms": duration_ms,
+        "category_method": "assembled-v2",
         "categories": categories,
     });
     let ledger_path = usage_dir.join("ledger.jsonl");
@@ -3539,6 +3886,9 @@ fn summarize_usage_entries(entries: &[Value], current_period: &str) -> Value {
         let recent_cached = sum_json_u64(&recent, "cached_input_tokens");
         let mut categories = BTreeMap::<String, u64>::new();
         for entry in &matching {
+            if entry.get("category_method").and_then(Value::as_str) != Some("assembled-v2") {
+                continue;
+            }
             if let Some(values) = entry.get("categories").and_then(Value::as_object) {
                 for (key, value) in values {
                     *categories.entry(key.clone()).or_default() = categories
@@ -4107,18 +4457,25 @@ mod tests {
     use coomi_services::MemoryType;
 
     #[test]
-    fn story_preflight_only_runs_for_constrained_story_modes() {
+    fn story_preflight_and_context_assembly_have_distinct_mode_scope() {
         assert!(is_story_prompt("[Storydex 剧情模式]\n行动"));
         assert!(is_story_prompt("[Storydex 剧情旁白模式]\n提问"));
+        assert!(!is_story_prompt("[Storydex 故事创作 Agent]\n任务"));
         assert!(!is_story_prompt("普通 Coomi Agent 任务"));
+        assert!(should_assemble_story_context(
+            "[Storydex 故事创作 Agent]\n任务"
+        ));
+        assert!(!should_assemble_story_context("普通 Coomi Agent 任务"));
     }
 
     #[test]
     fn story_preflight_classifies_only_the_player_text() {
         let story = "[Storydex 剧情模式]\n规则包含 OOC 和 WORLD_CONTROL\n玩家行动：我推开门";
         let narrator = "[Storydex 剧情旁白模式]\n规则\n玩家输入：解释当前状态";
+        let agent = "[Storydex 故事创作 Agent]\n规则\n用户指令：整理角色设定";
         assert_eq!(story_player_input(story), "我推开门");
         assert_eq!(story_player_input(narrator), "解释当前状态");
+        assert_eq!(story_player_input(agent), "整理角色设定");
     }
 
     #[test]
@@ -4178,6 +4535,128 @@ mod tests {
     }
 
     #[test]
+    fn managed_items_are_loaded_from_canonical_and_legacy_indexes() {
+        let project = tempfile::tempdir().expect("temporary project");
+        let presets = project.path().join(".storydex/presets");
+        let scripts = project.path().join(".storydex/scripts");
+        fs::create_dir_all(&presets).expect("create presets");
+        fs::create_dir_all(&scripts).expect("create scripts");
+        fs::write(
+            presets.join("cinematic.md"),
+            "PRESET_SENTINEL 采用克制的电影镜头语言",
+        )
+        .expect("write preset");
+        fs::write(
+            presets.join("index.json"),
+            serde_json::to_vec(&json!({"items":[{"id":"p1","title":"电影感","filename":"cinematic.md","enabled":true}]})).unwrap(),
+        )
+        .expect("write preset index");
+        fs::write(
+            scripts.join("index.json"),
+            serde_json::to_vec(&json!({"items":[],"entries":[{"id":"s1","name":"东段山沟事件","enabled":true,"status":"active","completion_condition":"反派撤退","default_route":"线索转移","content":"SCRIPT_SENTINEL 山沟伏击持续发展"}]})).unwrap(),
+        )
+        .expect("write script index");
+
+        let context = assemble_mobile_story_context(project.path(), StorydexMode::Story, 2);
+        assert!(context.text.contains("PRESET_SENTINEL"));
+        assert!(context.text.contains("SCRIPT_SENTINEL"));
+        assert!(context.text.contains("完成条件：反派撤退"));
+        assert!(context.text.contains("默认路线：线索转移"));
+        assert!(
+            context
+                .categories
+                .get("constraints")
+                .copied()
+                .unwrap_or_default()
+                > 0
+        );
+        assert!(
+            context
+                .categories
+                .get("scripts_time")
+                .copied()
+                .unwrap_or_default()
+                > 0
+        );
+    }
+
+    #[test]
+    fn usage_categories_only_include_real_nonzero_sources() {
+        let categories = normalized_usage_categories(
+            StorydexMode::Story,
+            &BTreeMap::from([("story".into(), 90), ("memory".into(), 10)]),
+            1_000,
+        );
+        assert_eq!(categories.get("story"), Some(&900));
+        assert_eq!(categories.get("memory"), Some(&100));
+        assert!(!categories.contains_key("capabilities"));
+        assert!(!categories.contains_key("scripts_time"));
+        assert_eq!(categories.values().sum::<u64>(), 1_000);
+    }
+
+    #[test]
+    fn project_sessions_and_narrator_references_are_archived_by_mode() {
+        let project = tempfile::tempdir().expect("temporary project");
+        let mut session = Session::new("provider", "model", project.path().to_path_buf());
+        session.storydex_mode = "narrator".into();
+        session.messages.push(ChatMessage::user("解释药材铺的现状"));
+        session.messages.push(ChatMessage::assistant(
+            "周记药材铺约今日续第二批盘库。掌柜仍在等待确认。",
+            Vec::new(),
+        ));
+        save_storydex_session_record(&session).expect("archive session");
+        assert!(
+            project
+                .path()
+                .join(format!(".storydex/sessions/narrator/{}.json", session.id))
+                .is_file()
+        );
+
+        archive_narrator_output(
+            project.path(),
+            session.id,
+            "解释药材铺的现状",
+            &session.messages,
+        )
+        .expect("archive narrator output");
+        let story_context = assemble_mobile_story_context(project.path(), StorydexMode::Story, 2);
+        let agent_context = assemble_mobile_story_context(project.path(), StorydexMode::Agent, 2);
+        assert!(story_context.text.contains("周记药材铺约今日续第二批盘库"));
+        assert!(agent_context.text.contains("周记药材铺约今日续第二批盘库"));
+        assert!(
+            story_context
+                .categories
+                .get("memory")
+                .copied()
+                .unwrap_or_default()
+                > 0
+        );
+        assert!(
+            agent_context
+                .categories
+                .get("project_files")
+                .copied()
+                .unwrap_or_default()
+                > 0
+        );
+    }
+
+    #[test]
+    fn legacy_sessions_infer_mode_from_their_first_storydex_prompt() {
+        let project = tempfile::tempdir().expect("temporary project");
+        let mut story_session = Session::new("provider", "model", project.path().to_path_buf());
+        story_session.messages.push(ChatMessage::user(
+            "[Storydex 剧情模式]\n规则\n玩家行动：推门",
+        ));
+        let mut narrator_session = Session::new("provider", "model", project.path().to_path_buf());
+        narrator_session.messages.push(ChatMessage::user(
+            "[Storydex 剧情旁白模式]\n规则\n玩家输入：解释线索",
+        ));
+        assert_eq!(inferred_session_mode(&story_session), "story");
+        assert_eq!(inferred_session_mode(&narrator_session), "narrator");
+    }
+
+    #[test]
     fn story_fragment_paths_stay_under_chapters() {
         assert_eq!(
             validated_story_fragment_relative("chapters/202608092036/202608092036-001.md").unwrap(),
@@ -4214,17 +4693,17 @@ mod tests {
     }
 
     #[test]
-    fn browser_usage_includes_session_and_context_totals() {
+    fn browser_usage_categories_follow_current_context_not_accumulated_turn_input() {
         let state = BrowserUsageState {
-            input_tokens: 12_000,
-            cached_input_tokens: 8_000,
+            input_tokens: 120_000,
+            cached_input_tokens: 80_000,
             output_tokens: 800,
             reasoning_tokens: 120,
             context_used_tokens: 32_000,
             context_window_tokens: 128_000,
             turn_usage: TokenUsage {
-                input_tokens: 10_000,
-                cached_input_tokens: 7_500,
+                input_tokens: 48_000,
+                cached_input_tokens: 36_000,
                 output_tokens: 600,
                 reasoning_tokens: Some(100),
             },
@@ -4235,7 +4714,7 @@ mod tests {
             &BTreeMap::from([("story".into(), 4), ("memory".into(), 1)]),
             None,
         );
-        assert_eq!(value["usage"]["total_tokens"], 12_800);
+        assert_eq!(value["usage"]["total_tokens"], 120_800);
         assert_eq!(value["usage"]["context_used_tokens"], 32_000);
         assert_eq!(value["usage"]["context_window_tokens"], 128_000);
         assert_eq!(value["usage"]["context_ratio"], 0.25);
@@ -4252,12 +4731,36 @@ mod tests {
     }
 
     #[test]
+    fn requested_story_project_stays_inside_engine_workspace() {
+        let tmp = tempfile::tempdir().expect("temporary workspace");
+        let workspace = tmp.path().join("files");
+        let project = workspace.join("stories/demo");
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&project).expect("create project");
+        fs::create_dir_all(&outside).expect("create outside directory");
+        let state = AppState {
+            home: workspace.join("home"),
+            cwd: workspace,
+            port: 0,
+            token: "test-token".into(),
+            permission: Arc::new(RwLock::new(PermissionMode::Auto)),
+            tasks: Arc::new(StdMutex::new(HashMap::new())),
+            vision_degraded: Arc::new(StdMutex::new(HashSet::new())),
+            vision_failures: Arc::new(StdMutex::new(HashMap::new())),
+        };
+        let selected =
+            validated_story_project(&state, project.clone()).expect("select nested story project");
+        assert_eq!(selected, project.canonicalize().expect("canonical project"));
+        assert!(validated_story_project(&state, outside).is_err());
+    }
+
+    #[test]
     fn usage_summary_separates_modes_and_weights_cache_rates() {
         let entries = vec![
-            json!({"period_id":"p1","mode":"story","input_tokens":100,"cached_input_tokens":80,"output_tokens":20,"reasoning_tokens":4,"reasoning_effort":"low","duration_ms":20_000,"categories":{"story":60}}),
-            json!({"period_id":"p1","mode":"story","input_tokens":300,"cached_input_tokens":60,"output_tokens":40,"reasoning_tokens":8,"reasoning_effort":"low","duration_ms":40_000,"categories":{"story":180}}),
-            json!({"period_id":"p1","mode":"agent","input_tokens":200,"cached_input_tokens":100,"output_tokens":30,"reasoning_tokens":0,"reasoning_effort":"high","duration_ms":90_000,"categories":{"project_files":120}}),
-            json!({"period_id":"old","mode":"story","input_tokens":10_000,"cached_input_tokens":0,"output_tokens":1,"reasoning_tokens":0,"categories":{}}),
+            json!({"period_id":"p1","mode":"story","input_tokens":100,"cached_input_tokens":80,"output_tokens":20,"reasoning_tokens":4,"reasoning_effort":"low","duration_ms":20_000,"category_method":"assembled-v2","categories":{"story":60}}),
+            json!({"period_id":"p1","mode":"story","input_tokens":300,"cached_input_tokens":60,"output_tokens":40,"reasoning_tokens":8,"reasoning_effort":"low","duration_ms":40_000,"category_method":"assembled-v2","categories":{"story":180}}),
+            json!({"period_id":"p1","mode":"agent","input_tokens":200,"cached_input_tokens":100,"output_tokens":30,"reasoning_tokens":0,"reasoning_effort":"high","duration_ms":90_000,"category_method":"assembled-v2","categories":{"project_files":120}}),
+            json!({"period_id":"old","mode":"story","input_tokens":10_000,"cached_input_tokens":0,"output_tokens":1,"reasoning_tokens":0,"categories":{"capabilities":5}}),
         ];
         let summary = summarize_usage_entries(&entries, "p1");
         assert_eq!(summary["modes"]["story"]["turns"], 3);
@@ -4265,6 +4768,8 @@ mod tests {
         assert_eq!(summary["modes"]["story"]["cached_input_tokens"], 140);
         assert_eq!(summary["modes"]["agent"]["turns"], 1);
         assert_eq!(summary["modes"]["narrator"]["turns"], 0);
+        assert_eq!(summary["modes"]["story"]["categories"]["story"], 240);
+        assert!(summary["modes"]["story"]["categories"]["capabilities"].is_null());
         assert_eq!(summary["reasoning_efforts"]["low"]["turns"], 2);
         assert_eq!(summary["reasoning_efforts"]["low"]["average_tokens"], 230);
         assert_eq!(
@@ -4385,6 +4890,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn binding_new_session_cwd_stays_pending_until_first_message() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let cwd = tmp.path().join("project");
+        std::fs::create_dir_all(&home).expect("create home");
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        let state = AppState {
+            home: home.clone(),
+            cwd: cwd.clone(),
+            port: 0,
+            token: "test-token".into(),
+            permission: Arc::new(RwLock::new(PermissionMode::Auto)),
+            tasks: Arc::new(StdMutex::new(HashMap::new())),
+            vision_degraded: Arc::new(StdMutex::new(HashSet::new())),
+            vision_failures: Arc::new(StdMutex::new(HashMap::new())),
+        };
+        let id = Uuid::new_v4();
+
+        let response = set_session_cwd(
+            axum::extract::State(state.clone()),
+            AxumPath(id.to_string()),
+            Json(json!({"cwd": cwd.display().to_string(), "mode": "story"})),
+        )
+        .await
+        .expect("bind pending cwd");
+
+        assert_eq!(response.0["pending"], json!(true));
+        assert!(SessionStore::new(&home).load(id).is_err());
+        let pending = state
+            .task(&id.to_string())
+            .pending_cwd
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert_eq!(pending.as_deref(), Some(cwd.as_path()));
+    }
+
+    #[tokio::test]
     async fn list_sessions_reports_running_per_session() {
         // 构造 AppState：临时 home，塞两个会话 + 一个 running 任务。
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4404,10 +4947,20 @@ mod tests {
         };
 
         let store = SessionStore::new(&home);
-        let running_session = Session::new("provider", "model", cwd.clone());
-        let idle_session = Session::new("provider", "model", cwd.clone());
+        let mut running_session = Session::new("provider", "model", cwd.clone());
+        running_session
+            .messages
+            .push(ChatMessage::user("running session content"));
+        let mut idle_session = Session::new("provider", "model", cwd.clone());
+        idle_session
+            .messages
+            .push(ChatMessage::user("idle session content"));
+        let empty_session = Session::new("provider", "model", cwd.clone());
         store.save(&running_session).expect("save running session");
         store.save(&idle_session).expect("save idle session");
+        store
+            .save(&empty_session)
+            .expect("save legacy empty session");
 
         // 只把 running_session 标记为执行中（模拟 send_message 后的任务表状态）。
         let running_task = state.task(&running_session.id.to_string());
@@ -4419,6 +4972,7 @@ mod tests {
         let mut found_idle = false;
         for session in sessions {
             let id = session["id"].as_str().expect("session id");
+            assert_ne!(id, empty_session.id.to_string());
             assert!(session["title"].is_string(), "session should expose title");
             assert!(
                 session["summary"].is_string(),

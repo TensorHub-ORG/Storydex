@@ -222,6 +222,12 @@ async function onManagedFile(event: Event) {
 }
 
 // Memory
+const editingFactId = ref('')
+function memoryPreview(text: string) {
+  const compact = text.replace(/\s+/g, ' ').trim()
+  const sentence = compact.match(/^.*?[。！？!?…](?:[”’」』】》])?/)?.[0] ?? compact
+  return sentence || '空记忆事实'
+}
 function saveFact(fact: MemoryFact) { mutate(() => project.saveMemory(), '记忆事实已保存') }
 function requestRebuild(all: boolean) {
   mutate(async () => {
@@ -342,7 +348,8 @@ onBeforeUnmount(() => window.removeEventListener('coomi:files-imported', onNativ
         <p v-if="project.memoryPending" class="sync-state"><CoomiIcon name="alert" :size="15" />记忆待同步</p>
         <section class="memory-list">
           <article v-for="fact in project.memoryFacts" :key="fact.id" :class="{ stale: fact.stale }">
-            <textarea v-model="fact.text" rows="2" @change="saveFact(fact)" />
+            <textarea v-if="editingFactId === fact.id" v-model="fact.text" rows="3" autofocus @change="saveFact(fact)" @blur="editingFactId = ''" />
+            <button v-else class="memory-preview" :title="fact.text" @click="editingFactId = fact.id">{{ memoryPreview(fact.text) }}</button>
             <div><select v-model="fact.scope" @change="saveFact(fact)"><option value="objective">客观事实</option><option value="protagonist">主角已知</option></select><button :class="{ on: fact.locked }" @click="fact.locked = !fact.locked; saveFact(fact)">{{ fact.locked ? '已锁定' : '锁定' }}</button><span v-if="fact.stale">已过期</span><button class="danger" @click="deleteFact(fact)">删除</button></div>
           </article>
           <p v-if="project.memoryFacts.length === 0" class="empty">暂无结构化事实</p>
@@ -438,7 +445,7 @@ input,select,textarea { border:1px solid var(--border-strong); border-radius:6px
 .switch-row > i { position:relative; width:38px; height:22px; border-radius:11px; background:var(--fill-strong); }.switch-row > i::after { position:absolute; top:3px; left:3px; width:16px; height:16px; border-radius:50%; background:var(--bg); box-shadow:var(--shadow-1); content:''; }.switch-row > i.on { background:var(--blue); }.switch-row > i.on::after { transform:translateX(16px); }
 .text-actions { display:flex; flex-wrap:wrap; width:100%; gap:6px; }.text-actions button:disabled { opacity:.4; }
 .sync-state { display:flex; align-items:center; gap:6px; padding:8px 10px; border-radius:6px; background:var(--orange-soft); color:var(--orange); font-size:12px; }
-.memory-list article { align-items:stretch; }.memory-list article.stale { border-color:var(--orange); }.memory-list textarea { width:100%; padding:8px; resize:vertical; }.memory-list article > div { display:flex; align-items:center; gap:7px; }.memory-list article button { padding:5px 9px; border-radius:5px; background:var(--fill); font-size:11.5px; }.memory-list article button.on { color:var(--blue); background:var(--blue-soft); }.memory-list article span { flex:1; color:var(--orange); font-size:11px; }
+.memory-list article { align-items:stretch; }.memory-list article.stale { border-color:var(--orange); }.memory-list textarea { width:100%; padding:8px; resize:vertical; }.memory-list .memory-preview { display:block; width:100%; overflow:hidden; padding:8px 4px; background:transparent; color:var(--text); font-size:14px; line-height:1.5; text-align:left; text-overflow:ellipsis; white-space:nowrap; }.memory-list article > div { display:flex; align-items:center; gap:7px; }.memory-list article > div button { padding:5px 9px; border-radius:5px; background:var(--fill); font-size:11.5px; }.memory-list article button.on { color:var(--blue); background:var(--blue-soft); }.memory-list article span { flex:1; color:var(--orange); font-size:11px; }
 .wide-actions,.correction-actions { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin-top:10px; }.wide-actions button { min-height:40px; }
 .time-now { display:flex; flex-direction:column; gap:4px; padding:4px 2px 14px; }.time-now span { color:var(--text-3); font-size:12px; }.time-now strong { font-size:25px; letter-spacing:0; }.time-now small { color:var(--blue); }
 .inline-input { display:flex; gap:6px; }.inline-input input { width:130px; padding:0 8px; }.inline-input button { padding:0 10px; border-radius:5px; background:var(--blue-soft); color:var(--blue); }

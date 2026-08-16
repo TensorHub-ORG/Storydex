@@ -3,6 +3,7 @@ import { ref, computed } from 'vue'
 import { isDemoMode } from '@/bridge/demoMode'
 import { authedFetch } from '@/bridge/http'
 import type { Timelineitem } from './viewModel'
+import type { AgentMode } from './story'
 
 /**
  * 会话历史（纯本机）。
@@ -38,6 +39,8 @@ export interface SessionMeta {
   model?: string
   /** 用户手动重命名过：true 时引擎推导的标题不再覆盖。 */
   renamed?: boolean
+  /** Storydex 主模式；侧边栏与项目内会话目录均按此字段隔离。 */
+  mode: AgentMode
 }
 
 export interface SessionGroup {
@@ -51,7 +54,9 @@ function readMetas(): SessionMeta[] {
     if (!raw) return []
     const parsed = JSON.parse(raw)
     return Array.isArray(parsed)
-      ? (parsed as SessionMeta[]).filter(meta => meta.turns > 0 || meta.title !== '新对话')
+      ? (parsed as Array<Partial<SessionMeta>>)
+        .filter(meta => meta.turns! > 0 || meta.title !== '新对话')
+        .map(meta => ({ ...meta, mode: ['story', 'narrator', 'agent'].includes(meta.mode ?? '') ? meta.mode : 'agent' }) as SessionMeta)
       : []
   } catch {
     return []
@@ -77,6 +82,7 @@ export const useSessionsStore = defineStore('sessions', () => {
   const query = ref('')
   /** 引擎当前工作目录（来自 /api/runtime/health），用于会话按项目隔离。 */
   const currentCwd = ref('')
+  const currentMode = ref<AgentMode>('story')
   /** 引擎侧正在后台执行的会话 id 集合（/api/sessions 的 running 字段）。 */
   const runningIds = ref<Set<string>>(new Set())
 
@@ -117,26 +123,38 @@ export const useSessionsStore = defineStore('sessions', () => {
     currentCwd.value = cwd
   }
 
+  function setCurrentMode(mode: AgentMode) {
+    currentMode.value = mode
+    query.value = ''
+  }
+
   const sorted = computed(() =>
     [...metas.value].sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt - a.updatedAt)
   )
 
+  const modeSessions = computed(() => sorted.value.filter(meta =>
+    (meta.turns > 0 || meta.title !== '新对话')
+    && meta.mode === currentMode.value
+    && (!currentCwd.value || !meta.cwd || meta.cwd === currentCwd.value),
+  ))
+  const visibleCount = computed(() => modeSessions.value.length)
+
   const filtered = computed(() => {
     const q = query.value.trim().toLowerCase()
-    if (!q) return sorted.value
+    if (!q) return modeSessions.value
     // 与 Rust 侧 ranked_sessions 一致：title×5 / summary×3 / preview×1 / model×1 加权打分排序。
     // 注意：必须 Unicode 感知分词（\p{L}\p{N} 含中文 + 技术符号 +.#），与 Rust 的
     // is_alphanumeric 谓词对齐；不能用 ASCII 正则 [a-z0-9]，否则中文查询词会被整体拆掉。
     const terms = q.match(/[\p{L}\p{N}_+.#-]{2,}/gu) ?? []
-    if (terms.length === 0) return sorted.value
-    return sorted.value
+    if (terms.length === 0) return modeSessions.value
+    return modeSessions.value
       .map(m => ({ m, score: scoreSession(m, terms) }))
       .filter(x => x.score > 0)
       .sort((a, b) => b.score - a.score)
       .map(x => x.m)
   })
 
-  /** 置顶 / 今天 / 昨天 / 7 天内 / 更早 / 其它目录 —— 空组不出现。 */
+  /** 当前项目、当前模式内按时间分组；其它项目与其它模式不会混入。 */
   const groups = computed<SessionGroup[]>(() => {
     const buckets: SessionGroup[] = [
       { label: '置顶', items: [] },
@@ -144,17 +162,12 @@ export const useSessionsStore = defineStore('sessions', () => {
       { label: '昨天', items: [] },
       { label: '7 天内', items: [] },
       { label: '更早', items: [] },
-      { label: '其它目录', items: [] },
     ]
     const today = dayStart()
     const yesterday = dayStart(1)
     const week = dayStart(7)
-    const current = currentCwd.value
     for (const m of filtered.value) {
       if (m.pinned) buckets[0].items.push(m)
-      // 会话属于其它工作目录时归入「其它目录」，避免把别的项目的会话混进当前项目。
-      // cwd 为空的是旧数据，按当前项目对待。
-      else if (current && m.cwd && m.cwd !== current) buckets[5].items.push(m)
       else if (m.updatedAt >= today) buckets[1].items.push(m)
       else if (m.updatedAt >= yesterday) buckets[2].items.push(m)
       else if (m.updatedAt >= week) buckets[3].items.push(m)
@@ -224,7 +237,7 @@ export const useSessionsStore = defineStore('sessions', () => {
   function ensure(id: string, title = '新对话'): SessionMeta {
     let m = find(id)
     if (!m) {
-      m = { id, title, createdAt: Date.now(), updatedAt: Date.now(), turns: 0, pinned: false, cwd: currentCwd.value || undefined }
+      m = { id, title, createdAt: Date.now(), updatedAt: Date.now(), turns: 0, pinned: false, cwd: currentCwd.value || undefined, mode: currentMode.value }
       metas.value.unshift(m)
       persistMeta()
     }
@@ -236,10 +249,12 @@ export const useSessionsStore = defineStore('sessions', () => {
    * 排序时间 = 最后一轮 agent 的执行时间，由引擎在任务完成/中断时
    * 落盘到会话 updated_at，前端轮询合并——点击/打开会话不应改变排序。
    */
-  function touch(id: string, patch: Partial<Pick<SessionMeta, 'title' | 'turns'>> = {}) {
+  function touch(id: string, patch: Partial<Pick<SessionMeta, 'title' | 'turns' | 'cwd' | 'mode'>> = {}) {
     const m = ensure(id)
     if (patch.title) m.title = patch.title
     if (patch.turns != null) m.turns = patch.turns
+    if (patch.cwd) m.cwd = patch.cwd
+    if (patch.mode) m.mode = patch.mode
     persistMeta()
   }
 
@@ -328,7 +343,8 @@ export const useSessionsStore = defineStore('sessions', () => {
   }
 
   function clearAll() {
-    for (const m of metas.value) {
+    const ids = new Set(modeSessions.value.map(meta => meta.id))
+    for (const m of modeSessions.value) {
       try {
         localStorage.removeItem(TRANSCRIPT_PREFIX + m.id)
       } catch {
@@ -337,7 +353,7 @@ export const useSessionsStore = defineStore('sessions', () => {
       // 同步删除引擎磁盘记录，避免清空后从引擎列表“复活”。
       authedFetch(`/api/sessions/${m.id}`, { method: 'DELETE' }).catch(() => {})
     }
-    metas.value = []
+    metas.value = metas.value.filter(meta => !ids.has(meta.id))
     persist()
   }
 
@@ -361,6 +377,7 @@ export const useSessionsStore = defineStore('sessions', () => {
         title: string
         summary: string
         created_at: string
+        mode?: AgentMode
       }>
       const localById = new Map(metas.value.map(m => [m.id, m]))
       const merged: SessionMeta[] = remote.map(r => {
@@ -380,12 +397,13 @@ export const useSessionsStore = defineStore('sessions', () => {
           preview: r.preview || local?.preview,
           model: r.model || local?.model,
           renamed: local?.renamed,
+          mode: ['story', 'narrator', 'agent'].includes(r.mode ?? '') ? r.mode! : (local?.mode ?? 'agent'),
         }
       })
       // 本地有而引擎暂无的（旧迁移 ID 等）保留，避免吞掉用户数据
       const remoteIds = new Set(merged.map(m => m.id))
       for (const m of metas.value) {
-        if (!remoteIds.has(m.id)) merged.push(m)
+        if (!remoteIds.has(m.id) && (m.turns > 0 || m.title !== '新对话')) merged.push(m)
       }
       metas.value = merged
       persist()
@@ -396,7 +414,7 @@ export const useSessionsStore = defineStore('sessions', () => {
   }
 
   return {
-    metas, query, sorted, filtered, groups, currentCwd, setCurrentCwd,
+    metas, query, sorted, filtered, groups, visibleCount, currentCwd, currentMode, setCurrentCwd, setCurrentMode,
     syncFromEngine,
     ensure, touch, rename, togglePin, remove, find, deriveTitle,
     saveTranscript, loadTranscript, migrateId, clearAll,

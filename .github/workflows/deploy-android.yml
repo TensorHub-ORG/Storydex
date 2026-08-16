@@ -10,11 +10,11 @@ on:
       version:
         description: Android semantic version
         required: true
-        default: 0.1.2
+        default: 0.1.3
       asset_name:
         description: Android APK asset filename
         required: true
-        default: Storydex-Android-arm64-v0.1.2.apk
+        default: Storydex-Android-arm64-v0.1.3.apk
       sha256:
         description: Expected APK SHA-256
         required: true

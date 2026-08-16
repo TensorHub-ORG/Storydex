@@ -10,6 +10,7 @@ import android.system.OsConstants;
 
 import com.termux.shared.logger.Logger;
 import com.termux.shared.termux.TermuxConstants;
+import com.termux.BuildConfig;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -28,6 +29,9 @@ public class CoomiService extends Service {
 
     private static final String LOG_TAG = "CoomiService";
     private static final int HEALTH_CHECK_TIMEOUT_MS = 2000;
+    private static final int DAILY_ACTIVE_TIMEOUT_MS = 4000;
+    private static final String DAILY_ACTIVE_URL =
+        "https://updates.septemc.com/storydex/feedback/api/stats/dau/android";
     private static final int CMD_TIMEOUT_SEC = 30;
     /** ~/.profile 与 ~/.bashrc 里由 Coomi 管理的块标记：块内整体替换，块外保留用户内容。 */
     private static final String SHELL_BLOCK_START = "# >>> Coomi Android managed block >>>";
@@ -369,6 +373,7 @@ public class CoomiService extends Service {
                     // 旧进程加载的还是旧代码（新旧 API 不匹配，前端会 404）。
                     // 对比引擎自身写入的二进制指纹，不一致则重启。
                     if (engineMatchesApk()) {
+                        reportDailyActive();
                         mIsEngineStarting = false;
                         return new CommandResult(true, "already running", "", 0);
                     }
@@ -411,6 +416,7 @@ public class CoomiService extends Service {
             mEngineProcess = builder.start();
             mEnginePort = port;
             mIsEngineRunning = true;
+            reportDailyActive();
 
             Process process = mEngineProcess;
             new Thread(() -> {
@@ -558,6 +564,27 @@ public class CoomiService extends Service {
         } catch (Exception ignored) {
             return false;
         }
+    }
+
+    private void reportDailyActive() {
+        new Thread(() -> {
+            HttpURLConnection connection = null;
+            try {
+                connection = (HttpURLConnection) new URL(DAILY_ACTIVE_URL).openConnection();
+                connection.setRequestMethod("POST");
+                connection.setConnectTimeout(DAILY_ACTIVE_TIMEOUT_MS);
+                connection.setReadTimeout(DAILY_ACTIVE_TIMEOUT_MS);
+                connection.setDoOutput(true);
+                connection.setRequestProperty("X-Storydex-Version", BuildConfig.VERSION_NAME);
+                connection.setRequestProperty("User-Agent", "Storydex-Android/" + BuildConfig.VERSION_NAME);
+                connection.setFixedLengthStreamingMode(0);
+                connection.getResponseCode();
+            } catch (Exception ignored) {
+                // Usage telemetry must never affect engine startup.
+            } finally {
+                if (connection != null) connection.disconnect();
+            }
+        }, "storydex-daily-active").start();
     }
 
     private static String shellQuote(String value) {

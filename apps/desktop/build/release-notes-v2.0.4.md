@@ -1,6 +1,6 @@
 # Storydex v2.0.4
 
-本次发行完成 Storydex Android 剧情创作系统的项目级重构，并同步增强桌面端共用的 Coomi Rust 运行时。桌面版版本为 2.0.4，Android 测试版版本为 0.1.2。
+本次发行完成 Storydex Android 剧情创作系统的项目级重构，并同步增强桌面端共用的 Coomi Rust 运行时。桌面版版本为 2.0.4，Android 测试版版本为 0.1.3。
 
 ## 主要更新
 
@@ -17,5 +17,5 @@
 - `StorydexSetup-x64-2.0.4.exe`
 - `StorydexSetup-x64-2.0.4.exe.blockmap`
 - `Storydex-win-unpacked.zip`
-- `Storydex-Android-arm64-v0.1.2.apk`
+- `Storydex-Android-arm64-v0.1.3.apk`
 - `latest.yml`、`SHA256SUMS.txt`、`BUILD_MANIFEST.json` 和 `DEPENDENCIES.json`

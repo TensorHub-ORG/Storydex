@@ -27,6 +27,12 @@ export interface ManagedItem {
   updatedAt: string
 }
 
+type ManagedItemDocument = {
+  schemaVersion?: number
+  items?: Array<Record<string, unknown>>
+  entries?: Array<Record<string, unknown>>
+}
+
 export interface MemoryFact {
   id: string
   text: string
@@ -81,8 +87,8 @@ export const useProjectStore = defineStore('story-project', () => {
     error.value = ''
     try {
       settings.value = { ...DEFAULT_SETTINGS, ...(await readProjectJson<Partial<ProjectSettings>>('.storydex/settings.json') ?? {}) }
-      presets.value = (await readProjectJson<{ items?: ManagedItem[] }>('.storydex/presets/index.json'))?.items ?? []
-      scripts.value = (await readProjectJson<{ items?: ManagedItem[] }>('.storydex/scripts/index.json'))?.items ?? []
+      presets.value = await loadCollection('presets')
+      scripts.value = await loadCollection('scripts')
       const memory = await readProjectJson<{ facts?: MemoryFact[]; pendingSync?: boolean }>('.storydex/memory/state.json')
       memoryFacts.value = (memory?.facts ?? []).map(fact => ({ ...fact, scope: fact.scope ?? 'objective' }))
       memoryPending.value = memory?.pendingSync ?? false
@@ -104,6 +110,59 @@ export const useProjectStore = defineStore('story-project', () => {
   }
 
   function collection(kind: CollectionKind) { return kind === 'presets' ? presets : scripts }
+  function stringField(raw: Record<string, unknown>, ...keys: string[]): string {
+    for (const key of keys) {
+      const value = raw[key]
+      if (typeof value === 'string' && value.trim()) return value.trim()
+    }
+    return ''
+  }
+  function leafFilename(value: string): string {
+    const normalized = value.replace(/\\/g, '/')
+    const leaf = normalized.split('/').pop() ?? ''
+    return leaf && leaf !== '.' && leaf !== '..' ? safeFilename(leaf) : ''
+  }
+  async function loadCollection(kind: CollectionKind): Promise<ManagedItem[]> {
+    const document = await readProjectJson<ManagedItemDocument>(`.storydex/${kind}/index.json`)
+    const records = document?.items?.length ? document.items : (document?.entries ?? document?.items ?? [])
+    const result: ManagedItem[] = []
+    for (const [index, raw] of records.entries()) {
+      if (!raw || typeof raw !== 'object') continue
+      const id = stringField(raw, 'id', 'key') || createId(kind === 'presets' ? 'preset' : 'script')
+      const inlineContent = stringField(raw, 'content', 'prompt', 'body', 'text', 'instructions', 'description')
+      const rawFilename = stringField(raw, 'filename', 'file', 'path', 'relativePath', 'contentFile', 'content_file')
+      let filename = leafFilename(rawFilename)
+      let title = stringField(raw, 'title', 'name', 'label', 'presetName', 'scriptName')
+      if (!title && filename) title = filename.replace(/\.(?:md|markdown|txt)$/i, '')
+      title ||= kind === 'presets' ? `未命名预设 ${index + 1}` : `未命名剧本 ${index + 1}`
+      if (!filename) filename = `${safeFilename(title)}-${id.slice(-8)}.md`
+
+      const existing = await readProjectText(`.storydex/${kind}/${filename}`)
+      if (existing == null && inlineContent) {
+        await writeProjectText(`.storydex/${kind}/${filename}`, `${inlineContent}\n`)
+      }
+      const enabledValue = raw.enabled ?? raw.active ?? (typeof raw.disabled === 'boolean' ? !raw.disabled : undefined)
+      const statusValue = stringField(raw, 'status')
+      const status = ['active', 'pending', 'completed'].includes(statusValue)
+        ? statusValue as ManagedItem['status']
+        : (kind === 'scripts' ? 'active' : undefined)
+      result.push({
+        id,
+        title,
+        filename,
+        enabled: typeof enabledValue === 'boolean' ? enabledValue : true,
+        status,
+        completionCondition: kind === 'scripts'
+          ? stringField(raw, 'completionCondition', 'completion_condition', 'condition', 'goal')
+          : undefined,
+        defaultRoute: kind === 'scripts'
+          ? stringField(raw, 'defaultRoute', 'default_route', 'route')
+          : undefined,
+        updatedAt: stringField(raw, 'updatedAt', 'updated_at') || new Date().toISOString(),
+      })
+    }
+    return result
+  }
   async function saveCollection(kind: CollectionKind) {
     await writeProjectJson(`.storydex/${kind}/index.json`, { schemaVersion: 1, items: collection(kind).value })
   }

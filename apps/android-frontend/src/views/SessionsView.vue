@@ -5,18 +5,19 @@
  * 列表来自引擎磁盘会话（/api/sessions 为权威源），本地 localStorage 保存标题/置顶等
  * 元数据与最近对话正文；删除会话会同时删除引擎磁盘记录与本地记录。
  */
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSessionStore } from '@/stores/session'
 import { useSessionsStore, formatSessionTime, type SessionMeta } from '@/stores/sessions'
-import { useConfigStore } from '@/stores/config'
+import { useStoryStore } from '@/stores/story'
 import PageHead from '@/components/PageHead.vue'
 import CoomiIcon from '@/components/CoomiIcon.vue'
 
 const router = useRouter()
 const session = useSessionStore()
 const sessions = useSessionsStore()
-const config = useConfigStore()
+const story = useStoryStore()
+const modeLabel = computed(() => ({ story: '剧情', narrator: '旁白', agent: 'Agent' })[story.agentMode])
 
 const menuFor = ref<SessionMeta | null>(null)
 const askDelete = ref<SessionMeta | null>(null)
@@ -59,7 +60,7 @@ onMounted(() => {
 </script>
 <template>
   <div class="page">
-    <PageHead title="会话历史" @back="router.push('/')">
+    <PageHead :title="`${modeLabel}记录`" @back="router.push('/')">
       <template #right>
         <button class="icon-btn blue" aria-label="新对话" @click="startNew">
           <CoomiIcon name="plus" />
@@ -79,7 +80,7 @@ onMounted(() => {
 
     <main class="body">
       <!-- 历史会话列表始终可见；「全局会话记忆」开关只控制模型能否读取这些记录。 -->
-      <p v-if="sessions.metas.length === 0" class="empty">
+      <p v-if="sessions.visibleCount === 0" class="empty">
         还没有历史会话。回到对话随便说点什么，标题会用你的第一句话。
       </p>
       <p v-else-if="sessions.filtered.length === 0" class="empty">没有匹配「{{ sessions.query }}」的会话。</p>
@@ -104,11 +105,9 @@ onMounted(() => {
             </div>
           </div>
         </template>
-        <button v-if="sessions.metas.length" class="btn btn-danger wide" @click="askClear = true">清空全部记录</button>
+        <button v-if="sessions.visibleCount" class="btn btn-danger wide" @click="askClear = true">清空当前模式记录</button>
         <p class="note">
-          历史会话保存在引擎里（这台手机的应用私有目录），最近 12 条会留完整对话内容。
-          用同一个会话继续时，只要引擎进程还活着就是真的接上了上下文；引擎重启过的话，
-          就只剩本机这份记录。
+          当前模式的完整会话同时归档在故事项目的 .storydex/sessions 目录中。
         </p>
     </main>
     <div v-if="menuFor" class="scrim" @click.self="menuFor = null">
@@ -140,7 +139,7 @@ onMounted(() => {
     <div v-if="askClear" class="scrim" @click.self="askClear = false">
       <div class="sheet">
         <div class="grip" />
-        <p class="stitle">清空全部 {{ sessions.metas.length }} 条记录？</p>
+        <p class="stitle">清空 {{ modeLabel }}模式的 {{ sessions.visibleCount }} 条记录？</p>
         <p class="ssub">本机的标题和对话内容都会删掉，无法恢复。</p>
         <div class="sacts">
           <button class="btn" @click="askClear = false">取消</button>
