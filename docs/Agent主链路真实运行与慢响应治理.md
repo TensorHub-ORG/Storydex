@@ -345,3 +345,43 @@ Provider 流现在区分以下阶段，并保留请求/响应字节、HTTP 状�
 - 不同磁盘冷启动、项目规模和模型版本下，上下文候选排序是否仍保持稳定；若继续优化，必须先用同口径真实夹具确认新的主因。
 
 在 `ds/deepseek-v4-flash` 上游恢复前，不应增加 522 自动重试或用更长超时掩盖故障；应保留单次尝试、明确 HTTP 状态和可复现失败报告。
+
+### 9.9 2026-08-16 Rust Agent 迁移前复核
+
+本轮重新构建当前 `HEAD` 的 Rust bridge，并通过 Storydex 正常 Backend HTTP/SSE 入口运行真实模型场景。配置副本和小说项目均位于临时目录，未写回源配置，也未读写真实用户项目。
+
+第一轮从 OpenCode 的 `opencode.json` 选择 `ds/deepseek-v4-flash` 并转换到临时 Coomi Home。两次严格只读调用均产生相同边界：
+
+| 项目 | 修复前 | 修复后 |
+| --- | ---: | ---: |
+| 总耗时 | `25,857ms` | `26,519ms` |
+| Provider 等待 | `20,393ms` | `20,411ms` |
+| 模型回合 / 工具调用 | `1 / 0` | `1 / 0` |
+| Provider 尝试 / 重试 | `1 / 0` | `1 / 0` |
+| HTTP 结果 | `522` | `522` |
+| capability | `read_only` | `read_only` |
+| RouteHints 操作信号 | `read + write + scope_exclusion` | `read + no_write` |
+
+OpenCode CLI 对同一个 `ds` Provider 的无工具完整请求也在约 `20s` 收到 HTTP 522。该结果只能证明 `ds` 所指线路在该时段返回 522，不代表所有名为 `deepseek-v4-flash` 的 Provider 都不可用。
+
+后续核对发现，Storydex 桌面端实际激活的是自身 `providers.json` 中的 `OPENCODE/deepseek-v4-flash`。非敏感等值比较确认，`OPENCODE` 与 OpenCode 配置中的 `ds` 使用不同的 `base_url` 和 API Key；最近一次桌面端会话也记录为 `provider_id=OPENCODE` 并正常产生模型输出。因此，先前把 `ds` 的 522 外推为“桌面端实际 Provider 不可用”是错误的。
+
+改用桌面端实际生效的 `OPENCODE` Provider 后，严格只读场景通过：
+
+| 项目 | 实际结果 |
+| --- | ---: |
+| 总耗时 | `12,180ms` |
+| Provider 等待 / 模型生成 | `3,878ms / 5,542ms` |
+| 模型回合 / 工具调用 | `2 / 1` |
+| Provider HTTP / 重试 | `200 / 0` |
+| 工具序列 | `read_file` |
+| capability / RouteHints | `read_only / read + no_write` |
+| 固定证据标记 | 已返回 |
+
+同一个 `OPENCODE` Provider 的角色字段定向编辑也完成了实际读写闭环：一次保留报告的运行耗时 `23,136ms`，共 `6` 个模型回合、`5` 次工具调用，Provider 全程 HTTP 200、零重试；工具序列为 `read_file → edit_file（失败）→ search → edit_file（成功）→ read_file`。最终文件同时满足新字段已写入、旧字段已移除和保留字段未丢失，但严格基线仍因中途工具错误判为失败，不能表述为“零错误 scoped-write parity 已通过”。重复诊断中也出现过无工具错误的完成轮次，说明该现象不是稳定的 Provider 或 Rust 工具不可用；在获得可复现错误参数前，不据此修改 `edit_file` 实现。
+
+真实报告同时暴露了一个本地可复现问题：“不要修改任何文件”被当成正向写入，“不要使用其他工具”又被当成写入范围排除，使主模型收到了与 `read_only` capability 相冲突的 RouteHints。现已将操作信号改为按分句识别否定前缀，并区分项目级禁写与命名/局部排除；修复后的相同主链路报告确认 RouteHints 只保留 `read + no_write`。
+
+基线脚本还修复了一个诊断缺陷：SSE 已完成、但后置严格验收失败时，现在仍会先写入脱敏 `baseline-report.json` 并记录验收错误，不再只返回一条无法复盘的终端错误。当前结论是严格只读 live 已通过；scoped-write 已完成最终文件闭环，但其零中途错误门槛尚未稳定通过。
+
+`storydex-agentd` 首个只读配置切片完成后，又从当前代码重跑了相同 Storydex 主链路：`OPENCODE/deepseek-v4-flash` 总耗时 `10,462ms`，Provider 等待/生成 `2,669ms / 1,769ms`，2 个模型回合、1 次 `read_file`、零工具错误、零重试，最终 `AgentCompleted`；`capability=read_only`，RouteHints 仍为 `read + no_write`。这次结果继续证明 Storydex 实际配置可用，但不代表 Agent HTTP/SSE 已由 `storydex-agentd` 接管；当前 Rust 服务仅完成 health 和脱敏 Provider 状态切片。

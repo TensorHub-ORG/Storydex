@@ -1,15 +1,45 @@
 # Storydex Rust 后端与 Tauri 桌面重构计划
 
-- 状态：实施基线草案
+- 状态：实施基线草案（Agent 重构执行版）
 - 建立日期：2026-08-05
-- 适用范围：Storydex 2.x 稳定维护、Rust 后端迁移及后续 Tauri 桌面迁移
+- 最近修订：2026-08-16
+- 适用范围：Storydex 2.x 稳定维护、Agent Rust 重构、后续 Rust 后端与 Tauri 桌面迁移
+
+## 0. 本轮 Agent 重构边界
+
+本轮先处理 Agent 的实现语言和运行时边界，目标是“行为不变、实现可替换”，不是一次性重写整个后端。现有 Stable 生产链路继续使用 `Electron + Python/FastAPI + Rust Coomi bridge`；Rust Agent 先以旁路/Beta 形态运行，未达到 parity 前不得接管 Stable。
+
+本轮范围：
+
+- Agent 的意图、权限、TurnContract、上下文装配、工具循环、Provider 适配、SSE 生命周期、取消/恢复和错误透传。
+- 复用并整理现有 `apps/desktop/agent-runtime` 的 engine、services、tools、security 和 bridge 能力，不重复实现已有稳定基础设施。
+- 以现有 `/api/v1`、SSE、`.storydex` 文件格式、Git 边界和前端可见行为为兼容边界。
+
+本轮不做：
+
+- 不迁移 WIKI、Story Knowledge、普通项目服务或前端设计；这些仍由 Python/现有桌面壳负责。
+- 不同时切换 Tauri；Tauri 仍以后端稳定观察周期为前置条件。
+- 不把 123 个全后端路由或完整 Python 删除作为 Agent 首个切片的前置条件。
+
+执行方向只规定边界，不规定每个内部模块的固定拆分。实现过程中以现有代码和测量结果决定 crate、进程和适配器的最小划分；不得为了“重构完整”增加无消费者的中间层、额外模型调用或重复上下文构建。外部技术资料在确有疑问时可用 `smartsearch` 查询，不是本计划的必需依赖。
+
+### 0.1 2026-08-16 当前执行状态
+
+本轮实际进度按里程碑记录如下：
+
+- **M0：部分完成。** 已用 Storydex 当前生效的 `OPENCODE/deepseek-v4-flash` 配置跑通一次真实严格只读主链路（Provider HTTP `200`、2 个模型回合、1 次 `read_file`、RouteHints 为 `read + no_write`）；意图否定语义和基线报告持久化缺陷已修复。取消、审批、恢复以及不稳定行为台账仍未收齐。
+- **M1：部分完成。** 已建立 Agent runtime manifest，以及可指向任意 base URL 的 health、Coomi 状态黑盒契约和 Rust/Python 归一化比较入口；读写、SSE、取消/恢复的完整契约仍待补齐。
+- **M2：骨架已实现并通过本地验证。** `apps/desktop/agent-runtime/storydex-agentd` 是未接入 Stable 的独立 loopback 服务，具备动态端口、每次启动 token、统一 envelope、trace、panic 边界、任务注册表、`CancellationToken` 和受控关闭；格式、Clippy、单测、release 构建、真实启动/鉴权/退出及 Python Stable health 差分均已通过。CI 和人工完整测试入口已加入独立 `storydex-agentd` 构建检查；独立依赖审计与远端 CI 结果仍待补齐，因此尚未宣告里程碑最终完成。
+- **M3：已开始首个无副作用切片。** Rust 已实现只读 `/api/v1/agent/coomi/status`，直接读取 Storydex Coomi Home 并返回脱敏的激活 Provider/模型与能力；尚未达到完整字段 parity，也尚未把 Agent HTTP/SSE 主链路接入 `storydex-agentd`。Electron Beta、Stable 切换和 Tauri 迁移均未开始。
+
+这里的“真实主链路”特指 Storydex 自身 `providers.json` 中当前激活的 Provider；OpenCode 源配置中的 `ds/deepseek-v4-flash` 曾返回 HTTP `522`，它不是 Storydex 当前主链路的配置，不能作为迁移阻断依据。
 
 ## 1. 结论
 
-Storydex 采用分两次切换的渐进式重构：
+Storydex 采用分阶段、可回滚的渐进式重构：
 
-1. 先在 Electron 桌面壳不变的前提下，将 FastAPI 后端迁移为独立 Rust 后端 `storydex-agentd`。
-2. Rust 后端经过稳定版本验证后，再将 Electron 桌面壳迁移到 Tauri 2。
+1. 先在 Electron 桌面壳不变的前提下，将 Agent 执行链逐步迁移到独立 Rust 服务（可复用现有 runtime；服务名沿用 `storydex-agentd` 仅作为目标形态）。
+2. Agent Rust 版本经过差分、Beta 和稳定观察后，再评估其余后端切片；完整 Rust 后端稳定后，才迁移 Electron 到 Tauri 2。
 
 在重构门禁完成前，后续 2.x 小版本继续使用当前 `Electron + Python/FastAPI + Rust Coomi bridge` 生产链路。Rust 和 Tauri 的未完成实现不得进入正式包、不得读取或写入真实用户项目，也不得通过静默 fallback 改变线上行为。
 
@@ -22,7 +52,7 @@ Storydex 采用分两次切换的渐进式重构：
 - 保持现有 Vue 工作台的用户可见功能、交互路径和数据语义基本不变。
 - 保持 `/api/v1` HTTP 接口、SSE 事件、错误 envelope 和状态码兼容。
 - 保持已有小说项目无需转换即可由新旧后端读取，迁移期不引入单向磁盘格式升级。
-- 保持 Agent、WIKI、Story Knowledge、字数门禁、回滚和 Git 边界的既有硬性规则。
+- 保持 Agent、WIKI、Story Knowledge、字数门禁、回滚和 Git 边界的既有硬性规则；本轮允许改变 Agent 的实现语言，但不改变这些规则的语义。
 - 降低冷启动、空闲内存、安装体积和本地计算耗时。
 - 将并发、取消、恢复、文件事务和进程生命周期变为可测试的显式状态模型。
 - 最终移除正式包中的嵌入式 Python、FastAPI/Uvicorn 依赖和 Electron/Node 桌面运行时。
@@ -30,13 +60,14 @@ Storydex 采用分两次切换的渐进式重构：
 ### 2.2 非目标
 
 - 不在迁移期间重做前端设计或改变主要工作流。
-- 不同时更改 Agent/WIKI 产品规则和实现语言。
+- 本轮不改变 Agent/WIKI 产品规则、提示词约束、权限含义或主要工作流；只迁移 Agent 的实现语言和运行时边界。
+- 本轮不要求一次性移除 Python/FastAPI；旧实现作为 Stable 参考和可回滚版本保留到正式切换完成。
 - 不把本地应用拆成网络微服务。
 - 不为迁移方便降低现有测试、覆盖率、安全或发布门禁。
 - 不以大量 `serde_json::Value` 逐句翻译 Python 动态字典；领域层应使用明确类型。
 - 不承诺 LLM 网络请求本身会因桌面框架变化而显著加速。
 
-## 3. 2026-08-05 基线
+## 3. 历史基线与本轮基线规则
 
 | 项目 | 当前基线 |
 | --- | --- |
@@ -49,7 +80,7 @@ Storydex 采用分两次切换的渐进式重构：
 | Agent Runtime | `apps/desktop/agent-runtime` Rust workspace，经 JSONL bridge 调用 |
 | 正式桌面运行时 | Electron 40 + 内嵌 Python 3.9 + MinGit + Rust bridge |
 
-本次盘点中，API、Rust bridge、SSE、工作区和 WIKI 边界子集为 `64 passed`。完整 946 项测试在本地 5 分钟观察上限内未结束，因此 M0 必须先建立可重复、可完整结束的规范测试基线；在此之前不得将“当前全套通过”作为迁移前提。
+上表是 2026-08-05 的历史盘点，不作为本轮 Agent parity 的最终数字。本轮 Agent 行为起点以 `40d37b0972f68e197b364c2570a88c7a42d8de40` 及 `docs/Agent运行链路信息完整性与性能治理.md` 中已有基线为准，并在首个切片前重新生成相关行为、性能和资源数据。全后端 123 路由的完整 manifest 可以作为后续 Rust 后端迁移工作，不应阻塞 Agent 首个切片。历史盘点中的完整测试未在当时的观察窗口内结束，因此任何“全套通过”都必须以实际可重复的命令和结果为准。
 
 ## 4. 发布隔离策略
 
@@ -87,6 +118,8 @@ Stable 不得因其他轨道未完成而改变启动命令、依赖、安装资�
 
 ## 5. 目标架构
 
+以下是长期完整目标；本轮只实现其中的 Agent 边界，不要求同时迁移图中的全部领域服务。
+
 ```text
 apps/frontend (Vue 3 + Vite)
         |
@@ -108,6 +141,8 @@ storydex-agentd (独立 Rust 进程)
 `storydex-agentd` 保持为独立进程，而不是把全部 Agent 工作直接放进 Tauri Core。这样可以隔离 Agent、Shell、Git 或第三方 Provider 异常，并保留独立重启、日志、健康检查和执行恢复能力。
 
 Rust 后端建议从一个 workspace、一个核心 library 和一个服务 binary 开始。只有当编译边界、测试隔离或所有权确有收益时才继续拆 crate，避免用 crate 数量代替模块设计。
+
+本轮的过渡边界更窄：`storydex-agentd` 首先只承载 Agent 的执行、权限、上下文、工具和 SSE 协调；WIKI、Story Knowledge、项目服务等仍留在 Python Stable。现有 `apps/desktop/agent-runtime` 已包含 engine、services、tools、security 和 bridge，优先通过复用或提取稳定接口接入，只有在所有权或测试隔离确有收益时才新建 crate。Agent 与 Python 领域服务之间使用明确的 HTTP/JSONL 或库接口，不以隐式跨进程状态作为兼容手段。
 
 ## 6. 兼容契约
 
@@ -142,7 +177,19 @@ Rust 后端建议从一个 workspace、一个核心 library 和一个服务 bina
 - Git 操作只允许当前 Storydex 项目仓库，不得吸收父仓库。
 - 差分测试中的写操作只能在同一 fixture 的两份临时克隆中执行，禁止对真实项目双写。
 
-### 6.5 桌面与更新
+### 6.5 Agent 行为契约
+
+Agent 重构的 parity 以外部可观察行为为准，而不是以 Python/Rust 内部结构相同为准。至少保持以下语义：
+
+- intent、权限模式、目标路径、上下文来源和 TurnContract 的约束一致；自然语言不能扩大已编译权限。
+- 工具名称、调用顺序、参数校验、revision/span、截断状态、文件集合和 Git 变更集一致。
+- SSE 事件名称、阶段顺序、heartbeat、唯一终止事件，以及 follow-up、steer、cancel、approval、resume 和 disconnect 状态迁移一致。
+- Provider 的 HTTP 状态、异常类型、阶段、trace/session 和可安全展示的错误信息不能被压成笼统成功或失败。
+- 生成文本允许因模型采样而不同，但必须满足相同的文件写入边界、字数/质量门禁、章节标记和项目语义约束。
+
+读操作可比较规范化响应；写操作必须在两份相同的临时 fixture 上比较文件、revision、Git 状态和事件流。任何差异都要解释为 bug、已确认的不稳定行为或明确的兼容决策，不能扩大忽略字段来消除差异。
+
+### 6.6 桌面与更新
 
 - 保持目录选择、打开文件、文件定位、预览窗口、标题栏、单实例和退出清理行为。
 - Tauri 更新使用独立的签名密钥和更新源验收，不复用未经转换的 Electron `latest.yml`/blockmap 契约。
@@ -152,13 +199,15 @@ Rust 后端建议从一个 workspace、一个核心 library 和一个服务 bina
 
 ### M0：先稳定当前实现
 
+本轮 M0 只为 Agent 重构建立足够的事实基线，不要求先完成整个 Python 后端的治理。
+
 工作项：
 
-- 建立不稳定功能台账，至少记录复现步骤、期望行为、影响范围、严重度、关联测试和临时规避方式。
-- 优先覆盖 Agent SSE/follow-up/steer/cancel、故事生成与回滚、WIKI 增量同步、Git 自动提交、桌面启动与更新。
+- 建立 Agent 不稳定行为台账，记录复现步骤、期望行为、影响范围、关联测试和临时规避方式。
+- 优先覆盖 Agent 的 SSE、工具循环、权限、上下文、follow-up/steer/cancel/approval/resume、文件写入和错误透传。
 - 修复 P0/P1 根因；无法立即修复的行为必须明确标为实验功能或阻断迁移，不得默默冻结成 Rust 契约。
-- 固化 Windows Python 3.9/3.13、Rust workspace、前端和桌面完整测试命令与最长合理耗时。
-- 记录冷启动、空闲 RSS、首个 SSE、搜索、WIKI 冷/增量构建、取消响应和安装体积基线。
+- 固化 Agent 相关的 Python、Rust、前端和桌面聚焦测试命令及合理超时。
+- 记录 Agent 冷启动、首个 SSE、工具轮、取消响应、上下文装配和 provider 错误基线；WIKI/全后端性能基线按原计划后续维护。
 
 退出条件：
 
@@ -170,11 +219,10 @@ Rust 后端建议从一个 workspace、一个核心 library 和一个服务 bina
 
 工作项：
 
-- 导出并版本化 OpenAPI 快照，同时建立独立的端点 manifest；OpenAPI 不能替代行为测试。
-- 为 123 个路由标记 `untracked/captured/ported/parity/release-ready` 状态。
-- 建立可接受任意 base URL 的黑盒 HTTP/SSE 契约套件。
-- 建立典型小说项目 fixture，记录执行前后目录清单、规范化 JSON、文件 hash、Git 状态和变更集。
-- 将前端 API 类型与后端响应 schema 做字段级映射检查。
+- 为 Agent HTTP/SSE、工具、错误和文件边界建立独立 manifest；全后端 123 路由 manifest 不作为本轮前置条件。
+- 建立可接受任意 base URL 的 Agent 黑盒 HTTP/SSE 契约套件，覆盖读、受限写、审批、取消和恢复。
+- 建立典型小说项目 fixture，记录执行前后目录清单、规范化 JSON、文件 hash、Git 状态、工具序列和变更集。
+- 将前端 Agent API 类型与响应 schema 做字段级映射检查；OpenAPI 只作为索引，不能替代行为测试。
 
 退出条件：
 
@@ -186,8 +234,8 @@ Rust 后端建议从一个 workspace、一个核心 library 和一个服务 bina
 
 工作项：
 
-- 新建独立 `apps/backend-rs` workspace，不修改现有生产启动入口。
-- 建立 `storydex-core` library 与 `storydex-agentd` binary。
+- 建立不接入 Stable 的 Rust Agent 服务骨架；可以复用现有 `apps/desktop/agent-runtime` workspace，也可以在 `apps/backend-rs` 建立边界，具体选择以现有 crate 所有权和测试隔离为准。
+- 建立 Agent core 与服务 binary 的最小边界，不为尚未迁移的 WIKI/项目服务预留空壳模块。
 - 使用 Tokio、Axum、Serde、Tower 和 tracing 实现 health、版本、trace、统一错误和受控关闭。
 - 默认只监听 `127.0.0.1` 的动态端口，使用每次启动生成的认证 token。
 - 接入结构化日志、panic 边界、任务注册表、CancellationToken 和 shutdown deadline。
@@ -225,11 +273,24 @@ Rust 后端建议从一个 workspace、一个核心 library 和一个服务 bina
 
 任何切片未达到 parity 前都不得通过“返回空数据”“捕获所有异常”“自动重试”或跳过写入来假装兼容。
 
+### 本轮 Agent 执行路径
+
+上表是完整 Rust 后端的长期风险顺序；本轮 Agent 重构不需要等待 WIKI 或普通项目服务迁移完成。执行时保持以下方向即可，内部拆分可随证据调整：
+
+1. 先把现有 Python Agent 的意图、权限、TurnContract、上下文、工具循环和生命周期行为固化为可运行 fixture。
+2. 在现有 Rust runtime 上补齐缺失的强类型领域模型和适配器，优先复用 provider、tools、security、session 和 bridge，不重复造轮子。
+3. 让 Rust Agent 在 Refactor/Beta 轨道与 Python Stable 做同输入差分；读请求比较响应和事件，写请求比较临时项目副作用。
+4. 只有 parity 和故障注入结果稳定后，才扩大到 Electron Beta；Tauri 和非 Agent 后端继续按后续里程碑处理。
+
+这不是必须逐项打勾的流水线。若现有实现已覆盖某一层，直接保留并补契约；若某一层尚无真实消费者，不为满足目录结构而新增实现。
+
 ### M4：Electron + Rust Beta
+
+本轮 M4 只验证 Agent Rust 服务；未迁移的 WIKI、Story Knowledge 和普通项目接口继续由 Python 提供。
 
 工作项：
 
-- 让 Electron 在独立 beta 构建中启动 `storydex-agentd`，Stable 仍固定启动 Python。
+- 让 Electron 在独立 beta 构建中同时管理现有 Python 后端和 `storydex-agentd`，只将 Agent 表面切到 Rust；Stable 仍固定使用 Python Agent 链路。
 - 复用现有 `/api/v1` 和 SSE，首轮不改为 Tauri IPC 或自定义事件协议。
 - 验证端口避让、启动超时、日志轮换、进程树清理、崩溃提示和执行恢复。
 - 使用复制后的大型真实项目样本做长会话、中文路径、断网、Provider 错误和强制退出测试。
@@ -237,16 +298,18 @@ Rust 后端建议从一个 workspace、一个核心 library 和一个服务 bina
 
 退出条件：
 
-- 全部 manifest 项达到 parity。
+- Agent manifest 项达到 parity；未迁移的全后端 manifest 不计入本轮 Beta 门禁。
 - Python/Rust 黑盒差分无未解释差异。
 - 完整前端、桌面和封装 E2E 在 Rust beta 包上通过。
 - 至少两个连续发布候选周期没有 P0/P1 数据损坏、执行丢失或更新阻断问题。
 
 ### M5：Rust 后端正式切换
 
+M5 的完整版本仍属于后续全后端迁移。本轮只有在 Agent 的 Beta 和稳定观察完成后，才允许讨论将 Electron 默认 Agent 执行链切换到 Rust；不得借此同时切换其他后端或 Tauri。
+
 工作项：
 
-- 在独立的主版本或迁移版本中，将 Electron 默认后端切换为 `storydex-agentd`。
+- 在独立的主版本或迁移版本中，将 Electron 默认 Agent 执行链切换为 `storydex-agentd`；未迁移的后端接口继续由 Python 提供。
 - 正式包不同时捆绑 Python 后端作为静默 fallback。
 - 保留上一个 Python 稳定版本的签名安装包、源码分支和更新元数据，以支持人工回滚。
 - 因为磁盘格式保持向后兼容，用户回滚旧版本时不需要数据降级。
@@ -315,9 +378,18 @@ Rust 后端建议从一个 workspace、一个核心 library 和一个服务 bina
 - Rust 覆盖率在 M2 建立独立基线，在 M3 每个切片完成后 ratchet 上调。
 - API、路径安全、文件事务、执行协调、WIKI 写入和 Agent 状态机属于 critical 模块，不能仅依靠总覆盖率。
 
+### 8.4 Agent 真实主链路
+
+- 真实模型验证使用完整 Agent 场景和真实工具/文件流程，不用一 token、空请求或短 health prompt 代替主链路。
+- 至少覆盖只读、跨文件读取、章节中段读取、受限角色字段编辑，以及可用时的 follow-up、approval、cancel、resume 和错误场景。
+- provider 不可用时，使用脱敏的 replay/fixture 继续做本地差分；报告必须保留真实 HTTP 状态，不能换模型或静默 fallback 后宣称 live 通过。
+- live 结果用于验证 provider 适配和端到端行为；Rust 本地逻辑的日常门禁不得依赖外部 provider 始终在线。
+
 ## 9. 性能验收
 
 M0 先固定机器、数据集、预热方式、样本数和统计口径，再提交具体数值目标。目标提交后，除非记录测量口径变化，不得在切换前放宽。
+
+指标用于识别真正的本地瓶颈，不为测量本身增加额外模型调用、重复上下文或不必要的串行层；只有可重复的收益才进入切换门禁。
 
 至少跟踪：
 
@@ -367,6 +439,16 @@ M0 先固定机器、数据集、预热方式、样本数和统计口径，再�
 
 ## 12. 完成定义
 
+### 12.1 Agent Rust 重构完成定义
+
+只有同时满足以下条件，才可把本轮 Agent 重构标为完成：
+
+- Agent 的 HTTP/SSE、权限、工具、文件、session 和错误行为通过 Python/Rust 差分；差异有明确解释。
+- 读写 fixture、取消/审批/恢复、路径安全和 provider 错误场景均有可重复证据。
+- Electron Stable 未被旁路实现静默替换；Agent Beta 的启动、崩溃、恢复和回滚可见且可控。
+- 至少一轮完整真实主链路通过；provider 不可用时明确记录为外部阻塞，不以 replay 冒充 live 成功。
+- 性能结论来自本地基线和真实收益，不以增加模型调用、上下文或隐藏重试换取表面指标。
+
 Rust 后端完成需要同时满足：
 
 - 公开 HTTP/SSE 契约、项目磁盘格式和 Git 副作用通过差分验证。
@@ -384,22 +466,22 @@ Tauri 迁移完成需要同时满足：
 
 ## 13. 第一批可执行工作
 
-第一批工作只增加证据和旁路基础设施，不改变生产运行时：
+第一批工作只增加 Agent 证据和旁路基础设施，不改变 Stable 生产运行时：
 
-1. 建立不稳定功能台账并为每项补充最小复现。
-2. 生成 123 个端点的 manifest 和当前 OpenAPI 快照。
-3. 将 SSE 事件、错误 envelope 和磁盘格式整理为版本化契约 fixture。
-4. 建立 Python 后端黑盒 runner 和临时项目差分工具。
-5. 建立可重复的启动、RSS、首个 SSE、搜索和 WIKI 基准。
-6. 当前完整 release gate 连续稳定后，再创建 `apps/backend-rs` 骨架。
+1. 记录 Agent 外部行为和已知不稳定点，形成最小可运行的读/写/取消/恢复 fixture。
+2. 盘点并复用现有 Rust runtime，确定 Agent 服务与 Python 领域服务的最小边界。
+3. 建立 Python/Rust 黑盒差分和 provider replay；随后实现 Rust Agent 的第一条无副作用切片。
+4. 用完整主链路、故障注入和资源基线决定是否扩大切片；达到 parity 后再进入 Electron Beta。
 
-完成以上六项后，才进入实际业务代码迁移。
+不要求先完成全后端 123 路由 manifest，也不要求先改 Tauri；这些工作在 Agent 稳定后按需要推进。
 
 ## 14. 参考边界
 
 - 当前后端入口：`apps/backend/main.py`
 - 当前 Agent/SSE 路由：`apps/backend/api/routes_agent.py`
+- 当前 Agent 编排与契约：`apps/backend/services/agent_intent_routing.py`、`apps/backend/services/agent_capability_policy.py`、`apps/backend/services/storydex_orchestration_service.py`、`apps/backend/services/storydex_context_assembler_service.py`
 - 当前 Rust bridge：`apps/backend/services/coomi_bridge_client.py`
+- 当前 Rust Agent runtime：`apps/desktop/agent-runtime/engine`、`services`、`tools`、`security`、`storydex-bridge`
 - 当前桌面启动与更新：`apps/desktop/electron/main.cjs`
 - 当前发布门禁：`.github/workflows/quality-gate.yml`
 - 当前本地完整检查：`scripts/run_full_test_suite.ps1`
