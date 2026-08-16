@@ -618,7 +618,11 @@ def run_baseline(args: argparse.Namespace) -> dict[str, Any]:
                 backend.stop()
 
             turn = public_turn(result, fixture, workspace=workspace)
-            validate_baseline_turn(turn, fixture)
+            validation_error: AcceptanceError | None = None
+            try:
+                validate_baseline_turn(turn, fixture)
+            except AcceptanceError as exc:
+                validation_error = exc
             config_observation["outputLimit"] = output_limit_observation(
                 isolated_provider,
                 turn["lifecycle"],
@@ -630,7 +634,7 @@ def run_baseline(args: argparse.Namespace) -> dict[str, Any]:
             report = {
                 "_type": "AgentLifecycleBaseline",
                 "_version": 2,
-                "status": "passed",
+                "status": "failed" if validation_error is not None else "passed",
                 "startedAt": started_at,
                 "finishedAt": now_iso(),
                 "provider": redact(provider),
@@ -651,7 +655,13 @@ def run_baseline(args: argparse.Namespace) -> dict[str, Any]:
                     },
                 },
             }
+            if validation_error is not None:
+                report["error"] = f"baseline validation failed: {validation_error}"
             write_json(report_path, redact(report))
+            if validation_error is not None:
+                raise AcceptanceError(
+                    f"{validation_error}; report={report_path.as_posix()}"
+                ) from validation_error
             return report
     finally:
         if original_bridge is None:

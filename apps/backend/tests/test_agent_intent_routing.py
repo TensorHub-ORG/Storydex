@@ -44,6 +44,40 @@ def test_route_hints_strip_read_and_delete_verbs_from_entity_names() -> None:
     assert "delete" in deletion["operationSignals"]
 
 
+def test_route_hints_do_not_turn_strict_read_only_negations_into_write_signals() -> None:
+    hints = build_route_hints(
+        prompt=(
+            "这是一次只读测试。只能调用 read_file 读取 "
+            "chapters/lifecycle-baseline.md；不要使用其他工具，"
+            "不要修改或写入任何项目文件。"
+        ),
+        routing_mode=HYBRID,
+    )
+
+    assert hints["operationSignals"] == ["read", "no_write"]
+
+
+def test_route_hints_keep_local_no_write_constraints_scoped() -> None:
+    hints = build_route_hints(
+        prompt="修复 Agent 路由缺陷，不要修改 Provider 配置",
+        routing_mode=HYBRID,
+    )
+
+    assert "write" in hints["operationSignals"]
+    assert "scope_exclusion" in hints["operationSignals"]
+    assert "no_write" not in hints["operationSignals"]
+
+
+def test_route_hints_ignore_negated_delete_as_positive_delete() -> None:
+    hints = build_route_hints(
+        prompt="只读检查 chapters/one.md，不要删除任何文件",
+        routing_mode=HYBRID,
+    )
+
+    assert "delete" not in hints["operationSignals"]
+    assert "write" not in hints["operationSignals"]
+
+
 def test_routing_mode_aliases_are_explicit_and_reversible() -> None:
     assert normalize_routing_mode("b") == DIRECT
     assert normalize_routing_mode("c_hybrid") == HYBRID

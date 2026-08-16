@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
 import pytest
 
+import scripts.run_agent_lifecycle_baseline as baseline_module
 from scripts.run_agent_lifecycle_baseline import (
     AcceptanceError,
     MULTI_MARKERS,
@@ -29,6 +33,106 @@ def valid_turn() -> dict:
 
 def test_baseline_validation_accepts_exact_read_only_turn() -> None:
     validate_baseline_turn(valid_turn())
+
+
+def test_baseline_writes_report_when_post_turn_validation_fails(
+    tmp_path, monkeypatch
+) -> None:
+    source_config = tmp_path / "providers.json"
+    source_config.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "active": "provider",
+                "providers": {
+                    "provider": {
+                        "type": "openai_compatible",
+                        "base_url": "https://example.test/v1",
+                        "api_key": "fixture-value",
+                        "model": "model",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    bridge = tmp_path / "storydex-coomi-bridge.exe"
+    bridge.write_bytes(b"bridge")
+    output_dir = tmp_path / "output"
+
+    class FakeBackendProcess:
+        base_url = "http://127.0.0.1:1"
+
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+    class FakeClient:
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(baseline_module, "BackendProcess", FakeBackendProcess)
+    monkeypatch.setattr(baseline_module.httpx, "Client", FakeClient)
+    monkeypatch.setattr(baseline_module, "free_port", lambda: 1)
+    monkeypatch.setattr(
+        baseline_module,
+        "run_turn",
+        lambda *_args, **_kwargs: {
+            "traceId": "trace",
+            "sessionId": "session",
+            "elapsedMs": 10,
+            "eventCount": 2,
+            "events": [],
+            "protocol": {},
+            "replyPreview": baseline_module.MARKER,
+            "usage": {},
+            "errors": [],
+            "lifecycle": {
+                "toolCalls": 1,
+                "tools": [{"tool": "read_file", "error": True}],
+            },
+            "toolCalls": [
+                {
+                    "event": "ToolStart",
+                    "toolName": "read_file",
+                    "toolCallId": "call-1",
+                    "arguments": {"path": "chapters/lifecycle-baseline.md"},
+                },
+                {
+                    "event": "ToolDone",
+                    "toolName": "read_file",
+                    "toolCallId": "call-1",
+                    "isError": True,
+                },
+            ],
+        },
+    )
+    args = SimpleNamespace(
+        output_dir=str(output_dir),
+        config=str(source_config),
+        bridge=str(bridge),
+        scenario="strict-single-read",
+        provider_id="provider",
+        model="model",
+        enable_parallel_tool_calls=False,
+        intent_routing_mode="",
+        backend_repository_root="",
+        reasoning_effort="low",
+        turn_timeout=30,
+    )
+
+    with pytest.raises(AcceptanceError, match="report="):
+        baseline_module.run_baseline(args)
+
+    report = json.loads((output_dir / "baseline-report.json").read_text(encoding="utf-8"))
+    assert report["status"] == "failed"
+    assert report["error"] == "baseline validation failed: baseline task reported a tool error"
+    assert report["turn"]["toolSequence"] == ["read_file"]
 
 
 @pytest.mark.parametrize(

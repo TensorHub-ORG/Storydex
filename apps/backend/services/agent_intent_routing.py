@@ -66,17 +66,40 @@ _WRITE_SIGNAL_RE = re.compile(
     r"edit|update|adjust|rewrite|create|add|generate|delete|organize|sync|implement|fix|save",
     re.I,
 )
-_NO_WRITE_RE = re.compile(
-    r"不要|不得|禁止|无需|不用|不必|只读|不修改|不写入|do\s+not|don't|never|read[- ]?only",
+_DELETE_SIGNAL_RE = re.compile(r"删除|移除|\bdelete\b|\bremove\b", re.I)
+_NEGATED_OPERATION_PREFIX_RE = re.compile(
+    r"(?:不要|请勿|禁止|无需|无须|不用|不必|避免|不得|切勿|别|"
+    r"do\s+not|don't|must\s+not|never)\s*[^，,。！？!?；;\n]{0,32}$",
+    re.I,
+)
+_NEGATIVE_WRITE_RE = re.compile(
+    r"(?:不要|请勿|禁止|无需|无须|不用|不必|避免|不得|切勿|别)"
+    r"[^，,。！？!?；;\n]{0,32}"
+    r"(?:修改|写入|保存|落盘|改变|动|创建|新增|删除|移除|替换|重命名)|"
+    r"(?:do\s+not|don't|must\s+not|never)\s+"
+    r"[^.,;!?\n]{0,32}(?:edit|write|save|change|create|add|delete|remove|replace|rename)",
+    re.I,
+)
+_BROAD_NO_WRITE_RE = re.compile(
+    r"(?:只读|read[- ]?only)|"
+    r"(?:不要|不得|禁止|请勿|无需|无须|不用|不必|别|切勿)"
+    r"[^，,。！？!?；;\n]{0,24}(?:写入|修改|保存|落盘|改变|动)"
+    r"[^，,。！？!?；;\n]{0,12}(?:任何|全部|所有)(?:项目)?(?:文件|内容)|"
+    r"(?:do\s+not|don't|never|must\s+not)\s+"
+    r"[^.,;!?\n]{0,24}(?:write|modify|save|change)\s+"
+    r"(?:any|all)\s+(?:project\s+)?files?",
     re.I,
 )
 _SCOPED_NO_WRITE_RE = re.compile(
-    r"(?:不要|不得|禁止|请勿|别|切勿)[^，,。！？!?；;\n]{0,16}"
+    r"(?:不要|不得|禁止|请勿|别|切勿)[^，,。！？!?；;\n]{0,12}"
+    r"(?:写入|修改|保存|落盘|改变|动|创建|新增|删除|移除)[^，,。！？!?；;\n]{0,8}"
     r"(?:其他|其它|其余|别的|非目标|无关)(?:项目)?(?:文件|字段|内容|角色卡)?|"
     r"(?:其他|其它|其余|别的|非目标|无关)(?:项目)?(?:文件|字段|内容|角色卡)?"
-    r"[^，,。！？!?；;\n]{0,12}(?:不要|不得|禁止|请勿|别|切勿)",
+    r"[^，,。！？!?；;\n]{0,8}(?:不要|不得|禁止|请勿|别|切勿)"
+    r"[^，,。！？!?；;\n]{0,8}(?:写入|修改|保存|落盘|改变|动|创建|新增|删除|移除)",
     re.IGNORECASE,
 )
+_OPERATION_CLAUSE_BOUNDARIES = "，,。！？!?；;\n"
 _AMBIGUOUS_FOLLOWUP_RE = re.compile(
     r"^\s*(继续|执行|处理一下|弄一下|按刚才的来|就这样|确认|可以|好的?|go ahead|continue|do it)\s*[。.!！]?$",
     re.I,
@@ -104,6 +127,22 @@ def _dedupe(values: Iterable[str]) -> list[str]:
         if normalized and normalized not in result:
             result.append(normalized)
     return result
+
+
+def _has_positive_operation(pattern: re.Pattern[str], text: str) -> bool:
+    for match in pattern.finditer(text):
+        clause_start = max(
+            (
+                text.rfind(boundary, 0, match.start())
+                for boundary in _OPERATION_CLAUSE_BOUNDARIES
+            ),
+            default=-1,
+        )
+        prefix = text[clause_start + 1 : match.start()]
+        if _NEGATED_OPERATION_PREFIX_RE.search(prefix):
+            continue
+        return True
+    return False
 
 
 def build_route_hints(
@@ -158,15 +197,18 @@ def build_route_hints(
             document_kinds.append(kind)
 
     operation_signals: list[str] = []
-    if _READ_SIGNAL_RE.search(text):
+    if _has_positive_operation(_READ_SIGNAL_RE, text):
         operation_signals.append("read")
-    if _WRITE_SIGNAL_RE.search(text):
+    if _has_positive_operation(_WRITE_SIGNAL_RE, text):
         operation_signals.append("write")
-    if _NO_WRITE_RE.search(text):
-        operation_signals.append(
-            "scope_exclusion" if _SCOPED_NO_WRITE_RE.search(text) else "no_write"
-        )
-    if "删除" in text or re.search(r"\bdelete|\bremove", text, re.I):
+    if _BROAD_NO_WRITE_RE.search(text):
+        operation_signals.append("no_write")
+    elif _SCOPED_NO_WRITE_RE.search(text) or _NEGATIVE_WRITE_RE.search(text):
+        # A named/local exclusion is advisory scope information, never a
+        # project-wide permission decision. The semantic classifier or an
+        # explicit capability mode remains authoritative.
+        operation_signals.append("scope_exclusion")
+    if _has_positive_operation(_DELETE_SIGNAL_RE, text):
         operation_signals.append("delete")
 
     candidate_paths = _dedupe([normalized_active, *explicit_paths])
