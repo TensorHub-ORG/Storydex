@@ -1,12 +1,13 @@
 # Storydex Agent 主链路真实运行与慢响应治理计划
 
-更新日期：2026-08-13
+更新日期：2026-08-16
 
-当前基线：`main` / `5f71dbd66b3d5e3596feb5491dbc3b3206d0851f`
+当前基线：`main` / `d7909d6c6d152709bee7abe561b779f32dafb69b`
 
 关联资料：
 
 - [Agent 运行链路、信息完整性与性能治理计划](./Agent运行链路信息完整性与性能治理.md)
+- [Rust 后端与 Tauri 桌面重构计划](./rust-tauri-migration.md)
 - `F:\Temp\report.md`（2026-08-08 慢响应与 Agent 调度治理交接）
 
 ## 1. 结论
@@ -134,13 +135,13 @@
 ## 7. 新对话接手说明
 
 ```text
-请执行 docs/Agent主链路真实运行与慢响应治理.md。
+当前 HEAD 为 d7909d6。先读取 docs/rust-tauri-migration.md 的 0.1、0.2、6.5、8.4 节，再读取本文 9.9、9.10；不要把已完成的 P1 性能治理重新当作未完成工作。
 
-先检查并保留工作区，读取关联治理文档和 F:\Temp\report.md。使用当前机器已有的 OpenCode Provider 配置副本，在隔离 workspace 中通过 Storydex 正常 HTTP/SSE Agent API 进行真实主链路运行；不得输出、提交或写入报告任何 API key、Authorization、完整提示词、reasoning 正文或敏感工具参数。
+当前 Rust 重构仍处于 M3：只有 health 和只读 Coomi status 已接入 storydex-agentd，Agent chat/SSE 仍由 Python 编排。下一步先冻结 /api/v1/agent/chat/stream 的有序事件契约，再接入 Rust loop 做 Refactor 轨道差分；不得切换 Electron Stable、Tauri 或静默 fallback。
 
-先取得当前 HEAD 的脱敏结构化基线，并判断现有 Trace 能否可靠回答各模型回合的 Provider 首响应、持续生成、工具执行、Token、重试、配置实际发送值和停止原因。缺少关键证据时先补最小观测能力，再根据实际最大耗时和无进展现象实施最小完整优化，不预设必须修改哪个模块。
+如需重新跑 live，必须复制当前 Storydex `OPENCODE/deepseek-v4-flash` Provider 到临时 Coomi Home，通过正常 HTTP/SSE 入口运行；不得输出、提交或写入报告任何 API key、Authorization、完整提示词、reasoning 正文或敏感工具参数。OpenCode 源配置的 ds 不是当前 Storydex 主链路。
 
-优化后使用相同 API 路径、workspace、任务目标和验收条件复测，保留前后报告。先跑受影响模块聚焦测试，再运行仓库标准门禁；如产生提交并准备推送，严格遵守 AGENTS.md 的 pre-push 与远端 CI 要求。
+先使用 provider replay 和只读 fixture 冻结 Python 事件序列，再实现 Rust sidecar 的同输入差分。写入、取消、审批、恢复必须使用临时 fixture；先跑受影响模块聚焦测试，再运行仓库标准门禁，并遵守 AGENTS.md 的 pre-push 与远端 CI 要求。
 ```
 
 ## 8. 边界与禁止事项
@@ -385,3 +386,20 @@ OpenCode CLI 对同一个 `ds` Provider 的无工具完整请求也在约 `20s` 
 基线脚本还修复了一个诊断缺陷：SSE 已完成、但后置严格验收失败时，现在仍会先写入脱敏 `baseline-report.json` 并记录验收错误，不再只返回一条无法复盘的终端错误。当前结论是严格只读 live 已通过；scoped-write 已完成最终文件闭环，但其零中途错误门槛尚未稳定通过。
 
 `storydex-agentd` 首个只读配置切片完成后，又从当前代码重跑了相同 Storydex 主链路：`OPENCODE/deepseek-v4-flash` 总耗时 `10,462ms`，Provider 等待/生成 `2,669ms / 1,769ms`，2 个模型回合、1 次 `read_file`、零工具错误、零重试，最终 `AgentCompleted`；`capability=read_only`，RouteHints 仍为 `read + no_write`。这次结果继续证明 Storydex 实际配置可用，但不代表 Agent HTTP/SSE 已由 `storydex-agentd` 接管；当前 Rust 服务仅完成 health 和脱敏 Provider 状态切片。
+
+### 9.10 2026-08-16 推送前后最新主链路复核
+
+在本次 `dev/windows`/`main` 推送所对应的 HEAD 上，使用同一份 Storydex `OPENCODE/deepseek-v4-flash` 配置副本，通过正常 Backend HTTP/SSE + Rust bridge 重新执行严格只读场景；推送后两个分支保持同一 SHA。最新脱敏报告为 `output/push-validation/opencode-deepseekv4flash/baseline-report.json`，未保留 Provider 凭证或真实用户项目内容。
+
+| 项目 | 最新结果 |
+| --- | ---: |
+| 状态 | `passed` |
+| 总耗时 | `12,398ms` |
+| Provider 等待 / 模型生成 | `4,330ms / 5,893ms` |
+| 模型回合 / 工具调用 | `2 / 1` |
+| Provider HTTP / 重试 | `200 / 0` |
+| 工具序列 | `read_file` |
+| capability / RouteHints | `read_only / read + no_write` |
+| 终态 | `AgentCompleted` |
+
+该结果证明 Storydex 当前实际 Provider 线路可用，并为迁移差分提供最新行为基线；它仍然不是 `storydex-agentd` 接管 Agent chat/SSE 的证据。Rust sidecar 的独立 health、Coomi status、鉴权、受控关闭和脱敏契约已单独通过，主链路接入仍属于下一阶段。

@@ -27,12 +27,27 @@
 
 本轮实际进度按里程碑记录如下：
 
-- **M0：部分完成。** 已用 Storydex 当前生效的 `OPENCODE/deepseek-v4-flash` 配置跑通一次真实严格只读主链路（Provider HTTP `200`、2 个模型回合、1 次 `read_file`、RouteHints 为 `read + no_write`）；意图否定语义和基线报告持久化缺陷已修复。取消、审批、恢复以及不稳定行为台账仍未收齐。
-- **M1：部分完成。** 已建立 Agent runtime manifest，以及可指向任意 base URL 的 health、Coomi 状态黑盒契约和 Rust/Python 归一化比较入口；读写、SSE、取消/恢复的完整契约仍待补齐。
-- **M2：骨架已实现并通过本地验证。** `apps/desktop/agent-runtime/storydex-agentd` 是未接入 Stable 的独立 loopback 服务，具备动态端口、每次启动 token、统一 envelope、trace、panic 边界、任务注册表、`CancellationToken` 和受控关闭；格式、Clippy、单测、release 构建、真实启动/鉴权/退出及 Python Stable health 差分均已通过。CI 和人工完整测试入口已加入独立 `storydex-agentd` 构建检查；独立依赖审计与远端 CI 结果仍待补齐，因此尚未宣告里程碑最终完成。
-- **M3：已开始首个无副作用切片。** Rust 已实现只读 `/api/v1/agent/coomi/status`，直接读取 Storydex Coomi Home 并返回脱敏的激活 Provider/模型与能力；尚未达到完整字段 parity，也尚未把 Agent HTTP/SSE 主链路接入 `storydex-agentd`。Electron Beta、Stable 切换和 Tauri 迁移均未开始。
+- **M0：部分完成。** 已用 Storydex 当前生效的 `OPENCODE/deepseek-v4-flash` 配置跑通真实严格只读主链路；最近一次脱敏报告为 `status=passed`、HTTP `200`、2 个模型回合、1 次 `read_file`、0 重试、终态 `AgentCompleted`，RouteHints 为 `read + no_write`。意图否定语义和基线报告持久化缺陷已修复；取消、审批、恢复以及不稳定行为台账仍未收齐。
+- **M1：部分完成。** 已建立 Agent runtime manifest，以及可指向任意 base URL 的 health、Coomi 状态黑盒契约和归一化比较入口。Rust sidecar 的 health/Coomi status 契约已用 Storydex 实际 `OPENCODE/deepseek-v4-flash` 配置通过；读写、SSE、取消/恢复的完整契约仍待补齐。
+- **M2：骨架已实现并通过本地与远端验证。** `apps/desktop/agent-runtime/storydex-agentd` 是未接入 Stable 的独立 loopback 服务，具备动态端口、每次启动 token、统一 envelope、trace、panic 边界、任务注册表、`CancellationToken` 和受控关闭；格式、Clippy、154 项 workspace 测试、release 构建、真实启动/鉴权/退出及契约检查均已通过。`dev/windows` Development CI run `31945550643` 和 `main` CI run `31948178752` 均为 `success`。独立依赖审计仍未完成，因此不宣告 M2 的所有治理项已关闭。
+- **M3：首个无副作用切片已落地，主链路迁移尚未开始。** Rust 已实现只读 `/api/v1/agent/coomi/status`，直接读取 Storydex Coomi Home 并返回脱敏的激活 Provider/模型与能力；尚未达到完整字段 parity，也尚未把 `/api/v1/agent/chat/stream` 或其他 Agent HTTP/SSE 接入 `storydex-agentd`。Electron Beta、Stable 切换和 Tauri 迁移均未开始。
 
 这里的“真实主链路”特指 Storydex 自身 `providers.json` 中当前激活的 Provider；OpenCode 源配置中的 `ds/deepseek-v4-flash` 曾返回 HTTP `522`，它不是 Storydex 当前主链路的配置，不能作为迁移阻断依据。
+
+### 0.2 2026-08-16 推送后同步与下一阶段入口
+
+- 本次 `git fetch origin --prune` 后，`main`、`origin/main`、`dev/windows` 和 `origin/dev/windows` 均指向 `d7909d6c6d152709bee7abe561b779f32dafb69b`，当时没有待合并的远端提交。
+- `dev/windows` 上游已有的 `7e161e7 feat(windows): report daily active usage` 已保留并随分支快进进入 `main`；该提交不是 Agent parity 证据，后续差分仍只以 Agent 相关文件和契约为准。
+- 最新真实主链路脱敏报告：`output/push-validation/opencode-deepseekv4flash/baseline-report.json`。该运行经过正常 Storydex Backend HTTP/SSE + Rust bridge，未由 `storydex-agentd` 接管。
+- Stable 仍固定使用 `Electron + Python/FastAPI + Rust Coomi bridge`；`storydex-agentd` 只能在 Refactor/Beta 轨道使用，不得静默 fallback 或读取真实用户项目。
+
+下一阶段按以下顺序推进：
+
+1. 以 `apps/backend/api/routes_agent.py`、`services/agent_lifecycle_trace.py` 和现有基线报告为来源，冻结 `POST /api/v1/agent/chat/stream` 的请求、统一 envelope、首包、heartbeat、工具事件、阶段顺序和唯一终止事件契约。
+2. 建立 provider replay 与确定性的只读 fixture，先让 Python Stable 产出规范化事件序列、trace/session、工具参数和错误边界。
+3. 将现有 Rust `engine`/`storydex-bridge` Agent loop 接入 `storydex-agentd` 的 Refactor 路由，只做旁路差分，不修改 Stable 启动入口。
+4. 对同一输入执行 Python/Rust 读请求差分；写入、取消、审批、恢复在临时 fixture 上逐项比较副作用和状态迁移。
+5. 只有无解释差异和故障注入结果稳定后，才进入 Electron Beta 评估；Tauri 和 Stable 切换继续冻结。
 
 ## 1. 结论
 
