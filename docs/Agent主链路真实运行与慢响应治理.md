@@ -2,7 +2,7 @@
 
 更新日期：2026-08-16
 
-当前基线：`main` / `d7909d6c6d152709bee7abe561b779f32dafb69b`
+当前代码基线：`d7909d6c6d152709bee7abe561b779f32dafb69b`；文档同步后的 `main` HEAD：`ea06aae618024e04895be6fee3d64498e918dc5e`
 
 关联资料：
 
@@ -135,7 +135,7 @@
 ## 7. 新对话接手说明
 
 ```text
-当前 HEAD 为 d7909d6。先读取 docs/rust-tauri-migration.md 的 0.1、0.2、6.5、8.4 节，再读取本文 9.9、9.10；不要把已完成的 P1 性能治理重新当作未完成工作。
+代码基线为 d7909d6，当前 main 文档 HEAD 为 ea06aae。先读取 docs/rust-tauri-migration.md 的 0.1、0.2、6.5、8.4 节，再读取本文 9.9、9.10；不要把已完成的 P1 性能治理重新当作未完成工作。
 
 当前 Rust 重构仍处于 M3：只有 health 和只读 Coomi status 已接入 storydex-agentd，Agent chat/SSE 仍由 Python 编排。下一步先冻结 /api/v1/agent/chat/stream 的有序事件契约，再接入 Rust loop 做 Refactor 轨道差分；不得切换 Electron Stable、Tauri 或静默 fallback。
 

@@ -25,7 +25,7 @@
 | P1-5 至 P1-7 | 已完成 | Evidence Ledger、结构化 compaction checkpoint、shadow/真实 token 预算、LRU/JIT 上下文及对应 Trace/失效语义已落地并通过聚焦、全量和真实主链路验收 |
 | P2 | 阻塞 | P1-5～P1-7 已完成但仍需积累稳定真实 token/证据样本；在 Evidence Ledger、checkpoint 和 token baseline 稳定前不得启动 P2 |
 
-2026-08-16 同步：P1 治理结论保持不变，P2 仍按真实 token/证据样本门槛阻塞；当前仓库已同步到 `main`/`dev/windows` HEAD `d7909d6c6d152709bee7abe561b779f32dafb69b`。后续工作已转入 [Rust 后端与 Tauri 桌面重构计划](./rust-tauri-migration.md) 的 Agent M3：`storydex-agentd` 目前只有 health 和只读 Coomi status 切片，Agent chat/SSE 仍由 Python Stable 编排。本文件的 P1/P2 结论不得被 Rust 迁移工作静默改写。
+2026-08-16 同步：P1 治理结论保持不变，P2 仍按真实 token/证据样本门槛阻塞；Agent 代码基线为 `d7909d6c6d152709bee7abe561b779f32dafb69b`，文档同步后的 `main` HEAD 为 `ea06aae618024e04895be6fee3d64498e918dc5e`，`dev/windows` 保持代码基线。后续工作已转入 [Rust 后端与 Tauri 桌面重构计划](./rust-tauri-migration.md) 的 Agent M3：`storydex-agentd` 目前只有 health 和只读 Coomi status 切片，Agent chat/SSE 仍由 Python Stable 编排。本文件的 P1/P2 结论不得被 Rust 迁移工作静默改写。
 
 P0 已全部完成；P0-1F、P1-0、P1-1 核心和 P1-2a 已由提交 `5cfabbd` 推送，P1-2c 已由提交 `0d4c611` 推送。第二批（P1-2b、P1-3、P1-4）代码收口提交为 `858c990c16978c40369c2d6eb60b1ff57c1823c5`，第三批（P1-5、P1-6、P1-7）为 `327eeb4b9521d1d450558db05b0d6b4f4ed23ad0`；两个 SHA 均通过 pre-push，GitHub Actions run `31225798801`、`31227503047` 均为 `success`。P1-5～P1-7 已完成最终回归和真实主链路验收；P2 仍按门槛阻塞。
 
@@ -879,7 +879,7 @@ P1 变更包已完成；P2 仍必须等 Evidence Ledger、compaction checkpoint 
 
 P0-1/P0-2/P0-3 已分别提交为 `b0dd6cf`、`151ca45`、`785a46f`；P0-1F、P1-0、P1-1 核心和 P1-2a 已提交为 `5cfabbd`；P1-2c 为 `0d4c6117e381b78a13e44e8525243c1ec36bd966`。本轮第二批代码为 `858c990c16978c40369c2d6eb60b1ff57c1823c5`，第三批代码为 `327eeb4b9521d1d450558db05b0d6b4f4ed23ad0`；对应 Actions run `31225798801`、`31227503047` 均为 `success`，每个新 HEAD 均有独立 `mode: Fast` pre-push 认证。
 
-上述 stash 和工作区说明记录的是 P1 收口时的历史交付状态；当前工作区已同步到 `d7909d6`，本轮 Rust Agent 迁移提交与 P1 治理提交分离。不得在新对话中 pop、删除或覆盖历史 stash，也不要把 Rust M3 的旁路代码当成 Stable 已切换。
+上述 stash 和工作区说明记录的是 P1 收口时的历史交付状态；当前代码基线为 `d7909d6`，文档同步提交为 `ea06aae`，本轮 Rust Agent 迁移提交与 P1 治理提交分离。不得在新对话中 pop、删除或覆盖历史 stash，也不要把 Rust M3 的旁路代码当成 Stable 已切换。
 
 真实验收使用临时目录复制单个 Provider 配置，结束后自动删除临时配置和密钥副本。`output/` 下的验收报告被 Git 忽略；每次提交前仍检查暂存差异没有 API key、Authorization header 值或临时 Provider 配置。本文档明确记录的是本机 `OPENCODE / deepseek-v4-flash` 配置的使用事实，不包含凭证。
 

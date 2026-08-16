@@ -36,7 +36,7 @@
 
 ### 0.2 2026-08-16 推送后同步与下一阶段入口
 
-- 本次 `git fetch origin --prune` 后，`main`、`origin/main`、`dev/windows` 和 `origin/dev/windows` 均指向 `d7909d6c6d152709bee7abe561b779f32dafb69b`，当时没有待合并的远端提交。
+- 本次 `git fetch origin --prune` 后，代码基线 `d7909d6c6d152709bee7abe561b779f32dafb69b` 已在 `main` 与 `dev/windows` 同步；文档同步提交随后将 `main` 推进到 `ea06aae618024e04895be6fee3d64498e918dc5e`，`dev/windows` 仍保持代码基线，当前没有新的代码待合并。
 - `dev/windows` 上游已有的 `7e161e7 feat(windows): report daily active usage` 已保留并随分支快进进入 `main`；该提交不是 Agent parity 证据，后续差分仍只以 Agent 相关文件和契约为准。
 - 最新真实主链路脱敏报告：`output/push-validation/opencode-deepseekv4flash/baseline-report.json`。该运行经过正常 Storydex Backend HTTP/SSE + Rust bridge，未由 `storydex-agentd` 接管。
 - Stable 仍固定使用 `Electron + Python/FastAPI + Rust Coomi bridge`；`storydex-agentd` 只能在 Refactor/Beta 轨道使用，不得静默 fallback 或读取真实用户项目。
