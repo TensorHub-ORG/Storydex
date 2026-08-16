@@ -3,148 +3,210 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Storydex 反馈管理</title>
+  <title>Storydex 运营控制台</title>
   <style>
-    :root { color-scheme: dark; --bg:#11151b; --panel:#191f27; --line:#343c47; --text:#eef2f6; --dim:#9ba7b4; --accent:#38a3a5; --danger:#ef6a67; }
+    :root { color-scheme:dark; --bg:#101318; --surface:#171c23; --surface-2:#202731; --line:#343d49; --text:#f0f3f6; --dim:#98a4b2; --windows:#58a6ff; --android:#65c466; --accent:#e6b85c; --danger:#f06a68; }
     * { box-sizing:border-box; }
     body { margin:0; min-height:100vh; background:var(--bg); color:var(--text); font:14px/1.55 system-ui,"Microsoft YaHei",sans-serif; }
     button,input,select { font:inherit; }
     button { cursor:pointer; }
-    .shell { width:min(1120px,100%); margin:auto; padding:24px 18px 48px; }
-    header { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:20px; }
-    h1 { margin:0; font-size:22px; letter-spacing:0; }
-    .sub,.muted { color:var(--dim); }
-    .login { width:min(380px,100%); margin:12vh auto; padding:24px; border:1px solid var(--line); border-radius:8px; background:var(--panel); }
-    .login h2 { margin:0 0 18px; font-size:18px; }
-    input,select { width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:6px; background:#0f1318; color:var(--text); }
-    button { min-height:38px; padding:0 14px; border:1px solid var(--line); border-radius:6px; background:#202833; color:var(--text); }
-    button.primary { border-color:var(--accent); background:var(--accent); color:#071415; font-weight:700; }
+    .shell { width:min(1240px,100%); margin:auto; padding:24px 18px 48px; }
+    h1,h2,h3,p { margin-top:0; }
+    h1 { margin-bottom:3px; font-size:23px; letter-spacing:0; }
+    h2 { margin-bottom:12px; font-size:16px; }
+    h3 { margin-bottom:8px; font-size:14px; }
+    .muted,.sub { color:var(--dim); }
+    .login { width:min(380px,100%); margin:12vh auto; padding:24px; border:1px solid var(--line); border-radius:8px; background:var(--surface); }
+    .login h2 { font-size:18px; }
+    input,select { width:100%; min-height:40px; padding:8px 11px; border:1px solid var(--line); border-radius:6px; outline:none; background:#0d1116; color:var(--text); }
+    input:focus,select:focus { border-color:var(--windows); }
+    button { min-height:38px; padding:0 13px; border:1px solid var(--line); border-radius:6px; background:var(--surface-2); color:var(--text); }
+    button:hover { border-color:#667383; }
+    button.primary { border-color:var(--accent); background:var(--accent); color:#17130a; font-weight:700; }
     .login button { width:100%; margin-top:12px; }
     .error { margin-top:10px; color:var(--danger); }
-    .toolbar { display:grid; grid-template-columns:auto minmax(170px,1fr) minmax(150px,auto) auto auto; gap:10px; margin-bottom:14px; }
-    .platform-filter { display:flex; gap:2px; padding:2px; border:1px solid var(--line); border-radius:6px; background:#0f1318; }
-    .platform-filter button { min-height:32px; padding:0 10px; border:0; background:transparent; color:var(--dim); }
-    .platform-filter button.active { background:#2a3743; color:var(--text); }
-    .grid { display:grid; grid-template-columns:minmax(320px,.9fr) minmax(420px,1.35fr); min-height:620px; border:1px solid var(--line); background:var(--panel); }
+    .topbar { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:18px; }
+    .top-actions { display:flex; gap:8px; }
+    .platform-filter { display:inline-flex; gap:2px; padding:2px; border:1px solid var(--line); border-radius:6px; background:#0d1116; }
+    .platform-filter button { min-height:34px; border:0; background:transparent; color:var(--dim); }
+    .platform-filter button.active { background:#303946; color:var(--text); }
+    .overview { margin-bottom:22px; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
+    .kpis { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); }
+    .kpi { min-width:0; padding:17px 18px; border-right:1px solid var(--line); }
+    .kpi:last-child { border-right:0; }
+    .kpi-label { color:var(--dim); }
+    .kpi-value { display:block; margin-top:3px; font-size:27px; font-weight:700; font-variant-numeric:tabular-nums; }
+    .kpi.windows .kpi-value { color:var(--windows); }
+    .kpi.android .kpi-value { color:var(--android); }
+    .trend { padding:18px 0 12px; border-top:1px solid var(--line); }
+    .trend-head { display:flex; align-items:center; justify-content:space-between; padding:0 18px 8px; }
+    .legend { display:flex; gap:16px; color:var(--dim); }
+    .legend span::before { content:""; display:inline-block; width:9px; height:9px; margin-right:6px; border-radius:50%; background:currentColor; }
+    .legend .windows { color:var(--windows); }
+    .legend .android { color:var(--android); }
+    .chart-wrap { width:100%; height:230px; overflow:hidden; }
+    #chart { display:block; width:100%; height:100%; }
+    .axis { stroke:#39424e; stroke-width:1; }
+    .line-windows { fill:none; stroke:var(--windows); stroke-width:2.5; }
+    .line-android { fill:none; stroke:var(--android); stroke-width:2.5; }
+    .point-windows { fill:var(--windows); }
+    .point-android { fill:var(--android); }
+    .axis-label { fill:var(--dim); font-size:11px; }
+    .section-head { display:flex; align-items:end; justify-content:space-between; gap:16px; margin-bottom:10px; }
+    .section-head h2 { margin-bottom:0; }
+    .toolbar { display:grid; grid-template-columns:minmax(220px,1fr) minmax(160px,220px); gap:9px; width:min(600px,100%); }
+    .workspace { display:grid; grid-template-columns:minmax(320px,.85fr) minmax(440px,1.3fr); min-height:590px; border:1px solid var(--line); background:var(--surface); }
     .list { border-right:1px solid var(--line); overflow:auto; }
     .item { width:100%; min-height:0; padding:13px 15px; border:0; border-bottom:1px solid var(--line); border-radius:0; background:transparent; text-align:left; }
-    .item:hover,.item.active { background:#242d38; }
+    .item:hover,.item.active { background:#222a34; }
     .item-top { display:flex; justify-content:space-between; gap:10px; }
-    .tag { color:#79d4ce; }
-    .desc { margin-top:5px; color:var(--text); overflow-wrap:anywhere; }
+    .tag { font-weight:650; }
+    .tag.windows { color:var(--windows); }
+    .tag.android { color:var(--android); }
+    .desc { margin:5px 0 3px; color:var(--text); overflow-wrap:anywhere; }
     .detail { padding:20px; overflow:auto; }
-    .detail h2 { margin:0 0 14px; font-size:18px; }
-    dl { display:grid; grid-template-columns:110px minmax(0,1fr); gap:8px 12px; margin:0 0 18px; }
+    .detail h2 { font-size:18px; }
+    dl { display:grid; grid-template-columns:100px minmax(0,1fr); gap:8px 12px; margin:0 0 18px; }
     dt { color:var(--dim); }
     dd { margin:0; overflow-wrap:anywhere; }
-    pre { margin:8px 0 18px; padding:12px; overflow:auto; border:1px solid var(--line); border-radius:6px; background:#0f1318; color:#cbd5df; white-space:pre-wrap; }
+    pre { margin:8px 0 18px; padding:12px; overflow:auto; border:1px solid var(--line); border-radius:6px; background:#0d1116; color:#cbd5df; white-space:pre-wrap; }
     .images { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
-    .images img { width:100%; aspect-ratio:4/3; object-fit:contain; border:1px solid var(--line); background:#0b0e12; }
+    .images img { width:100%; aspect-ratio:4/3; object-fit:contain; border:1px solid var(--line); background:#090c10; }
     .empty { padding:48px 20px; color:var(--dim); text-align:center; }
     [hidden] { display:none !important; }
-    @media (max-width:780px) { .grid { grid-template-columns:1fr; }.list { max-height:340px; border-right:0; border-bottom:1px solid var(--line); }.toolbar { grid-template-columns:1fr auto; }.platform-filter { grid-column:1/-1; }.toolbar .logout { grid-column:1/-1; }.images { grid-template-columns:1fr; } }
+    @media (max-width:800px) {
+      .shell { padding:16px 12px 32px; }
+      .topbar,.section-head { align-items:stretch; flex-direction:column; }
+      .top-actions,.platform-filter { width:100%; }
+      .top-actions .platform-filter { flex:1; }
+      .platform-filter button { flex:1; }
+      .kpis { grid-template-columns:repeat(2,minmax(0,1fr)); }
+      .kpi:nth-child(2) { border-right:0; }
+      .kpi:nth-child(-n+2) { border-bottom:1px solid var(--line); }
+      .toolbar { grid-template-columns:1fr; width:100%; }
+      .workspace { grid-template-columns:1fr; }
+      .list { max-height:340px; border-right:0; border-bottom:1px solid var(--line); }
+      .images { grid-template-columns:1fr; }
+      .chart-wrap { height:190px; }
+    }
   </style>
 </head>
 <body>
   <main class="shell">
     <section id="login" class="login">
-      <h2>Storydex 反馈管理</h2>
+      <h2>Storydex 运营控制台</h2>
       <p class="muted">使用 Coomi 反馈后台的管理员密码登录。</p>
       <input id="password" type="password" autocomplete="current-password" placeholder="管理员密码">
       <button class="primary" id="loginButton">登录</button>
       <div id="loginError" class="error"></div>
     </section>
     <section id="app" hidden>
-      <header><div><h1>Storydex 反馈管理</h1><div class="sub">错误上报、主动反馈与截图</div></div></header>
-      <div class="toolbar">
-        <div class="platform-filter" role="group" aria-label="平台筛选">
-          <button class="active" data-platform="">全部</button>
-          <button data-platform="windows">Win 桌面端</button>
-          <button data-platform="android">Android 移动端</button>
+      <header class="topbar">
+        <div><h1>Storydex 运营控制台</h1><div class="sub">日活量与用户反馈</div></div>
+        <div class="top-actions">
+          <div class="platform-filter" role="group" aria-label="平台筛选">
+            <button class="active" data-platform="">全部</button>
+            <button data-platform="windows">Windows</button>
+            <button data-platform="android">Android</button>
+          </div>
+          <button id="refresh">刷新</button>
+          <button id="logout">退出</button>
         </div>
-        <input id="query" type="search" placeholder="搜索描述、分类、联系方式或 ID">
-        <select id="category" aria-label="反馈类型筛选">
-          <option value="">全部类型</option>
-          <option value="tool_failure_analysis">工具故障分析</option>
-        </select>
-        <button id="refresh">刷新</button>
-        <button id="logout" class="logout">退出登录</button>
-      </div>
-      <div class="grid">
-        <div id="list" class="list"></div>
-        <article id="detail" class="detail"><div class="empty">选择一条反馈查看详情</div></article>
-      </div>
+      </header>
+      <section class="overview" aria-label="活跃统计">
+        <div class="kpis">
+          <div class="kpi"><span class="kpi-label">今日总活跃</span><strong id="todayTotal" class="kpi-value">0</strong></div>
+          <div class="kpi windows"><span class="kpi-label">Windows 今日活跃</span><strong id="todayWindows" class="kpi-value">0</strong></div>
+          <div class="kpi android"><span class="kpi-label">Android 今日活跃</span><strong id="todayAndroid" class="kpi-value">0</strong></div>
+          <div class="kpi"><span class="kpi-label">累计反馈</span><strong id="feedbackTotal" class="kpi-value">0</strong></div>
+        </div>
+        <div class="trend">
+          <div class="trend-head"><h2>近 30 天日活趋势</h2><div class="legend"><span class="windows">Windows</span><span class="android">Android</span></div></div>
+          <div class="chart-wrap"><svg id="chart" viewBox="0 0 1000 230" preserveAspectRatio="none" role="img" aria-label="Windows 与 Android 日活趋势"></svg></div>
+        </div>
+      </section>
+      <section>
+        <div class="section-head">
+          <div><h2>反馈记录</h2><div id="feedbackSummary" class="sub">全部平台</div></div>
+          <div class="toolbar">
+            <input id="query" type="search" placeholder="搜索描述、分类、联系方式或 ID">
+            <select id="category" aria-label="反馈类型筛选">
+              <option value="">全部类型</option>
+              <option value="tool_failure_analysis">工具故障分析</option>
+            </select>
+          </div>
+        </div>
+        <div class="workspace">
+          <div id="list" class="list"></div>
+          <article id="detail" class="detail"><div class="empty">选择一条反馈查看详情</div></article>
+        </div>
+      </section>
     </section>
   </main>
   <script>
-    const base = '/storydex/feedback';
-    const tokenKey = 'storydex_feedback_admin_token';
-    let token = localStorage.getItem(tokenKey) || '';
-    let selected = '';
-    let platform = '';
-    let category = '';
-    const el = id => document.getElementById(id);
-    const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-    async function api(path, options = {}) {
-      const headers = Object.assign({}, options.headers || {}, token ? {Authorization: `Bearer ${token}`} : {});
-      const response = await fetch(path, Object.assign({}, options, {headers}));
-      const body = await response.json().catch(() => ({}));
-      if (response.status === 401 && path.indexOf('/login') < 0) logout();
-      if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+    const base='/storydex/feedback', tokenKey='storydex_feedback_admin_token';
+    let token=localStorage.getItem(tokenKey)||'', selected='', platform='', category='', stats=null;
+    const el=id=>document.getElementById(id);
+    const escapeHtml=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const formatNumber=value=>new Intl.NumberFormat('zh-CN').format(Number(value)||0);
+    async function api(path,options={}) {
+      const headers=Object.assign({},options.headers||{},token?{Authorization:`Bearer ${token}`}:{ });
+      const response=await fetch(path,Object.assign({},options,{headers}));
+      const body=await response.json().catch(()=>({}));
+      if(response.status===401&&path.indexOf('/login')<0) logout();
+      if(!response.ok) throw new Error(body.error||`HTTP ${response.status}`);
       return body;
     }
-    function showApp() { el('login').hidden = true; el('app').hidden = false; loadList(); }
-    function showLogin() { el('login').hidden = false; el('app').hidden = true; }
-    function logout() { token=''; selected=''; localStorage.removeItem(tokenKey); showLogin(); }
-    async function login() {
-      el('loginError').textContent = '';
-      try {
-        const body = await api(`${base}/api/admin/login`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({password:el('password').value})});
-        token = body.token; localStorage.setItem(tokenKey, token); el('password').value=''; showApp();
-      } catch (error) { el('loginError').textContent = error.message; }
+    function showApp(){el('login').hidden=true;el('app').hidden=false;loadAll();}
+    function showLogin(){el('login').hidden=false;el('app').hidden=true;}
+    function logout(){token='';selected='';localStorage.removeItem(tokenKey);showLogin();}
+    async function login(){
+      el('loginError').textContent='';
+      try{const body=await api(`${base}/api/admin/login`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:el('password').value})});token=body.token;localStorage.setItem(tokenKey,token);el('password').value='';showApp();}
+      catch(error){el('loginError').textContent=error.message;}
     }
-    async function loadList() {
-      const query = encodeURIComponent(el('query').value.trim());
-      try {
-        const body = await api(`${base}/admin/api/list?q=${query}&platform=${encodeURIComponent(platform)}&category=${encodeURIComponent(category)}&limit=200`);
-        el('list').innerHTML = body.items.length ? body.items.map(item => `<button class="item ${selected===item.id?'active':''}" data-id="${escapeHtml(item.id)}"><div class="item-top"><span class="tag">${escapeHtml(item.platform === 'android' ? 'Android 移动端' : 'Win 桌面端')} · ${escapeHtml(item.category)} · ${escapeHtml(item.source)}</span><span class="muted">${escapeHtml(new Date(item.received_at).toLocaleString())}</span></div><div class="desc">${escapeHtml(item.description.slice(0,180))}</div><div class="muted">${item.image_count} 张图片 · ${escapeHtml(item.contact || '未留联系方式')}</div></button>`).join('') : '<div class="empty">暂无反馈</div>';
-        document.querySelectorAll('.item').forEach(node => node.addEventListener('click', () => loadDetail(node.dataset.id)));
-      } catch (error) { el('list').innerHTML = `<div class="empty error">${escapeHtml(error.message)}</div>`; }
+    function drawChart(series){
+      const svg=el('chart'), width=1000, height=230, left=42, right=18, top=14, bottom=30;
+      const visible=platform?[platform]:['windows','android'];
+      const max=Math.max(1,...series.flatMap(day=>visible.map(key=>Number(day[key])||0)));
+      const x=index=>left+(series.length<2?0:index*(width-left-right)/(series.length-1));
+      const y=value=>top+(max-value)*(height-top-bottom)/max;
+      const pathFor=key=>series.map((day,index)=>`${index?'L':'M'} ${x(index).toFixed(1)} ${y(Number(day[key])||0).toFixed(1)}`).join(' ');
+      const grid=[0,.5,1].map(ratio=>{const value=Math.round(max*(1-ratio)),lineY=top+ratio*(height-top-bottom);return `<line class="axis" x1="${left}" y1="${lineY}" x2="${width-right}" y2="${lineY}"/><text class="axis-label" x="4" y="${lineY+4}">${value}</text>`;}).join('');
+      const dates=series.length?[0,Math.floor((series.length-1)/2),series.length-1]:[];
+      const labels=dates.map(index=>`<text class="axis-label" x="${x(index)}" y="${height-7}" text-anchor="middle">${escapeHtml(series[index].date.slice(5))}</text>`).join('');
+      const lines=visible.map(key=>`<path class="line-${key}" d="${pathFor(key)}"/>${series.map((day,index)=>`<circle class="point-${key}" cx="${x(index)}" cy="${y(Number(day[key])||0)}" r="2.5"><title>${escapeHtml(day.date)} ${key==='windows'?'Windows':'Android'}: ${Number(day[key])||0}</title></circle>`).join('')}`).join('');
+      svg.innerHTML=`${grid}${labels}${lines}`;
+      document.querySelector('.legend .windows').hidden=platform==='android';
+      document.querySelector('.legend .android').hidden=platform==='windows';
     }
-    async function authImage(url) {
-      const response = await fetch(url, {headers:{Authorization:`Bearer ${token}`}});
-      if (!response.ok) throw new Error('图片加载失败');
-      return URL.createObjectURL(await response.blob());
+    function renderStats(){
+      if(!stats)return;
+      el('todayTotal').textContent=formatNumber(stats.today.total);
+      el('todayWindows').textContent=formatNumber(stats.today.windows);
+      el('todayAndroid').textContent=formatNumber(stats.today.android);
+      el('feedbackTotal').textContent=formatNumber(platform?stats.feedback[platform]:stats.feedback.total);
+      el('feedbackSummary').textContent=platform?`${platform==='windows'?'Windows':'Android'} · ${formatNumber(stats.feedback[platform])} 条`:`全部平台 · ${formatNumber(stats.feedback.total)} 条`;
+      drawChart(stats.series);
     }
-    async function loadDetail(id) {
-      selected=id; await loadList();
-      try {
-        const data = await api(`${base}/admin/api/detail?id=${encodeURIComponent(id)}`);
-        const analysis = data.error?.details || data.error || {};
-        const analysisSections = data.category === 'tool_failure_analysis'
-          ? `<h3>程序证据</h3><pre>${escapeHtml(analysis.programEvidence || '未提供')}</pre><h3>本地模型分析</h3><pre>${escapeHtml(analysis.analysisReport || analysis.detail || '未提供')}</pre>`
-          : `<h3>错误信息</h3><pre>${escapeHtml(JSON.stringify(data.error,null,2))}</pre>`;
-        el('detail').innerHTML = `<h2>${escapeHtml(data.platform === 'android' ? 'Android 移动端' : 'Win 桌面端')} · ${escapeHtml(data.category)} · ${escapeHtml(data.source)}</h2><dl><dt>接收时间</dt><dd>${escapeHtml(new Date(data.received_at).toLocaleString())}</dd><dt>反馈 ID</dt><dd>${escapeHtml(data.id)}</dd><dt>提交 ID</dt><dd>${escapeHtml(data.submission_id)}</dd><dt>联系方式</dt><dd>${escapeHtml(data.contact || '未填写')}</dd><dt>客户端 IP</dt><dd>${escapeHtml(data.client_ip)}</dd><dt>描述</dt><dd>${escapeHtml(data.description)}</dd></dl>${analysisSections}<h3>诊断信息</h3><pre>${escapeHtml(JSON.stringify(data.diagnostics,null,2))}</pre><h3>截图</h3><div id="images" class="images">${data.images.length?'正在加载...':'无截图'}</div>`;
-        if (data.images.length) {
-          const urls = await Promise.all(data.images.map(image => authImage(image.url)));
-          el('images').innerHTML = urls.map((url,index) => `<a href="${url}" target="_blank" rel="noopener"><img src="${url}" alt="${escapeHtml(data.images[index].original_name)}"></a>`).join('');
-        }
-      } catch (error) { el('detail').innerHTML=`<div class="empty error">${escapeHtml(error.message)}</div>`; }
+    async function loadStats(){try{stats=await api(`${base}/admin/api/stats?days=30`);renderStats();}catch(error){el('chart').innerHTML=`<text class="axis-label" x="500" y="115" text-anchor="middle">${escapeHtml(error.message)}</text>`;}}
+    async function loadList(){
+      const query=encodeURIComponent(el('query').value.trim());
+      try{const body=await api(`${base}/admin/api/list?q=${query}&platform=${encodeURIComponent(platform)}&category=${encodeURIComponent(category)}&limit=200`);el('list').innerHTML=body.items.length?body.items.map(item=>`<button class="item ${selected===item.id?'active':''}" data-id="${escapeHtml(item.id)}"><div class="item-top"><span class="tag ${escapeHtml(item.platform)}">${item.platform==='android'?'Android':'Windows'} · ${escapeHtml(item.category)} · ${escapeHtml(item.source)}</span><span class="muted">${escapeHtml(new Date(item.received_at).toLocaleString())}</span></div><div class="desc">${escapeHtml(item.description.slice(0,180))}</div><div class="muted">${item.image_count} 张图片 · ${escapeHtml(item.contact||'未留联系方式')}</div></button>`).join(''):'<div class="empty">暂无反馈</div>';document.querySelectorAll('.item').forEach(node=>node.addEventListener('click',()=>loadDetail(node.dataset.id)));}
+      catch(error){el('list').innerHTML=`<div class="empty error">${escapeHtml(error.message)}</div>`;}
     }
-    el('loginButton').addEventListener('click', login);
-    el('password').addEventListener('keydown', event => { if(event.key==='Enter') login(); });
-    el('refresh').addEventListener('click', loadList);
-    el('category').addEventListener('change', event => { category=event.target.value; selected=''; loadList(); });
-    el('logout').addEventListener('click', logout);
-    document.querySelectorAll('[data-platform]').forEach(node => node.addEventListener('click', () => {
-      platform = node.dataset.platform;
-      selected = '';
-      document.querySelectorAll('[data-platform]').forEach(button => button.classList.toggle('active', button === node));
-      el('detail').innerHTML = '<div class="empty">选择一条反馈查看详情</div>';
-      loadList();
-    }));
-    let searchTimer; el('query').addEventListener('input', () => { clearTimeout(searchTimer); searchTimer=setTimeout(loadList,250); });
-    token ? showApp() : showLogin();
+    async function loadAll(){await Promise.all([loadStats(),loadList()]);}
+    async function authImage(url){const response=await fetch(url,{headers:{Authorization:`Bearer ${token}`}});if(!response.ok)throw new Error('图片加载失败');return URL.createObjectURL(await response.blob());}
+    async function loadDetail(id){
+      selected=id;await loadList();
+      try{const data=await api(`${base}/admin/api/detail?id=${encodeURIComponent(id)}`),analysis=data.error?.details||data.error||{},analysisSections=data.category==='tool_failure_analysis'?`<h3>程序证据</h3><pre>${escapeHtml(analysis.programEvidence||'未提供')}</pre><h3>本地模型分析</h3><pre>${escapeHtml(analysis.analysisReport||analysis.detail||'未提供')}</pre>`:`<h3>错误信息</h3><pre>${escapeHtml(JSON.stringify(data.error,null,2))}</pre>`;el('detail').innerHTML=`<h2>${data.platform==='android'?'Android':'Windows'} · ${escapeHtml(data.category)} · ${escapeHtml(data.source)}</h2><dl><dt>接收时间</dt><dd>${escapeHtml(new Date(data.received_at).toLocaleString())}</dd><dt>反馈 ID</dt><dd>${escapeHtml(data.id)}</dd><dt>提交 ID</dt><dd>${escapeHtml(data.submission_id)}</dd><dt>联系方式</dt><dd>${escapeHtml(data.contact||'未填写')}</dd><dt>客户端 IP</dt><dd>${escapeHtml(data.client_ip)}</dd><dt>描述</dt><dd>${escapeHtml(data.description)}</dd></dl>${analysisSections}<h3>诊断信息</h3><pre>${escapeHtml(JSON.stringify(data.diagnostics,null,2))}</pre><h3>截图</h3><div id="images" class="images">${data.images.length?'正在加载...':'无截图'}</div>`;if(data.images.length){const urls=await Promise.all(data.images.map(image=>authImage(image.url)));el('images').innerHTML=urls.map((url,index)=>`<a href="${url}" target="_blank" rel="noopener"><img src="${url}" alt="${escapeHtml(data.images[index].original_name)}"></a>`).join('');}}
+      catch(error){el('detail').innerHTML=`<div class="empty error">${escapeHtml(error.message)}</div>`;}
+    }
+    el('loginButton').addEventListener('click',login);el('password').addEventListener('keydown',event=>{if(event.key==='Enter')login();});
+    el('refresh').addEventListener('click',loadAll);el('category').addEventListener('change',event=>{category=event.target.value;selected='';loadList();});el('logout').addEventListener('click',logout);
+    document.querySelectorAll('[data-platform]').forEach(node=>node.addEventListener('click',()=>{platform=node.dataset.platform;selected='';document.querySelectorAll('[data-platform]').forEach(button=>button.classList.toggle('active',button===node));el('detail').innerHTML='<div class="empty">选择一条反馈查看详情</div>';renderStats();loadList();}));
+    let searchTimer;el('query').addEventListener('input',()=>{clearTimeout(searchTimer);searchTimer=setTimeout(loadList,250);});
+    token?showApp():showLogin();
   </script>
 </body>
 </html>

@@ -34,6 +34,7 @@ MAX_TEXT = 5000
 TOKEN_LIFETIME_SECONDS = 12 * 60 * 60
 MAX_SUBMISSIONS_PER_IP_HOUR = 30
 ANDROID_INITIAL_DOWNLOADS = 28
+STATS_PLATFORMS = {"windows", "android"}
 COOMI_LOGIN_URL = "https://updates.septemc.com/coomi/feedback/api/admin/login"
 IMAGE_TYPES = {
     "image/png": (".png", b"\x89PNG\r\n\x1a\n"),
@@ -208,6 +209,17 @@ class FeedbackStore:
                 );
                 CREATE INDEX IF NOT EXISTS site_counter_events_created_at_idx
                     ON site_counter_events(created_at DESC);
+                CREATE TABLE IF NOT EXISTS daily_active (
+                    activity_date TEXT NOT NULL,
+                    platform TEXT NOT NULL,
+                    client_ip_hash TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    first_seen_at TEXT NOT NULL,
+                    user_agent TEXT NOT NULL,
+                    PRIMARY KEY (activity_date, platform, client_ip_hash)
+                );
+                CREATE INDEX IF NOT EXISTS daily_active_platform_date_idx
+                    ON daily_active(platform, activity_date DESC);
                 INSERT OR IGNORE INTO site_counters (name, value)
                     VALUES ('android_downloads', 28);
                 """
@@ -266,6 +278,101 @@ class FeedbackStore:
                 "SELECT value FROM site_counters WHERE name = 'android_downloads'"
             ).fetchone()
         return max(ANDROID_INITIAL_DOWNLOADS, int(row["value"]) if row else 0)
+
+    def record_daily_active(
+        self,
+        platform: str,
+        client_ip: str,
+        version: str,
+        user_agent: str,
+        observed_at: Optional[datetime] = None,
+    ) -> bool:
+        normalized_platform = bounded_text(platform, 20).lower()
+        if normalized_platform not in STATS_PLATFORMS:
+            raise FeedbackError("platform 必须是 windows 或 android。")
+        now = observed_at or datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        now = now.astimezone(timezone.utc)
+        normalized_ip = bounded_text(client_ip, 120) or "unknown"
+        ip_hash = hmac.new(
+            self.auth_secret(),
+            normalized_ip.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        with self.connect() as connection:
+            inserted = connection.execute(
+                """INSERT OR IGNORE INTO daily_active
+                   (activity_date, platform, client_ip_hash, version, first_seen_at, user_agent)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    now.date().isoformat(),
+                    normalized_platform,
+                    ip_hash,
+                    bounded_text(version, 80) or "unknown",
+                    now.isoformat(),
+                    bounded_text(user_agent, 500),
+                ),
+            ).rowcount
+        return bool(inserted)
+
+    def activity_stats(
+        self,
+        days: int = 30,
+        observed_at: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        days = max(1, min(int(days), 90))
+        now = observed_at or datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        now = now.astimezone(timezone.utc)
+        start_date = now.date() - timedelta(days=days - 1)
+        series_by_date = {
+            (start_date + timedelta(days=offset)).isoformat(): {"windows": 0, "android": 0}
+            for offset in range(days)
+        }
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT activity_date, platform, COUNT(*) AS active_count
+                   FROM daily_active
+                   WHERE activity_date >= ? AND activity_date <= ?
+                   GROUP BY activity_date, platform
+                   ORDER BY activity_date""",
+                (start_date.isoformat(), now.date().isoformat()),
+            ).fetchall()
+            feedback_rows = connection.execute(
+                "SELECT platform, COUNT(*) AS feedback_count FROM feedback GROUP BY platform"
+            ).fetchall()
+        for row in rows:
+            date_key = str(row["activity_date"])
+            platform = str(row["platform"])
+            if date_key in series_by_date and platform in STATS_PLATFORMS:
+                series_by_date[date_key][platform] = int(row["active_count"])
+        series = []
+        period = {"windows": 0, "android": 0, "total": 0}
+        for date_key, counts in series_by_date.items():
+            total = counts["windows"] + counts["android"]
+            series.append({"date": date_key, **counts, "total": total})
+            period["windows"] += counts["windows"]
+            period["android"] += counts["android"]
+            period["total"] += total
+        feedback = {"windows": 0, "android": 0, "total": 0}
+        for row in feedback_rows:
+            platform = str(row["platform"])
+            if platform in STATS_PLATFORMS:
+                feedback[platform] = int(row["feedback_count"])
+                feedback["total"] += int(row["feedback_count"])
+        today = series[-1] if series else {
+            "date": now.date().isoformat(), "windows": 0, "android": 0, "total": 0
+        }
+        return {
+            "generatedAt": now.isoformat(),
+            "days": days,
+            "today": today,
+            "period": period,
+            "feedback": feedback,
+            "series": series,
+        }
 
     def save(self, payload: Dict[str, Any], client_ip: str, user_agent: str) -> str:
         data = validate_feedback(payload)
@@ -480,6 +587,18 @@ class FeedbackHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path.rstrip("/")
         try:
+            dau_prefix = f"{BASE_PATH}/api/stats/dau/"
+            if path.startswith(dau_prefix):
+                platform = path[len(dau_prefix):]
+                client_ip = self.headers.get("X-Real-IP") or self.client_address[0]
+                counted = self.store.record_daily_active(
+                    platform,
+                    client_ip,
+                    self.headers.get("X-Storydex-Version", ""),
+                    self.headers.get("User-Agent", ""),
+                )
+                self.send_json(HTTPStatus.OK, {"ok": True, "counted": counted, "platform": platform})
+                return
             payload = self.read_json()
             if path == f"{BASE_PATH}/api":
                 client_ip = self.headers.get("X-Real-IP") or self.client_address[0]
@@ -539,6 +658,13 @@ class FeedbackHandler(BaseHTTPRequestHandler):
             except ValueError:
                 limit = 100
             self.send_json(HTTPStatus.OK, {"items": self.store.list(query, limit, platform, category)})
+            return
+        if path == f"{BASE_PATH}/admin/api/stats":
+            try:
+                days = int(params.get("days", ["30"])[0])
+            except ValueError:
+                days = 30
+            self.send_json(HTTPStatus.OK, self.store.activity_stats(days))
             return
         if path == f"{BASE_PATH}/admin/api/detail":
             detail = self.store.detail(bounded_text(params.get("id", [""])[0], 120))

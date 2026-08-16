@@ -6,6 +6,7 @@ const http = require("http");
 const { pathToFileURL } = require("url");
 const { spawn } = require("child_process");
 const { findCachedInstaller, launchUpdateHelper, readActiveInstallLock, verifyCachedInstaller } = require("./update-installer.cjs");
+const { reportDailyActive } = require("./daily-active.cjs");
 let resolveUpdateFeedUrl = (desktopPackage, overrideUrl) =>
   String(overrideUrl || desktopPackage?.storydexUpdateFeedUrl || desktopPackage?.build?.extraMetadata?.storydexUpdateFeedUrl || "").trim();
 try {
@@ -1792,6 +1793,7 @@ app.whenReady().then(async () => {
     app.quit();
     return;
   }
+  reportDailyActive("windows", DESKTOP_PACKAGE.version);
   await createMainWindow();
 
   app.on("activate", async () => {

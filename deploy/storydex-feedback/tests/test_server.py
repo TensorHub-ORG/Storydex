@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timedelta, timezone
+import http.client
 import importlib.util
+import json
 from pathlib import Path
 import sqlite3
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -144,6 +148,61 @@ class FeedbackStoreTests(unittest.TestCase):
     def test_android_download_counter_rejects_invalid_event_id(self) -> None:
         with self.assertRaisesRegex(server.FeedbackError, "eventId"):
             self.store.record_android_download("bad")
+
+    def test_daily_active_is_unique_by_utc_day_ip_and_platform(self) -> None:
+        first_day = datetime(2026, 8, 16, 23, 59, tzinfo=timezone.utc)
+        self.assertTrue(self.store.record_daily_active("android", "203.0.113.10", "0.1.3", "test", first_day))
+        self.assertFalse(self.store.record_daily_active("android", "203.0.113.10", "0.1.3", "test", first_day))
+        self.assertTrue(self.store.record_daily_active("windows", "203.0.113.10", "2.0.5", "test", first_day))
+        self.assertTrue(self.store.record_daily_active("android", "203.0.113.11", "0.1.3", "test", first_day))
+        self.assertTrue(self.store.record_daily_active(
+            "android", "203.0.113.10", "0.1.3", "test", first_day + timedelta(minutes=2)
+        ))
+
+        stats = self.store.activity_stats(2, first_day + timedelta(minutes=2))
+        self.assertEqual(stats["series"][0]["android"], 2)
+        self.assertEqual(stats["series"][0]["windows"], 1)
+        self.assertEqual(stats["series"][1]["android"], 1)
+        self.assertEqual(stats["period"], {"windows": 1, "android": 3, "total": 4})
+
+    def test_daily_active_rejects_invalid_platform(self) -> None:
+        with self.assertRaisesRegex(server.FeedbackError, "platform"):
+            self.store.record_daily_active("web", "203.0.113.10", "1", "test")
+
+    def test_stats_endpoint_requires_admin_and_dau_accepts_empty_post(self) -> None:
+        httpd = server.ThreadingFeedbackServer(
+            ("127.0.0.1", 0), server.build_handler(self.store, b"admin")
+        )
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+            connection.request("POST", f"{server.BASE_PATH}/api/stats/dau/android", body=b"", headers={
+                "X-Real-IP": "203.0.113.12",
+                "X-Storydex-Version": "0.1.3",
+            })
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertTrue(json.loads(response.read())["counted"])
+
+            connection.request("GET", f"{server.BASE_PATH}/admin/api/stats?days=30")
+            response = connection.getresponse()
+            self.assertEqual(response.status, 401)
+            response.read()
+
+            token = server.issue_token(self.store)
+            connection.request("GET", f"{server.BASE_PATH}/admin/api/stats?days=30", headers={
+                "Authorization": f"Bearer {token}",
+            })
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            payload = json.loads(response.read())
+            self.assertEqual(payload["today"]["android"], 1)
+            connection.close()
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=5)
 
     def test_connect_passes_a_string_path_to_legacy_sqlite(self) -> None:
         original_connect = server.sqlite3.connect
