@@ -10,6 +10,7 @@ use axum::middleware::Next;
 use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::routing::get;
+use axum::routing::patch;
 use axum::routing::post;
 use chrono::Utc;
 use coomi_engine::ReasoningEffort;
@@ -584,6 +585,10 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/agent/followups/{message_id}/steer",
             post(chat::steer_followup),
         )
+        .route(
+            "/api/v1/agent/followups/{message_id}",
+            patch(chat::update_followup).delete(chat::delete_followup),
+        )
         .route("/api/v1/agent/chat/stream", post(chat::chat_stream))
         .route("/api/v1/agent/executions/stop", post(chat::stop_execution))
         .route("/api/v1/agent/coomi/approval", post(chat::resolve_approval))
@@ -633,9 +638,13 @@ mod tests {
         serde_json::from_slice(&bytes).expect("decode response JSON")
     }
 
-    fn protected_json_request(uri: &str, payload: Value) -> Request<Body> {
+    fn protected_json_request_with_method(
+        method: &str,
+        uri: &str,
+        payload: Value,
+    ) -> Request<Body> {
         Request::builder()
-            .method("POST")
+            .method(method)
             .uri(uri)
             .header(header::AUTHORIZATION, "Bearer test-token")
             .header(header::CONTENT_TYPE, "application/json")
@@ -643,6 +652,10 @@ mod tests {
                 serde_json::to_vec(&payload).expect("serialize request body"),
             ))
             .expect("request")
+    }
+
+    fn protected_json_request(uri: &str, payload: Value) -> Request<Body> {
+        protected_json_request_with_method("POST", uri, payload)
     }
 
     fn followup_test_state(root: &Path) -> (AppState, PathBuf) {
@@ -923,6 +936,92 @@ mod tests {
         assert_eq!(
             response_json(response).await["error"]["code"],
             "corrupt_followup_mailbox"
+        );
+    }
+
+    #[tokio::test]
+    async fn followup_patch_and_delete_routes_are_idempotent() {
+        let root = tempdir().expect("root");
+        let (state, workspace) = followup_test_state(root.path());
+        let workspace_root = workspace.to_string_lossy().into_owned();
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/agent/followups",
+                json!({
+                    "messageId": "followup-mutation-1",
+                    "sessionId": "session-mutation",
+                    "workspaceRoot": workspace_root,
+                    "content": "first content",
+                    "mode": "queued"
+                }),
+            ))
+            .await
+            .expect("enqueue response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let patch_payload = json!({
+            "sessionId": "session-mutation",
+            "workspaceRoot": workspace.to_string_lossy(),
+            "content": "updated content"
+        });
+        for _ in 0..2 {
+            let response = router(state.clone())
+                .oneshot(protected_json_request_with_method(
+                    "PATCH",
+                    "/api/v1/agent/followups/followup-mutation-1",
+                    patch_payload.clone(),
+                ))
+                .await
+                .expect("patch response");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            assert_eq!(body["data"]["message"]["content"], "updated content");
+            assert_eq!(body["data"]["message"]["status"], "pending");
+        }
+
+        let encoded_workspace = workspace
+            .to_string_lossy()
+            .replace('%', "%25")
+            .replace(':', "%3A")
+            .replace('\\', "%5C")
+            .replace('/', "%2F");
+        let delete_uri = format!(
+            "/api/v1/agent/followups/followup-mutation-1?sessionId=session-mutation&workspaceRoot={encoded_workspace}"
+        );
+        for _ in 0..2 {
+            let response = router(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(&delete_uri)
+                        .header(header::AUTHORIZATION, "Bearer test-token")
+                        .body(Body::empty())
+                        .expect("delete request"),
+                )
+                .await
+                .expect("delete response");
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response_json(response).await["data"]["message"]["status"],
+                "cancelled"
+            );
+        }
+
+        let mailbox = state
+            .followup_store()
+            .list(&workspace, "session-mutation")
+            .expect("mailbox");
+        assert_eq!(mailbox.revision, 3);
+        assert_eq!(mailbox.messages.len(), 1);
+        assert_eq!(mailbox.messages[0].content, "updated content");
+        assert_eq!(mailbox.messages[0].status, "cancelled");
+        assert_eq!(
+            mailbox
+                .events
+                .iter()
+                .filter(|event| event["_type"] == "FollowupUpdated")
+                .count(),
+            2
         );
     }
 

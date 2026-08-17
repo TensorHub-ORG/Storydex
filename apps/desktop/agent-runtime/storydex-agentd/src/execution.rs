@@ -1,5 +1,6 @@
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -17,6 +18,7 @@ struct ExecutionEntry {
     workspace_root: PathBuf,
     cancellation: ExecutionCancellation,
     control_sender: mpsc::Sender<ExecutionControl>,
+    pending_requests: HashSet<String>,
 }
 
 #[derive(Debug)]
@@ -125,6 +127,7 @@ impl ExecutionRegistry {
             workspace_root,
             cancellation,
             control_sender,
+            pending_requests: HashSet::new(),
         });
         Ok(ExecutionGuard {
             registry: self.clone(),
@@ -152,42 +155,60 @@ impl ExecutionRegistry {
             };
         }
         let entry = {
-            let active = self
+            let mut active = self
                 .active
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            active
-                .as_ref()
-                .filter(|entry| {
-                    entry.session_id == normalized_session
-                        && workspace_root.is_none_or(|root| entry.workspace_root == root)
-                })
-                .cloned()
-        };
-        let Some(entry) = entry else {
-            return ResolveResult {
-                accepted: false,
-                session_id: normalized_session,
-                active_trace_id: String::new(),
-                reason: "no_active_execution".to_owned(),
-                request_id,
+            let Some(entry) = active.as_mut().filter(|entry| {
+                entry.session_id == normalized_session
+                    && workspace_root.is_none_or(|root| entry.workspace_root == root)
+            }) else {
+                return ResolveResult {
+                    accepted: false,
+                    session_id: normalized_session,
+                    active_trace_id: String::new(),
+                    reason: "no_active_execution".to_owned(),
+                    request_id,
+                };
             };
+            let expected_trace = expected_trace_id.trim();
+            if !expected_trace.is_empty() && entry.trace_id != expected_trace {
+                return ResolveResult {
+                    accepted: false,
+                    session_id: entry.session_id.clone(),
+                    active_trace_id: entry.trace_id.clone(),
+                    reason: "stale_trace".to_owned(),
+                    request_id,
+                };
+            }
+            if !entry.pending_requests.remove(&request_id) {
+                return ResolveResult {
+                    accepted: false,
+                    session_id: entry.session_id.clone(),
+                    active_trace_id: entry.trace_id.clone(),
+                    reason: "request_not_pending".to_owned(),
+                    request_id,
+                };
+            }
+            entry.clone()
         };
-        let expected_trace = expected_trace_id.trim();
-        if !expected_trace.is_empty() && entry.trace_id != expected_trace {
-            return ResolveResult {
-                accepted: false,
-                session_id: entry.session_id,
-                active_trace_id: entry.trace_id,
-                reason: "stale_trace".to_owned(),
-                request_id,
-            };
-        }
         let send_result = entry.control_sender.try_send(ExecutionControl::Resolve {
             request_id: request_id.clone(),
             value,
         });
         let accepted = send_result.is_ok();
+        if !accepted {
+            let mut active = self
+                .active
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(active) = active
+                .as_mut()
+                .filter(|active| active.trace_id == entry.trace_id)
+            {
+                active.pending_requests.insert(request_id.clone());
+            }
+        }
         ResolveResult {
             accepted,
             session_id: entry.session_id,
@@ -199,6 +220,24 @@ impl ExecutionRegistry {
             },
             request_id,
         }
+    }
+
+    pub(crate) fn register_request(&self, trace_id: &str, request_id: &str) -> bool {
+        let request_id = request_id.trim();
+        if request_id.is_empty() {
+            return false;
+        }
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(entry) = active
+            .as_mut()
+            .filter(|entry| entry.trace_id == trace_id.trim())
+        else {
+            return false;
+        };
+        entry.pending_requests.insert(request_id.to_owned())
     }
 
     pub(crate) fn cancel(
@@ -341,5 +380,44 @@ mod tests {
                 mpsc::channel(1).0,
             )
             .expect("released execution slot");
+    }
+
+    #[test]
+    fn approval_request_can_only_be_resolved_once() {
+        let registry = ExecutionRegistry::default();
+        let (sender, mut receiver) = mpsc::channel(1);
+        let _guard = registry
+            .register(
+                "trace-approval".into(),
+                "session-approval".into(),
+                PathBuf::from("workspace-approval"),
+                ExecutionCancellation::default(),
+                sender,
+            )
+            .expect("register execution");
+        assert!(registry.register_request("trace-approval", "approval-1"));
+
+        let first = registry.resolve(
+            "approval-1",
+            "session-approval",
+            "trace-approval",
+            Some(Path::new("workspace-approval")),
+            serde_json::json!({"approved": false}),
+        );
+        assert!(first.accepted);
+        let repeated = registry.resolve(
+            "approval-1",
+            "session-approval",
+            "trace-approval",
+            Some(Path::new("workspace-approval")),
+            serde_json::json!({"approved": false}),
+        );
+        assert!(!repeated.accepted);
+        assert_eq!(repeated.reason, "request_not_pending");
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutionControl::Resolve { request_id, .. }) if request_id == "approval-1"
+        ));
+        assert!(receiver.try_recv().is_err());
     }
 }

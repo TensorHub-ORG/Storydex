@@ -253,6 +253,16 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def resolve_backend_bridge(environment: Mapping[str, str], backend_root: Path) -> str:
+    """Prefer an explicitly selected bridge over the packaged fallback."""
+
+    configured = str(environment.get("STORYDEX_COOMI_BRIDGE") or "").strip()
+    if configured:
+        return configured
+    packaged = backend_root / "runtime" / "storydex-coomi-bridge.exe"
+    return str(packaged) if packaged.is_file() else ""
+
+
 class BackendProcess:
     def __init__(
         self,
@@ -283,9 +293,9 @@ class BackendProcess:
         env["PYTHONPATH"] = str(backend_root) + os.pathsep + str(self.repository_root)
         env["STORYDEX_FORCE_WORKSPACE_ROOT"] = str(self.workspace)
         env["STORYDEX_COOMI_HOME"] = str(self.coomi_home)
-        bridge = backend_root / "runtime" / "storydex-coomi-bridge.exe"
-        if bridge.is_file():
-            env["STORYDEX_COOMI_BRIDGE"] = str(bridge)
+        bridge = resolve_backend_bridge(env, backend_root)
+        if bridge:
+            env["STORYDEX_COOMI_BRIDGE"] = bridge
         log_stream = self.log_path.open("w", encoding="utf-8")
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         self.process = subprocess.Popen(

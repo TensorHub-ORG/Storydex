@@ -2,7 +2,7 @@
 
 更新日期：2026-08-17
 
-P1 治理代码基线：`d7909d6c6d152709bee7abe561b779f32dafb69b`；当前远端 `main` 基线：`219cb05aaf2699effedaee78cb403cc89e7f013b`；本地 Agent M3 实现提交：`2cf446e00c25e166209f0549eb58d3b9b317ec95`，仍须先后通过 `dev/windows` 与 `main` 的远端 CI。
+P1 治理代码基线：`d7909d6c6d152709bee7abe561b779f32dafb69b`；本轮 Agent 控制面收口起始基线：`10ae9b73a9890ed4b715df82f269b496feff1c42`；本轮提交仍须先后通过 `dev/windows` 与 `main` 的远端 CI。
 
 范围说明：本文件继续保存慢响应的历史复现、指标和真实主链路报告；当前新对话不推进慢响应治理，只推进 [Rust 后端与 Tauri 桌面重构计划](./rust-tauri-migration.md) 的 Agent Rust 重构。Agent 重构完成后再重新实测，并由用户决定是否恢复本专项。
 
@@ -139,9 +139,9 @@ P1 治理代码基线：`d7909d6c6d152709bee7abe561b779f32dafb69b`；当前远�
 ## 7. 新对话接手说明
 
 ```text
-P1 治理代码基线为 d7909d6，当前远端 main 基线为 219cb05，本地 Agent M3 实现提交为 2cf446e（远端 CI 尚未完成）。先读取 docs/rust-tauri-migration.md 的 0.2、6.5、8.4 节，再读取本文 9.11、9.12 作为历史证据；不要在本对话推进慢响应专项，也不要把已完成的 P1 性能治理重新当作未完成工作。
+P1 治理代码基线为 d7909d6，本轮 Agent 控制面收口起始基线为 10ae9b7（远端 CI 尚未完成）。先读取 docs/rust-tauri-migration.md 的 0.2、6.5、8.4 节，再读取本文 9.11、9.12 作为历史证据；不要在本对话推进慢响应专项，也不要把已完成的 P1 性能治理重新当作未完成工作。
 
-当前 Rust 重构仍处于 M3：health、只读 Coomi status 和 chat/SSE replay 已接入 storydex-agentd 的 Refactor 轨道，13 组 fixture 已覆盖读、受限写、取消/超时/断连、审批、follow-up/steer、损坏会话和 replacement；Stable Agent chat/SSE 仍由 Python 编排。下一步按迁移计划的未完成边界补齐故事生成、完整 intent/context、WIKI/Knowledge、控制面竞态和依赖审计；不得切换 Electron Stable、Tauri 或静默 fallback。
+当前 Rust 重构仍处于 M3：health、只读 Coomi status 和 chat/SSE replay 已接入 storydex-agentd 的 Refactor 轨道，20 组 fixture 已覆盖读、受限写、取消/超时/断连、启动前 stop、审批允许/拒绝/超时/重复决策、follow-up 编辑/删除/存储失败、steer、会话损坏/缺失/工作区不匹配和 replacement；Stable Agent chat/SSE 仍由 Python 编排。下一步按迁移计划的未完成边界补齐故事生成、完整 intent/context/permission、WIKI/Knowledge、并发/崩溃故障模型和依赖审计；不得切换 Electron Stable、Tauri 或静默 fallback。
 
 如需重新跑 live，必须复制当前 Storydex `OPENCODE/deepseek-v4-flash` Provider 到临时 Coomi Home，通过正常 HTTP/SSE 入口运行；不得输出、提交或写入报告任何 API key、Authorization、完整提示词、reasoning 正文或敏感工具参数。OpenCode 源配置的 ds 不是当前 Storydex 主链路。
 
@@ -417,34 +417,44 @@ OpenCode CLI 对同一个 `ds` Provider 的无工具完整请求也在约 `20s` 
 | 只读成功 | passed | passed | `AgentCompleted -> done`，一次 `read_file`，回复标记一致 |
 | Provider 错误 | passed | passed | `AgentError -> done`，零工具调用，错误计数一致 |
 | stop / timeout / disconnect | passed | passed | 取消原因、断连边界、session 持久化和关键顺序一致 |
-| approval / follow-up / steer | passed | passed | 控制面响应、mailbox 状态与显式 resume 一致 |
+| preflight / repeated stop | passed | passed | `RunAccepted` 后可抢停，只有首次 stop 被接受且不启动 bridge/模型 |
+| approval allow / deny / timeout | passed | passed | 重复或 late decision 不会二次领取 waiter 或执行工具 |
+| follow-up / steer / mutations | passed | passed | enqueue/PATCH/DELETE 幂等，mailbox 状态与显式 resume 一致 |
+| follow-up storage failure | passed | passed | fail closed，写失败不替换原 mailbox 障碍物 |
 | scoped-write | passed | passed | 目标文件 SHA、Git HEAD/状态一致；Python WIKI 派生副作用单独保留 |
 | 损坏 binding / session | passed | passed | fail closed，原始损坏文件保持不变 |
+| missing session / workspace mismatch | passed | passed | fail closed，不伪造 session 或跨工作区恢复 |
 | replacement 接受 / 恢复 | passed | passed | 旧 trace、runtime session 与失败审计状态符合 replacement 事务契约 |
 
 报告：
 
 - `output/agent-runtime-contract/differential-read-only-current/differential-report.json`
 - `output/agent-runtime-contract/differential-provider-error-current/differential-report.json`
-- `output/agent-runtime-contract/differential-replacement-accepted-current/differential-report.json`
+- `output/agent-runtime-contract/differential-approval-deny-current/differential-report.json`
+- `output/agent-runtime-contract/differential-approval-timeout-current/differential-report.json`
+- `output/agent-runtime-contract/differential-stop-preflight-current/differential-report.json`
+- `output/agent-runtime-contract/differential-followup-mutations-current/differential-report.json`
+- `output/agent-runtime-contract/differential-followup-storage-error-current/differential-report.json`
+- `output/agent-runtime-contract/differential-missing-session-current/differential-report.json`
+- `output/agent-runtime-contract/differential-workspace-mismatch-current/differential-report.json`
+- `output/agent-runtime-contract/differential-replacement-current/differential-report.json`
 - `output/agent-runtime-contract/differential-replacement-restore-current/differential-report.json`
 
-归一化比较覆盖 HTTP 状态、终态和 `done` 次数、工具顺序、provider/model、`providerMode`、回复、关键事件/phase 顺序、控制面持久状态和写入副作用；13 个 fixture 均由 `agent-chat-stream-v1.json` 与 runtime manifest 列出。Python Stable 独有的 Git/WIKI 事件、Rust 独有的 `PermissionResolved` 以及 follow-up 事件落点差异均显式留在报告与迁移台账中，未扩大忽略字段。故事生成、完整 intent/context、WIKI/Knowledge、Electron Beta、Stable 接管和 Tauri 仍未完成。
+归一化比较覆盖 HTTP 状态、终态和 `done` 次数、工具完成/错误/中断顺序、provider/model、`providerMode`、回复、关键事件/phase 顺序、控制面持久状态和写入副作用；20 个 fixture 均由 `agent-chat-stream-v1.json` 与 runtime manifest 列出。Python Stable 独有的 Git/WIKI 领域事件继续作为明确差异留在报告与迁移台账中，未扩大忽略字段；Rust 已收敛 approval 与直接 follow-up 消费入口的额外公开 SSE。故事生成、完整 intent/context/permission、WIKI/Knowledge、Electron Beta、Stable 接管和 Tauri 仍未完成。
 
 ### 9.12 2026-08-17 当前代码基线真实复核
 
-按本轮功能性重构完成后的要求，使用当前 Storydex 配置 `OPENCODE/deepseek-v4-flash` 再跑一次严格只读主链路。报告：`output/agent-lifecycle-baseline/f42a77babf/baseline-report.json`。
+按本轮重大控制面取舍的要求，使用当前 Storydex 配置 `OPENCODE/deepseek-v4-flash` 再跑一次严格只读主链路并请求迁移优先级。报告：`output/rust-migration-decision-live/10ae9b73a989-20260817T162840/decision-report.json`。
 
 | 项目 | 结果 |
 | --- | ---: |
 | 状态 | `passed` |
-| Agent turn 耗时 | `14,696ms` |
+| HTTP/SSE 总耗时 | `43,690ms` |
 | 模型回合 / 工具调用 | `2 / 1` |
 | 工具序列 | `read_file` |
 | Provider HTTP | `200, 200` |
-| 首字节来源 | `provider_raw_stream` |
 | 重试 / fallback | `0 / 0` |
-| capability / RouteHints | `read_only / read + no_write` |
-| 终态 | `AgentCompleted -> done` |
+| 终态 | `AgentCompleted` |
+| 首选迁移项 | `control_session_failure_matrix` |
 
-该报告只证明当前真实 Provider 与 Python Stable HTTP/SSE + Rust bridge 主链路通过；本次请求没有经过 `storydex-agentd`，因此不构成 Stable 切换或 Tauri 迁移依据。
+该报告只证明当前真实 Provider 与 Python Stable HTTP/SSE + Rust bridge 主链路通过，并为本轮先做控制面/会话故障矩阵提供决策依据；本次请求没有经过 `storydex-agentd`，因此不构成 Stable 切换或 Tauri 迁移依据。Rust 依赖审计、故事生成/知识投影 parity 和 M0 性能窗口仍按报告优先级留待后续。

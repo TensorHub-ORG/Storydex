@@ -430,6 +430,8 @@ def test_permission_modes_and_approval_resolution() -> None:
         service._approval_waiters["approval-1"] = future
         result = service.resolve_approval("approval-1", "allow", response={"note": "ok"})
         assert result["resolved"] is True
+        repeated = service.resolve_approval("approval-1", "allow", response={"note": "again"})
+        assert repeated["resolved"] is False
         await asyncio.sleep(0)
         assert await future == {"decision": "allow", "response": {"note": "ok"}}
 

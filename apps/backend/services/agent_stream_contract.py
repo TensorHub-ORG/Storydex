@@ -368,6 +368,11 @@ def validate_chat_stream_events(
             tool_starts.append((_tool_name(payload), _tool_id(payload), index))
         elif name == "ToolDone":
             tool_dones.append((_tool_name(payload), _tool_id(payload), index, _is_error(payload)))
+    expected_error_tools = [str(value) for value in expected.get("toolErrorSequence") or []]
+    expected_interrupted_tools = [
+        str(value) for value in expected.get("interruptedToolSequence") or []
+    ]
+    interrupted_tools: list[str] = []
     for tool_name, tool_id, start_index in tool_starts:
         match = next(
             (
@@ -378,15 +383,40 @@ def validate_chat_stream_events(
             None,
         )
         if match is None:
+            if (
+                terminal_index is not None
+                and names[terminal_index] == "AgentCancelled"
+                and tool_name in expected_interrupted_tools
+            ):
+                interrupted_tools.append(tool_name)
+                if not allow_mutating_tools and tool_name.casefold() not in READ_ONLY_TOOLS:
+                    raise AgentStreamContractError(
+                        f"read-only fixture emitted mutating tool {tool_name}"
+                    )
+                continue
             raise AgentStreamContractError(
                 f"ToolStart {tool_name}/{tool_id} has no later matching ToolDone"
             )
-        if match[3]:
+        if match[3] and tool_name not in expected_error_tools:
             raise AgentStreamContractError(f"tool {tool_name} returned an error")
         if not allow_mutating_tools and tool_name.casefold() not in READ_ONLY_TOOLS:
             raise AgentStreamContractError(f"read-only fixture emitted mutating tool {tool_name}")
 
     tool_sequence = [item[0] for item in tool_starts]
+    tool_error_sequence = [item[0] for item in tool_dones if item[3]]
+    if "toolErrorSequence" in expected and tool_error_sequence != expected_error_tools:
+        raise AgentStreamContractError(
+            f"tool error sequence {tool_error_sequence!r} does not match fixture "
+            f"{expected_error_tools!r}"
+        )
+    if (
+        "interruptedToolSequence" in expected
+        and interrupted_tools != expected_interrupted_tools
+    ):
+        raise AgentStreamContractError(
+            f"interrupted tool sequence {interrupted_tools!r} does not match fixture "
+            f"{expected_interrupted_tools!r}"
+        )
     errors = [
         _text(payload.get("message") or payload.get("error_type"))
         for name, payload in events
@@ -468,6 +498,8 @@ def validate_chat_stream_events(
         "phaseFirstSeen": phase_first_seen,
         "heartbeatCount": heartbeat_count,
         "toolSequence": tool_sequence,
+        "toolErrorSequence": tool_error_sequence,
+        "interruptedToolSequence": interrupted_tools,
         "providerIds": sorted(provider_ids),
         "models": sorted(models),
         "providerModes": sorted(provider_modes),

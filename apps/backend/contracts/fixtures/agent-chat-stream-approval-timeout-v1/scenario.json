@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "contractId": "agent.chat.stream.v1",
+  "scenario": "approval-timeout-and-late-decision",
+  "intentRoutingMode": "direct",
+  "allowMutatingTools": true,
+  "request": {
+    "prompt": "Update the existing repository state by executing exactly one shell command. The command writes approval-timeout-output.txt and must ask the user for approval. Wait for the decision. Marker AGENT_APPROVAL_TIMEOUT_PROMPT_8D14.",
+    "activeFile": "",
+    "reasoningEffort": "low",
+    "confirmNoSnapshot": true,
+    "permissionMode": "ask_approval",
+    "capabilityMode": "workspace_write",
+    "writesAllowed": true,
+    "coreWritesAllowed": true,
+    "timeoutMs": 1000
+  },
+  "interaction": {
+    "action": "approval_timeout",
+    "afterEvent": "PermissionRequest",
+    "lateDecision": "deny"
+  },
+  "workspace": {
+    "initializeGit": true,
+    "initializeStorydex": true,
+    "stabilizeRuntimeBaseline": true,
+    "files": [
+      {
+        "path": ".storydex/config/project-settings.json",
+        "content": "{\n  \"agentCommitPromptEnabled\": false\n}\n"
+      }
+    ]
+  },
+  "expected": {
+    "providerId": "OPENCODE",
+    "model": "deepseek-v4-flash",
+    "providerMode": "replay",
+    "toolSequence": ["shell"],
+    "interruptedToolSequence": ["shell"],
+    "replyContains": [],
+    "terminalEvent": "AgentCancelled",
+    "terminalReason": "timeout",
+    "sessionPersistence": true,
+    "workspaceEffects": {
+      "changedPaths": [],
+      "createdPaths": [],
+      "modifiedPaths": [],
+      "deletedPaths": [],
+      "gitPresent": true,
+      "gitHeadUnchanged": true,
+      "gitStatusBefore": [],
+      "gitStatusAfter": [],
+      "excludedPrefixes": [".git/", ".storydex/.agent/", ".storydex/.cache/"],
+      "files": {
+        "approval-timeout-output.txt": {
+          "exists": false,
+          "size": 0,
+          "sha256": ""
+        }
+      }
+    },
+    "httpStatus": 200
+  }
+}

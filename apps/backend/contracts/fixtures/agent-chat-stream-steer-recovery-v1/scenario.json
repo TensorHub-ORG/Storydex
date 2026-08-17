@@ -51,6 +51,7 @@
           "messageId": "steer-contract-1",
           "mode": "queued",
           "status": "pending",
+          "content": "Resume this guidance as a new queued turn after the interrupted trace.",
           "dispatchTracePresent": false
         }
       ]

@@ -62,6 +62,8 @@ PARITY_FIELDS = (
     "terminalReason",
     "doneCount",
     "toolSequence",
+    "toolErrorSequence",
+    "interruptedToolSequence",
     "providerIds",
     "models",
     "providerModes",
@@ -385,11 +387,13 @@ def compare_reports(
         python_mailbox = python_mailbox if isinstance(python_mailbox, Mapping) else {}
         rust_mailbox = rust_mailbox if isinstance(rust_mailbox, Mapping) else {}
         mailbox_fields = (
+            "revision",
             "revisionPositive",
             "paused",
             "pauseReason",
             "activeTraceEmpty",
             "messages",
+            "eventTypeCounts",
         )
         python_values = {field: python_mailbox.get(field) for field in mailbox_fields}
         rust_values = {field: rust_mailbox.get(field) for field in mailbox_fields}

@@ -25,7 +25,7 @@
 | P1-5 至 P1-7 | 已完成 | Evidence Ledger、结构化 compaction checkpoint、shadow/真实 token 预算、LRU/JIT 上下文及对应 Trace/失效语义已落地并通过聚焦、全量和真实主链路验收 |
 | P2 | 阻塞 | P1-5～P1-7 已完成但仍需积累稳定真实 token/证据样本；在 Evidence Ledger、checkpoint 和 token baseline 稳定前不得启动 P2 |
 
-2026-08-17 同步：P1 治理结论保持不变，P2 仍按真实 token/证据样本门槛阻塞并暂缓；P1 治理代码基线为 `d7909d6c6d152709bee7abe561b779f32dafb69b`，当前远端 `main` 基线为 `219cb05aaf2699effedaee78cb403cc89e7f013b`（对应 CI run `31949698044` 已成功），本地 Agent M3 实现提交为 `2cf446e00c25e166209f0549eb58d3b9b317ec95`，仍须先后通过 `dev/windows` 与 `main` 的远端 CI。后续工作已转入 [Rust 后端与 Tauri 桌面重构计划](./rust-tauri-migration.md) 的 Agent M3：`storydex-agentd` 已增加 13 组 chat/SSE replay 的 Refactor 差分切片，但 Agent chat/SSE Stable 仍由 Python 编排。本文件的 P1/P2 结论不得被 Rust 迁移工作静默改写；新对话只推进 Rust 重构，不恢复慢响应专项。
+2026-08-17 同步：P1 治理结论保持不变，P2 仍按真实 token/证据样本门槛阻塞并暂缓；P1 治理代码基线为 `d7909d6c6d152709bee7abe561b779f32dafb69b`，Agent 控制面收口起始基线为 `10ae9b73a9890ed4b715df82f269b496feff1c42`，本轮仍须先后通过 `dev/windows` 与 `main` 的远端 CI。后续工作已转入 [Rust 后端与 Tauri 桌面重构计划](./rust-tauri-migration.md) 的 Agent M3：`storydex-agentd` 已增加 20 组 chat/SSE replay 的 Refactor 差分切片，但 Agent chat/SSE Stable 仍由 Python 编排。本文件的 P1/P2 结论不得被 Rust 迁移工作静默改写；新对话只推进 Rust 重构，不恢复慢响应专项。
 
 P0 已全部完成；P0-1F、P1-0、P1-1 核心和 P1-2a 已由提交 `5cfabbd` 推送，P1-2c 已由提交 `0d4c611` 推送。第二批（P1-2b、P1-3、P1-4）代码收口提交为 `858c990c16978c40369c2d6eb60b1ff57c1823c5`，第三批（P1-5、P1-6、P1-7）为 `327eeb4b9521d1d450558db05b0d6b4f4ed23ad0`；两个 SHA 均通过 pre-push，GitHub Actions run `31225798801`、`31227503047` 均为 `success`。P1-5～P1-7 已完成最终回归和真实主链路验收；P2 仍按门槛阻塞。
 
@@ -901,7 +901,7 @@ P0-1/P0-2/P0-3 已分别提交为 `b0dd6cf`、`151ca45`、`785a46f`；P0-1F、P1
 
 ```text
 P1-2c、P1-3、P1-4、P1-5、P1-6、P1-7 已完成，不要重复实施。若出现新的性能或信息完整性证据，只在本文件记录复现和影响；当前对话不启动性能专项。
-当前主任务转到 docs/rust-tauri-migration.md：M3 已冻结 Agent chat/SSE 有序事件契约，并完成 13 组 Python Stable/Rust Refactor 规范化差分，覆盖读、受限写、Provider 错误、取消/超时/断连、审批、follow-up/steer、损坏会话和 replacement。真实主链路仍只使用本机 Storydex OPENCODE/deepseek-v4-flash 的隔离配置副本，凭证不得输出或提交；Rust 只在 Refactor/Beta 轨道运行，不接管 Stable。
+当前主任务转到 docs/rust-tauri-migration.md：M3 已冻结 Agent chat/SSE 有序事件契约，并完成 20 组 Python Stable/Rust Refactor 规范化差分，覆盖读、受限写、Provider 错误、取消/超时/断连、启动前 stop、审批允许/拒绝/超时/重复决策、follow-up 编辑/删除/存储失败、steer、会话损坏/缺失/工作区不匹配和 replacement。真实主链路仍只使用本机 Storydex OPENCODE/deepseek-v4-flash 的隔离配置副本，凭证不得输出或提交；Rust 只在 Refactor/Beta 轨道运行，不接管 Stable。
 ```
 
 ### Rust 重构完成后的 P2 处理（当前暂缓）

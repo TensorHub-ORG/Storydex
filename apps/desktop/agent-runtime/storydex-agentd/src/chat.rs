@@ -37,6 +37,7 @@ use uuid::Uuid;
 const MAX_PROMPT_CHARS: usize = 12_000;
 const MAX_EXECUTION_TIMEOUT_MS: u64 = 600_000;
 const BRIDGE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+const CONTROL_PLANE_PREFLIGHT_GRACE: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -129,6 +130,21 @@ pub struct FollowupActionRequest {
     expected_trace_id: String,
     #[serde(default)]
     workspace_root: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FollowupUpdateRequest {
+    #[serde(default = "default_session_id")]
+    session_id: String,
+    #[serde(default)]
+    expected_trace_id: String,
+    #[serde(default)]
+    workspace_root: String,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -600,6 +616,96 @@ pub async fn enqueue_followup(
     .into_response()
 }
 
+pub async fn update_followup(
+    State(state): State<AppState>,
+    AxumPath(message_id): AxumPath<String>,
+    payload: Result<Json<FollowupUpdateRequest>, JsonRejection>,
+) -> Response<Body> {
+    let started_at = Instant::now();
+    let Json(payload) = match payload {
+        Ok(payload) => payload,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "Follow-up update body must be valid JSON.",
+            )
+            .into_response();
+        }
+    };
+    let workspace = match resolve_workspace(&state, &payload.workspace_root) {
+        Ok(path) => path,
+        Err((status, code, message)) => {
+            return error_response(status, code, message).into_response();
+        }
+    };
+    let message = match state.followup_store().update(
+        &workspace,
+        &payload.session_id,
+        &message_id,
+        payload.content.as_deref(),
+        payload.mode.as_deref(),
+        &payload.expected_trace_id,
+    ) {
+        Ok(message) => message,
+        Err(error) => return followup_error_response(error),
+    };
+    let mut steer_requested = false;
+    if message.mode == "steer" {
+        steer_requested = state
+            .execution_registry()
+            .cancel(
+                &payload.session_id,
+                &payload.expected_trace_id,
+                Some(&workspace),
+                "steer",
+            )
+            .accepted;
+    }
+    Json(
+        ApiEnvelope::success(
+            json!({"message": message, "steerRequested": steer_requested}),
+            started_at,
+        )
+        .with_audit(vec![json!({
+            "action": "update_agent_followup",
+            "messageId": message_id,
+            "status": message.status,
+        })]),
+    )
+    .into_response()
+}
+
+pub async fn delete_followup(
+    State(state): State<AppState>,
+    AxumPath(message_id): AxumPath<String>,
+    Query(query): Query<FollowupQuery>,
+) -> Response<Body> {
+    let started_at = Instant::now();
+    let workspace = match resolve_workspace(&state, &query.workspace_root) {
+        Ok(path) => path,
+        Err((status, code, message)) => {
+            return error_response(status, code, message).into_response();
+        }
+    };
+    let message =
+        match state
+            .followup_store()
+            .cancel_message(&workspace, &query.session_id, &message_id)
+        {
+            Ok(message) => message,
+            Err(error) => return followup_error_response(error),
+        };
+    Json(
+        ApiEnvelope::success(json!({"message": message}), started_at).with_audit(vec![json!({
+            "action": "delete_agent_followup",
+            "messageId": message_id,
+            "status": message.status,
+        })]),
+    )
+    .into_response()
+}
+
 pub async fn steer_followup(
     State(state): State<AppState>,
     AxumPath(message_id): AxumPath<String>,
@@ -696,6 +802,7 @@ fn followup_error_response(error: crate::followup::FollowupError) -> Response<Bo
         | "no_active_execution"
         | "message_id_conflict"
         | "invalid_followup_transition"
+        | "followup_not_editable"
         | "followup_mailbox_paused" => StatusCode::CONFLICT,
         "corrupt_followup_mailbox" | "followup_storage_error" => StatusCode::INTERNAL_SERVER_ERROR,
         _ => StatusCode::UNPROCESSABLE_ENTITY,
@@ -962,24 +1069,7 @@ async fn run_chat(execution: ChatExecution) {
         cancellation.cancel("client_disconnected");
         return;
     }
-    if !payload.source_followup_message_id.trim().is_empty()
-        && !send_event(
-            &sender,
-            "ContinuationStarted",
-            json!({
-                "messageId": payload.source_followup_message_id,
-                "previousTraceId": payload.source_followup_expected_trace_id,
-                "continuationMode": "queued",
-            }),
-            &trace_id,
-            &session_id,
-        )
-        .await
-    {
-        cancellation.cancel("client_disconnected");
-        return;
-    }
-
+    tokio::task::yield_now().await;
     for (phase, label, status) in [
         ("intent_classification", "执行意图识别完成", "success"),
         ("context_assembly", "项目上下文组装完成", "success"),
@@ -1018,6 +1108,10 @@ async fn run_chat(execution: ChatExecution) {
     {
         cancellation.cancel("client_disconnected");
         return;
+    }
+    tokio::select! {
+        () = cancellation.cancelled() => {}
+        () = tokio::time::sleep(CONTROL_PLANE_PREFLIGHT_GRACE) => {}
     }
 
     let identity = provider_identity(&state);
@@ -1075,6 +1169,28 @@ async fn run_chat(execution: ChatExecution) {
     .await
     {
         cancellation.cancel("client_disconnected");
+        return;
+    }
+    if cancellation.is_cancelled() {
+        terminal_event = "AgentCancelled".to_owned();
+        trace_events.push((
+            terminal_event.clone(),
+            with_event_identity(
+                "AgentCancelled",
+                json!({"reason": cancellation.reason()}),
+                &trace_id,
+                &session_id,
+            ),
+        ));
+        send_terminal_cancelled(
+            &sender,
+            &mut terminal_sent,
+            &trace_id,
+            &session_id,
+            &cancellation.reason(),
+        )
+        .await;
+        send_done(&sender).await;
         return;
     }
     let runtime_session_id = match load_runtime_session_id(&state, &workspace, &session_id) {
@@ -1263,6 +1379,27 @@ async fn run_bridge(context: BridgeRunContext<'_>) -> anyhow::Result<()> {
         runtime_session_id,
         identity,
     } = context;
+    if cancellation.is_cancelled() {
+        *terminal_event = "AgentCancelled".to_owned();
+        trace_events.push((
+            terminal_event.clone(),
+            with_event_identity(
+                "AgentCancelled",
+                json!({"reason": cancellation.reason()}),
+                trace_id,
+                session_id,
+            ),
+        ));
+        send_terminal_cancelled(
+            sender,
+            terminal_sent,
+            trace_id,
+            session_id,
+            &cancellation.reason(),
+        )
+        .await;
+        return Ok(());
+    }
     let mut command = Command::new(state.bridge_path());
     command
         .stdin(Stdio::piped())
@@ -1288,6 +1425,30 @@ async fn run_bridge(context: BridgeRunContext<'_>) -> anyhow::Result<()> {
     line.push(b'\n');
     stdin.write_all(&line).await?;
     stdin.flush().await?;
+    tokio::task::yield_now().await;
+    if cancellation.is_cancelled() {
+        send_bridge_control(&mut stdin, "cancel", Some(&cancellation.reason())).await;
+        let _ = tokio::time::timeout(BRIDGE_SHUTDOWN_TIMEOUT, child.wait()).await;
+        *terminal_event = "AgentCancelled".to_owned();
+        trace_events.push((
+            terminal_event.clone(),
+            with_event_identity(
+                "AgentCancelled",
+                json!({"reason": cancellation.reason()}),
+                trace_id,
+                session_id,
+            ),
+        ));
+        send_terminal_cancelled(
+            sender,
+            terminal_sent,
+            trace_id,
+            session_id,
+            &cancellation.reason(),
+        )
+        .await;
+        return Ok(());
+    }
     if !send_event(
         sender,
         "AgentStarted",
@@ -1345,16 +1506,7 @@ async fn run_bridge(context: BridgeRunContext<'_>) -> anyhow::Result<()> {
             control = control_receiver.recv(), if !control_closed => {
                 match control {
                     Some(ExecutionControl::Resolve { request_id, value }) => {
-                        let accepted = send_bridge_resolve_value(&mut stdin, &request_id, value).await;
-                        if accepted {
-                            let _ = send_event(
-                                sender,
-                                "PermissionResolved",
-                                json!({"requestId": request_id, "accepted": true}),
-                                trace_id,
-                                session_id,
-                            ).await;
-                        }
+                        let _ = send_bridge_resolve_value(&mut stdin, &request_id, value).await;
                     }
                     None => control_closed = true,
                 }
@@ -1392,6 +1544,16 @@ async fn run_bridge(context: BridgeRunContext<'_>) -> anyhow::Result<()> {
                         packet.get("data").unwrap_or(&Value::Null),
                     )?;
                     continue;
+                }
+                if matches!(kind, "approval_request" | "user_input_request") {
+                    let request_id = packet
+                        .get("data")
+                        .and_then(|data| data.get("requestId"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    state
+                        .execution_registry()
+                        .register_request(trace_id, request_id);
                 }
                 if kind == "tool_request" {
                     let request_id = packet.get("data").and_then(|data| data.get("requestId")).and_then(Value::as_str).unwrap_or_default();

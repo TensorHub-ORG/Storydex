@@ -144,7 +144,6 @@ impl FollowupStore {
         self.mutate_state(workspace, session_id, |state| {
             state.active_trace_id = trace_id.trim().to_owned();
             state.last_trace_id = trace_id.trim().to_owned();
-            state.append_event("ActiveTraceUpdated", None, trace_id, "");
             Ok(())
         })
     }
@@ -158,7 +157,6 @@ impl FollowupStore {
         self.mutate_state(workspace, session_id, |state| {
             if state.active_trace_id == expected_trace_id.trim() {
                 state.active_trace_id.clear();
-                state.append_event("ActiveTraceCleared", None, expected_trace_id, "");
             }
             Ok(())
         })
@@ -194,14 +192,14 @@ impl FollowupStore {
                 "mode must be queued or steer.",
             ));
         }
-        let result = self.mutate(workspace, session_id, |state| {
+        self.mutate_optional(workspace, session_id, |state| {
             if let Some(existing) = state
                 .messages
                 .iter()
                 .find(|item| item.message_id == normalized_id)
             {
                 if existing.content == normalized_content && existing.mode == normalized_mode {
-                    return Ok(existing.clone());
+                    return Ok((existing.clone(), false));
                 }
                 return Err(FollowupError::new(
                     "message_id_conflict",
@@ -260,9 +258,163 @@ impl FollowupStore {
             if normalized_mode == "steer" {
                 state.append_event("SteerRequested", Some(&message), &active, "");
             }
-            Ok(message)
-        })?;
-        Ok(result)
+            Ok((message, true))
+        })
+    }
+
+    pub(crate) fn update(
+        &self,
+        workspace: &Path,
+        session_id: &str,
+        message_id: &str,
+        content: Option<&str>,
+        mode: Option<&str>,
+        expected_trace_id: &str,
+    ) -> Result<FollowupMessage, FollowupError> {
+        let normalized_content = content.map(str::trim);
+        if normalized_content.is_some_and(str::is_empty) {
+            return Err(FollowupError::new(
+                "empty_followup",
+                "Follow-up content cannot be empty.",
+            ));
+        }
+        let normalized_mode = match mode {
+            Some(value) => {
+                let value = value.trim().to_ascii_lowercase();
+                if !matches!(value.as_str(), "queued" | "steer") {
+                    return Err(FollowupError::new(
+                        "invalid_followup_mode",
+                        "mode must be queued or steer.",
+                    ));
+                }
+                Some(value)
+            }
+            None => None,
+        };
+        self.mutate_optional(workspace, session_id, |state| {
+            let active_trace_id = state.active_trace_id.clone();
+            let Some(index) = state
+                .messages
+                .iter()
+                .position(|item| item.message_id == message_id.trim())
+            else {
+                return Err(FollowupError::new(
+                    "followup_not_found",
+                    "Follow-up message was not found.",
+                ));
+            };
+            if !matches!(
+                state.messages[index].status.as_str(),
+                "pending" | "steering"
+            ) {
+                return Err(FollowupError::new(
+                    "followup_not_editable",
+                    "Only pending or steering messages can be edited.",
+                ));
+            }
+            let content_changed =
+                normalized_content.is_some_and(|value| value != state.messages[index].content);
+            let mode_changed = normalized_mode
+                .as_deref()
+                .is_some_and(|value| value != state.messages[index].mode);
+            let effective_mode = normalized_mode
+                .as_deref()
+                .unwrap_or(state.messages[index].mode.as_str());
+            if effective_mode == "steer" {
+                if active_trace_id.is_empty() {
+                    return Err(FollowupError::new(
+                        "no_active_execution",
+                        "There is no active execution to steer.",
+                    ));
+                }
+                let expected = if expected_trace_id.trim().is_empty() {
+                    state.messages[index].expected_trace_id.trim()
+                } else {
+                    expected_trace_id.trim()
+                };
+                if !expected.is_empty() && expected != active_trace_id {
+                    return Err(FollowupError::new(
+                        "stale_trace",
+                        "The active execution changed before the steer request was applied.",
+                    ));
+                }
+            }
+            if !content_changed && !mode_changed {
+                return Ok((state.messages[index].clone(), false));
+            }
+            if let Some(content) = normalized_content {
+                state.messages[index].content = content.to_owned();
+            }
+            if let Some(mode) = normalized_mode.as_deref() {
+                state.messages[index].mode = mode.to_owned();
+                if mode == "steer" {
+                    state.messages[index].status = "steering".to_owned();
+                    state.messages[index].status_detail =
+                        "waiting for a safe interruption point".to_owned();
+                    state.messages[index].active_trace_id = active_trace_id.clone();
+                    state.messages[index].expected_trace_id = if expected_trace_id.trim().is_empty()
+                    {
+                        active_trace_id.clone()
+                    } else {
+                        expected_trace_id.trim().to_owned()
+                    };
+                } else {
+                    state.messages[index].status = "pending".to_owned();
+                    state.messages[index].status_detail =
+                        "waiting for the current turn to finish".to_owned();
+                }
+            }
+            state.messages[index].updated_at = now_iso();
+            let output = state.messages[index].clone();
+            if mode_changed && output.mode == "steer" {
+                state.append_event("SteerRequested", Some(&output), &active_trace_id, "");
+            }
+            state.append_event("FollowupUpdated", Some(&output), &active_trace_id, "");
+            Ok((output, true))
+        })
+    }
+
+    pub(crate) fn cancel_message(
+        &self,
+        workspace: &Path,
+        session_id: &str,
+        message_id: &str,
+    ) -> Result<FollowupMessage, FollowupError> {
+        self.mutate_optional(workspace, session_id, |state| {
+            let Some(index) = state
+                .messages
+                .iter()
+                .position(|item| item.message_id == message_id.trim())
+            else {
+                return Err(FollowupError::new(
+                    "followup_not_found",
+                    "Follow-up message was not found.",
+                ));
+            };
+            if state.messages[index].status == "cancelled" {
+                return Ok((state.messages[index].clone(), false));
+            }
+            if !matches!(
+                state.messages[index].status.as_str(),
+                "pending" | "steering"
+            ) {
+                return Err(FollowupError::new(
+                    "followup_not_editable",
+                    "A dispatching or sent follow-up cannot be deleted.",
+                ));
+            }
+            state.messages[index].status = "cancelled".to_owned();
+            state.messages[index].status_detail = "deleted".to_owned();
+            state.messages[index].updated_at = now_iso();
+            let output = state.messages[index].clone();
+            state.append_event(
+                "FollowupUpdated",
+                Some(&output),
+                &state.active_trace_id.clone(),
+                "",
+            );
+            Ok((output, true))
+        })
     }
 
     pub(crate) fn claim(
@@ -428,7 +580,6 @@ impl FollowupStore {
         self.mutate_state(workspace, session_id, |state| {
             state.paused = true;
             state.pause_reason = reason.trim().to_owned();
-            state.append_event("MailboxPaused", None, &state.active_trace_id.clone(), "");
             Ok(())
         })
     }
@@ -499,7 +650,6 @@ impl FollowupStore {
         self.mutate_state(workspace, session_id, |state| {
             state.paused = false;
             state.pause_reason.clear();
-            state.append_event("MailboxResumed", None, "", "");
             Ok(())
         })
     }
@@ -532,6 +682,23 @@ impl FollowupStore {
         state.updated_at = now_iso();
         self.write(workspace, session_id, &state)?;
         Ok(state)
+    }
+
+    fn mutate_optional<T>(
+        &self,
+        workspace: &Path,
+        session_id: &str,
+        operation: impl FnOnce(&mut FollowupState) -> Result<(T, bool), FollowupError>,
+    ) -> Result<T, FollowupError> {
+        let _guard = self.lock.lock().unwrap_or_else(|error| error.into_inner());
+        let mut state = self.load(workspace, session_id)?;
+        let (value, changed) = operation(&mut state)?;
+        if changed {
+            state.revision = state.revision.saturating_add(1);
+            state.updated_at = now_iso();
+            self.write(workspace, session_id, &state)?;
+        }
+        Ok(value)
     }
 
     fn load(&self, workspace: &Path, session_id: &str) -> Result<FollowupState, FollowupError> {
@@ -585,13 +752,35 @@ impl FollowupStore {
         fs::write(&temporary, bytes)
             .map_err(|error| FollowupError::new("followup_storage_error", error.to_string()))?;
         if path.exists() {
-            fs::remove_file(&path)
-                .map_err(|error| FollowupError::new("followup_storage_error", error.to_string()))?;
+            let backup = path.with_file_name(format!(
+                ".{}.{}.bak",
+                path.file_name().unwrap_or_default().to_string_lossy(),
+                Uuid::new_v4()
+            ));
+            fs::rename(&path, &backup).map_err(|error| {
+                let _ = fs::remove_file(&temporary);
+                FollowupError::new("followup_storage_error", error.to_string())
+            })?;
+            match fs::rename(&temporary, &path) {
+                Ok(()) => {
+                    let _ = fs::remove_file(backup);
+                    Ok(())
+                }
+                Err(error) => {
+                    let _ = fs::rename(backup, &path);
+                    let _ = fs::remove_file(&temporary);
+                    Err(FollowupError::new(
+                        "followup_storage_error",
+                        error.to_string(),
+                    ))
+                }
+            }
+        } else {
+            fs::rename(&temporary, &path).map_err(|error| {
+                let _ = fs::remove_file(&temporary);
+                FollowupError::new("followup_storage_error", error.to_string())
+            })
         }
-        fs::rename(&temporary, &path).map_err(|error| {
-            let _ = fs::remove_file(&temporary);
-            FollowupError::new("followup_storage_error", error.to_string())
-        })
     }
 }
 
@@ -646,10 +835,15 @@ mod tests {
             .enqueue(workspace, "session", "m1", "continue", "queued", "trace-1")
             .expect("enqueue");
         assert_eq!(message.status, "pending");
+        let revision = store.list(workspace, "session").expect("mailbox").revision;
         assert!(
             store
                 .enqueue(workspace, "session", "m1", "continue", "queued", "trace-1")
                 .is_ok()
+        );
+        assert_eq!(
+            store.list(workspace, "session").expect("mailbox").revision,
+            revision
         );
         assert_eq!(
             store
@@ -728,5 +922,41 @@ mod tests {
             .expect("claim requeued steer");
         assert_eq!(claimed.status, "dispatching");
         assert_eq!(claimed.mode, "queued");
+    }
+
+    #[test]
+    fn pending_followups_can_be_edited_and_cancelled_idempotently() {
+        let directory = tempdir().expect("tempdir");
+        let workspace = directory.path();
+        let store = FollowupStore::default();
+        store
+            .enqueue(workspace, "session", "m1", "first", "queued", "")
+            .expect("enqueue");
+
+        let edited = store
+            .update(workspace, "session", "m1", Some("second"), None, "")
+            .expect("edit");
+        assert_eq!(edited.content, "second");
+        assert_eq!(edited.status, "pending");
+
+        let cancelled = store
+            .cancel_message(workspace, "session", "m1")
+            .expect("cancel");
+        assert_eq!(cancelled.status, "cancelled");
+        let repeated = store
+            .cancel_message(workspace, "session", "m1")
+            .expect("repeat cancel");
+        assert_eq!(repeated.status, "cancelled");
+
+        let state = store.list(workspace, "session").expect("mailbox");
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(
+            state
+                .events
+                .iter()
+                .filter(|event| event["_type"] == "FollowupUpdated")
+                .count(),
+            2
+        );
     }
 }

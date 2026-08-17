@@ -625,7 +625,10 @@ def _resolve_followup_workspace_root(*, session_id: str, workspace_root: str = "
 
 
 def _raise_followup_error(exc: FollowupMailboxError) -> None:
-    status_code = 404 if exc.code == "followup_not_found" else 409 if exc.code in {
+    status_code = 500 if exc.code in {
+        "corrupt_followup_mailbox",
+        "followup_storage_error",
+    } else 404 if exc.code == "followup_not_found" else 409 if exc.code in {
         "message_id_conflict",
         "followup_not_editable",
         "invalid_followup_transition",

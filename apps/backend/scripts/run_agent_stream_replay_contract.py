@@ -390,7 +390,12 @@ def _prepare_runtime_session_fixture(
     if not isinstance(setup, Mapping):
         return None
     kind = str(setup.get("kind") or "").strip()
-    if kind not in {"corrupt_binding", "corrupt_session"}:
+    if kind not in {
+        "corrupt_binding",
+        "corrupt_session",
+        "missing_session",
+        "workspace_mismatch",
+    }:
         raise AcceptanceError(f"unsupported runtimeSessionSetup kind: {kind}")
     runtime_session_id = str(
         setup.get("runtimeSessionId") or "11111111-1111-4111-8111-111111111111"
@@ -414,7 +419,7 @@ def _prepare_runtime_session_fixture(
     binding_path.parent.mkdir(parents=True, exist_ok=True)
     if kind == "corrupt_binding":
         binding_path.write_text("{broken", encoding="utf-8")
-    else:
+    elif kind == "corrupt_session":
         session_path.parent.mkdir(parents=True, exist_ok=True)
         session_path.write_text("{broken", encoding="utf-8")
         _write_json(
@@ -423,6 +428,24 @@ def _prepare_runtime_session_fixture(
                 "version": 2,
                 "runtime": "storydex-coomi-rs",
                 "workspaceRoot": str(workspace.resolve()),
+                "storydexSessionId": normalized_session,
+                "coomiSessionId": runtime_session_id,
+                "runtimeSessionId": runtime_session_id,
+                "historyPath": str(session_path.resolve()),
+                "sessionPath": str(session_path.resolve()),
+            },
+        )
+    else:
+        _write_json(
+            binding_path,
+            {
+                "version": 2,
+                "runtime": "storydex-coomi-rs",
+                "workspaceRoot": str(
+                    (workspace.parent / "workspace-mismatch").resolve()
+                    if kind == "workspace_mismatch"
+                    else workspace.resolve()
+                ),
                 "storydexSessionId": normalized_session,
                 "coomiSessionId": runtime_session_id,
                 "runtimeSessionId": runtime_session_id,
@@ -579,7 +602,12 @@ def run_replay_contract(args: argparse.Namespace) -> dict[str, Any]:
             )
             os.environ["STORYDEX_COOMI_BRIDGE"] = str(runtime_bridge)
             os.environ["STORYDEX_AGENT_PROVIDER_REPLAY_FIXTURE"] = str(replay_path)
-            os.environ["AGENT_INTENT_ROUTING_MODE"] = "hybrid"
+            routing_mode = str(fixture.get("intentRoutingMode") or "hybrid").strip()
+            if routing_mode not in {"legacy", "hybrid", "workflow", "direct"}:
+                raise AcceptanceError(
+                    f"unsupported fixture intentRoutingMode: {routing_mode}"
+                )
+            os.environ["AGENT_INTENT_ROUTING_MODE"] = routing_mode
             backend = BackendProcess(
                 workspace=workspace,
                 coomi_home=coomi_home,

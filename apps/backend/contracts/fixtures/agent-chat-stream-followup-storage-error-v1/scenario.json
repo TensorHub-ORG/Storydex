@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "contractId": "agent.chat.stream.v1",
+  "scenario": "followup-storage-failure-preserves-obstacle",
+  "request": {
+    "prompt": "Read chapters/followup-storage.md once and return STORYDEX_FOLLOWUP_STORAGE_FILE_2D44. Marker STORYDEX_FOLLOWUP_STORAGE_PROMPT_7E20.",
+    "activeFile": "",
+    "reasoningEffort": "low",
+    "confirmNoSnapshot": true,
+    "timeoutMs": 0
+  },
+  "setupInteractions": [
+    {
+      "action": "probe_followup_storage_error",
+      "messageId": "followup-storage-failure-1",
+      "content": "This payload must never be persisted."
+    }
+  ],
+  "workspace": {
+    "initializeGit": true,
+    "stabilizeRuntimeBaseline": true,
+    "files": [
+      {
+        "path": ".storydex/config/project-settings.json",
+        "content": "{\n  \"agentCommitPromptEnabled\": false\n}\n"
+      },
+      {
+        "path": "chapters/followup-storage.md",
+        "content": "# Follow-up storage\n\nSTORYDEX_FOLLOWUP_STORAGE_FILE_2D44\n"
+      }
+    ]
+  },
+  "expected": {
+    "providerId": "OPENCODE",
+    "model": "deepseek-v4-flash",
+    "providerMode": "replay",
+    "toolSequence": ["read_file"],
+    "replyContains": ["STORYDEX_FOLLOWUP_STORAGE_FILE_2D44"],
+    "terminalEvent": "AgentCompleted",
+    "followupPersistence": true,
+    "followupMessages": [],
+    "sessionPersistence": true,
+    "httpStatus": 200
+  }
+}

@@ -10,6 +10,7 @@ from api.routes_agent import AgentChatRequest
 from scripts.run_agent_runtime_contract import (
     ContractError,
     _interaction_event_matches,
+    _safe_interaction_tail,
     validate_coomi_status_response,
     validate_health_response,
 )
@@ -44,6 +45,32 @@ def test_interaction_trigger_can_match_event_payload_fields() -> None:
         after_event="TurnPhase",
         after_event_fields=expected,
     )
+
+
+def test_interaction_failure_tail_keeps_safe_error_fields_only() -> None:
+    tail = _safe_interaction_tail(
+        [
+            ("TurnPhase", {"phase": "model", "status": "running"}),
+            (
+                "AgentError",
+                {
+                    "error_type": "BridgeError",
+                    "code": "bridge_error",
+                    "message": "Authorization: Bearer must-not-leak",
+                    "details": {"stage": "bridge_events", "providerHttpStatus": 503},
+                },
+            ),
+        ]
+    )
+
+    assert tail[-1] == {
+        "event": "AgentError",
+        "code": "bridge_error",
+        "error_type": "BridgeError",
+        "stage": "bridge_events",
+        "providerHttpStatus": 503,
+    }
+    assert "must-not-leak" not in json.dumps(tail)
 
 
 def test_health_contract_accepts_shared_storydex_envelope() -> None:
@@ -295,6 +322,72 @@ def test_chat_stream_contract_allows_explicit_mutating_fixture() -> None:
     )
 
     assert observed["toolSequence"] == ["write_file"]
+
+
+def test_chat_stream_contract_allows_declared_tool_error() -> None:
+    events = _valid_chat_stream_events()
+    for name, payload in events:
+        if name == "ToolDone":
+            payload["is_error"] = True
+
+    observed = validate_chat_stream_events(
+        events,
+        status_code=200,
+        headers={
+            "content-type": "text/event-stream",
+            "cache-control": "no-cache",
+            "x-accel-buffering": "no",
+        },
+        trace_id="trace-contract",
+        session_id="session-contract",
+        fixture={
+            "expected": {
+                "terminalEvent": "AgentCompleted",
+                "toolSequence": ["read_file"],
+                "toolErrorSequence": ["read_file"],
+                "replyContains": ["STORYDEX_AGENT_STREAM_CONTRACT_FILE_91C7"],
+            }
+        },
+    )
+
+    assert observed["toolErrorSequence"] == ["read_file"]
+
+
+def test_chat_stream_contract_allows_declared_interrupted_tool_on_cancel() -> None:
+    events = [
+        item
+        for item in _valid_chat_stream_events()
+        if item[0] not in {"ToolDone", "TextChunk", "AgentCompleted", "done"}
+    ]
+    events.extend(
+        [
+            _event("AgentCancelled", reason="timeout"),
+            ("done", {"type": "done"}),
+        ]
+    )
+
+    observed = validate_chat_stream_events(
+        events,
+        status_code=200,
+        headers={
+            "content-type": "text/event-stream",
+            "cache-control": "no-cache",
+            "x-accel-buffering": "no",
+        },
+        trace_id="trace-contract",
+        session_id="session-contract",
+        fixture={
+            "expected": {
+                "terminalEvent": "AgentCancelled",
+                "terminalReason": "timeout",
+                "toolSequence": ["read_file"],
+                "interruptedToolSequence": ["read_file"],
+                "replyContains": [],
+            }
+        },
+    )
+
+    assert observed["interruptedToolSequence"] == ["read_file"]
 
 
 def test_chat_stream_contract_rejects_mutating_tool_without_fixture_opt_in() -> None:

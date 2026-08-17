@@ -9,6 +9,32 @@ import pytest
 from scripts import run_graph_live_acceptance as acceptance
 
 
+def test_backend_bridge_resolution_prefers_explicit_runtime(tmp_path: Path) -> None:
+    backend_root = tmp_path / "backend"
+    packaged = backend_root / "runtime" / "storydex-coomi-bridge.exe"
+    packaged.parent.mkdir(parents=True)
+    packaged.write_bytes(b"packaged")
+    explicit = tmp_path / "debug" / "storydex-coomi-bridge.exe"
+
+    selected = acceptance.resolve_backend_bridge(
+        {"STORYDEX_COOMI_BRIDGE": str(explicit)},
+        backend_root,
+    )
+
+    assert selected == str(explicit)
+
+
+def test_backend_bridge_resolution_uses_packaged_fallback(tmp_path: Path) -> None:
+    backend_root = tmp_path / "backend"
+    packaged = backend_root / "runtime" / "storydex-coomi-bridge.exe"
+    packaged.parent.mkdir(parents=True)
+    packaged.write_bytes(b"packaged")
+
+    selected = acceptance.resolve_backend_bridge({}, backend_root)
+
+    assert selected == str(packaged)
+
+
 def test_live_acceptance_removes_isolated_provider_copy_after_setup_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

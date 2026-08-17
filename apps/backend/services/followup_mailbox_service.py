@@ -730,10 +730,30 @@ class FollowupMailboxService:
         path = _mailbox_path(workspace, normalized_session)
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
+        except FileNotFoundError:
             payload = {}
-        if not isinstance(payload, dict) or str(payload.get("sessionId") or normalized_session) != normalized_session:
-            payload = {}
+        except OSError as exc:
+            raise FollowupMailboxError(
+                "followup_storage_error",
+                f"Unable to read the follow-up mailbox: {exc}",
+            ) from exc
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise FollowupMailboxError(
+                "corrupt_followup_mailbox",
+                f"Invalid follow-up mailbox: {exc}",
+            ) from exc
+        if not isinstance(payload, dict):
+            raise FollowupMailboxError(
+                "corrupt_followup_mailbox",
+                "Follow-up mailbox must be a JSON object.",
+            )
+        stored_session = str(payload.get("sessionId") or normalized_session)
+        stored_workspace = str(payload.get("workspaceRoot") or workspace.as_posix())
+        if stored_session != normalized_session or Path(stored_workspace).resolve() != workspace:
+            raise FollowupMailboxError(
+                "corrupt_followup_mailbox",
+                "Follow-up mailbox identity does not match the requested workspace/session.",
+            )
         state = {
             "_type": "FollowupMailbox",
             "_version": FOLLOWUP_MAILBOX_VERSION,
@@ -766,7 +786,13 @@ class FollowupMailboxService:
         state["revision"] = int(state.get("revision") or 0) + 1
         state["updatedAt"] = _now_iso()
         path = _mailbox_path(Path(workspace_root).resolve(), self._normalize_session_id(session_id))
-        _atomic_write_json(path, state)
+        try:
+            _atomic_write_json(path, state)
+        except OSError as exc:
+            raise FollowupMailboxError(
+                "followup_storage_error",
+                f"Unable to persist the follow-up mailbox: {exc}",
+            ) from exc
 
 
 def _mailbox_path(workspace_root: Path, session_id: str) -> Path:

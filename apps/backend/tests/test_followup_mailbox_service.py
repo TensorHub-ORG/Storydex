@@ -334,3 +334,43 @@ def test_atomic_mailbox_write_retries_transient_windows_file_sharing_error(monke
     assert len(calls) == 2
     persisted = FollowupMailboxService().list_mailbox(workspace_root=tmp_path, session_id="session-retry")
     assert persisted["pauseReason"] == "disconnect"
+
+
+def test_corrupt_mailbox_fails_closed_without_overwriting_original(tmp_path: Path) -> None:
+    service = FollowupMailboxService()
+    _enqueue(service, tmp_path, "message-1", "original")
+    mailbox_path = next((tmp_path / ".storydex" / ".agent" / "followups").glob("*.json"))
+    mailbox_path.write_text("{broken", encoding="utf-8")
+    original = mailbox_path.read_bytes()
+
+    with pytest.raises(FollowupMailboxError) as failure:
+        _enqueue(service, tmp_path, "message-2", "must not overwrite")
+
+    assert failure.value.code == "corrupt_followup_mailbox"
+    assert mailbox_path.read_bytes() == original
+
+
+def test_mailbox_write_failure_preserves_persisted_message(monkeypatch, tmp_path: Path) -> None:
+    service = FollowupMailboxService()
+    original = _enqueue(service, tmp_path, "message-1", "original")
+    monkeypatch.setattr(
+        followup_mailbox_module.os,
+        "replace",
+        lambda _source, _target: (_ for _ in ()).throw(PermissionError("locked")),
+    )
+    monkeypatch.setattr(followup_mailbox_module.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(FollowupMailboxError) as failure:
+        service.update_message(
+            workspace_root=tmp_path,
+            session_id="session-1",
+            message_id="message-1",
+            content="must not persist",
+        )
+
+    assert failure.value.code == "followup_storage_error"
+    persisted = FollowupMailboxService().list_mailbox(
+        workspace_root=tmp_path,
+        session_id="session-1",
+    )
+    assert persisted["messages"] == [original]

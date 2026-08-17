@@ -399,6 +399,7 @@ class StorydexCoomiAgentService:
         self._permission_mode = "ask_approval"
         self._plan_modes: dict[str, bool] = {}
         self._approval_waiters: dict[str, asyncio.Future[Dict[str, Any]]] = {}
+        self._approval_lock = threading.Lock()
         self._active_lock = threading.Lock()
         self._active: dict[str, tuple[asyncio.AbstractEventLoop, LiveBridgeProcess]] = {}
         self._context_by_session: dict[str, Dict[str, Any]] = {}
@@ -832,10 +833,12 @@ class StorydexCoomiAgentService:
             self._unregister_bridge(key, bridge)
             for task in resolution_tasks:
                 task.cancel()
-            for approval_id, future in list(self._approval_waiters.items()):
+            with self._approval_lock:
+                approval_waiters = list(self._approval_waiters.items())
+                self._approval_waiters.clear()
+            for _, future in approval_waiters:
                 if not future.done():
                     future.cancel()
-                self._approval_waiters.pop(approval_id, None)
             await bridge.close()
 
     async def _dispatch_tool_request(
@@ -884,7 +887,8 @@ class StorydexCoomiAgentService:
         for index, question in enumerate(questions):
             approval_id = f"{trace_id}-{uuid4().hex}"
             future: asyncio.Future[Dict[str, Any]] = asyncio.get_running_loop().create_future()
-            self._approval_waiters[approval_id] = future
+            with self._approval_lock:
+                self._approval_waiters[approval_id] = future
             question_id = str(question.get("id") or f"question-{index + 1}")
             pending.append((approval_id, future, question_id))
             events.append(
@@ -926,8 +930,9 @@ class StorydexCoomiAgentService:
                 payload = {"approved": approved} if packet_type == "approval_request" else {"answers": values}
                 await bridge.resolve(bridge_request_id, payload)
             finally:
-                for approval_id, _, _ in pending:
-                    self._approval_waiters.pop(approval_id, None)
+                with self._approval_lock:
+                    for approval_id, _, _ in pending:
+                        self._approval_waiters.pop(approval_id, None)
 
         return events, asyncio.create_task(forward())
 
@@ -1162,13 +1167,19 @@ class StorydexCoomiAgentService:
     def resolve_approval(
         self, approval_id: str, decision: str, *, response: Dict[str, Any] | None = None
     ) -> Dict[str, Any]:
-        future = self._approval_waiters.get(str(approval_id or ""))
+        normalized_id = str(approval_id or "")
+        with self._approval_lock:
+            future = self._approval_waiters.pop(normalized_id, None)
         resolved = future is not None and not future.done()
         if resolved and future is not None:
             value = {"decision": str(decision or ""), "response": dict(response or {})}
-            future.get_loop().call_soon_threadsafe(future.set_result, value)
+            def complete() -> None:
+                if not future.done():
+                    future.set_result(value)
+
+            future.get_loop().call_soon_threadsafe(complete)
         return {
-            "approvalId": str(approval_id or ""),
+            "approvalId": normalized_id,
             "decision": str(decision or ""),
             "resolved": resolved,
         }

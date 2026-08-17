@@ -261,6 +261,26 @@ def _interaction_event_matches(
     )
 
 
+def _safe_interaction_tail(
+    events: list[tuple[str, Mapping[str, Any]]],
+) -> list[dict[str, Any]]:
+    tail: list[dict[str, Any]] = []
+    for event_name, payload in events[-12:]:
+        summary: dict[str, Any] = {"event": event_name}
+        for field in ("code", "error_type", "phase", "status", "reason"):
+            value = payload.get(field)
+            if value not in (None, ""):
+                summary[field] = str(value)[:160]
+        details = payload.get("details")
+        if isinstance(details, Mapping):
+            for field in ("stage", "providerHttpStatus", "statusCode", "httpStatus"):
+                value = details.get(field)
+                if value not in (None, ""):
+                    summary[field] = value
+        tail.append(summary)
+    return tail
+
+
 def _read_stream_with_interaction(
     *,
     client: httpx.Client,
@@ -291,7 +311,13 @@ def _read_stream_with_interaction(
         raise ContractError(
             "chat stream interaction.afterEventFields must be an object"
         )
-    if action and action not in {"stop", "steer", "disconnect", "approval"}:
+    if action and action not in {
+        "stop",
+        "steer",
+        "disconnect",
+        "approval",
+        "approval_timeout",
+    }:
         raise ContractError(f"unsupported chat stream interaction: {action}")
     if action and not after_event:
         raise ContractError("chat stream interaction.afterEvent is required")
@@ -304,6 +330,8 @@ def _read_stream_with_interaction(
     current_data_lines: list[str] = []
     triggered = False
     observation: dict[str, Any] = {}
+    late_approval_id = ""
+    late_approval_kind = ""
     for raw_line in response.iter_lines():
         line = str(raw_line)
         lines.append(line)
@@ -344,30 +372,46 @@ def _read_stream_with_interaction(
         }
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         if action == "stop":
-            control_response = client.post(
-                base_url.rstrip("/") + "/api/v1/agent/executions/stop",
-                headers=headers,
-                json=stop_payload,
-                timeout=30.0,
-            )
             try:
-                control_payload = _require_mapping(
-                    control_response.json(), "execution stop response"
+                repeat = max(1, min(3, int(interaction.get("repeat") or 1)))
+            except (TypeError, ValueError) as exc:
+                raise ContractError("stop interaction.repeat must be an integer") from exc
+            stop_attempts: list[tuple[httpx.Response, Mapping[str, Any]]] = []
+            for _ in range(repeat):
+                control_response = client.post(
+                    base_url.rstrip("/") + "/api/v1/agent/executions/stop",
+                    headers=headers,
+                    json=stop_payload,
+                    timeout=30.0,
                 )
-            except ValueError as exc:
-                raise ContractError("execution stop response is not valid JSON") from exc
-            control_data = _require_mapping(
-                control_payload.get("data"), "execution stop data"
-            )
-            if control_response.status_code != 200 or control_payload.get("ok") is not True:
-                raise ContractError(
-                    "execution stop was rejected: "
-                    f"HTTP {control_response.status_code} {str(control_payload.get('error') or '')[:500]}"
+                try:
+                    control_payload = _require_mapping(
+                        control_response.json(), "execution stop response"
+                    )
+                except ValueError as exc:
+                    raise ContractError(
+                        "execution stop response is not valid JSON"
+                    ) from exc
+                control_data = _require_mapping(
+                    control_payload.get("data"), "execution stop data"
                 )
-            if control_data.get("accepted") is not True:
+                if (
+                    control_response.status_code != 200
+                    or control_payload.get("ok") is not True
+                ):
+                    raise ContractError(
+                        "execution stop was rejected: "
+                        f"HTTP {control_response.status_code} {str(control_payload.get('error') or '')[:500]}"
+                    )
+                stop_attempts.append((control_response, control_data))
+            control_response, control_data = stop_attempts[0]
+            accepted_attempts = [data.get("accepted") is True for _, data in stop_attempts]
+            if not accepted_attempts[0]:
                 raise ContractError("execution stop did not accept the active trace")
             if str(control_data.get("activeTraceId") or "") != trace_id:
                 raise ContractError("execution stop changed the active trace id")
+            if any(accepted_attempts[1:]):
+                raise ContractError("repeated execution stop was accepted more than once")
             observation = {
                 "action": action,
                 **trigger_observation,
@@ -377,6 +421,8 @@ def _read_stream_with_interaction(
                 "mailboxPaused": bool(control_data.get("mailboxPaused")),
                 "pauseReason": str(control_data.get("pauseReason") or ""),
             }
+            if repeat > 1:
+                observation["attemptAccepted"] = accepted_attempts
         elif action == "steer":
             message_id = str(interaction.get("messageId") or "").strip()
             content = str(interaction.get("content") or "").strip()
@@ -508,41 +554,64 @@ def _read_stream_with_interaction(
                 raise ContractError(
                     f"approval interaction event {after_event!r} has no approvalId"
                 )
+            if action == "approval_timeout":
+                late_approval_id = approval_id
+                late_approval_kind = str(completed_payload.get("kind") or "")
+                continue
             decision = str(interaction.get("decision") or "allow").strip()
             response_value = interaction.get("response")
             response_value = response_value if isinstance(response_value, Mapping) else {}
-            approval_response = client.post(
-                base_url.rstrip("/") + "/api/v1/agent/coomi/approval",
-                headers=headers,
-                json={
-                    "approvalId": approval_id,
-                    "decision": decision,
-                    "response": dict(response_value),
-                    "sessionId": session_id,
-                    "expectedTraceId": trace_id,
-                    "workspaceRoot": workspace_root,
-                },
-                timeout=30.0,
-            )
             try:
-                approval_payload = _require_mapping(
-                    approval_response.json(), "approval response"
+                repeat = max(
+                    1,
+                    min(3, int(interaction.get("repeatDecision") or 1)),
                 )
-            except ValueError as exc:
-                raise ContractError("approval response is not valid JSON") from exc
-            approval_data = _require_mapping(
-                approval_payload.get("data"), "approval response data"
-            )
-            if approval_response.status_code != 200 or approval_payload.get("ok") is not True:
+            except (TypeError, ValueError) as exc:
                 raise ContractError(
-                    "approval was rejected: "
-                    f"HTTP {approval_response.status_code} {str(approval_payload.get('error') or '')[:500]}"
+                    "approval interaction.repeatDecision must be an integer"
+                ) from exc
+            approval_attempts: list[tuple[httpx.Response, Mapping[str, Any]]] = []
+            for _ in range(repeat):
+                approval_response = client.post(
+                    base_url.rstrip("/") + "/api/v1/agent/coomi/approval",
+                    headers=headers,
+                    json={
+                        "approvalId": approval_id,
+                        "decision": decision,
+                        "response": dict(response_value),
+                        "sessionId": session_id,
+                        "expectedTraceId": trace_id,
+                        "workspaceRoot": workspace_root,
+                    },
+                    timeout=30.0,
                 )
-            if not (
-                approval_data.get("accepted") is True
-                or approval_data.get("resolved") is True
-            ):
+                try:
+                    approval_payload = _require_mapping(
+                        approval_response.json(), "approval response"
+                    )
+                except ValueError as exc:
+                    raise ContractError("approval response is not valid JSON") from exc
+                approval_data = _require_mapping(
+                    approval_payload.get("data"), "approval response data"
+                )
+                if (
+                    approval_response.status_code != 200
+                    or approval_payload.get("ok") is not True
+                ):
+                    raise ContractError(
+                        "approval was rejected: "
+                        f"HTTP {approval_response.status_code} {str(approval_payload.get('error') or '')[:500]}"
+                    )
+                approval_attempts.append((approval_response, approval_data))
+            approval_response, _ = approval_attempts[0]
+            accepted_attempts = [
+                data.get("accepted") is True or data.get("resolved") is True
+                for _, data in approval_attempts
+            ]
+            if not accepted_attempts[0]:
                 raise ContractError("approval response did not accept the pending request")
+            if any(accepted_attempts[1:]):
+                raise ContractError("repeated approval decision was accepted more than once")
             observation = {
                 "action": action,
                 **trigger_observation,
@@ -552,11 +621,59 @@ def _read_stream_with_interaction(
                 "decision": decision,
                 "kind": str(completed_payload.get("kind") or ""),
             }
+            if repeat > 1:
+                observation["attemptAccepted"] = accepted_attempts
+    if action == "approval_timeout" and triggered:
+        decision = str(interaction.get("lateDecision") or "deny").strip()
+        approval_response = client.post(
+            base_url.rstrip("/") + "/api/v1/agent/coomi/approval",
+            headers={"Authorization": f"Bearer {token}"} if token else {},
+            json={
+                "approvalId": late_approval_id,
+                "decision": decision,
+                "response": {},
+                "sessionId": session_id,
+                "expectedTraceId": trace_id,
+                "workspaceRoot": workspace_root,
+            },
+            timeout=30.0,
+        )
+        try:
+            approval_payload = _require_mapping(
+                approval_response.json(), "late approval response"
+            )
+        except ValueError as exc:
+            raise ContractError("late approval response is not valid JSON") from exc
+        approval_data = _require_mapping(
+            approval_payload.get("data"), "late approval response data"
+        )
+        accepted = (
+            approval_data.get("accepted") is True
+            or approval_data.get("resolved") is True
+        )
+        if approval_response.status_code != 200 or approval_payload.get("ok") is not True:
+            raise ContractError(
+                "late approval probe was rejected: "
+                f"HTTP {approval_response.status_code} {str(approval_payload.get('error') or '')[:500]}"
+            )
+        if accepted:
+            raise ContractError("late approval was accepted after execution timeout")
+        observation = {
+            "action": action,
+            **trigger_observation,
+            "httpStatus": approval_response.status_code,
+            "accepted": False,
+            "approvalIdPresent": bool(late_approval_id),
+            "decision": decision,
+            "kind": late_approval_kind,
+        }
+    parsed_events = parse_sse_events(lines)
     if action and not triggered:
         raise ContractError(
-            f"chat stream interaction did not observe trigger event {after_event!r}"
+            f"chat stream interaction did not observe trigger event {after_event!r}; "
+            f"tail={_safe_interaction_tail(parsed_events)!r}"
         )
-    return parse_sse_events(lines), observation
+    return parsed_events, observation
 
 
 def _replacement_session_directory(workspace: str, session_id: str) -> Path:
@@ -854,6 +971,12 @@ def _run_chat_stream_contract(
                         workspace_root=workspace,
                     )
                     try:
+                        setup_expected = setup_fixture.get("expected")
+                        setup_expected = (
+                            setup_expected
+                            if isinstance(setup_expected, Mapping)
+                            else {}
+                        )
                         replacement_setup_observation = validate_chat_stream_events(
                             setup_events,
                             status_code=setup_response.status_code,
@@ -863,6 +986,9 @@ def _run_chat_stream_contract(
                             fixture=setup_fixture,
                             expected_provider=expected_provider,
                             expected_model=expected_model,
+                            require_turn_contract=(
+                                setup_expected.get("turnContract", True) is not False
+                            ),
                         )
                     except AgentStreamContractError as exc:
                         raise ContractError(f"replacement setup stream failed: {exc}") from exc
@@ -890,6 +1016,7 @@ def _run_chat_stream_contract(
             for item in setup or []:
                 setup_item = _require_mapping(item, "chat stream setup interaction")
                 setup_action = str(setup_item.get("action") or "").strip()
+                storage_probe: dict[str, Any] | None = None
                 if setup_action == "enqueue_followup":
                     setup_response = client.post(
                         base_url.rstrip("/") + "/api/v1/agent/followups",
@@ -904,6 +1031,46 @@ def _run_chat_stream_contract(
                         },
                         timeout=30.0,
                     )
+                elif setup_action == "update_followup":
+                    message_id = str(setup_item.get("messageId") or "").strip()
+                    if not message_id:
+                        raise ContractError(
+                            "update_followup setup interaction requires messageId"
+                        )
+                    update_payload: dict[str, Any] = {
+                        "sessionId": resolved_session_id,
+                        "workspaceRoot": workspace,
+                        "expectedTraceId": str(
+                            setup_item.get("expectedTraceId") or ""
+                        ),
+                    }
+                    if "content" in setup_item:
+                        update_payload["content"] = setup_item.get("content")
+                    if "mode" in setup_item:
+                        update_payload["mode"] = setup_item.get("mode")
+                    setup_response = client.patch(
+                        base_url.rstrip("/")
+                        + f"/api/v1/agent/followups/{message_id}",
+                        headers=headers,
+                        json=update_payload,
+                        timeout=30.0,
+                    )
+                elif setup_action == "delete_followup":
+                    message_id = str(setup_item.get("messageId") or "").strip()
+                    if not message_id:
+                        raise ContractError(
+                            "delete_followup setup interaction requires messageId"
+                        )
+                    setup_response = client.delete(
+                        base_url.rstrip("/")
+                        + f"/api/v1/agent/followups/{message_id}",
+                        headers=headers,
+                        params={
+                            "sessionId": resolved_session_id,
+                            "workspaceRoot": workspace,
+                        },
+                        timeout=30.0,
+                    )
                 elif setup_action == "resume_followups":
                     setup_response = client.post(
                         base_url.rstrip("/") + "/api/v1/agent/followups/resume",
@@ -915,6 +1082,52 @@ def _run_chat_stream_contract(
                         },
                         timeout=30.0,
                     )
+                elif setup_action == "probe_followup_storage_error":
+                    obstacle = (
+                        Path(workspace)
+                        / ".storydex"
+                        / ".agent"
+                        / "followups"
+                    )
+                    obstacle.parent.mkdir(parents=True, exist_ok=True)
+                    if obstacle.exists():
+                        raise ContractError(
+                            "follow-up storage probe requires an unused mailbox directory"
+                        )
+                    marker = b"STORYDEX_FOLLOWUP_STORAGE_OBSTACLE_V1\n"
+                    obstacle.write_bytes(marker)
+                    try:
+                        setup_response = client.post(
+                            base_url.rstrip("/") + "/api/v1/agent/followups",
+                            headers=headers,
+                            json={
+                                "messageId": str(
+                                    setup_item.get("messageId")
+                                    or "followup-storage-probe"
+                                ),
+                                "sessionId": resolved_session_id,
+                                "workspaceRoot": workspace,
+                                "content": str(
+                                    setup_item.get("content")
+                                    or "This message must not be persisted."
+                                ),
+                                "mode": "queued",
+                            },
+                            timeout=30.0,
+                        )
+                        unchanged = obstacle.is_file() and obstacle.read_bytes() == marker
+                        artifacts = sorted(
+                            path.name
+                            for path in obstacle.parent.iterdir()
+                            if path.name.endswith((".tmp", ".bak"))
+                        )
+                        storage_probe = {
+                            "obstacleUnchanged": unchanged,
+                            "temporaryArtifacts": artifacts,
+                        }
+                    finally:
+                        if obstacle.is_file():
+                            obstacle.unlink()
                 else:
                     raise ContractError(
                         f"unsupported chat stream setup interaction: {setup_action}"
@@ -927,6 +1140,36 @@ def _run_chat_stream_contract(
                     raise ContractError(
                         "setup interaction response is not valid JSON"
                     ) from exc
+                if setup_action == "probe_followup_storage_error":
+                    error = setup_payload.get("error")
+                    error = error if isinstance(error, Mapping) else {}
+                    if (
+                        setup_response.status_code != 500
+                        or setup_payload.get("ok") is not False
+                        or error.get("code") != "followup_storage_error"
+                    ):
+                        raise ContractError(
+                            "follow-up storage probe did not fail closed: "
+                            f"HTTP {setup_response.status_code} {dict(error)}"
+                        )
+                    if not storage_probe or not storage_probe["obstacleUnchanged"]:
+                        raise ContractError(
+                            "follow-up storage probe changed the obstacle file"
+                        )
+                    if storage_probe["temporaryArtifacts"]:
+                        raise ContractError(
+                            "follow-up storage probe left temporary artifacts: "
+                            f"{storage_probe['temporaryArtifacts']}"
+                        )
+                    setup_observations.append(
+                        {
+                            "action": setup_action,
+                            "httpStatus": setup_response.status_code,
+                            "errorCode": str(error.get("code") or ""),
+                            **storage_probe,
+                        }
+                    )
+                    continue
                 if setup_response.status_code != 200 or setup_payload.get("ok") is not True:
                     raise ContractError(
                         f"setup interaction {setup_action} failed: "
@@ -944,6 +1187,7 @@ def _run_chat_stream_contract(
                         "messageId": str(message.get("messageId") or setup_item.get("messageId") or ""),
                         "mode": str(message.get("mode") or ""),
                         "status": str(message.get("status") or ""),
+                        "content": str(message.get("content") or ""),
                         "paused": bool(setup_data.get("paused")),
                     }
                 )
@@ -977,6 +1221,10 @@ def _run_chat_stream_contract(
                     fixture=fixture,
                     expected_provider=expected_provider,
                     expected_model=expected_model,
+                    require_turn_contract=(
+                        not isinstance(fixture.get("expected"), Mapping)
+                        or fixture["expected"].get("turnContract", True) is not False
+                    ),
                     allow_client_disconnect=(
                         isinstance(fixture.get("expected"), Mapping)
                         and bool(fixture["expected"].get("clientDisconnected"))
@@ -1035,6 +1283,7 @@ def _run_chat_stream_contract(
                 events_value = mailbox.get("events")
                 events_value = events_value if isinstance(events_value, list) else []
                 observation["followupMailbox"] = {
+                    "revision": int(mailbox.get("revision") or 0),
                     "revisionPositive": int(mailbox.get("revision") or 0) > 0,
                     "paused": bool(mailbox.get("paused")),
                     "pauseReason": str(mailbox.get("pauseReason") or ""),
@@ -1044,6 +1293,7 @@ def _run_chat_stream_contract(
                             "messageId": str(item.get("messageId") or ""),
                             "mode": str(item.get("mode") or ""),
                             "status": str(item.get("status") or ""),
+                            "content": str(item.get("content") or ""),
                             "dispatchTracePresent": bool(
                                 str(item.get("dispatchTraceId") or "").strip()
                             ),
@@ -1057,6 +1307,22 @@ def _run_chat_stream_contract(
                         if isinstance(item, Mapping)
                     ],
                 }
+                event_type_counts: dict[str, int] = {}
+                for event_type in observation["followupMailbox"]["eventTypes"]:
+                    event_type_counts[event_type] = (
+                        event_type_counts.get(event_type, 0) + 1
+                    )
+                observation["followupMailbox"]["eventTypeCounts"] = dict(
+                    sorted(event_type_counts.items())
+                )
+                expected_messages = expected.get("followupMessages")
+                if isinstance(expected_messages, list):
+                    actual_messages = observation["followupMailbox"]["messages"]
+                    if actual_messages != expected_messages:
+                        raise ContractError(
+                            "follow-up messages did not match the fixture expectation: "
+                            f"expected={expected_messages!r} actual={actual_messages!r}"
+                        )
                 expected_mailbox = expected.get("followupMailbox")
                 if isinstance(expected_mailbox, Mapping):
                     actual_mailbox = observation["followupMailbox"]
