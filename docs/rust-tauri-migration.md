@@ -29,7 +29,7 @@
 
 - **M0：部分完成。** Storydex 当前生效的 `OPENCODE/deepseek-v4-flash` 已再次通过严格只读 live 主链路；取消、超时、断连、审批、follow-up、steer、会话故障、写入和 replacement 的确定性复现已进入台账。完整性能统计窗口、所有 P1 决策和生产观察期仍未完成。
 - **M1：Agent 切片部分完成。** Agent runtime manifest、health/Coomi status 契约和 `chat/stream` 状态机已建立；20 组 fixture 覆盖只读、受限写、Provider 错误、取消/超时/断连、启动前 stop、审批允许/拒绝/超时/重复决策、follow-up/resume/编辑/删除/存储失败、steer、会话损坏/缺失/工作区不匹配和 replacement。故事生成、完整 intent/context/permission 字段、多个并发审批及全后端路由仍未冻结。
-- **M2：骨架与当前 Agent 切片已实现。** `storydex-agentd` 仍是未接入 Stable 的独立 loopback 服务，具备动态端口、启动 token、统一 envelope、trace、任务/取消注册、持久 follow-up mailbox、审批控制和受控关闭。收口提交 `21d22765f18c4c90ee6ad7d4b6c5d4180758ac39` 已依次通过 `dev/windows` Development CI run `32022067256` 和 `main` 完整 CI run `32023666547`；两个远端分支均指向该提交。依赖漏洞与许可证审计没有仓库级门禁，因此 M2 治理项未关闭。
+- **M2：骨架与当前 Agent 切片已实现。** `storydex-agentd` 仍是未接入 Stable 的独立 loopback 服务，具备动态端口、启动 token、统一 envelope、trace、任务/取消注册、持久 follow-up mailbox、审批控制和受控关闭。收口提交 `21d22765f18c4c90ee6ad7d4b6c5d4180758ac39` 已依次进入 `dev/windows` 与 `main`，并通过 Development CI run `32022067256` 和完整 CI run `32023666547`。依赖漏洞与许可证审计没有仓库级门禁，因此 M2 治理项未关闭。
 - **M3：受控 Agent Refactor 切片达到当前 fixture parity。** Rust `/api/v1/agent/chat/stream` 已接通现有 Rust Agent loop，并在隔离临时项目中覆盖读、受限写、控制面、会话持久化、故障注入和对话 replacement。Python-owned WIKI/Knowledge Projection、故事生成、普通项目服务、Electron Beta、Stable 切换及 Tauri 均未迁移。
 
 这里的“真实主链路”只指 Storydex 自身 `providers.json` 当前激活的 Provider。Replay 报告始终标记 `providerMode=replay`，不得替代 live 证据或被描述为实际 Provider 成功。
