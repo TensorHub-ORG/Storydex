@@ -25,7 +25,7 @@
 | P1-5 至 P1-7 | 已完成 | Evidence Ledger、结构化 compaction checkpoint、shadow/真实 token 预算、LRU/JIT 上下文及对应 Trace/失效语义已落地并通过聚焦、全量和真实主链路验收 |
 | P2 | 阻塞 | P1-5～P1-7 已完成但仍需积累稳定真实 token/证据样本；在 Evidence Ledger、checkpoint 和 token baseline 稳定前不得启动 P2 |
 
-2026-08-16 同步：P1 治理结论保持不变，P2 仍按真实 token/证据样本门槛阻塞；Agent 代码基线为 `d7909d6c6d152709bee7abe561b779f32dafb69b`，文档同步后的 `main` HEAD 为 `ea06aae618024e04895be6fee3d64498e918dc5e`，`dev/windows` 保持代码基线。后续工作已转入 [Rust 后端与 Tauri 桌面重构计划](./rust-tauri-migration.md) 的 Agent M3：`storydex-agentd` 目前只有 health 和只读 Coomi status 切片，Agent chat/SSE 仍由 Python Stable 编排。本文件的 P1/P2 结论不得被 Rust 迁移工作静默改写。
+2026-08-17 同步：P1 治理结论保持不变，P2 仍按真实 token/证据样本门槛阻塞并暂缓；P1 治理代码基线为 `d7909d6c6d152709bee7abe561b779f32dafb69b`，当前远端 `main` 基线为 `219cb05aaf2699effedaee78cb403cc89e7f013b`（对应 CI run `31949698044` 已成功），本地 Agent M3 实现提交为 `2cf446e00c25e166209f0549eb58d3b9b317ec95`，仍须先后通过 `dev/windows` 与 `main` 的远端 CI。后续工作已转入 [Rust 后端与 Tauri 桌面重构计划](./rust-tauri-migration.md) 的 Agent M3：`storydex-agentd` 已增加 13 组 chat/SSE replay 的 Refactor 差分切片，但 Agent chat/SSE Stable 仍由 Python 编排。本文件的 P1/P2 结论不得被 Rust 迁移工作静默改写；新对话只推进 Rust 重构，不恢复慢响应专项。
 
 P0 已全部完成；P0-1F、P1-0、P1-1 核心和 P1-2a 已由提交 `5cfabbd` 推送，P1-2c 已由提交 `0d4c611` 推送。第二批（P1-2b、P1-3、P1-4）代码收口提交为 `858c990c16978c40369c2d6eb60b1ff57c1823c5`，第三批（P1-5、P1-6、P1-7）为 `327eeb4b9521d1d450558db05b0d6b4f4ed23ad0`；两个 SHA 均通过 pre-push，GitHub Actions run `31225798801`、`31227503047` 均为 `success`。P1-5～P1-7 已完成最终回归和真实主链路验收；P2 仍按门槛阻塞。
 
@@ -879,7 +879,7 @@ P1 变更包已完成；P2 仍必须等 Evidence Ledger、compaction checkpoint 
 
 P0-1/P0-2/P0-3 已分别提交为 `b0dd6cf`、`151ca45`、`785a46f`；P0-1F、P1-0、P1-1 核心和 P1-2a 已提交为 `5cfabbd`；P1-2c 为 `0d4c6117e381b78a13e44e8525243c1ec36bd966`。本轮第二批代码为 `858c990c16978c40369c2d6eb60b1ff57c1823c5`，第三批代码为 `327eeb4b9521d1d450558db05b0d6b4f4ed23ad0`；对应 Actions run `31225798801`、`31227503047` 均为 `success`，每个新 HEAD 均有独立 `mode: Fast` pre-push 认证。
 
-上述 stash 和工作区说明记录的是 P1 收口时的历史交付状态；当前代码基线为 `d7909d6`，文档同步提交为 `ea06aae`，本轮 Rust Agent 迁移提交与 P1 治理提交分离。不得在新对话中 pop、删除或覆盖历史 stash，也不要把 Rust M3 的旁路代码当成 Stable 已切换。
+上述 stash 和工作区说明记录的是 P1 收口时的历史交付状态；P1 治理代码基线为 `d7909d6`，当前远端 `main` 基线为 `219cb05`（对应 CI run `31949698044` 已成功），本轮 Rust Agent 迁移本地提交为 `2cf446e`，与 P1 治理提交分离且远端 CI 尚未完成。不得在新对话中 pop、删除或覆盖历史 stash，也不要把 Rust M3 的旁路代码当成 Stable 已切换。
 
 真实验收使用临时目录复制单个 Provider 配置，结束后自动删除临时配置和密钥副本。`output/` 下的验收报告被 Git 忽略；每次提交前仍检查暂存差异没有 API key、Authorization header 值或临时 Provider 配置。本文档明确记录的是本机 `OPENCODE / deepseek-v4-flash` 配置的使用事实，不包含凭证。
 
@@ -897,16 +897,17 @@ P0-1/P0-2/P0-3 已分别提交为 `b0dd6cf`、`151ca45`、`785a46f`；P0-1F、P1
 
 ## 16. 后续对话接手顺序
 
-### 新对话处理 P1
+### Rust 重构对接（P1 已完成）
 
 ```text
-P1-2c、P1-3、P1-4、P1-5、P1-6、P1-7 已完成，不要重复实施。若出现新的性能或信息完整性证据，先在本文件记录复现和影响，再按原有 P1 规则补最小回归。
-当前主任务转到 docs/rust-tauri-migration.md：从 M3 冻结 Agent chat/SSE 有序事件契约开始。真实主链路只使用本机 Storydex OPENCODE/deepseek-v4-flash 的隔离配置副本，凭证不得输出或提交；Rust 只在 Refactor/Beta 轨道运行，不接管 Stable。
+P1-2c、P1-3、P1-4、P1-5、P1-6、P1-7 已完成，不要重复实施。若出现新的性能或信息完整性证据，只在本文件记录复现和影响；当前对话不启动性能专项。
+当前主任务转到 docs/rust-tauri-migration.md：M3 已冻结 Agent chat/SSE 有序事件契约，并完成 13 组 Python Stable/Rust Refactor 规范化差分，覆盖读、受限写、Provider 错误、取消/超时/断连、审批、follow-up/steer、损坏会话和 replacement。真实主链路仍只使用本机 Storydex OPENCODE/deepseek-v4-flash 的隔离配置副本，凭证不得输出或提交；Rust 只在 Refactor/Beta 轨道运行，不接管 Stable。
 ```
 
-### 新对话处理 P2
+### Rust 重构完成后的 P2 处理（当前暂缓）
 
 ```text
+本对话暂不处理 P2 慢响应治理。保留以下内容作为历史门槛和后续复测依据，待 Rust Agent 重构完成后由用户重新实测并决定是否恢复。
 请读取 docs/Agent运行链路信息完整性与性能治理.md 的第 11 至 14 节，
 检查 P0/P1 的 revision、checkpoint、catalog 和 evidence ledger 是否稳定。
 先给出长生命周期 bridge worker 的状态机、隔离边界、崩溃恢复和配置热重载设计，

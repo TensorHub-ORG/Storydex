@@ -2,7 +2,7 @@
 
 - 状态：实施基线草案（Agent 重构执行版）
 - 建立日期：2026-08-05
-- 最近修订：2026-08-16
+- 最近修订：2026-08-17
 - 适用范围：Storydex 2.x 稳定维护、Agent Rust 重构、后续 Rust 后端与 Tauri 桌面迁移
 
 ## 0. 本轮 Agent 重构边界
@@ -23,31 +23,60 @@
 
 执行方向只规定边界，不规定每个内部模块的固定拆分。实现过程中以现有代码和测量结果决定 crate、进程和适配器的最小划分；不得为了“重构完整”增加无消费者的中间层、额外模型调用或重复上下文构建。外部技术资料在确有疑问时可用 `smartsearch` 查询，不是本计划的必需依赖。
 
-### 0.1 2026-08-16 当前执行状态
+### 0.1 2026-08-17 当前执行状态
 
 本轮实际进度按里程碑记录如下：
 
-- **M0：部分完成。** 已用 Storydex 当前生效的 `OPENCODE/deepseek-v4-flash` 配置跑通真实严格只读主链路；最近一次脱敏报告为 `status=passed`、HTTP `200`、2 个模型回合、1 次 `read_file`、0 重试、终态 `AgentCompleted`，RouteHints 为 `read + no_write`。意图否定语义和基线报告持久化缺陷已修复；取消、审批、恢复以及不稳定行为台账仍未收齐。
-- **M1：部分完成。** 已建立 Agent runtime manifest，以及可指向任意 base URL 的 health、Coomi 状态黑盒契约和归一化比较入口。Rust sidecar 的 health/Coomi status 契约已用 Storydex 实际 `OPENCODE/deepseek-v4-flash` 配置通过；读写、SSE、取消/恢复的完整契约仍待补齐。
-- **M2：骨架已实现并通过本地与远端验证。** `apps/desktop/agent-runtime/storydex-agentd` 是未接入 Stable 的独立 loopback 服务，具备动态端口、每次启动 token、统一 envelope、trace、panic 边界、任务注册表、`CancellationToken` 和受控关闭；格式、Clippy、154 项 workspace 测试、release 构建、真实启动/鉴权/退出及契约检查均已通过。`dev/windows` Development CI run `31945550643` 和 `main` CI run `31948178752` 均为 `success`。独立依赖审计仍未完成，因此不宣告 M2 的所有治理项已关闭。
-- **M3：首个无副作用切片已落地，主链路迁移尚未开始。** Rust 已实现只读 `/api/v1/agent/coomi/status`，直接读取 Storydex Coomi Home 并返回脱敏的激活 Provider/模型与能力；尚未达到完整字段 parity，也尚未把 `/api/v1/agent/chat/stream` 或其他 Agent HTTP/SSE 接入 `storydex-agentd`。Electron Beta、Stable 切换和 Tauri 迁移均未开始。
+- **M0：部分完成。** Storydex 当前生效的 `OPENCODE/deepseek-v4-flash` 已再次通过严格只读 live 主链路；取消、超时、断连、审批、follow-up、steer、损坏会话、写入和 replacement 的确定性复现已进入台账。完整性能统计窗口、所有 P1 决策和生产观察期仍未完成。
+- **M1：Agent 切片部分完成。** Agent runtime manifest、health/Coomi status 契约和 `chat/stream` 状态机已建立；13 组 fixture 覆盖只读、受限写、Provider 错误、取消/超时/断连、审批、follow-up/resume、steer、损坏会话和 replacement。故事生成、完整 intent/context 字段、所有审批/竞态分支及全后端路由仍未冻结。
+- **M2：骨架与当前 Agent 切片已实现。** `storydex-agentd` 仍是未接入 Stable 的独立 loopback 服务，具备动态端口、启动 token、统一 envelope、trace、任务/取消注册、持久 follow-up mailbox、审批控制和受控关闭。历史 `dev/windows` Development CI run `31945550643`、`main` CI run `31948178752` 与 `31949698044` 均成功；本轮提交仍须重新通过对应 CI。依赖漏洞与许可证审计没有仓库级门禁，因此 M2 治理项未关闭。
+- **M3：受控 Agent Refactor 切片达到当前 fixture parity。** Rust `/api/v1/agent/chat/stream` 已接通现有 Rust Agent loop，并在隔离临时项目中覆盖读、受限写、控制面、会话持久化、故障注入和对话 replacement。Python-owned WIKI/Knowledge Projection、故事生成、普通项目服务、Electron Beta、Stable 切换及 Tauri 均未迁移。
 
-这里的“真实主链路”特指 Storydex 自身 `providers.json` 中当前激活的 Provider；OpenCode 源配置中的 `ds/deepseek-v4-flash` 曾返回 HTTP `522`，它不是 Storydex 当前主链路的配置，不能作为迁移阻断依据。
+这里的“真实主链路”只指 Storydex 自身 `providers.json` 当前激活的 Provider。Replay 报告始终标记 `providerMode=replay`，不得替代 live 证据或被描述为实际 Provider 成功。
 
-### 0.2 2026-08-16 推送后同步与下一阶段入口
+### 0.2 基线、分支与生产边界
 
-- 本次 `git fetch origin --prune` 后，代码基线 `d7909d6c6d152709bee7abe561b779f32dafb69b` 已在 `main` 与 `dev/windows` 同步；文档同步提交随后将 `main` 推进到 `ea06aae618024e04895be6fee3d64498e918dc5e`，`dev/windows` 仍保持代码基线，当前没有新的代码待合并。
-- `dev/windows` 上游已有的 `7e161e7 feat(windows): report daily active usage` 已保留并随分支快进进入 `main`；该提交不是 Agent parity 证据，后续差分仍只以 Agent 相关文件和契约为准。
-- 最新真实主链路脱敏报告：`output/push-validation/opencode-deepseekv4flash/baseline-report.json`。该运行经过正常 Storydex Backend HTTP/SSE + Rust bridge，未由 `storydex-agentd` 接管。
-- Stable 仍固定使用 `Electron + Python/FastAPI + Rust Coomi bridge`；`storydex-agentd` 只能在 Refactor/Beta 轨道使用，不得静默 fallback 或读取真实用户项目。
+- 本轮起始基线为 `219cb05aaf2699effedaee78cb403cc89e7f013b`；当时 `origin/main` 指向该提交，`origin/dev/windows` 指向 `d7909d6c6d152709bee7abe561b779f32dafb69b`。
+- 本轮 Agent 代码、契约、fixture 和文档属于同一 Refactor 功能块；最终推送必须先进入 `dev/windows` 并等待 Development CI 成功，再进入 `main` 并等待完整门禁成功。
+- Stable 继续固定使用 `Electron + Python/FastAPI + Rust Coomi bridge`。`storydex-agentd` 只允许 Refactor CI 的隔离 fixture workspace，不得读取真实用户项目，不得静默 fallback，也未接入当前桌面启动或打包入口。
+- 最新 live 脱敏报告为 `output/agent-lifecycle-baseline/f42a77babf/baseline-report.json`；它经过正常 Python Backend HTTP/SSE + Rust bridge，而不是 `storydex-agentd`。
 
-下一阶段按以下顺序推进：
+### 0.3 2026-08-17 chat/SSE Refactor 差分与 live 证据
 
-1. 以 `apps/backend/api/routes_agent.py`、`services/agent_lifecycle_trace.py` 和现有基线报告为来源，冻结 `POST /api/v1/agent/chat/stream` 的请求、统一 envelope、首包、heartbeat、工具事件、阶段顺序和唯一终止事件契约。
-2. 建立 provider replay 与确定性的只读 fixture，先让 Python Stable 产出规范化事件序列、trace/session、工具参数和错误边界。
-3. 将现有 Rust `engine`/`storydex-bridge` Agent loop 接入 `storydex-agentd` 的 Refactor 路由，只做旁路差分，不修改 Stable 启动入口。
-4. 对同一输入执行 Python/Rust 读请求差分；写入、取消、审批、恢复在临时 fixture 上逐项比较副作用和状态迁移。
-5. 只有无解释差异和故障注入结果稳定后，才进入 Electron Beta 评估；Tauri 和 Stable 切换继续冻结。
+- 基础执行：只读成功与 Provider 请求不匹配报告均通过；成功场景为 `read_file` 一次、`AgentCompleted -> done`，错误场景为 `AgentError -> done`，两端均使用 `OPENCODE/deepseek-v4-flash` replay。
+- 生命周期：手动 stop、执行超时均为 `AgentCancelled -> done`，客户端断连在观测流中不伪造业务终态；三者的 runtime binding、session 文件、消息数和关键事件顺序一致。控制面 fixture 通过 `afterEventFields` 锁定 `model/running` 阶段后再触发，避免在 `RuntimeMetrics` 与 `model_started` 之间依赖偶然调度时序。
+- 控制面：`request_user_input` 审批 round-trip、持久 queued follow-up/resume 和 steer 中断后显式恢复均通过；mailbox revision、pause 原因、消息状态和 dispatch trace 已比较。
+- 受限写：两份临时克隆均只修改 `.storydex/characters/fixture.md`，文件 SHA、Git HEAD/状态和变更路径一致；Python Stable 额外生成的 WIKI 投影文件作为明确的 Python-owned 派生副作用单独验证，未从报告中隐藏。
+- 会话故障：损坏 binding 和损坏 session 均 fail closed，原始文件保持不变；关键序列分别为 `RunAccepted -> TurnContract -> AgentError -> done` 与 `RunAccepted -> TurnContract -> AgentStarted -> AgentError -> done`。
+- Replacement：成功场景中旧 trace 为 `superseded/accepted`，旧 prompt 从 runtime session 移除，新 prompt 保留；隔离 bridge 启动失败场景中旧 trace 为 `completed/restored`、新 trace 为 `failed`，setup 后的 runtime-session SHA 和 2 条消息原样恢复。两端报告分别位于 `differential-replacement-accepted-current` 和 `differential-replacement-restore-current`。
+- Live：`output/agent-lifecycle-baseline/f42a77babf/baseline-report.json` 为 `passed`，turn `14,696ms`，2 个模型回合、1 次 `read_file`、Provider HTTP `200,200`、`firstByteSource=provider_raw_stream`、0 重试、0 fallback，终态 `AgentCompleted -> done`。
+- 差分入口为 `python apps/backend/scripts/run_agent_stream_differential.py --fixture-dir <fixture> --output-dir <report-dir>`；失败报告同样持久化。13 个受支持 fixture 已列入 `agent-chat-stream-v1.json` 和 runtime manifest。
+
+### 0.4 M0 不稳定行为与兼容决策台账
+
+| 编号 | 可观察差异或风险 | 当前定性与影响 | 复现证据 | 后续处理 |
+| --- | --- | --- | --- | --- |
+| AGENT-001 | Python 多数场景额外发出 `GitAutoCommit` 或 `GitCommitPrompt` | Python-owned 项目 Git 收尾；当前 Rust fixture 切片不复制该领域事件，不影响核心终态，但阻断 Stable 接管 | 各 `differential-*-current` 报告的 `eventKindDifferences` | 迁移项目/Git 服务时补齐，不扩大 ignore 字段 |
+| AGENT-002 | scoped-write 后仅 Python 生成 `KnowledgeProjectionUpdated` 和 WIKI 派生文件 | 这是当前生产投影副作用，不是可删除噪声；Rust 仅比较目标文件并显式验证 Python 派生文件 | `differential-scoped-write-current` | WIKI/Story Knowledge 迁移前保持 Python-owned，Stable 切换前必须闭环 |
+| AGENT-003 | approval 场景仅 Rust 额外发出 `PermissionResolved` | Rust 控制面确认事件；交互响应与关键序列一致，但公开事件兼容决策尚未完成 | `differential-approval-current` | Beta 前决定 Python 补发或 Rust 对外隐藏，并增加拒绝/超时案例 |
+| AGENT-004 | queued follow-up 的 `ContinuationStarted` 在两端落点不同 | mailbox 必需事件与最终状态一致，SSE/持久事件来源尚未完全统一 | `differential-followup-current` | 冻结唯一对外来源，补重复进程和重连测试 |
+| AGENT-005 | Provider 请求阶段错误会在已有 `ProviderStream` 后接受 replacement | 这是现行 Stable 边界；该错误不能冒充“启动失败恢复” | provider-error 与 replacement 报告 | 使用 bridge spawn 故障验证未接受恢复；保留两类独立 fixture |
+| AGENT-006 | Rust 源码变化后旧 bridge 会被运行时指纹门禁拒绝 | 正确的 fail-closed 构建约束，不允许绕过 | `scripts/verify_coomi_runtime.py` 与 Backend 启动检查 | 每次 Rust 改动后重建当前提交产物，CI 继续校验 |
+
+### 0.5 M2 依赖审计现状
+
+- `cargo metadata --locked --format-version 1 --no-deps` 已通过，`Cargo.lock` 可解析；`cargo tree --duplicates` 显示 `getrandom`、`hashbrown`、`syn`、`unicode-width` 等多版本依赖，当前仅作为依赖图事实，不据此宣称安全或许可证合规。
+- workspace 包声明 `license = "MIT"`，但这不是第三方许可证清单。仓库中没有 `deny.toml`、`cargo-deny`/`cargo-audit` 配置、第三方许可证生成脚本或对应 GitHub Actions 门禁；本机也未安装 `cargo deny` 与 `cargo audit`。
+- 因此漏洞、来源和许可证审计仍是明确未完成项。后续应把工具版本、advisory 数据来源、允许许可证和例外记录固定到仓库/CI 后再关闭 M2，当前不得写成“审计通过”。
+
+### 0.6 未完成边界与下一阶段入口
+
+1. 补齐故事生成、完整 intent/context/permission 字段和 Python WIKI/Knowledge Projection 的外部语义；这些不应借由当前 Agent fixture parity 被视为已迁移。
+2. 扩展 approval 拒绝/超时/重复决策、stop 启动前竞态、follow-up 编辑/删除/重复进程、missing-session、workspace mismatch 和磁盘写失败等黑盒案例。
+3. 建立可重复的 Rust 漏洞、来源与许可证审计门禁，并完成 M0 性能统计窗口和剩余 P1 决策。
+4. 只有上述 Agent 门禁无未解释差异后才评估 Electron Rust Beta；Stable 接管、其余 Python 后端迁移和 Tauri Preview 继续按后续里程碑独立推进。
+
+在这些门禁完成前，不接管 Stable，不启动 Electron Rust Beta，不开始 Tauri 切换。
 
 ## 1. 结论
 
