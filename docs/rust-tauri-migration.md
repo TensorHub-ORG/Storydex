@@ -1,6 +1,6 @@
 # Storydex Rust 后端与 Tauri 桌面重构计划
 
-- 状态：实施基线草案（Agent 重构执行版）
+- 状态：执行中（M3 受控 Agent Refactor 切片，Stable 未切换）
 - 建立日期：2026-08-05
 - 最近修订：2026-08-17
 - 适用范围：Storydex 2.x 稳定维护、Agent Rust 重构、后续 Rust 后端与 Tauri 桌面迁移
@@ -29,7 +29,7 @@
 
 - **M0：部分完成。** Storydex 当前生效的 `OPENCODE/deepseek-v4-flash` 已再次通过严格只读 live 主链路；取消、超时、断连、审批、follow-up、steer、会话故障、写入和 replacement 的确定性复现已进入台账。完整性能统计窗口、所有 P1 决策和生产观察期仍未完成。
 - **M1：Agent 切片部分完成。** Agent runtime manifest、health/Coomi status 契约和 `chat/stream` 状态机已建立；20 组 fixture 覆盖只读、受限写、Provider 错误、取消/超时/断连、启动前 stop、审批允许/拒绝/超时/重复决策、follow-up/resume/编辑/删除/存储失败、steer、会话损坏/缺失/工作区不匹配和 replacement。故事生成、完整 intent/context/permission 字段、多个并发审批及全后端路由仍未冻结。
-- **M2：骨架与当前 Agent 切片已实现。** `storydex-agentd` 仍是未接入 Stable 的独立 loopback 服务，具备动态端口、启动 token、统一 envelope、trace、任务/取消注册、持久 follow-up mailbox、审批控制和受控关闭。历史 `dev/windows` Development CI run `31945550643`、`main` CI run `31948178752` 与 `31949698044` 均成功；本轮提交仍须重新通过对应 CI。依赖漏洞与许可证审计没有仓库级门禁，因此 M2 治理项未关闭。
+- **M2：骨架与当前 Agent 切片已实现。** `storydex-agentd` 仍是未接入 Stable 的独立 loopback 服务，具备动态端口、启动 token、统一 envelope、trace、任务/取消注册、持久 follow-up mailbox、审批控制和受控关闭。收口提交 `21d22765f18c4c90ee6ad7d4b6c5d4180758ac39` 已依次通过 `dev/windows` Development CI run `32022067256` 和 `main` 完整 CI run `32023666547`；两个远端分支均指向该提交。依赖漏洞与许可证审计没有仓库级门禁，因此 M2 治理项未关闭。
 - **M3：受控 Agent Refactor 切片达到当前 fixture parity。** Rust `/api/v1/agent/chat/stream` 已接通现有 Rust Agent loop，并在隔离临时项目中覆盖读、受限写、控制面、会话持久化、故障注入和对话 replacement。Python-owned WIKI/Knowledge Projection、故事生成、普通项目服务、Electron Beta、Stable 切换及 Tauri 均未迁移。
 
 这里的“真实主链路”只指 Storydex 自身 `providers.json` 当前激活的 Provider。Replay 报告始终标记 `providerMode=replay`，不得替代 live 证据或被描述为实际 Provider 成功。
@@ -37,7 +37,7 @@
 ### 0.2 基线、分支与生产边界
 
 - 本次控制面与会话故障收口的起始基线为 `10ae9b73a9890ed4b715df82f269b496feff1c42`；开始时 `origin/main` 与 `origin/dev/windows` 均指向该提交。
-- 本轮 Agent 代码、契约、fixture 和文档属于同一 Refactor 功能块；最终推送必须先进入 `dev/windows` 并等待 Development CI 成功，再进入 `main` 并等待完整门禁成功。
+- 本轮 Agent 代码、契约、fixture 和文档属于同一 Refactor 功能块；已以中文提交 `完善 Agent 控制面与会话故障门禁` 收口到 `21d22765f18c4c90ee6ad7d4b6c5d4180758ac39`，并按顺序完成 `dev/windows`、`main` 推送和对应 CI 监控。
 - Stable 继续固定使用 `Electron + Python/FastAPI + Rust Coomi bridge`。`storydex-agentd` 只允许 Refactor CI 的隔离 fixture workspace，不得读取真实用户项目，不得静默 fallback，也未接入当前桌面启动或打包入口。
 - 最新 live 脱敏决策报告为 `output/rust-migration-decision-live/10ae9b73a989-20260817T162840/decision-report.json`；它经过正常 Python Backend HTTP/SSE + Rust bridge，而不是 `storydex-agentd`。
 
@@ -73,12 +73,21 @@
 
 ### 0.6 未完成边界与下一阶段入口
 
-1. 补齐故事生成、完整 intent/context/permission 字段和 Python WIKI/Knowledge Projection 的外部语义；这些不应借由当前 Agent fixture parity 被视为已迁移。
-2. 补多个并发 approval、多进程 mailbox 竞争和 process-crash cancellation 黑盒案例；当前进程内幂等、存储失败与启动前 stop 不能替代这些故障模型。
-3. 建立可重复的 Rust 漏洞、来源与许可证审计门禁，并完成 M0 性能统计窗口和剩余 P1 决策。
-4. 只有上述 Agent 门禁无未解释差异后才评估 Electron Rust Beta；Stable 接管、其余 Python 后端迁移和 Tauri Preview 继续按后续里程碑独立推进。
+1. 建立可重复的 Rust 漏洞、来源与许可证审计门禁，固定工具版本、advisory 数据来源、允许许可证和例外记录；这是当前续作的第一优先级。
+2. 补齐故事生成、完整 intent/context/permission 字段和 Python WIKI/Knowledge Projection 的外部语义；这些不应借由当前 Agent fixture parity 被视为已迁移。
+3. 补多个并发 approval、多进程 mailbox 竞争和 process-crash cancellation 黑盒案例；当前进程内幂等、存储失败与启动前 stop 不能替代这些故障模型。
+4. 完成 M0 性能统计窗口和剩余 P1 决策，以可重复测量验证 Rust 本地路径收益，不以 LLM 网络耗时替代本地性能结论。
+5. 只有上述 Agent 门禁无未解释差异后才评估 Electron Rust Beta；Stable 接管、其余 Python 后端迁移和 Tauri Preview 继续按后续里程碑独立推进。
 
 在这些门禁完成前，不接管 Stable，不启动 Electron Rust Beta，不开始 Tauri 切换。
+
+### 0.7 新对话续作起点
+
+- Agent 实现收口点（不含后续纯文档同步提交）：`21d22765f18c4c90ee6ad7d4b6c5d4180758ac39`，该提交已同时进入 `main` 与 `dev/windows`；新工作开始前仍须重新执行 `git status --short --branch`、检查本地 hooks，并确认 `origin/main` 最新 CI 没有失败基线。
+- 已验证基线：Python 聚焦测试 `64 passed`、`storydex-agentd` `25 passed`、`cargo fmt --check` 通过、Stable/Refactor 差分 `20/20 passed`，20 份报告的 Rust-only 公开事件集合均为空，轻量 pre-push 检查通过。
+- 真实 Provider 依据：`output/rust-migration-decision-live/10ae9b73a989-20260817T162840/decision-report.json` 使用 Storydex 当前 `OPENCODE/deepseek-v4-flash` 配置，Provider HTTP 为 `200,200`、0 retry、0 fallback，终态为 `AgentCompleted`。后续重大优先级或契约决策继续通过 Storydex 自身 API 配置调用该模型并保留脱敏报告；日常确定性测试继续使用 replay，不依赖外部模型在线。
+- 下一项实施从 M2 依赖审计门禁开始：先盘点仓库现有 CI/policy 和 Rust workspace，再以最小可复现配置引入漏洞、来源和许可证检查；不得在没有实际 advisory/许可证结果时宣称审计通过。
+- 当前架构事实不变：Stable 是 `Electron + Python/FastAPI + Rust Coomi bridge`，`storydex-agentd` 仅在隔离 Refactor 轨道达到当前 fixture parity；不能将其表述为 Python 已退役或 Tauri 已切换。
 
 ## 1. 结论
 
