@@ -3,21 +3,43 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import time
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 import httpx
+
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
+
+from services.agent_stream_contract import (  # noqa: E402
+    AgentStreamContractError,
+    load_fixture,
+    parse_sse_events,
+    validate_chat_stream_events,
+)
 
 
 HEALTH_CONTRACT_ID = "agent.sys.health.v1"
 COOMI_STATUS_CONTRACT_ID = "agent.coomi.status.v1"
+CHAT_STREAM_CONTRACT_ID = "agent.chat.stream.v1"
+DEFAULT_CHAT_STREAM_FIXTURE = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "fixtures"
+    / "agent-chat-stream-read-only-v1"
+    / "scenario.json"
+)
 CONTRACT_IDS = {
     "health": HEALTH_CONTRACT_ID,
     "coomi-status": COOMI_STATUS_CONTRACT_ID,
+    "chat-stream": CHAT_STREAM_CONTRACT_ID,
 }
 
 
@@ -226,6 +248,836 @@ def safe_origin(base_url: str) -> str:
     return f"{parsed.scheme}://{host}{port}"
 
 
+def _interaction_event_matches(
+    *,
+    event_name: str,
+    event_payload: Mapping[str, Any],
+    after_event: str,
+    after_event_fields: Mapping[str, Any],
+) -> bool:
+    return event_name == after_event and all(
+        event_payload.get(field) == expected
+        for field, expected in after_event_fields.items()
+    )
+
+
+def _read_stream_with_interaction(
+    *,
+    client: httpx.Client,
+    response: httpx.Response,
+    base_url: str,
+    token: str,
+    fixture: Mapping[str, Any],
+    trace_id: str,
+    session_id: str,
+    workspace_root: str,
+) -> tuple[list[tuple[str, dict[str, Any]]], dict[str, Any]]:
+    interaction = fixture.get("interaction")
+    interaction = interaction if isinstance(interaction, Mapping) else {}
+    action = str(interaction.get("action") or "").strip()
+    after_event = str(interaction.get("afterEvent") or "").strip()
+    raw_after_event_fields = interaction.get("afterEventFields")
+    if raw_after_event_fields is None:
+        after_event_fields: dict[str, Any] = {}
+    elif isinstance(raw_after_event_fields, Mapping):
+        after_event_fields = {
+            str(field): expected for field, expected in raw_after_event_fields.items()
+        }
+        if any(not field.strip() for field in after_event_fields):
+            raise ContractError(
+                "chat stream interaction.afterEventFields keys must not be empty"
+            )
+    else:
+        raise ContractError(
+            "chat stream interaction.afterEventFields must be an object"
+        )
+    if action and action not in {"stop", "steer", "disconnect", "approval"}:
+        raise ContractError(f"unsupported chat stream interaction: {action}")
+    if action and not after_event:
+        raise ContractError("chat stream interaction.afterEvent is required")
+    trigger_observation: dict[str, Any] = {"afterEvent": after_event}
+    if after_event_fields:
+        trigger_observation["afterEventFields"] = dict(after_event_fields)
+
+    lines: list[str] = []
+    current_event = ""
+    current_data_lines: list[str] = []
+    triggered = False
+    observation: dict[str, Any] = {}
+    for raw_line in response.iter_lines():
+        line = str(raw_line)
+        lines.append(line)
+        if line.startswith("event:"):
+            current_event = line[6:].strip()
+        elif line.startswith("data:"):
+            current_data_lines.append(line[5:].lstrip())
+        if line or not current_event:
+            continue
+        completed_event = current_event
+        completed_payload: Mapping[str, Any] = {}
+        if current_data_lines:
+            try:
+                decoded_payload = json.loads("\n".join(current_data_lines))
+            except json.JSONDecodeError as exc:
+                raise ContractError(
+                    f"SSE event {completed_event} has invalid JSON data"
+                ) from exc
+            completed_payload = _require_mapping(decoded_payload, "SSE event payload")
+        current_event = ""
+        current_data_lines = []
+        if (
+            not action
+            or triggered
+            or not _interaction_event_matches(
+                event_name=completed_event,
+                event_payload=completed_payload,
+                after_event=after_event,
+                after_event_fields=after_event_fields,
+            )
+        ):
+            continue
+        triggered = True
+        stop_payload = {
+            "sessionId": session_id,
+            "expectedTraceId": trace_id,
+            "workspaceRoot": workspace_root,
+        }
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        if action == "stop":
+            control_response = client.post(
+                base_url.rstrip("/") + "/api/v1/agent/executions/stop",
+                headers=headers,
+                json=stop_payload,
+                timeout=30.0,
+            )
+            try:
+                control_payload = _require_mapping(
+                    control_response.json(), "execution stop response"
+                )
+            except ValueError as exc:
+                raise ContractError("execution stop response is not valid JSON") from exc
+            control_data = _require_mapping(
+                control_payload.get("data"), "execution stop data"
+            )
+            if control_response.status_code != 200 or control_payload.get("ok") is not True:
+                raise ContractError(
+                    "execution stop was rejected: "
+                    f"HTTP {control_response.status_code} {str(control_payload.get('error') or '')[:500]}"
+                )
+            if control_data.get("accepted") is not True:
+                raise ContractError("execution stop did not accept the active trace")
+            if str(control_data.get("activeTraceId") or "") != trace_id:
+                raise ContractError("execution stop changed the active trace id")
+            observation = {
+                "action": action,
+                **trigger_observation,
+                "httpStatus": control_response.status_code,
+                "accepted": True,
+                "activeTraceMatches": True,
+                "mailboxPaused": bool(control_data.get("mailboxPaused")),
+                "pauseReason": str(control_data.get("pauseReason") or ""),
+            }
+        elif action == "steer":
+            message_id = str(interaction.get("messageId") or "").strip()
+            content = str(interaction.get("content") or "").strip()
+            if not message_id or not content:
+                raise ContractError(
+                    "steer interaction requires messageId and content"
+                )
+            control_response = client.post(
+                base_url.rstrip("/") + "/api/v1/agent/followups",
+                headers=headers,
+                json={
+                    "messageId": message_id,
+                    "sessionId": session_id,
+                    "expectedTraceId": trace_id,
+                    "workspaceRoot": workspace_root,
+                    "content": content,
+                    "mode": "steer",
+                },
+                timeout=30.0,
+            )
+            try:
+                control_payload = _require_mapping(
+                    control_response.json(), "steer response"
+                )
+            except ValueError as exc:
+                raise ContractError("steer response is not valid JSON") from exc
+            control_data = _require_mapping(
+                control_payload.get("data"), "steer response data"
+            )
+            message = _require_mapping(
+                control_data.get("message"), "steer response message"
+            )
+            if control_response.status_code != 200 or control_payload.get("ok") is not True:
+                raise ContractError(
+                    "steer was rejected: "
+                    f"HTTP {control_response.status_code} {str(control_payload.get('error') or '')[:500]}"
+                )
+            if control_data.get("steerRequested") is not True:
+                raise ContractError("steer did not interrupt the active trace")
+            if str(message.get("activeTraceId") or "") != trace_id:
+                raise ContractError("steer changed the active trace id")
+            observation = {
+                "action": action,
+                **trigger_observation,
+                "httpStatus": control_response.status_code,
+                "accepted": True,
+                "activeTraceMatches": True,
+                "messageId": str(message.get("messageId") or ""),
+                "mode": str(message.get("mode") or ""),
+                "status": str(message.get("status") or ""),
+            }
+        elif action == "disconnect":
+            interaction_payload = interaction.get("settleMs", 1000)
+            try:
+                settle_ms = max(0, min(10000, int(interaction_payload)))
+            except (TypeError, ValueError) as exc:
+                raise ContractError("disconnect interaction.settleMs must be an integer") from exc
+            # Closing the response is the client action. Use a separate HTTP
+            # connection for the evidence probe because the SSE connection is
+            # intentionally no longer available after this point.
+            response.close()
+            if settle_ms:
+                time.sleep(settle_ms / 1000.0)
+            settled_response: httpx.Response | None = None
+            settled_payload: Mapping[str, Any] | None = None
+            settled_data: Mapping[str, Any] | None = None
+            for attempt in range(10):
+                with httpx.Client(timeout=30.0, trust_env=False) as probe_client:
+                    settled_response = probe_client.post(
+                        base_url.rstrip("/") + "/api/v1/agent/executions/stop",
+                        headers=headers,
+                        json=stop_payload,
+                    )
+                try:
+                    candidate_payload = _require_mapping(
+                        settled_response.json(), "execution stop response"
+                    )
+                    candidate_data = _require_mapping(
+                        candidate_payload.get("data"), "execution stop data"
+                    )
+                except ValueError as exc:
+                    raise ContractError("execution stop response is not valid JSON") from exc
+                if (
+                    settled_response.status_code != 200
+                    or candidate_payload.get("ok") is not True
+                ):
+                    raise ContractError(
+                        "disconnect stop probe was rejected: "
+                        f"HTTP {settled_response.status_code} {str(candidate_payload.get('error') or '')[:500]}"
+                    )
+                settled_payload = candidate_payload
+                settled_data = candidate_data
+                if (
+                    candidate_data.get("accepted") is False
+                    and str(candidate_data.get("reason") or "") == "no_active_execution"
+                ):
+                    break
+                if attempt < 9:
+                    time.sleep(0.1)
+            if settled_response is None or settled_payload is None or settled_data is None:
+                raise ContractError("disconnect stop probe returned no response")
+            if not (
+                settled_data.get("accepted") is False
+                and str(settled_data.get("reason") or "") == "no_active_execution"
+            ):
+                raise ContractError(
+                    "client disconnect did not settle the active execution: "
+                    f"{dict(settled_data)}"
+                )
+            observation = {
+                "action": action,
+                **trigger_observation,
+                "httpStatus": settled_response.status_code,
+                "accepted": False,
+                "activeTraceMatches": False,
+                "reason": "no_active_execution",
+                "clientClosed": True,
+                "settleMs": settle_ms,
+            }
+            break
+        else:
+            approval_id = str(
+                completed_payload.get("approvalId")
+                or completed_payload.get("approval_id")
+                or completed_payload.get("requestId")
+                or ""
+            ).strip()
+            if not approval_id:
+                raise ContractError(
+                    f"approval interaction event {after_event!r} has no approvalId"
+                )
+            decision = str(interaction.get("decision") or "allow").strip()
+            response_value = interaction.get("response")
+            response_value = response_value if isinstance(response_value, Mapping) else {}
+            approval_response = client.post(
+                base_url.rstrip("/") + "/api/v1/agent/coomi/approval",
+                headers=headers,
+                json={
+                    "approvalId": approval_id,
+                    "decision": decision,
+                    "response": dict(response_value),
+                    "sessionId": session_id,
+                    "expectedTraceId": trace_id,
+                    "workspaceRoot": workspace_root,
+                },
+                timeout=30.0,
+            )
+            try:
+                approval_payload = _require_mapping(
+                    approval_response.json(), "approval response"
+                )
+            except ValueError as exc:
+                raise ContractError("approval response is not valid JSON") from exc
+            approval_data = _require_mapping(
+                approval_payload.get("data"), "approval response data"
+            )
+            if approval_response.status_code != 200 or approval_payload.get("ok") is not True:
+                raise ContractError(
+                    "approval was rejected: "
+                    f"HTTP {approval_response.status_code} {str(approval_payload.get('error') or '')[:500]}"
+                )
+            if not (
+                approval_data.get("accepted") is True
+                or approval_data.get("resolved") is True
+            ):
+                raise ContractError("approval response did not accept the pending request")
+            observation = {
+                "action": action,
+                **trigger_observation,
+                "httpStatus": approval_response.status_code,
+                "accepted": True,
+                "approvalIdPresent": True,
+                "decision": decision,
+                "kind": str(completed_payload.get("kind") or ""),
+            }
+    if action and not triggered:
+        raise ContractError(
+            f"chat stream interaction did not observe trigger event {after_event!r}"
+        )
+    return parse_sse_events(lines), observation
+
+
+def _replacement_session_directory(workspace: str, session_id: str) -> Path:
+    root = Path(workspace).resolve() / ".storydex" / ".agent" / "sessions"
+    normalized = str(session_id or "default").strip() or "default"
+    portable = normalized.replace("\\", "/")
+    unsafe = (
+        normalized in {".", ".."}
+        or portable.startswith("/")
+        or portable.startswith("//")
+        or (len(portable) >= 2 and portable[0].isalpha() and portable[1] == ":")
+        or any(part == ".." for part in portable.split("/"))
+    )
+    directory = (
+        f"_session_{hashlib.sha256(normalized.encode('utf-8')).hexdigest()[:16]}"
+        if unsafe
+        else normalized
+    )
+    return root / directory
+
+
+def _replacement_trace_summary(directory: Path, trace_id: str) -> dict[str, Any]:
+    normalized = str(trace_id or "").strip()
+    empty = {
+        "exists": False,
+        "traceId": normalized,
+        "status": "",
+        "superseded": False,
+        "replacementStatus": "",
+        "replacementTraceId": "",
+        "prompt": "",
+    }
+    if not normalized or not directory.is_dir():
+        return empty
+    candidates: list[dict[str, Any]] = []
+    for path in sorted(directory.glob("*.json")):
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(value, Mapping) or str(value.get("traceId") or "") != normalized:
+            continue
+        candidates.append(dict(value))
+    if not candidates:
+        return empty
+    candidates.sort(
+        key=lambda item: (
+            str(item.get("updatedAt") or ""),
+            str(item.get("createdAt") or ""),
+        )
+    )
+    value = candidates[-1]
+    replacement = (
+        value.get("replacement")
+        if isinstance(value.get("replacement"), Mapping)
+        else {}
+    )
+    return {
+        "exists": True,
+        "traceId": normalized,
+        "status": str(value.get("status") or ""),
+        "superseded": bool(value.get("superseded")),
+        "replacementStatus": str(replacement.get("status") or ""),
+        "replacementTraceId": str(
+            replacement.get("replacementTraceId")
+            or value.get("supersededByTraceId")
+            or ""
+        ),
+        "prompt": str(value.get("prompt") or ""),
+    }
+
+
+def _replacement_runtime_snapshot(workspace: str, session_id: str) -> dict[str, Any]:
+    root = Path(workspace).resolve()
+    normalized = str(session_id or "default").strip() or "default"
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
+    binding_path = (
+        root
+        / ".storydex"
+        / ".agent"
+        / "runtime"
+        / "coomi-sessions"
+        / f"{digest}.json"
+    )
+
+    def file_snapshot(path: Path | None) -> dict[str, Any]:
+        if path is None or not path.is_file():
+            return {"exists": False, "size": 0, "sha256": ""}
+        content = path.read_bytes()
+        return {
+            "exists": True,
+            "size": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+
+    binding: Mapping[str, Any] = {}
+    if binding_path.is_file():
+        try:
+            value = json.loads(binding_path.read_text(encoding="utf-8"))
+            binding = value if isinstance(value, Mapping) else {}
+        except (OSError, ValueError, json.JSONDecodeError):
+            binding = {}
+    raw_session_path = str(
+        binding.get("sessionPath") or binding.get("historyPath") or ""
+    ).strip()
+    session_path = Path(raw_session_path).resolve() if raw_session_path else None
+    session_value: Mapping[str, Any] = {}
+    if session_path is not None and session_path.is_file():
+        try:
+            value = json.loads(session_path.read_text(encoding="utf-8"))
+            session_value = value if isinstance(value, Mapping) else {}
+        except (OSError, ValueError, json.JSONDecodeError):
+            session_value = {}
+    messages = (
+        session_value.get("messages")
+        if isinstance(session_value.get("messages"), list)
+        else []
+    )
+    markers = [
+        str(item.get("content") or "")
+        for item in messages
+        if isinstance(item, Mapping) and str(item.get("content") or "")
+    ]
+    return {
+        "binding": file_snapshot(binding_path),
+        "session": file_snapshot(session_path),
+        "sessionPath": str(session_path) if session_path is not None else "",
+        "messageCount": len(messages),
+        "contentMarkers": markers,
+    }
+
+
+def _replacement_persistence_snapshot(
+    *,
+    workspace: str,
+    session_id: str,
+    old_trace_id: str,
+    new_trace_id: str,
+    runtime_before: Mapping[str, Any],
+) -> dict[str, Any]:
+    directory = _replacement_session_directory(workspace, session_id)
+    runtime_after = _replacement_runtime_snapshot(workspace, session_id)
+    before_session = (
+        runtime_before.get("session")
+        if isinstance(runtime_before.get("session"), Mapping)
+        else {}
+    )
+    after_session = (
+        runtime_after.get("session")
+        if isinstance(runtime_after.get("session"), Mapping)
+        else {}
+    )
+    return {
+        "oldTrace": _replacement_trace_summary(directory, old_trace_id),
+        "newTrace": _replacement_trace_summary(directory, new_trace_id),
+        "runtimeSessionBefore": dict(runtime_before),
+        "runtimeSessionAfter": runtime_after,
+        "runtimeSessionChanged": before_session.get("sha256")
+        != after_session.get("sha256"),
+        "runtimeSessionUnchanged": before_session.get("sha256")
+        == after_session.get("sha256"),
+        "sessionContentMarkers": list(runtime_after.get("contentMarkers") or []),
+        "sessionMessageCount": int(runtime_after.get("messageCount") or 0),
+    }
+
+
+def _validate_replacement_persistence(
+    actual: Mapping[str, Any], expected: Mapping[str, Any]
+) -> None:
+    old_trace = (
+        actual.get("oldTrace") if isinstance(actual.get("oldTrace"), Mapping) else {}
+    )
+    new_trace = (
+        actual.get("newTrace") if isinstance(actual.get("newTrace"), Mapping) else {}
+    )
+    checks = {
+        "oldStatus": old_trace.get("status"),
+        "oldReplacementStatus": old_trace.get("replacementStatus"),
+        "oldSuperseded": old_trace.get("superseded"),
+        "replacementTargetsNewTrace": bool(new_trace.get("traceId"))
+        and old_trace.get("replacementTraceId") == new_trace.get("traceId"),
+        "newTracePresent": new_trace.get("exists"),
+        "newTraceStatus": new_trace.get("status"),
+        "runtimeSessionChanged": actual.get("runtimeSessionChanged"),
+        "runtimeSessionUnchanged": actual.get("runtimeSessionUnchanged"),
+        "sessionMessageCount": actual.get("sessionMessageCount"),
+    }
+    mismatches = {
+        key: {"expected": value, "actual": checks.get(key)}
+        for key, value in expected.items()
+        if key in checks and checks.get(key) != value
+    }
+    markers = [str(value) for value in actual.get("sessionContentMarkers") or []]
+    for marker in expected.get("sessionContains") or []:
+        if not any(str(marker) in value for value in markers):
+            mismatches[f"sessionContains:{marker}"] = {
+                "expected": True,
+                "actual": False,
+            }
+    for marker in expected.get("sessionAbsent") or []:
+        if any(str(marker) in value for value in markers):
+            mismatches[f"sessionAbsent:{marker}"] = {
+                "expected": True,
+                "actual": False,
+            }
+    if mismatches:
+        raise ContractError(
+            f"replacement persistence did not match fixture: {mismatches}"
+        )
+
+
+def _run_chat_stream_contract(
+    *,
+    base_url: str,
+    token: str,
+    workspace_root: str,
+    fixture_path: str,
+    session_id: str,
+    expected_provider: str,
+    expected_model: str,
+    timeout_seconds: float,
+    replacement_after_setup: Callable[[Mapping[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    workspace = str(workspace_root or "").strip()
+    if not workspace:
+        raise ContractError("--workspace-root is required for the chat-stream contract")
+    fixture = load_fixture(fixture_path or DEFAULT_CHAT_STREAM_FIXTURE)
+    request_payload = fixture.get("request")
+    if not isinstance(request_payload, Mapping):
+        raise ContractError("chat stream fixture request must be an object")
+    payload = dict(request_payload)
+    payload["workspaceRoot"] = workspace
+    trace_id = str(uuid4())
+    resolved_session_id = str(session_id or "").strip() or f"runtime-contract-{uuid4().hex[:12]}"
+    headers = {
+        "x-trace-id": trace_id,
+        "x-session-id": resolved_session_id,
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    timeout = httpx.Timeout(
+        connect=min(30.0, max(1.0, timeout_seconds)),
+        read=None,
+        write=30.0,
+        pool=30.0,
+    )
+    try:
+        with httpx.Client(timeout=timeout, trust_env=False) as client:
+            replacement_setup = fixture.get("replacementSetup")
+            replacement_setup_observation: dict[str, Any] | None = None
+            replacement_runtime_before: dict[str, Any] | None = None
+            replacement_old_trace_id = ""
+            if replacement_setup is not None:
+                if not isinstance(replacement_setup, Mapping):
+                    raise ContractError("chat stream replacementSetup must be an object")
+                setup_request = replacement_setup.get("request")
+                if not isinstance(setup_request, Mapping):
+                    raise ContractError("chat stream replacementSetup.request must be an object")
+                setup_payload = dict(setup_request)
+                setup_payload["workspaceRoot"] = workspace
+                setup_payload["replaceLatestTraceId"] = ""
+                replacement_old_trace_id = str(
+                    replacement_setup.get("traceId") or uuid4()
+                ).strip()
+                setup_fixture = dict(fixture)
+                setup_fixture["request"] = setup_payload
+                setup_fixture["expected"] = dict(
+                    replacement_setup.get("expected")
+                    if isinstance(replacement_setup.get("expected"), Mapping)
+                    else {}
+                )
+                setup_fixture.pop("replacementSetup", None)
+                setup_fixture.pop("interaction", None)
+                setup_headers = dict(headers)
+                setup_headers["x-trace-id"] = replacement_old_trace_id
+                with client.stream(
+                    "POST",
+                    base_url.rstrip("/") + "/api/v1/agent/chat/stream",
+                    headers=setup_headers,
+                    json=setup_payload,
+                ) as setup_response:
+                    if setup_response.status_code != 200:
+                        body = setup_response.read().decode("utf-8", errors="replace")[:1000]
+                        raise ContractError(
+                            f"replacement setup stream returned HTTP {setup_response.status_code}: {body}"
+                        )
+                    setup_events, setup_interaction = _read_stream_with_interaction(
+                        client=client,
+                        response=setup_response,
+                        base_url=base_url,
+                        token=token,
+                        fixture=setup_fixture,
+                        trace_id=replacement_old_trace_id,
+                        session_id=resolved_session_id,
+                        workspace_root=workspace,
+                    )
+                    try:
+                        replacement_setup_observation = validate_chat_stream_events(
+                            setup_events,
+                            status_code=setup_response.status_code,
+                            headers=setup_response.headers,
+                            trace_id=replacement_old_trace_id,
+                            session_id=resolved_session_id,
+                            fixture=setup_fixture,
+                            expected_provider=expected_provider,
+                            expected_model=expected_model,
+                        )
+                    except AgentStreamContractError as exc:
+                        raise ContractError(f"replacement setup stream failed: {exc}") from exc
+                    if setup_interaction:
+                        replacement_setup_observation["interaction"] = setup_interaction
+                replacement_runtime_before = _replacement_runtime_snapshot(
+                    workspace, resolved_session_id
+                )
+                after_setup = replacement_setup.get("afterSetup")
+                if after_setup is not None:
+                    if not isinstance(after_setup, Mapping):
+                        raise ContractError(
+                            "chat stream replacementSetup.afterSetup must be an object"
+                        )
+                    if replacement_after_setup is None:
+                        raise ContractError(
+                            "chat stream replacement after-setup action has no runtime handler"
+                        )
+                    replacement_after_setup(after_setup)
+                payload["replaceLatestTraceId"] = replacement_old_trace_id
+            setup_observations: list[dict[str, Any]] = []
+            setup = fixture.get("setupInteractions")
+            if setup is not None and not isinstance(setup, list):
+                raise ContractError("chat stream fixture setupInteractions must be an array")
+            for item in setup or []:
+                setup_item = _require_mapping(item, "chat stream setup interaction")
+                setup_action = str(setup_item.get("action") or "").strip()
+                if setup_action == "enqueue_followup":
+                    setup_response = client.post(
+                        base_url.rstrip("/") + "/api/v1/agent/followups",
+                        headers=headers,
+                        json={
+                            "messageId": str(setup_item.get("messageId") or ""),
+                            "sessionId": resolved_session_id,
+                            "workspaceRoot": workspace,
+                            "content": str(setup_item.get("content") or ""),
+                            "mode": str(setup_item.get("mode") or "queued"),
+                            "expectedTraceId": str(setup_item.get("expectedTraceId") or ""),
+                        },
+                        timeout=30.0,
+                    )
+                elif setup_action == "resume_followups":
+                    setup_response = client.post(
+                        base_url.rstrip("/") + "/api/v1/agent/followups/resume",
+                        headers=headers,
+                        json={
+                            "sessionId": resolved_session_id,
+                            "workspaceRoot": workspace,
+                            "expectedTraceId": str(setup_item.get("expectedTraceId") or ""),
+                        },
+                        timeout=30.0,
+                    )
+                else:
+                    raise ContractError(
+                        f"unsupported chat stream setup interaction: {setup_action}"
+                    )
+                try:
+                    setup_payload = _require_mapping(
+                        setup_response.json(), "setup interaction response"
+                    )
+                except ValueError as exc:
+                    raise ContractError(
+                        "setup interaction response is not valid JSON"
+                    ) from exc
+                if setup_response.status_code != 200 or setup_payload.get("ok") is not True:
+                    raise ContractError(
+                        f"setup interaction {setup_action} failed: "
+                        f"HTTP {setup_response.status_code} {str(setup_payload.get('error') or '')[:500]}"
+                    )
+                setup_data = _require_mapping(
+                    setup_payload.get("data"), "setup interaction data"
+                )
+                message = setup_data.get("message")
+                message = message if isinstance(message, Mapping) else {}
+                setup_observations.append(
+                    {
+                        "action": setup_action,
+                        "httpStatus": setup_response.status_code,
+                        "messageId": str(message.get("messageId") or setup_item.get("messageId") or ""),
+                        "mode": str(message.get("mode") or ""),
+                        "status": str(message.get("status") or ""),
+                        "paused": bool(setup_data.get("paused")),
+                    }
+                )
+            with client.stream(
+                "POST",
+                base_url.rstrip("/") + "/api/v1/agent/chat/stream",
+                headers=headers,
+                json=payload,
+            ) as response:
+                if response.status_code != 200:
+                    body = response.read().decode("utf-8", errors="replace")[:1000]
+                    raise ContractError(
+                        f"chat stream returned HTTP {response.status_code}: {body}"
+                    )
+                events, interaction_observation = _read_stream_with_interaction(
+                    client=client,
+                    response=response,
+                    base_url=base_url,
+                    token=token,
+                    fixture=fixture,
+                    trace_id=trace_id,
+                    session_id=resolved_session_id,
+                    workspace_root=workspace,
+                )
+                observation = validate_chat_stream_events(
+                    events,
+                    status_code=response.status_code,
+                    headers=response.headers,
+                    trace_id=trace_id,
+                    session_id=resolved_session_id,
+                    fixture=fixture,
+                    expected_provider=expected_provider,
+                    expected_model=expected_model,
+                    allow_client_disconnect=(
+                        isinstance(fixture.get("expected"), Mapping)
+                        and bool(fixture["expected"].get("clientDisconnected"))
+                    ),
+                )
+                if interaction_observation:
+                    observation["interaction"] = interaction_observation
+            if setup_observations:
+                observation["setupInteractions"] = setup_observations
+            expected = fixture.get("expected")
+            expected = expected if isinstance(expected, Mapping) else {}
+            if replacement_setup_observation is not None:
+                observation["replacementSetup"] = replacement_setup_observation
+                replacement_persistence = _replacement_persistence_snapshot(
+                    workspace=workspace,
+                    session_id=resolved_session_id,
+                    old_trace_id=replacement_old_trace_id,
+                    new_trace_id=trace_id,
+                    runtime_before=replacement_runtime_before or {},
+                )
+                observation["replacementPersistence"] = replacement_persistence
+                expected_persistence = expected.get("replacementPersistence")
+                if isinstance(expected_persistence, Mapping):
+                    _validate_replacement_persistence(
+                        replacement_persistence,
+                        expected_persistence,
+                    )
+            if expected.get("followupPersistence") is True:
+                mailbox_response = client.get(
+                    base_url.rstrip("/") + "/api/v1/agent/followups",
+                    headers=headers,
+                    params={
+                        "sessionId": resolved_session_id,
+                        "workspaceRoot": workspace,
+                    },
+                    timeout=30.0,
+                )
+                try:
+                    mailbox_payload = _require_mapping(
+                        mailbox_response.json(), "follow-up mailbox response"
+                    )
+                except ValueError as exc:
+                    raise ContractError(
+                        "follow-up mailbox response is not valid JSON"
+                    ) from exc
+                if mailbox_response.status_code != 200 or mailbox_payload.get("ok") is not True:
+                    raise ContractError(
+                        "follow-up mailbox read failed: "
+                        f"HTTP {mailbox_response.status_code} {str(mailbox_payload.get('error') or '')[:500]}"
+                    )
+                mailbox = _require_mapping(
+                    mailbox_payload.get("data"), "follow-up mailbox data"
+                )
+                messages = mailbox.get("messages")
+                messages = messages if isinstance(messages, list) else []
+                events_value = mailbox.get("events")
+                events_value = events_value if isinstance(events_value, list) else []
+                observation["followupMailbox"] = {
+                    "revisionPositive": int(mailbox.get("revision") or 0) > 0,
+                    "paused": bool(mailbox.get("paused")),
+                    "pauseReason": str(mailbox.get("pauseReason") or ""),
+                    "activeTraceEmpty": not str(mailbox.get("activeTraceId") or "").strip(),
+                    "messages": [
+                        {
+                            "messageId": str(item.get("messageId") or ""),
+                            "mode": str(item.get("mode") or ""),
+                            "status": str(item.get("status") or ""),
+                            "dispatchTracePresent": bool(
+                                str(item.get("dispatchTraceId") or "").strip()
+                            ),
+                        }
+                        for item in messages
+                        if isinstance(item, Mapping)
+                    ],
+                    "eventTypes": [
+                        str(item.get("_type") or "")
+                        for item in events_value
+                        if isinstance(item, Mapping)
+                    ],
+                }
+                expected_mailbox = expected.get("followupMailbox")
+                if isinstance(expected_mailbox, Mapping):
+                    actual_mailbox = observation["followupMailbox"]
+                    mismatches = {
+                        str(key): {
+                            "expected": value,
+                            "actual": actual_mailbox.get(str(key)),
+                        }
+                        for key, value in expected_mailbox.items()
+                        if actual_mailbox.get(str(key)) != value
+                    }
+                    if mismatches:
+                        raise ContractError(
+                            "follow-up mailbox did not match the fixture expectation: "
+                            f"{mismatches}"
+                        )
+            return observation
+    except AgentStreamContractError as exc:
+        raise ContractError(str(exc)) from exc
+
+
 def run_contract(
     *,
     base_url: str,
@@ -234,34 +1086,52 @@ def run_contract(
     contract: str = "health",
     expected_provider: str = "",
     expected_model: str = "",
+    workspace_root: str = "",
+    fixture_path: str = "",
+    session_id: str = "",
+    timeout_seconds: float = 300.0,
+    replacement_after_setup: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     contract_id = CONTRACT_IDS.get(contract)
     if contract_id is None:
         raise ContractError(f"unknown Agent runtime contract: {contract}")
-    path = (
-        "/api/v1/sys/health"
-        if contract == "health"
-        else "/api/v1/agent/coomi/status"
-    )
     started = time.perf_counter()
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-    with httpx.Client(timeout=15.0) as client:
-        response = client.get(base_url.rstrip("/") + path, headers=headers)
-    observation = (
-        validate_health_response(response)
-        if contract == "health"
-        else validate_coomi_status_response(response)
-    )
-    if expected_provider and observation.get("providerId") != expected_provider:
-        raise ContractError(
-            f"Coomi status providerId {observation.get('providerId')!r} "
-            f"does not match expected {expected_provider!r}"
+    if contract == "chat-stream":
+        observation = _run_chat_stream_contract(
+            base_url=base_url,
+            token=token,
+            workspace_root=workspace_root,
+            fixture_path=fixture_path,
+            session_id=session_id,
+            expected_provider=expected_provider,
+            expected_model=expected_model,
+            timeout_seconds=timeout_seconds,
+            replacement_after_setup=replacement_after_setup,
         )
-    if expected_model and observation.get("model") != expected_model:
-        raise ContractError(
-            f"Coomi status model {observation.get('model')!r} "
-            f"does not match expected {expected_model!r}"
+    else:
+        path = (
+            "/api/v1/sys/health"
+            if contract == "health"
+            else "/api/v1/agent/coomi/status"
         )
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        with httpx.Client(timeout=15.0, trust_env=False) as client:
+            response = client.get(base_url.rstrip("/") + path, headers=headers)
+        observation = (
+            validate_health_response(response)
+            if contract == "health"
+            else validate_coomi_status_response(response)
+        )
+        if expected_provider and observation.get("providerId") != expected_provider:
+            raise ContractError(
+                f"Coomi status providerId {observation.get('providerId')!r} "
+                f"does not match expected {expected_provider!r}"
+            )
+        if expected_model and observation.get("model") != expected_model:
+            raise ContractError(
+                f"Coomi status model {observation.get('model')!r} "
+                f"does not match expected {expected_model!r}"
+            )
     return {
         "schemaVersion": 1,
         "contractId": contract_id,
@@ -281,6 +1151,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--token", default="")
     parser.add_argument("--expected-provider", default="")
     parser.add_argument("--expected-model", default="")
+    parser.add_argument("--workspace-root", default="")
+    parser.add_argument("--fixture", default="")
+    parser.add_argument("--session-id", default="")
+    parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--output", default="")
     return parser.parse_args()
 
@@ -296,6 +1170,10 @@ def main() -> int:
             contract=str(args.contract),
             expected_provider=str(args.expected_provider),
             expected_model=str(args.expected_model),
+            workspace_root=str(args.workspace_root),
+            fixture_path=str(args.fixture),
+            session_id=str(args.session_id),
+            timeout_seconds=float(args.timeout),
         )
         if str(args.output or "").strip():
             output = Path(args.output).resolve()

@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "contractId": "agent.chat.stream.v1",
+  "providerId": "OPENCODE",
+  "model": "deepseek-v4-flash",
+  "steps": [
+    {
+      "expect": {"messageContains": "STORYDEX_CORRUPT_BINDING_79C2"},
+      "response": {
+        "content": "This replay step must remain unused.",
+        "responseModel": "deepseek-v4-flash",
+        "finishReason": "stop"
+      }
+    }
+  ]
+}

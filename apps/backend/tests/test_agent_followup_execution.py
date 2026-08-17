@@ -432,7 +432,7 @@ def test_followup_snapshot_confirmation_returns_to_pending_and_retries_same_mess
     assert mailbox.list_mailbox(workspace_root=tmp_path, session_id="session-1")["paused"] is False
 
 
-def test_steer_waits_for_tool_checkpoint_and_continues_same_execution(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_interrupted_steer_requires_explicit_resume(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     mailbox = FollowupMailboxService()
     mailbox.set_active_trace(workspace_root=tmp_path, session_id="session-1", trace_id="trace-1")
     mailbox.enqueue(
@@ -443,109 +443,62 @@ def test_steer_waits_for_tool_checkpoint_and_continues_same_execution(monkeypatc
         mode="steer",
         expected_trace_id="trace-1",
     )
-    coordinator = ExecutionCoordinator()
-    captured: dict[str, Any] = {}
-    replacement_calls: list[str] = []
 
-    class Replacement:
-        accepted = False
-        restored = False
-        expected_trace_id = "old-trace"
+    async def cancelled_turn(**kwargs: Any):
+        assert kwargs["trace_id"] == "trace-1"
+        yield routes._encode_sse("AgentStarted", {"_type": "AgentStarted", "traceId": "trace-1"})
+        yield routes._encode_sse(
+            "AgentCancelled",
+            {"_type": "AgentCancelled", "traceId": "trace-1", "reason": "steer"},
+        )
+        yield routes._encode_sse("done", {"type": "done"})
 
-        def accept(self) -> None:
-            self.accepted = True
-            replacement_calls.append("accepted")
-
-        def restore(self, *, reason: str) -> None:
-            self.restored = True
-            replacement_calls.append(f"restored:{reason}")
-
-    replacement = Replacement()
-
-    class Service:
-        def __init__(self) -> None:
-            self.prompts: list[tuple[str, str]] = []
-            self.cancel_requested: asyncio.Event | None = None
-
-        def cancel_execution(self, **kwargs: Any) -> bool:
-            return False
-
-        def request_steer(self, **kwargs: Any) -> bool:
-            assert self.cancel_requested is not None
-            self.cancel_requested.set()
-            return True
-
-        async def stream_events(self, **kwargs: Any):
-            self.prompts.append((kwargs["trace_id"], kwargs["prompt"]))
-            if len(self.prompts) == 1:
-                self.cancel_requested = asyncio.Event()
-                yield "AgentStarted", {"_type": "AgentStarted"}
-                yield "ToolStart", {"_type": "ToolStart", "tool_name": "Write"}
-                await self.cancel_requested.wait()
-                await asyncio.sleep(0.01)
-                yield "ToolDone", {"_type": "ToolDone", "tool_name": "Write", "is_error": False}
-                yield "AgentCancelled", {"_type": "AgentCancelled", "reason": "steer"}
-                return
-            yield "AgentStarted", {"_type": "AgentStarted"}
-            yield "ReasoningChunk", {"_type": "ReasoningChunk", "content": "hidden reasoning"}
-            yield "TextChunk", {"_type": "TextChunk", "content": "continued"}
-            yield "AgentCompleted", {"_type": "AgentCompleted", "total_tokens": 1}
-
-    service = Service()
     monkeypatch.setattr(routes, "followup_mailbox_service", mailbox)
-    monkeypatch.setattr(routes, "execution_coordinator", coordinator)
-    monkeypatch.setattr(routes, "get_storydex_coomi_agent_service", lambda: service)
-    monkeypatch.setattr(routes, "_PHASE_HEARTBEAT_SECONDS", 0.002)
-    _patch_finalization(monkeypatch, captured)
-
-    snapshot = AgentGitSnapshot(workspace_root=tmp_path, available=True)
-    handle = coordinator.begin(tmp_path, "session-1", "trace-1")
-    handle.register_snapshot(snapshot)
+    monkeypatch.setattr(routes, "_resolve_agent_workspace_root", lambda payload: tmp_path)
+    monkeypatch.setattr(routes, "_stream_agent_chat_request_sse", cancelled_turn)
 
     async def collect() -> list[tuple[str, dict[str, Any]]]:
         return [
             _decode(chunk)
-            async for chunk in routes._stream_coomi_sse(
-                prompt="initial request",
+            async for chunk in routes._stream_agent_chat_with_followups_sse(
+                payload=routes.AgentChatRequest(
+                    prompt="initial request",
+                    workspaceRoot=str(tmp_path),
+                ),
+                request=_ConnectedRequest(),
                 trace_id="trace-1",
                 session_id="session-1",
-                active_file="",
-                workspace_root=tmp_path,
-                story_generation={},
-                turn_contract={"status": "ready", "intentFrame": {"primary": "general"}},
-                git_snapshot=snapshot,
-                request=_ConnectedRequest(),
                 cancellation_token=routes._CancellationToken(),
-                execution_handle=handle,
-                replacement=replacement,
             )
         ]
 
     packets = asyncio.run(collect())
     event_names = [event for event, _ in packets]
-    assert service.prompts == [("trace-1", "initial request"), ("trace-1", "new guidance")]
-    assert event_names.index("ToolDone") < event_names.index("SteerApplied")
-    assert event_names.count("SteerApplied") == 1
-    assert event_names.count("ContinuationStarted") == 1
-    steer_index = event_names.index("SteerApplied")
-    continuation_index = event_names.index("ContinuationStarted")
-    continued_agent_index = event_names.index("AgentStarted", continuation_index)
-    assert steer_index < continuation_index < continued_agent_index
-    assert packets[steer_index][1]["status"] == "sent"
-    assert event_names.count("AgentCancelled") == 0
-    assert event_names.count("AgentCompleted") == 1
-    assert event_names.count("ReasoningChunk") == 0
-    assert replacement_calls == ["accepted"]
-    assert coordinator.active_handle(session_id="session-1") is None
+    assert event_names == ["AgentStarted", "AgentCancelled", "done"]
 
     state = mailbox.list_mailbox(workspace_root=tmp_path, session_id="session-1")
-    assert state["messages"][0]["status"] == "sent"
-    assert state["messages"][0]["segmentId"] == "trace-1-segment-2"
-    captured_event_names = [event["event"] for event in captured["events"]]
-    assert "ReasoningChunk" not in captured_event_names
-    assert "SteerRequested" in captured_event_names
-    assert "SteerApplied" in captured_event_names
-    assert any(item["action"] == "agent_followup" for item in routes._build_audit(captured["events"]))
+    assert state["paused"] is True
+    assert state["pauseReason"] == "steer_requires_resume"
+    assert state["messages"][0]["mode"] == "queued"
+    assert state["messages"][0]["status"] == "pending"
+    assert state["messages"][0]["expectedTraceId"] == "trace-1"
+    assert state["messages"][0]["error"] == "steer_requires_resume"
+
+    mailbox.resume(workspace_root=tmp_path, session_id="session-1")
+    monkeypatch.setattr(routes, "_latest_session_trace_id", lambda session_id: "trace-1")
+    resumed_payload, resumed = routes._claim_initial_followup_dispatch(
+        payload=routes.AgentChatRequest(
+            prompt="stale browser copy",
+            workspaceRoot=str(tmp_path),
+            sourceFollowupMessageId="steer-1",
+            sourceFollowupExpectedTraceId="trace-1",
+        ),
+        workspace_root=tmp_path,
+        session_id="session-1",
+        trace_id="trace-resumed",
+    )
+    assert resumed_payload.prompt == "new guidance"
+    assert resumed is not None and resumed["status"] == "dispatching"
 
 
 def test_replacement_startup_failure_restores_original_before_stream_finishes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

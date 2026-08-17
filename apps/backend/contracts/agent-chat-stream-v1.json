@@ -1,0 +1,123 @@
+{
+  "schemaVersion": 1,
+  "contractId": "agent.chat.stream.v1",
+  "method": "POST",
+  "path": "/api/v1/agent/chat/stream",
+  "request": {
+    "contentType": "application/json",
+    "required": ["prompt"],
+    "properties": {
+      "prompt": {"type": "string", "minLength": 1, "maxLength": 12000},
+      "activeFile": {"type": "string", "default": ""},
+      "workspaceRoot": {"type": "string", "default": ""},
+      "reasoningEffort": {
+        "type": "string",
+        "enum": ["auto", "low", "medium", "high", "xhigh", "max"],
+        "default": "high"
+      },
+      "storyGeneration": {"type": "object", "default": {}},
+      "confirmNoSnapshot": {"type": "boolean", "default": false},
+      "replaceLatestTraceId": {"type": "string", "default": ""},
+      "sourceFollowupMessageId": {"type": "string", "default": ""},
+      "sourceFollowupExpectedTraceId": {"type": "string", "default": ""},
+      "timeoutMs": {"type": "integer", "minimum": 0, "maximum": 600000, "default": 0}
+    },
+    "headers": {
+      "x-trace-id": "optional client trace identifier; server preserves it when present",
+      "x-session-id": "optional session identifier; defaults to default"
+    }
+  },
+  "transport": {
+    "successStatus": 200,
+    "contentTypePrefix": "text/event-stream",
+    "headers": {
+      "cache-control": "no-cache",
+      "connection": "keep-alive",
+      "x-accel-buffering": "no"
+    },
+    "eventFrame": "event: <name>\\ndata: <single JSON object>\\n\\n",
+    "firstEvent": "RunAccepted",
+    "terminalEvents": ["AgentCompleted", "AgentError", "AgentCancelled"],
+    "transportTerminalEvent": "done",
+    "transportTerminalPayload": {"type": "done"},
+    "oneTraceRules": {
+      "acceptedFirst": true,
+      "oneSemanticTerminal": true,
+      "doneExactlyOnce": true,
+      "doneLast": true,
+      "noEventsAfterSemanticTerminal": true
+    },
+    "cancellation": {
+      "stopPath": "/api/v1/agent/executions/stop",
+      "stopRequest": ["sessionId", "expectedTraceId", "workspaceRoot"],
+      "timeoutField": "timeoutMs",
+      "terminal": "AgentCancelled",
+      "terminalReasonValues": ["manual_stop", "timeout", "client_disconnected"],
+      "disconnectRule": "A client disconnect closes the observed stream without a semantic terminal; the runtime persists cancellation independently."
+    },
+    "replacement": {
+      "requestField": "replaceLatestTraceId",
+      "latestTraceGuard": true,
+      "dialogueOnly": true,
+      "fileChangesReverted": false,
+      "acceptingEvents": [
+        "ProviderStream",
+        "ModelCompleted",
+        "ToolStart",
+        "ToolDone",
+        "TextChunk"
+      ],
+      "nonAcceptingEvents": ["AgentStarted", "AgentError", "AgentCancelled"],
+      "acceptedState": "The previous trace remains status=superseded with replacement.status=accepted and points to the replacement trace.",
+      "startupFailureState": "Before an accepting event, startup failure restores the exact runtime-session bytes and the previous trace, while the failed replacement trace remains auditable."
+    }
+  },
+  "payload": {
+    "versionField": "_version",
+    "typeField": "_type",
+    "commonFields": ["_type", "_version"],
+    "traceFields": ["traceId", "sessionId"],
+    "traceConsistency": "When present, traceId/sessionId equal the accepted request identifiers. Legacy snake_case aliases are accepted for tool and session fields."
+  },
+  "ordering": {
+    "requiredBeforeTerminal": ["RunAccepted", "TurnContract"],
+    "phaseNames": [
+      "intent_classification",
+      "context_assembly",
+      "workspace_snapshot",
+      "task_planning",
+      "model_execution",
+      "model",
+      "tool"
+    ],
+    "phaseRule": "A phase may emit running heartbeats before one non-running completion/warning packet. task_planning may overlap model execution; first occurrence order is used for deterministic fixtures.",
+    "heartbeatRule": "A heartbeat packet is TurnPhase with heartbeat=true, status=running, and a non-negative elapsedMs; it never terminates a phase.",
+    "toolRule": "Each ToolStart has one later ToolDone with the same tool name and call id. Read-only fixtures must not emit a mutating tool or a ToolDone with an error.",
+    "providerRule": "ProviderStream, ModelCompleted, UsageUpdate, TextChunk and ReasoningPlan are model/runtime events and must occur after AgentStarted when present."
+  },
+  "errorBoundary": {
+    "httpErrors": "Malformed requests and agent_busy remain HTTP error envelopes and do not become a successful SSE stream.",
+    "streamErrors": "After a 200 response, execution failures are AgentError payloads followed by exactly one done transport event; provider HTTP status and stage remain observable.",
+    "runtimeStartRule": "AgentStarted is emitted only after the bridge process starts and accepts its request; a bridge startup failure emits TurnContract, AgentError and done without AgentStarted.",
+    "noFallback": true
+  },
+  "replay": {
+    "fixtures": [
+      "apps/backend/contracts/fixtures/agent-chat-stream-read-only-v1",
+      "apps/backend/contracts/fixtures/agent-chat-stream-provider-error-v1",
+      "apps/backend/contracts/fixtures/agent-chat-stream-cancel-v1",
+      "apps/backend/contracts/fixtures/agent-chat-stream-timeout-v1",
+      "apps/backend/contracts/fixtures/agent-chat-stream-disconnect-v1",
+      "apps/backend/contracts/fixtures/agent-chat-stream-approval-v1",
+      "apps/backend/contracts/fixtures/agent-chat-stream-followup-v1",
+      "apps/backend/contracts/fixtures/agent-chat-stream-steer-recovery-v1",
+      "apps/backend/contracts/fixtures/agent-chat-stream-scoped-write-v1",
+      "apps/backend/contracts/fixtures/agent-chat-stream-corrupt-binding-v1",
+      "apps/backend/contracts/fixtures/agent-chat-stream-corrupt-session-v1",
+      "apps/backend/contracts/fixtures/agent-chat-stream-replacement-v1",
+      "apps/backend/contracts/fixtures/agent-chat-stream-replacement-restore-v1"
+    ],
+    "activation": "Explicit STORYDEX_AGENT_PROVIDER_REPLAY_FIXTURE only; missing or mismatched fixtures fail closed.",
+    "liveEvidence": "Replay observations are labelled providerMode=replay and must never be reported as live provider success."
+  }
+}

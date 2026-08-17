@@ -243,6 +243,7 @@ class LiveBridgeProcess:
         self._write_lock = asyncio.Lock()
         self._stdout_read_task: asyncio.Task[bytes] | None = None
         self._stderr_task = asyncio.create_task(self._read_stderr())
+        self._cancel_sent = False
 
     @classmethod
     async def start(cls, payload: Dict[str, Any]) -> "LiveBridgeProcess":
@@ -282,9 +283,22 @@ class LiveBridgeProcess:
     async def resolve(self, request_id: str, value: Dict[str, Any]) -> None:
         await self.send({"action": "resolve", "requestId": request_id, "value": value})
 
-    async def cancel(self, *, steer: bool = False) -> None:
+    async def cancel(self, *, steer: bool = False, reason: str = "") -> None:
+        if not steer and self._cancel_sent:
+            return
+        if not steer:
+            self._cancel_sent = True
         if self.process.poll() is None:
-            await self.send({"action": "steer" if steer else "cancel"})
+            payload: Dict[str, Any] = {"action": "steer" if steer else "cancel"}
+            if reason and not steer:
+                payload["reason"] = str(reason)
+            try:
+                await self.send(payload)
+            except CoomiBridgeError:
+                # A cancellation races the bridge's terminal packet. Once the
+                # child has closed its stdin, the command is already obsolete.
+                if self.process.poll() is None:
+                    raise
 
     async def _read_stdout_line(self) -> bytes:
         if self.process.stdout is None:

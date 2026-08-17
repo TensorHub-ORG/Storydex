@@ -6,8 +6,19 @@ from pathlib import Path
 import httpx
 import pytest
 
-from scripts.run_agent_runtime_contract import ContractError, validate_health_response
-from scripts.run_agent_runtime_contract import validate_coomi_status_response
+from api.routes_agent import AgentChatRequest
+from scripts.run_agent_runtime_contract import (
+    ContractError,
+    _interaction_event_matches,
+    validate_coomi_status_response,
+    validate_health_response,
+)
+from services.agent_stream_contract import (
+    AgentStreamContractError,
+    load_fixture,
+    parse_sse_events,
+    validate_chat_stream_events,
+)
 
 
 def _response(payload: dict, *, status: int = 200) -> httpx.Response:
@@ -15,6 +26,23 @@ def _response(payload: dict, *, status: int = 200) -> httpx.Response:
         status,
         json=payload,
         request=httpx.Request("GET", "http://127.0.0.1/api/v1/sys/health"),
+    )
+
+
+def test_interaction_trigger_can_match_event_payload_fields() -> None:
+    expected = {"phase": "model", "status": "running"}
+
+    assert _interaction_event_matches(
+        event_name="TurnPhase",
+        event_payload={"phase": "model", "status": "running", "current": 1},
+        after_event="TurnPhase",
+        after_event_fields=expected,
+    )
+    assert not _interaction_event_matches(
+        event_name="TurnPhase",
+        event_payload={"phase": "task_planning", "status": "running"},
+        after_event="TurnPhase",
+        after_event_fields=expected,
     )
 
 
@@ -154,3 +182,244 @@ def test_agent_runtime_manifest_has_unique_known_states() -> None:
     assert len({item["id"] for item in contracts}) == len(contracts)
     assert all(item["state"] in allowed for item in contracts)
     assert any(item["id"] == "agent.chat.stream.v1" for item in contracts)
+
+
+def _event(name: str, **payload: object) -> tuple[str, dict]:
+    return name, {"_type": name, "_version": 1, **payload}
+
+
+def _valid_chat_stream_events() -> list[tuple[str, dict]]:
+    trace_id = "trace-contract"
+    session_id = "session-contract"
+    return [
+        _event(
+            "RunAccepted",
+            traceId=trace_id,
+            sessionId=session_id,
+            phase="accepted",
+            status="running",
+        ),
+        _event(
+            "TurnPhase",
+            traceId=trace_id,
+            sessionId=session_id,
+            phase="intent_classification",
+            status="running",
+            heartbeat=False,
+            elapsedMs=0,
+        ),
+        _event("TurnContract", traceId=trace_id, sessionId=session_id),
+        _event(
+            "AgentStarted",
+            traceId=trace_id,
+            sessionId=session_id,
+            llmProvider="OPENCODE",
+            llmModel="deepseek-v4-flash",
+        ),
+        _event("RuntimeMetrics", providerMode="replay"),
+        _event(
+            "ToolStart",
+            tool_name="read_file",
+            tool_call_id="contract-read-1",
+            arguments={"path": "chapters/agent-stream-contract.md"},
+        ),
+        _event(
+            "ToolDone",
+            tool_name="read_file",
+            tool_call_id="contract-read-1",
+            is_error=False,
+        ),
+        _event("TextChunk", content="STORYDEX_AGENT_STREAM_CONTRACT_FILE_91C7"),
+        _event("AgentCompleted", traceId=trace_id, session_id=session_id),
+        ("done", {"type": "done"}),
+    ]
+
+
+def test_chat_stream_contract_accepts_ordered_read_only_replay() -> None:
+    root = Path(__file__).resolve().parents[3]
+    fixture = load_fixture(
+        root
+        / "apps/backend/contracts/fixtures/agent-chat-stream-read-only-v1/scenario.json"
+    )
+
+    observed = validate_chat_stream_events(
+        _valid_chat_stream_events(),
+        status_code=200,
+        headers={
+            "content-type": "text/event-stream; charset=utf-8",
+            "cache-control": "no-cache",
+            "x-accel-buffering": "no",
+        },
+        trace_id="trace-contract",
+        session_id="session-contract",
+        fixture=fixture,
+    )
+
+    assert observed["terminalEvent"] == "AgentCompleted"
+    assert observed["toolSequence"] == ["read_file"]
+    assert observed["providerModes"] == ["replay"]
+    assert observed["doneCount"] == 1
+
+
+def test_chat_stream_contract_allows_explicit_mutating_fixture() -> None:
+    events = _valid_chat_stream_events()
+    for index, (name, payload) in enumerate(events):
+        if name in {"ToolStart", "ToolDone"}:
+            events[index] = (
+                name,
+                {
+                    **payload,
+                    "tool_name": "write_file",
+                    "tool_call_id": "scoped-write-1",
+                },
+            )
+
+    observed = validate_chat_stream_events(
+        events,
+        status_code=200,
+        headers={
+            "content-type": "text/event-stream",
+            "cache-control": "no-cache",
+            "x-accel-buffering": "no",
+        },
+        trace_id="trace-contract",
+        session_id="session-contract",
+        fixture={
+            "allowMutatingTools": True,
+            "expected": {
+                "terminalEvent": "AgentCompleted",
+                "toolSequence": ["write_file"],
+                "replyContains": ["STORYDEX_AGENT_STREAM_CONTRACT_FILE_91C7"],
+            },
+        },
+    )
+
+    assert observed["toolSequence"] == ["write_file"]
+
+
+def test_chat_stream_contract_rejects_mutating_tool_without_fixture_opt_in() -> None:
+    events = _valid_chat_stream_events()
+    for _, payload in events:
+        if payload.get("tool_name") == "read_file":
+            payload["tool_name"] = "write_file"
+
+    with pytest.raises(AgentStreamContractError, match="mutating tool write_file"):
+        validate_chat_stream_events(
+            events,
+            status_code=200,
+            headers={
+                "content-type": "text/event-stream",
+                "cache-control": "no-cache",
+                "x-accel-buffering": "no",
+            },
+            trace_id="trace-contract",
+            session_id="session-contract",
+        )
+
+
+def test_chat_stream_contract_accepts_failure_only_after_finalization() -> None:
+    root = Path(__file__).resolve().parents[3]
+    fixture = load_fixture(
+        root
+        / "apps/backend/contracts/fixtures/agent-chat-stream-provider-error-v1/scenario.json"
+    )
+    events = _valid_chat_stream_events()[:4]
+    events.extend(
+        [
+            _event("RuntimeMetrics", providerMode="replay"),
+            _event("GitCommitPrompt", status="pending"),
+            _event(
+                "AgentError",
+                error_type="storydex_coomi_bridge_error",
+                message="provider replay step 1 did not find expected message marker",
+            ),
+            ("done", {"type": "done"}),
+        ]
+    )
+
+    observed = validate_chat_stream_events(
+        events,
+        status_code=200,
+        headers={
+            "content-type": "text/event-stream",
+            "cache-control": "no-cache",
+            "x-accel-buffering": "no",
+        },
+        trace_id="trace-contract",
+        session_id="session-contract",
+        fixture=fixture,
+    )
+
+    assert observed["terminalEvent"] == "AgentError"
+    assert observed["eventNames"][-3:] == ["GitCommitPrompt", "AgentError", "done"]
+    assert observed["errorCount"] == 1
+
+
+def test_chat_stream_contract_rejects_duplicate_terminal_event() -> None:
+    events = _valid_chat_stream_events()
+    events.insert(-1, _event("AgentCancelled", reason="late-cancel"))
+
+    with pytest.raises(AgentStreamContractError, match="exactly one semantic terminal"):
+        validate_chat_stream_events(
+            events,
+            status_code=200,
+            headers={
+                "content-type": "text/event-stream",
+                "cache-control": "no-cache",
+                "x-accel-buffering": "no",
+            },
+            trace_id="trace-contract",
+            session_id="session-contract",
+        )
+
+
+def test_chat_stream_contract_rejects_invalid_heartbeat_state() -> None:
+    events = _valid_chat_stream_events()
+    events.insert(
+        2,
+        _event(
+            "TurnPhase",
+            phase="context_assembly",
+            status="success",
+            heartbeat=True,
+            elapsedMs=12,
+        ),
+    )
+
+    with pytest.raises(AgentStreamContractError, match="heartbeat must have status=running"):
+        validate_chat_stream_events(
+            events,
+            status_code=200,
+            headers={
+                "content-type": "text/event-stream",
+                "cache-control": "no-cache",
+                "x-accel-buffering": "no",
+            },
+            trace_id="trace-contract",
+            session_id="session-contract",
+        )
+
+
+def test_chat_stream_parser_requires_complete_json_object_frames() -> None:
+    with pytest.raises(AgentStreamContractError, match="payload must be an object"):
+        parse_sse_events(["event: TextChunk", 'data: "not-an-object"', ""])
+
+
+def test_chat_stream_request_contract_matches_fastapi_alias_schema() -> None:
+    root = Path(__file__).resolve().parents[3]
+    contract = json.loads(
+        (root / "apps/backend/contracts/agent-chat-stream-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    route_schema = AgentChatRequest.model_json_schema(by_alias=True)
+
+    assert contract["contractId"] == "agent.chat.stream.v1"
+    assert set(contract["request"]["properties"]) == set(route_schema["properties"])
+    assert contract["request"]["required"] == route_schema["required"]
+    assert contract["transport"]["terminalEvents"] == [
+        "AgentCompleted",
+        "AgentError",
+        "AgentCancelled",
+    ]
+    assert contract["transport"]["transportTerminalEvent"] == "done"

@@ -4,6 +4,7 @@ mod config;
 mod mcp;
 mod memory;
 mod provider;
+mod replay;
 mod update;
 
 pub use auto_config::AutoConfigIntent;
@@ -45,5 +46,6 @@ pub use provider::reasoning_capability;
 pub use provider::reasoning_capability_best_effort;
 pub use provider::reasoning_request_plan;
 pub use provider::reasoning_request_plan_best_effort;
+pub use replay::ReplayModelProvider;
 pub use update::UpdateCheckResult;
 pub use update::check_for_update;

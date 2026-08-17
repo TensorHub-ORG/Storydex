@@ -8,7 +8,7 @@ use coomi_engine::{
 use coomi_security::{AccessMode, Decision, HookRunner, SecurityPolicy};
 use coomi_services::{
     HttpModelProvider, McpRuntime, MemoryManager, ProviderConfig, ProviderRegistry,
-    reasoning_capability_best_effort, reasoning_request_plan_best_effort,
+    ReplayModelProvider, reasoning_capability_best_effort, reasoning_request_plan_best_effort,
 };
 use coomi_tools::{AgentScheduler, CoreTools};
 use serde::Deserialize;
@@ -75,6 +75,7 @@ struct ControlHub {
     pending: Mutex<HashMap<String, oneshot::Sender<Value>>>,
     cancelled: Notify,
     cancellation_requested: AtomicBool,
+    cancellation_reason: Mutex<String>,
 }
 
 impl ControlHub {
@@ -94,9 +95,23 @@ impl ControlHub {
         }
     }
 
-    fn cancel(&self) {
+    fn cancel(&self, reason: &str) {
+        if let Ok(mut stored) = self.cancellation_reason.lock() {
+            *stored = if reason.trim().is_empty() {
+                "requested".to_owned()
+            } else {
+                reason.trim().to_owned()
+            };
+        }
         self.cancellation_requested.store(true, Ordering::Release);
         self.cancelled.notify_one();
+    }
+
+    fn cancellation_reason(&self) -> String {
+        self.cancellation_reason
+            .lock()
+            .map(|value| value.clone())
+            .unwrap_or_else(|_| "requested".to_owned())
     }
 }
 
@@ -154,6 +169,8 @@ struct BridgeRequest {
     storydex_session_id: String,
     #[serde(default)]
     provider: Option<String>,
+    #[serde(default)]
+    provider_replay_fixture: Option<PathBuf>,
     #[serde(default)]
     use_fast_model: bool,
     #[serde(default)]
@@ -577,7 +594,13 @@ fn start_control_reader(controls: Arc<ControlHub>, emitter: Emitter) {
                         value.get("value").cloned().unwrap_or(Value::Null),
                     );
                 }
-                Some("cancel" | "steer") => controls.cancel(),
+                Some("cancel") => controls.cancel(
+                    value
+                        .get("reason")
+                        .and_then(Value::as_str)
+                        .unwrap_or("requested"),
+                ),
+                Some("steer") => controls.cancel("steer"),
                 _ => emitter.event(
                     "protocol_warning",
                     json!({"message": "unknown control action"}),
@@ -859,7 +882,20 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
         emitter: emitter.clone(),
     };
     let provider_started = Instant::now();
-    let provider = HttpModelProvider::new(provider_config)?;
+    let replay_provider = request
+        .provider_replay_fixture
+        .as_ref()
+        .map(|path| ReplayModelProvider::load(provider_config.clone(), path))
+        .transpose()?;
+    let provider_mode = if replay_provider.is_some() {
+        "replay"
+    } else {
+        "live"
+    };
+    let provider: Box<dyn ModelProvider> = match replay_provider.as_ref() {
+        Some(replay) => Box::new(replay.clone()),
+        None => Box::new(HttpModelProvider::new(provider_config.clone())?),
+    };
     let provider_init_ms = provider_started.elapsed().as_secs_f64() * 1000.0;
     let checkpoint_buffer =
         SessionCheckpointBuffer::new(store.clone(), CHECKPOINT_MIN_WRITE_INTERVAL);
@@ -879,6 +915,7 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
             "hooksInitMs": hooks_init_ms,
             "toolsInitMs": tools_init_ms,
             "providerInitMs": provider_init_ms,
+            "providerMode": provider_mode,
         }),
     );
     let run_outcome: Result<bool, coomi_engine::AgentError> = {
@@ -887,7 +924,7 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
                 .run_turn(
                     &mut session,
                     request.prompt,
-                    &provider,
+                    provider.as_ref(),
                     &tools,
                     &approval,
                     &observer,
@@ -899,7 +936,13 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
                 .is_some_and(|state| state.status == coomi_engine::LoopStatus::Active)
             {
                 agent
-                    .continue_loop(&mut session, &provider, &tools, &approval, &observer)
+                    .continue_loop(
+                        &mut session,
+                        provider.as_ref(),
+                        &tools,
+                        &approval,
+                        &observer,
+                    )
                     .await?;
             }
             Ok::<(), coomi_engine::AgentError>(())
@@ -915,6 +958,9 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
         }
     };
     let cancelled = save_session_after_run(&checkpoint_buffer, &mut session, run_outcome)?;
+    if !cancelled && let Some(replay) = replay_provider.as_ref() {
+        replay.assert_complete()?;
+    }
     let checkpoint_stats = checkpoint_buffer.stats()?;
     emitter.event(
         "session_checkpoint_stats",
@@ -933,7 +979,7 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
     if cancelled {
         emitter.event(
             "cancelled",
-            json!({"runtimeSessionId": session.id, "reason": "requested"}),
+            json!({"runtimeSessionId": session.id, "reason": controls.cancellation_reason()}),
         );
     } else {
         emitter.event(

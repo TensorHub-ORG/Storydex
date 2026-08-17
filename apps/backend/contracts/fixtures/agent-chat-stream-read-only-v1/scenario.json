@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "contractId": "agent.chat.stream.v1",
+  "scenario": "strict-single-read-replay",
+  "request": {
+    "prompt": "严格只读契约回放：只能调用一次 read_file，读取 chapters/agent-stream-contract.md；不要使用其他工具，不要修改任何文件。读取后只返回固定标记 STORYDEX_AGENT_STREAM_CONTRACT_FILE_91C7。请求标记 STORYDEX_AGENT_STREAM_CONTRACT_PROMPT_6F1A。",
+    "activeFile": "",
+    "reasoningEffort": "low",
+    "confirmNoSnapshot": true
+  },
+  "workspace": {
+    "files": [
+      {
+        "path": "chapters/agent-stream-contract.md",
+        "content": "# Agent stream contract fixture\n\n固定回放标记：STORYDEX_AGENT_STREAM_CONTRACT_FILE_91C7\n"
+      }
+    ]
+  },
+  "expected": {
+    "providerId": "OPENCODE",
+    "model": "deepseek-v4-flash",
+    "providerMode": "replay",
+    "toolSequence": ["read_file"],
+    "replyContains": ["STORYDEX_AGENT_STREAM_CONTRACT_FILE_91C7"],
+    "terminalEvent": "AgentCompleted",
+    "httpStatus": 200
+  }
+}

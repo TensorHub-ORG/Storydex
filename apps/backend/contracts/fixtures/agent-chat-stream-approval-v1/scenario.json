@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "contractId": "agent.chat.stream.v1",
+  "scenario": "user-input-approval-round-trip",
+  "request": {
+    "prompt": "Read-only approval contract. Ask one question before returning the fixed marker STORYDEX_AGENT_STREAM_APPROVAL_REPLY_4C8E.",
+    "activeFile": "",
+    "reasoningEffort": "low",
+    "confirmNoSnapshot": true,
+    "timeoutMs": 0
+  },
+  "interaction": {
+    "action": "approval",
+    "afterEvent": "PermissionRequest",
+    "decision": "answer",
+    "response": {
+      "answers": {
+        "tone": "calm"
+      }
+    }
+  },
+  "workspace": {
+    "files": [
+      {
+        "path": "chapters/agent-stream-approval.md",
+        "content": "# Agent stream approval fixture\n\nSTORYDEX_AGENT_STREAM_APPROVAL_FILE_2D10\n"
+      }
+    ]
+  },
+  "expected": {
+    "providerId": "OPENCODE",
+    "model": "deepseek-v4-flash",
+    "providerMode": "replay",
+    "toolSequence": ["request_user_input"],
+    "replyContains": ["STORYDEX_AGENT_STREAM_APPROVAL_REPLY_4C8E"],
+    "terminalEvent": "AgentCompleted",
+    "sessionPersistence": true,
+    "httpStatus": 200
+  }
+}

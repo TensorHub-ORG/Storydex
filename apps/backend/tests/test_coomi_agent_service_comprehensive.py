@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from types import SimpleNamespace
 
 import pytest
 
@@ -572,6 +571,8 @@ def test_user_input_answer_prefers_free_text_and_never_uses_control_decision() -
 async def test_stream_events_preserves_storydex_event_contract(monkeypatch, tmp_path) -> None:
     started_payload = {}
     session_bound = _persisted_session_bound(monkeypatch, tmp_path)
+    replay_fixture = tmp_path / "provider-replay.json"
+    monkeypatch.setenv("STORYDEX_AGENT_PROVIDER_REPLAY_FIXTURE", str(replay_fixture))
 
     class Bridge:
         async def events(self):
@@ -619,8 +620,31 @@ async def test_stream_events_preserves_storydex_event_contract(monkeypatch, tmp_
     assert started_payload["capabilityMode"] == "read_only"
     assert started_payload["writesAllowed"] is False
     assert started_payload["coreWritesAllowed"] is False
+    assert started_payload["providerReplayFixture"] == str(replay_fixture.resolve())
     assert not any(tool["name"] == "StorydexSyncWiki" for tool in started_payload["toolSpecs"])
     assert "This turn is read-only" in started_payload["systemPrompt"]
+
+
+def test_translator_surfaces_explicit_provider_replay_mode() -> None:
+    translator = coomi._CoomiEventTranslator(session_id="provider-replay-session")
+
+    translated = translator.translate(
+        {
+            "type": "runtime_initialized",
+            "data": {"providerMode": "replay", "providerInitMs": 1.25},
+        }
+    )
+
+    assert translated == (
+        "RuntimeMetrics",
+        {
+            "_type": "RuntimeMetrics",
+            "_version": 1,
+            "providerMode": "replay",
+            "bridgeStartMs": 0.0,
+            "providerInitMs": 1.25,
+        },
+    )
 
 
 @pytest.mark.asyncio

@@ -31,6 +31,7 @@ from services.agent_intent_routing import (
 from services.agent_git_autocommit_service import AgentGitSnapshot, get_agent_git_autocommit_service
 from services.coomi_agent_service import (
     CoomiStoryGenerationAdapter,
+    StorydexCoomiSessionRestoreError,
     get_storydex_coomi_agent_service,
 )
 from services.context_policy import ContextPolicy
@@ -209,6 +210,7 @@ class AgentChatRequest(BaseModel):
     replace_latest_trace_id: str = Field(default="", alias="replaceLatestTraceId")
     source_followup_message_id: str = Field(default="", alias="sourceFollowupMessageId")
     source_followup_expected_trace_id: str = Field(default="", alias="sourceFollowupExpectedTraceId")
+    timeout_ms: int = Field(default=0, alias="timeoutMs", ge=0, le=600000)
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -3861,8 +3863,7 @@ async def _stream_coomi_sse_worker(
                             "applyError": dict(semantic_outcome.get("applyError") or {}),
                         },
                     }
-                    events.append(_event_to_trace_event("AgentError", error_packet, len(events) + 1))
-                    yield _encode_sse("AgentError", error_packet)
+                    terminal_event = ("AgentError", error_packet)
                     completed = False
                 should_run_coomi = False
 
@@ -4364,12 +4365,39 @@ async def _stream_coomi_sse_worker(
                                 ),
                             },
                         }
-                        events.append(
-                            _event_to_trace_event("AgentError", error_packet, len(events) + 1)
-                        )
-                        yield _encode_sse("AgentError", error_packet)
+                        terminal_event = ("AgentError", error_packet)
                         completed = False
                 should_run_coomi = False
+
+            if should_run_coomi and not execution_handle.is_cancelled:
+                try:
+                    get_storydex_coomi_agent_service().validate_session_for_execution(
+                        session_id=session_id,
+                        workspace_root=workspace_root,
+                    )
+                except StorydexCoomiSessionRestoreError as exc:
+                    error_message = _exception_message(exc)
+                    followup_mailbox_service.pause(
+                        workspace_root=workspace_root,
+                        session_id=session_id,
+                        reason="execution_error",
+                    )
+                    terminal_event = (
+                        "AgentError",
+                        {
+                            "_type": "AgentError",
+                            "_version": 1,
+                            "error_type": type(exc).__name__,
+                            "message": error_message,
+                            "details": {
+                                "runtime": "storydex-coomi-rs",
+                                "stage": "session_restore",
+                                "traceId": trace_id,
+                                "sessionId": session_id,
+                            },
+                        },
+                    )
+                    should_run_coomi = False
 
             if should_run_coomi and not execution_handle.is_cancelled:
                 if tracker is not None:
@@ -4400,7 +4428,6 @@ async def _stream_coomi_sse_worker(
                     segment_event_start = len(events)
                     pending_steer: Dict[str, Any] | None = None
                     segment_completed = False
-                    segment_cancelled = False
                     segment_visible_text_characters = 0
                     segment_tool_result_seen = False
                     runtime_events = get_storydex_coomi_agent_service().stream_events(
@@ -4592,27 +4619,12 @@ async def _stream_coomi_sse_worker(
                                             "sessionId": session_id,
                                         },
                                     }
-                                    events.append(
-                                        _event_to_trace_event(
-                                            "AgentError", error_packet, len(events) + 1
-                                        )
-                                    )
-                                    yield _encode_sse("AgentError", error_packet)
+                                    terminal_event = ("AgentError", error_packet)
                                     continue
                                 segment_completed = True
                                 terminal_event = (event_name, packet)
                                 continue
                             elif event_name == "AgentCancelled":
-                                if pending_steer is None and not execution_handle.is_cancelled:
-                                    pending_steer = followup_mailbox_service.claim_steer(
-                                        workspace_root=workspace_root,
-                                        session_id=session_id,
-                                        trace_id=trace_id,
-                                    )
-                                if pending_steer is not None and not cancellation_token.is_cancelled():
-                                    segment_cancelled = True
-                                    terminal_event = None
-                                    break
                                 execution_handle.cancel(str(packet.get("reason") or "coomi_cancelled"))
                                 terminal_event = (event_name, packet)
                                 continue
@@ -4629,6 +4641,8 @@ async def _stream_coomi_sse_worker(
                                     session_id=session_id,
                                     reason="execution_error",
                                 )
+                                terminal_event = (event_name, packet)
+                                continue
                             events.append(_event_to_trace_event(event_name, packet, len(events) + 1))
                             yield _encode_sse(event_name, packet)
                             if tracker is not None:
@@ -4846,12 +4860,9 @@ async def _stream_coomi_sse_worker(
                                         "validation": validation_packet,
                                     },
                                 }
-                                events.append(_event_to_trace_event("AgentError", error_packet, len(events) + 1))
-                                yield _encode_sse("AgentError", error_packet)
+                                terminal_event = ("AgentError", error_packet)
                                 break
                     completed = segment_completed
-                    if segment_cancelled and not execution_handle.is_cancelled:
-                        completed = False
                     break
 
             if error_message:
@@ -4885,8 +4896,7 @@ async def _stream_coomi_sse_worker(
                     "sessionId": session_id,
                 },
             }
-            events.append(_event_to_trace_event("AgentError", packet, len(events) + 1))
-            yield _encode_sse("AgentError", packet)
+            terminal_event = ("AgentError", packet)
             if tracker is not None:
                 for task_event_name, task_payload in tracker.fail_current(error_message):
                     events.append(_event_to_trace_event(task_event_name, task_payload, len(events) + 1))
@@ -5048,20 +5058,16 @@ async def _stream_coomi_sse_worker(
                     },
                 )
             else:
-                existing_error = next(
-                    (item for item in reversed(events) if item.get("event") == "AgentError"),
-                    None,
+                event_name, packet = terminal_event or (
+                    "AgentError",
+                    {
+                        "_type": "AgentError",
+                        "_version": 1,
+                        "error_type": "ExecutionFailed",
+                        "message": terminal_error or "Coomi execution failed.",
+                        "details": {"runtime": "coomi"},
+                    },
                 )
-                if existing_error is not None:
-                    return
-                event_name = "AgentError"
-                packet = {
-                    "_type": "AgentError",
-                    "_version": 1,
-                    "error_type": "ExecutionFailed",
-                    "message": terminal_error or "Coomi execution failed.",
-                    "details": {"runtime": "coomi"},
-                }
             events.append(_event_to_trace_event(event_name, packet, len(events) + 1))
             finalization_packets.append(_encode_sse(event_name, packet))
 
@@ -5180,6 +5186,7 @@ async def _stream_coomi_sse(
     git_snapshot: AgentGitSnapshot,
     request: Request,
     cancellation_token: _CancellationToken,
+    timeout_ms: int = 0,
     execution_handle: ExecutionHandle | None = None,
     execution_log_session: ExecutionLogSession | None = None,
     replacement: _LatestExecutionReplacement | None = None,
@@ -5264,11 +5271,39 @@ async def _stream_coomi_sse(
     worker = _retain_background_execution_task(
         asyncio.create_task(pump(), name=f"storydex-execution-{trace_id}")
     )
+    deadline = (
+        asyncio.get_running_loop().time() + (max(0, int(timeout_ms)) / 1000.0)
+        if int(timeout_ms or 0) > 0
+        else None
+    )
+
+    def cancel_for_timeout() -> None:
+        nonlocal deadline
+        if deadline is None:
+            return
+        deadline = None
+        handle.cancel("timeout")
+        followup_mailbox_service.pause(
+            workspace_root=workspace_root,
+            session_id=session_id,
+            reason="timeout",
+        )
+
     try:
         while True:
+            wait_seconds = _PHASE_HEARTBEAT_SECONDS
+            if deadline is not None:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    cancel_for_timeout()
+                    continue
+                wait_seconds = min(wait_seconds, remaining)
             try:
-                chunk = await asyncio.wait_for(queue.get(), timeout=_PHASE_HEARTBEAT_SECONDS)
+                chunk = await asyncio.wait_for(queue.get(), timeout=wait_seconds)
             except asyncio.TimeoutError:
+                if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+                    cancel_for_timeout()
+                    continue
                 if await request.is_disconnected():
                     handle.cancel("client_disconnected")
                     followup_mailbox_service.pause(
@@ -6850,6 +6885,7 @@ async def _stream_agent_chat_request_sse(
             git_snapshot=git_snapshot,
             request=request,
             cancellation_token=cancellation_token,
+            timeout_ms=payload.timeout_ms,
             execution_handle=execution_handle,
             execution_log_session=execution_log_session,
             replacement=replacement,
@@ -7046,6 +7082,7 @@ async def _stream_agent_chat_with_followups_sse(
     while True:
         saw_error = False
         saw_cancel = False
+        cancel_reason = ""
         source_marked_sent = source_message is None
         async for chunk in _stream_agent_chat_request_sse(
             payload=current_payload,
@@ -7064,6 +7101,7 @@ async def _stream_agent_chat_with_followups_sse(
                 saw_error = True
             elif event_name == "AgentCancelled":
                 saw_cancel = True
+                cancel_reason = str(packet.get("reason") or "").strip()
             if source_message is not None and not source_marked_sent:
                 if event_name in {"TaskPlanCreated", "TurnContract", "AgentStarted"} or (
                     event_name == "TurnPhase" and str(packet.get("phase") or "") == "task_planning"
@@ -7096,6 +7134,18 @@ async def _stream_agent_chat_with_followups_sse(
                 )
             except FollowupMailboxError:
                 pass
+
+        if saw_cancel and cancel_reason == "steer":
+            followup_mailbox_service.requeue_steering(
+                workspace_root=workspace_root,
+                session_id=session_id,
+                trace_id=current_trace_id,
+            )
+            followup_mailbox_service.pause(
+                workspace_root=workspace_root,
+                session_id=session_id,
+                reason="steer_requires_resume",
+            )
 
         state = followup_mailbox_service.list_mailbox(
             workspace_root=workspace_root,

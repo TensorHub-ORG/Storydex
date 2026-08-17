@@ -199,6 +199,70 @@ def test_followups_can_be_edited_cancelled_and_promoted_to_steer(tmp_path: Path)
     assert "ContinuationStarted" in event_types
 
 
+def test_interrupted_steer_is_requeued_for_explicit_resume(tmp_path: Path) -> None:
+    service = FollowupMailboxService()
+    service.set_active_trace(
+        workspace_root=tmp_path,
+        session_id="session-1",
+        trace_id="trace-active",
+    )
+    _enqueue(
+        service,
+        tmp_path,
+        "steer-1",
+        "continue safely",
+        mode="steer",
+        expected_trace_id="trace-active",
+    )
+    claimed = service.claim_steer(
+        workspace_root=tmp_path,
+        session_id="session-1",
+        trace_id="trace-active",
+    )
+    assert claimed is not None and claimed["steerClaimToken"]
+
+    assert service.requeue_steering(
+        workspace_root=tmp_path,
+        session_id="session-1",
+        trace_id="trace-stale",
+    ) == []
+    changed = service.requeue_steering(
+        workspace_root=tmp_path,
+        session_id="session-1",
+        trace_id="trace-active",
+    )
+    assert len(changed) == 1
+    assert changed[0]["mode"] == "queued"
+    assert changed[0]["status"] == "pending"
+    assert changed[0]["activeTraceId"] == ""
+    assert changed[0]["expectedTraceId"] == "trace-active"
+    assert changed[0]["error"] == "steer_requires_resume"
+    assert changed[0]["steerClaimToken"] == ""
+
+    service.pause(
+        workspace_root=tmp_path,
+        session_id="session-1",
+        reason="steer_requires_resume",
+    )
+    service.resume(workspace_root=tmp_path, session_id="session-1")
+    resumed = service.claim_queued_by_id(
+        workspace_root=tmp_path,
+        session_id="session-1",
+        message_id="steer-1",
+        previous_trace_id="trace-active",
+        next_trace_id="trace-resumed",
+        expected_trace_id="trace-active",
+    )
+    assert resumed["mode"] == "queued"
+    assert resumed["status"] == "dispatching"
+
+    mailbox = service.list_mailbox(
+        workspace_root=tmp_path,
+        session_id="session-1",
+    )
+    assert [event["_type"] for event in mailbox["events"]].count("FollowupUpdated") >= 1
+
+
 def test_paused_mailbox_preserves_pending_message_and_resumes_exactly_once(tmp_path: Path) -> None:
     service = FollowupMailboxService()
     _enqueue(service, tmp_path, "message-1", "resume me")

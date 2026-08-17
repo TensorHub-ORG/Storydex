@@ -478,6 +478,9 @@ def test_stream_coomi_sse_success_needs_input_and_runtime_error(monkeypatch, tmp
     monkeypatch.setattr(routes, "_build_chat_payload", lambda **kwargs: {"record": {"traceId": kwargs["trace_id"]}})
 
     class Service:
+        def validate_session_for_execution(self, **kwargs):
+            return {}
+
         async def stream_events(self, **kwargs):
             yield "AgentStarted", {}
             yield "TextChunk", {"content": "<read>hidden</read>"}
@@ -498,6 +501,7 @@ def test_stream_coomi_sse_success_needs_input_and_runtime_error(monkeypatch, tmp
     success = asyncio.run(collect({"status": "ready"}))
     names = [name for name, _ in success]
     assert "TextChunk" in names and "ToolDone" in names and names[-1] == "done"
+    assert names[-2:] == ["AgentCompleted", "done"]
     assert not any(data.get("content") == "" for name, data in success if name == "TextChunk")
 
     # 复杂任务：intentFrame.complexity=complex 触发任务清单规划路径，
@@ -519,13 +523,19 @@ def test_stream_coomi_sse_success_needs_input_and_runtime_error(monkeypatch, tmp
     assert any(name == "AgentCompleted" and data.get("status") == "needs_user_input" for name, data in waiting)
 
     class BrokenService:
+        def validate_session_for_execution(self, **kwargs):
+            return {}
+
         async def stream_events(self, **kwargs):
             raise RuntimeError("runtime broke")
             yield
 
     monkeypatch.setattr(routes, "get_storydex_coomi_agent_service", lambda: BrokenService())
     failed = asyncio.run(collect({"status": "ready"}))
-    assert any(name == "AgentError" for name, _ in failed)
+    failed_names = [name for name, _ in failed]
+    assert failed_names[-2:] == ["AgentError", "done"]
+    assert failed_names.index("GitCommitPrompt") < failed_names.index("AgentError")
+    assert sum(name in {"AgentCompleted", "AgentError", "AgentCancelled"} for name in failed_names) == 1
 
 
 def test_stream_finalizer_reconciles_written_knowledge_after_provider_401(monkeypatch, tmp_path):
@@ -558,6 +568,9 @@ def test_stream_finalizer_reconciles_written_knowledge_after_provider_401(monkey
     class ProviderFailsAfterWrite:
         def cancel_execution(self, **kwargs):
             return False
+
+        def validate_session_for_execution(self, **kwargs):
+            return {}
 
         async def stream_events(self, **kwargs):
             cards = tmp_path / ".storydex" / "characters"
@@ -716,6 +729,9 @@ def test_stream_disconnect_finishes_cancelled_execution_in_background(monkeypatc
     class Coomi:
         def cancel_execution(self, **kwargs):
             return False
+
+        def validate_session_for_execution(self, **kwargs):
+            return {}
 
         async def stream_events(self, **kwargs):
             model_calls.append(kwargs)
@@ -993,6 +1009,9 @@ def test_snapshot_failure_requires_confirmation_before_execution(monkeypatch, tm
         def cancel_execution(self, **kwargs):
             return False
 
+        def validate_session_for_execution(self, **kwargs):
+            return {}
+
         async def stream_events(self, **kwargs):
             model_calls.append(kwargs)
             yield "TextChunk", {"content": "done"}
@@ -1218,7 +1237,10 @@ def test_run_diff_empty_summary_commit_summary_and_record_append(monkeypatch, tm
 def test_agent_clear_conversation_and_chat_paths(monkeypatch, tmp_path):
     calls = []
     reset_calls = []
-    service = types.SimpleNamespace(clear_session=lambda *args, **kwargs: calls.append(("clear", args, kwargs)))
+    service = types.SimpleNamespace(
+        clear_session=lambda *args, **kwargs: calls.append(("clear", args, kwargs)),
+        validate_session_for_execution=lambda **kwargs: {},
+    )
     monkeypatch.setattr(routes, "get_storydex_coomi_agent_service", lambda: service)
     monkeypatch.setattr(routes, "project_service", types.SimpleNamespace(workspace_root=tmp_path))
     monkeypatch.setattr(routes, "storydex_intent_service", types.SimpleNamespace(

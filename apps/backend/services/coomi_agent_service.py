@@ -68,6 +68,7 @@ _SEMANTIC_STORY_LENGTH_MAX_RATIO = 1.20
 _BRIDGE_STATUS_CACHE_LOCK = threading.Lock()
 _BRIDGE_STATUS_PROBE_LOCK = threading.Lock()
 _BRIDGE_STATUS_CACHE: tuple[tuple[str, int, int, str, int, int], Dict[str, Any]] | None = None
+_PROVIDER_REPLAY_FIXTURE_ENV = "STORYDEX_AGENT_PROVIDER_REPLAY_FIXTURE"
 
 
 class StorydexCoomiUnavailable(RuntimeError):
@@ -491,11 +492,29 @@ class StorydexCoomiAgentService:
     def cancel_execution(
         self, *, session_id: str, workspace_root: Path, reason: str = "cancelled"
     ) -> bool:
-        del reason
-        return self._signal_bridge(session_id=session_id, workspace_root=workspace_root, steer=False)
+        key = self._runtime_key(session_id=session_id, workspace_root=workspace_root)
+        with self._active_lock:
+            active = self._active.get(key)
+        if active is None:
+            return False
+        loop, bridge = active
+        asyncio.run_coroutine_threadsafe(
+            bridge.cancel(reason=str(reason or "cancelled")),
+            loop,
+        )
+        return True
 
     def request_steer(self, *, session_id: str, workspace_root: Path) -> bool:
         return self._signal_bridge(session_id=session_id, workspace_root=workspace_root, steer=True)
+
+    def validate_session_for_execution(
+        self, *, session_id: str, workspace_root: Path
+    ) -> Dict[str, Any]:
+        """Fail closed before a turn is exposed as model execution."""
+        return _read_coomi_session_binding_for_execution(
+            workspace_root=Path(workspace_root).resolve(),
+            storydex_session_id=str(session_id or "default").strip() or "default",
+        )
 
     async def generate_commit_message(
         self,
@@ -591,8 +610,8 @@ class StorydexCoomiAgentService:
             capability_mode=capability_policy.mode,
         )
         try:
-            binding = _read_coomi_session_binding_for_execution(
-                workspace_root=workspace, storydex_session_id=normalized_session
+            binding = self.validate_session_for_execution(
+                workspace_root=workspace, session_id=normalized_session
             )
         except StorydexCoomiSessionRestoreError as exc:
             yield "AgentError", _agent_error(
@@ -627,6 +646,7 @@ class StorydexCoomiAgentService:
         ).strip().lower()
         bridge_started = time.perf_counter()
         try:
+            replay_fixture = str(os.getenv(_PROVIDER_REPLAY_FIXTURE_ENV, "") or "").strip()
             bridge = await LiveBridgeProcess.start(
                 {
                     "action": "run",
@@ -652,6 +672,15 @@ class StorydexCoomiAgentService:
                     ),
                     "toolSpecs": registry.specs(),
                     "mutatingToolNames": mutating_tool_names,
+                    # Replay is an explicit Refactor/CI seam.  The Rust bridge
+                    # fails closed when the path is missing or the request does
+                    # not match the checked-in fixture; an empty value keeps
+                    # the normal live provider path unchanged.
+                    **(
+                        {"providerReplayFixture": str(Path(replay_fixture).resolve())}
+                        if replay_fixture
+                        else {}
+                    ),
                 }
             )
         except Exception as exc:
@@ -695,10 +724,12 @@ class StorydexCoomiAgentService:
         resolution_tasks: set[asyncio.Task[Any]] = set()
         terminal_seen = False
         attempt_text_characters = 0
+        bridge_cancel_sent = False
         try:
             async for packet in bridge.events():
-                if _is_cancelled(cancellation_token):
+                if _is_cancelled(cancellation_token) and not bridge_cancel_sent:
                     await bridge.cancel()
+                    bridge_cancel_sent = True
                 packet_type = str(packet.get("type") or "")
                 data = packet.get("data") if isinstance(packet.get("data"), dict) else {}
                 if packet_type == "session_bound":
@@ -1555,6 +1586,7 @@ class _CoomiEventTranslator:
         }
         self.provider_id = str(provider_id or "")
         self.model = str(model or "")
+        self.provider_mode = "live"
         self.last_http_status: int | None = None
         self.current_stage = "bridge_events"
 
@@ -1697,9 +1729,13 @@ class _CoomiEventTranslator:
                     if str(key).endswith("Ms")
                 }
             )
+            mode = str(data.get("providerMode") or "").strip().lower()
+            if mode:
+                self.provider_mode = mode
             return "RuntimeMetrics", {
                 "_type": "RuntimeMetrics",
                 "_version": 1,
+                "providerMode": self.provider_mode,
                 **self.runtime_metrics,
             }
         if name == "tool_started":

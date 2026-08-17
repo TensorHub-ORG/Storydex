@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "contractId": "agent.chat.stream.v1",
+  "scenario": "corrupt-runtime-session-file-fails-closed",
+  "request": {
+    "prompt": "This request must fail while restoring the bound runtime session. Marker STORYDEX_CORRUPT_SESSION_63A4.",
+    "activeFile": "",
+    "reasoningEffort": "low",
+    "confirmNoSnapshot": true,
+    "timeoutMs": 0
+  },
+  "runtimeSessionSetup": {
+    "kind": "corrupt_session",
+    "runtimeSessionId": "22222222-2222-4222-8222-222222222222"
+  },
+  "workspace": {
+    "initializeGit": true,
+    "files": [
+      {
+        "path": ".storydex/config/project-settings.json",
+        "content": "{\n  \"agentCommitPromptEnabled\": false\n}\n"
+      }
+    ]
+  },
+  "expected": {
+    "providerId": "OPENCODE",
+    "model": "deepseek-v4-flash",
+    "agentStarted": true,
+    "toolSequence": [],
+    "replyContains": [],
+    "terminalEvent": "AgentError",
+    "errorContains": ["invalid session file"],
+    "runtimeSessionIntegrity": {
+      "kind": "corrupt_session",
+      "unchanged": true,
+      "bindingExists": true,
+      "sessionExists": true
+    },
+    "httpStatus": 200
+  }
+}

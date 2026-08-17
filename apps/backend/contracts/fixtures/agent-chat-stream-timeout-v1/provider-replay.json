@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "contractId": "agent.chat.stream.v1",
+  "providerId": "OPENCODE",
+  "model": "deepseek-v4-flash",
+  "steps": [
+    {
+      "expect": {
+        "messageContains": "STORYDEX_AGENT_STREAM_TIMEOUT_PROMPT_E073",
+        "toolNames": ["read_file"]
+      },
+      "response": {
+        "content": "This delayed response must hit the execution timeout.",
+        "usage": {"input_tokens": 64, "output_tokens": 8},
+        "responseModel": "deepseek-v4-flash",
+        "finishReason": "stop",
+        "delayMs": 5000
+      }
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "contractId": "agent.chat.stream.v1",
+  "scenario": "provider-replay-request-mismatch",
+  "request": {
+    "prompt": "严格只读故障注入：读取 chapters/agent-stream-contract.md，并保持请求标记 STORYDEX_AGENT_STREAM_CONTRACT_PROMPT_6F1A。",
+    "activeFile": "",
+    "reasoningEffort": "low",
+    "confirmNoSnapshot": true
+  },
+  "workspace": {
+    "files": [
+      {
+        "path": "chapters/agent-stream-contract.md",
+        "content": "# Agent stream failure fixture\n\n固定回放标记：STORYDEX_AGENT_STREAM_CONTRACT_FILE_91C7\n"
+      }
+    ]
+  },
+  "expected": {
+    "providerId": "OPENCODE",
+    "model": "deepseek-v4-flash",
+    "providerMode": "replay",
+    "toolSequence": [],
+    "replyContains": [],
+    "terminalEvent": "AgentError",
+    "errorContains": ["expected message marker"],
+    "httpStatus": 200
+  }
+}

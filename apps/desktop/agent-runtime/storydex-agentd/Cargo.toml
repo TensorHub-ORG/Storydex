@@ -19,8 +19,10 @@ clap.workspace = true
 coomi-engine = { path = "../engine" }
 coomi-services = { path = "../services" }
 dirs.workspace = true
+futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tower-http.workspace = true

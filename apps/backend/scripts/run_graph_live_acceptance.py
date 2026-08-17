@@ -298,7 +298,9 @@ class BackendProcess:
         )
         deadline = time.time() + 90
         last_error = ""
-        with httpx.Client(timeout=5.0) as client:
+        # BackendProcess always targets a loopback server. Do not let a system
+        # HTTP proxy turn a healthy local probe into an empty 502 response.
+        with httpx.Client(timeout=5.0, trust_env=False) as client:
             while time.time() < deadline:
                 if self.process.poll() is not None:
                     break

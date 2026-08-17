@@ -288,6 +288,60 @@ class FollowupMailboxService:
             message["updatedAt"] = _now_iso()
             self._write(state, workspace_root=workspace_root, session_id=session_id)
 
+    def requeue_steering(
+        self,
+        *,
+        workspace_root: Path,
+        session_id: str,
+        trace_id: str,
+    ) -> list[Dict[str, Any]]:
+        """Preserve an interrupted steer as a queued message for explicit resume."""
+
+        normalized_trace = str(trace_id or "").strip()
+        with self._lock:
+            state = self._load(workspace_root=workspace_root, session_id=session_id)
+            changed: list[Dict[str, Any]] = []
+            for message in self._ordered_messages(state):
+                expected_trace = str(
+                    message.get("expectedTraceId") or message.get("activeTraceId") or ""
+                ).strip()
+                if (
+                    str(message.get("mode") or "") != "steer"
+                    or str(message.get("status") or "") != "steering"
+                    or (
+                        normalized_trace
+                        and expected_trace
+                        and expected_trace != normalized_trace
+                    )
+                ):
+                    continue
+                message.update(
+                    {
+                        "mode": "queued",
+                        "status": "pending",
+                        "statusDetail": "Steer was interrupted; resume the mailbox to send it.",
+                        "activeTraceId": "",
+                        "expectedTraceId": normalized_trace,
+                        "dispatchTraceId": "",
+                        "previousTraceId": "",
+                        "error": "steer_requires_resume",
+                        "steerClaimToken": "",
+                        "dispatchToken": "",
+                        "updatedAt": _now_iso(),
+                    }
+                )
+                self._append_event(
+                    state,
+                    "FollowupUpdated",
+                    message,
+                    trace_id=normalized_trace,
+                    previous_trace_id=normalized_trace,
+                )
+                changed.append(deepcopy(message))
+            if changed:
+                self._write(state, workspace_root=workspace_root, session_id=session_id)
+            return changed
+
     def apply_steer(
         self,
         *,

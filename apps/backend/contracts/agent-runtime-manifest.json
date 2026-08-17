@@ -44,64 +44,129 @@
       "id": "agent.chat.stream.v1",
       "method": "POST",
       "path": "/api/v1/agent/chat/stream",
-      "state": "captured",
+      "state": "parity",
       "pythonEvidence": [
         "apps/backend/api/routes_agent.py::stream_agent_chat"
       ],
       "rustEvidence": [
+        "apps/desktop/agent-runtime/storydex-agentd/src/chat.rs::chat_stream",
         "apps/desktop/agent-runtime/storydex-bridge/src/main.rs::run_agent"
       ],
-      "remaining": "Expose the existing Rust loop through agentd SSE and compare ordered lifecycle events before declaring parity."
+      "contractDocument": "apps/backend/contracts/agent-chat-stream-v1.json",
+      "replayFixtures": [
+        "apps/backend/contracts/fixtures/agent-chat-stream-read-only-v1",
+        "apps/backend/contracts/fixtures/agent-chat-stream-provider-error-v1",
+        "apps/backend/contracts/fixtures/agent-chat-stream-cancel-v1",
+        "apps/backend/contracts/fixtures/agent-chat-stream-timeout-v1",
+        "apps/backend/contracts/fixtures/agent-chat-stream-disconnect-v1",
+        "apps/backend/contracts/fixtures/agent-chat-stream-approval-v1",
+        "apps/backend/contracts/fixtures/agent-chat-stream-followup-v1",
+        "apps/backend/contracts/fixtures/agent-chat-stream-steer-recovery-v1",
+        "apps/backend/contracts/fixtures/agent-chat-stream-scoped-write-v1",
+        "apps/backend/contracts/fixtures/agent-chat-stream-corrupt-binding-v1",
+        "apps/backend/contracts/fixtures/agent-chat-stream-corrupt-session-v1",
+        "apps/backend/contracts/fixtures/agent-chat-stream-replacement-v1",
+        "apps/backend/contracts/fixtures/agent-chat-stream-replacement-restore-v1"
+      ],
+      "differentialRunner": "apps/backend/scripts/run_agent_stream_differential.py",
+      "parityEvidence": [
+        "output/agent-runtime-contract/differential-read-only-current/differential-report.json",
+        "output/agent-runtime-contract/differential-provider-error-current/differential-report.json",
+        "output/agent-runtime-contract/differential-cancel-current/differential-report.json",
+        "output/agent-runtime-contract/differential-timeout-current/differential-report.json",
+        "output/agent-runtime-contract/differential-disconnect-current/differential-report.json",
+        "output/agent-runtime-contract/differential-approval-current/differential-report.json",
+        "output/agent-runtime-contract/differential-followup-current/differential-report.json",
+        "output/agent-runtime-contract/differential-steer-recovery-current/differential-report.json",
+        "output/agent-runtime-contract/differential-scoped-write-current/differential-report.json",
+        "output/agent-runtime-contract/differential-corrupt-binding-current/differential-report.json",
+        "output/agent-runtime-contract/differential-corrupt-session-current/differential-report.json",
+        "output/agent-runtime-contract/differential-replacement-accepted-current/differential-report.json",
+        "output/agent-runtime-contract/differential-replacement-restore-current/differential-report.json"
+      ],
+      "remaining": "The checked-in Refactor slice has parity evidence for read-only, scoped write, provider failure, manual stop, timeout, disconnect, approval, queued follow-up/resume, interrupted steer recovery, corrupt session state, and latest-trace replacement. Python-owned knowledge projection and Git prompt events remain explicit differences. Story generation, full context/intent parity, production workspace access, Electron Beta and Stable takeover remain out of scope."
     },
     {
       "id": "agent.approval.v1",
       "method": "POST",
       "path": "/api/v1/agent/coomi/approval",
-      "state": "captured",
+      "state": "parity",
       "pythonEvidence": [
         "apps/backend/api/routes_agent.py::agent_resolve_coomi_approval"
       ],
       "rustEvidence": [
+        "apps/desktop/agent-runtime/storydex-agentd/src/chat.rs::resolve_approval",
         "apps/desktop/agent-runtime/storydex-bridge/src/main.rs::ControlHub"
       ],
-      "remaining": "Freeze approval request/resolve ordering in the shared black-box suite."
+      "differentialFixture": "apps/backend/contracts/fixtures/agent-chat-stream-approval-v1",
+      "parityEvidence": "output/agent-runtime-contract/differential-approval-current/differential-report.json",
+      "remaining": "One request_user_input answer round-trip is covered. Reject/timeout, multiple concurrent approvals, duplicate decisions and every permission mode still need dedicated black-box cases."
     },
     {
       "id": "agent.followup.v1",
       "method": "POST",
       "path": "/api/v1/agent/followups",
-      "state": "captured",
+      "state": "parity",
       "pythonEvidence": [
         "apps/backend/tests/test_agent_followup_execution.py"
       ],
-      "rustEvidence": [],
-      "remaining": "Port queue, steer and reconnect state transitions after base SSE parity."
+      "rustEvidence": [
+        "apps/desktop/agent-runtime/storydex-agentd/src/followup.rs::FollowupStore",
+        "apps/desktop/agent-runtime/storydex-agentd/src/chat.rs::enqueue_followup"
+      ],
+      "differentialFixtures": [
+        "apps/backend/contracts/fixtures/agent-chat-stream-followup-v1",
+        "apps/backend/contracts/fixtures/agent-chat-stream-steer-recovery-v1"
+      ],
+      "parityEvidence": [
+        "output/agent-runtime-contract/differential-followup-current/differential-report.json",
+        "output/agent-runtime-contract/differential-steer-recovery-current/differential-report.json"
+      ],
+      "remaining": "Queued dispatch/resume and interrupted steer requeue are covered. Edit/delete races, duplicate processes and every mailbox-corruption transition remain outside the black-box slice."
     },
     {
       "id": "agent.cancel.v1",
       "method": "POST",
       "path": "/api/v1/agent/executions/stop",
-      "state": "captured",
+      "state": "parity",
       "pythonEvidence": [
         "apps/backend/api/routes_agent.py::stop_agent_execution"
       ],
       "rustEvidence": [
+        "apps/desktop/agent-runtime/storydex-agentd/src/chat.rs::stop_execution",
         "apps/desktop/agent-runtime/storydex-bridge/src/main.rs::ControlHub"
       ],
-      "remaining": "Compare cancellation deadline, terminal event and persisted session state."
+      "differentialFixtures": [
+        "apps/backend/contracts/fixtures/agent-chat-stream-cancel-v1",
+        "apps/backend/contracts/fixtures/agent-chat-stream-timeout-v1",
+        "apps/backend/contracts/fixtures/agent-chat-stream-disconnect-v1"
+      ],
+      "parityEvidence": [
+        "output/agent-runtime-contract/differential-cancel-current/differential-report.json",
+        "output/agent-runtime-contract/differential-timeout-current/differential-report.json",
+        "output/agent-runtime-contract/differential-disconnect-current/differential-report.json"
+      ],
+      "remaining": "Manual stop, timeout and client disconnect have terminal/session parity. Stop races before runtime readiness, repeated stop and process-crash cancellation still need coverage."
     },
     {
       "id": "agent.resume.v1",
       "method": "POST",
       "path": "/api/v1/agent/followups/resume",
-      "state": "captured",
+      "state": "parity",
       "pythonEvidence": [
         "apps/backend/api/routes_agent.py::resume_agent_followups"
       ],
       "rustEvidence": [
+        "apps/desktop/agent-runtime/storydex-agentd/src/followup.rs::FollowupStore::resume",
         "apps/desktop/agent-runtime/engine/src/session.rs::SessionStore"
       ],
-      "remaining": "Add duplicate-process, missing-session and workspace-mismatch black-box cases."
+      "differentialFixtures": [
+        "apps/backend/contracts/fixtures/agent-chat-stream-followup-v1",
+        "apps/backend/contracts/fixtures/agent-chat-stream-steer-recovery-v1",
+        "apps/backend/contracts/fixtures/agent-chat-stream-corrupt-binding-v1",
+        "apps/backend/contracts/fixtures/agent-chat-stream-corrupt-session-v1"
+      ],
+      "remaining": "Explicit queued resume, steer interruption and fail-closed corrupt binding/session cases are covered. Duplicate-process, missing-session and workspace-mismatch black-box cases remain."
     }
   ]
 }

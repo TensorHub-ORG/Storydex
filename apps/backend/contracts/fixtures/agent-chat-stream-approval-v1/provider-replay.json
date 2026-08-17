@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "contractId": "agent.chat.stream.v1",
+  "providerId": "OPENCODE",
+  "model": "deepseek-v4-flash",
+  "steps": [
+    {
+      "expect": {
+        "messageContains": "STORYDEX_AGENT_STREAM_APPROVAL_REPLY_4C8E",
+        "toolNames": ["request_user_input"]
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "id": "approval-question-1",
+            "name": "request_user_input",
+            "arguments": {
+              "questions": [
+                {
+                  "id": "tone",
+                  "header": "Tone",
+                  "question": "Which tone should the fixed reply use?",
+                  "options": [
+                    {"label": "calm", "description": "Measured and restrained."},
+                    {"label": "bright", "description": "Energetic and light."}
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "usage": {"input_tokens": 64, "output_tokens": 16},
+        "responseModel": "deepseek-v4-flash",
+        "finishReason": "tool_calls"
+      }
+    },
+    {
+      "expect": {
+        "messageContains": "STORYDEX_AGENT_STREAM_APPROVAL_REPLY_4C8E",
+        "toolNames": ["request_user_input"]
+      },
+      "response": {
+        "content": "Fixed approval reply: STORYDEX_AGENT_STREAM_APPROVAL_REPLY_4C8E",
+        "usage": {"input_tokens": 96, "output_tokens": 16},
+        "responseModel": "deepseek-v4-flash",
+        "finishReason": "stop"
+      }
+    }
+  ]
+}

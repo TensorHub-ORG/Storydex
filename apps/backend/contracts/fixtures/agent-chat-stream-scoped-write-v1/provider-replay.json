@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "contractId": "agent.chat.stream.v1",
+  "providerId": "OPENCODE",
+  "model": "deepseek-v4-flash",
+  "steps": [
+    {
+      "expect": {
+        "messageContains": "STORYDEX_SCOPED_WRITE_PROMPT_A5F2",
+        "toolNames": ["write_file"]
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "id": "scoped-write-1",
+            "name": "write_file",
+            "arguments": {
+              "path": ".storydex/characters/fixture.md",
+              "content": "# Fixture Character\n\nStatus: verified\nMarker: STORYDEX_SCOPED_WRITE_AFTER_4D9E\n"
+            }
+          }
+        ],
+        "usage": {"input_tokens": 160, "output_tokens": 36},
+        "responseModel": "deepseek-v4-flash",
+        "finishReason": "tool_calls"
+      }
+    },
+    {
+      "expect": {
+        "messageContains": "STORYDEX_SCOPED_WRITE_AFTER_4D9E",
+        "toolNames": ["write_file"]
+      },
+      "response": {
+        "content": "STORYDEX_SCOPED_WRITE_DONE_31B6",
+        "usage": {"input_tokens": 224, "output_tokens": 16},
+        "responseModel": "deepseek-v4-flash",
+        "finishReason": "stop"
+      }
+    }
+  ]
+}

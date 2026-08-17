@@ -38,6 +38,11 @@ use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
+mod chat;
+mod execution;
+mod followup;
+mod replacement;
+
 pub const API_PROTOCOL_VERSION: u32 = 1;
 pub const SERVICE_NAME: &str = "storydex-agentd";
 pub const API_SERVICE_NAME: &str = "Storydex Backend";
@@ -97,9 +102,14 @@ impl Drop for TaskGuard {
 pub struct AppState {
     token: Arc<str>,
     coomi_home: Arc<PathBuf>,
+    bridge_path: Arc<PathBuf>,
+    refactor_root: Option<Arc<PathBuf>>,
+    replay_fixture: Option<Arc<PathBuf>>,
     started_at: Instant,
     shutdown: CancellationToken,
     tasks: TaskRegistry,
+    executions: execution::ExecutionRegistry,
+    followups: followup::FollowupStore,
 }
 
 impl AppState {
@@ -111,6 +121,22 @@ impl AppState {
         token: impl Into<String>,
         coomi_home: impl Into<PathBuf>,
     ) -> anyhow::Result<Self> {
+        Self::with_paths(
+            token,
+            coomi_home,
+            default_bridge_path(),
+            configured_refactor_root(),
+            configured_replay_fixture(),
+        )
+    }
+
+    pub fn with_paths(
+        token: impl Into<String>,
+        coomi_home: impl Into<PathBuf>,
+        bridge_path: impl Into<PathBuf>,
+        refactor_root: Option<PathBuf>,
+        replay_fixture: Option<PathBuf>,
+    ) -> anyhow::Result<Self> {
         let token = token.into();
         anyhow::ensure!(!token.trim().is_empty(), "agentd token must not be empty");
         let coomi_home = coomi_home.into();
@@ -118,12 +144,26 @@ impl AppState {
             !coomi_home.as_os_str().is_empty(),
             "Storydex Coomi home must not be empty"
         );
+        let bridge_path = bridge_path.into();
+        anyhow::ensure!(
+            !bridge_path.as_os_str().is_empty(),
+            "Storydex Coomi bridge path must not be empty"
+        );
+        let refactor_root = refactor_root
+            .map(|path| path.canonicalize().unwrap_or(path))
+            .map(Arc::new);
+        let replay_fixture = replay_fixture.map(Arc::new);
         Ok(Self {
             token: Arc::from(token),
             coomi_home: Arc::new(coomi_home),
+            bridge_path: Arc::new(bridge_path),
+            refactor_root,
+            replay_fixture,
             started_at: Instant::now(),
             shutdown: CancellationToken::new(),
             tasks: TaskRegistry::default(),
+            executions: execution::ExecutionRegistry::default(),
+            followups: followup::FollowupStore::default(),
         })
     }
 
@@ -135,9 +175,63 @@ impl AppState {
         self.tasks.clone()
     }
 
+    pub(crate) fn execution_registry(&self) -> execution::ExecutionRegistry {
+        self.executions.clone()
+    }
+
+    pub(crate) fn followup_store(&self) -> followup::FollowupStore {
+        self.followups.clone()
+    }
+
     pub fn coomi_home(&self) -> &Path {
         self.coomi_home.as_path()
     }
+
+    pub fn bridge_path(&self) -> &Path {
+        self.bridge_path.as_path()
+    }
+
+    pub fn refactor_root(&self) -> Option<&Path> {
+        self.refactor_root.as_deref().map(|path| path.as_path())
+    }
+
+    pub fn replay_fixture(&self) -> Option<&Path> {
+        self.replay_fixture.as_deref().map(|path| path.as_path())
+    }
+}
+
+pub fn default_bridge_path() -> PathBuf {
+    if let Ok(configured) = std::env::var("STORYDEX_COOMI_BRIDGE") {
+        let configured = configured.trim();
+        if !configured.is_empty() {
+            return PathBuf::from(configured);
+        }
+    }
+    let filename = if cfg!(windows) {
+        "storydex-coomi-bridge.exe"
+    } else {
+        "storydex-coomi-bridge"
+    };
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join(filename)))
+        .unwrap_or_else(|| PathBuf::from(filename))
+}
+
+fn configured_refactor_root() -> Option<PathBuf> {
+    std::env::var("STORYDEX_AGENTD_REFACTOR_ROOT")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn configured_replay_fixture() -> Option<PathBuf> {
+    std::env::var("STORYDEX_AGENT_PROVIDER_REPLAY_FIXTURE")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 #[derive(Serialize)]
@@ -362,7 +456,7 @@ fn read_coomi_status(home: &Path) -> anyhow::Result<CoomiStatusData> {
     })
 }
 
-fn error_response(status: StatusCode, code: &str, message: &str) -> Response {
+pub(crate) fn error_response(status: StatusCode, code: &str, message: &str) -> Response {
     let envelope = ApiEnvelope::<Value> {
         ok: false,
         data: None,
@@ -478,6 +572,21 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/sys/version", get(version))
         .route("/api/v1/sys/shutdown", post(shutdown))
         .route("/api/v1/agent/coomi/status", get(coomi_status))
+        .route(
+            "/api/v1/agent/followups",
+            get(chat::list_followups).post(chat::enqueue_followup),
+        )
+        .route(
+            "/api/v1/agent/followups/resume",
+            post(chat::resume_followups),
+        )
+        .route(
+            "/api/v1/agent/followups/{message_id}/steer",
+            post(chat::steer_followup),
+        )
+        .route("/api/v1/agent/chat/stream", post(chat::chat_stream))
+        .route("/api/v1/agent/executions/stop", post(chat::stop_execution))
+        .route("/api/v1/agent/coomi/approval", post(chat::resolve_approval))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(CatchPanicLayer::custom(|_| {
@@ -522,6 +631,34 @@ mod tests {
             .await
             .expect("read response body");
         serde_json::from_slice(&bytes).expect("decode response JSON")
+    }
+
+    fn protected_json_request(uri: &str, payload: Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(header::AUTHORIZATION, "Bearer test-token")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&payload).expect("serialize request body"),
+            ))
+            .expect("request")
+    }
+
+    fn followup_test_state(root: &Path) -> (AppState, PathBuf) {
+        let workspace = root.join("workspace");
+        let home = root.join("coomi-home");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::create_dir_all(&home).expect("coomi home");
+        let state = AppState::with_paths(
+            "test-token",
+            home,
+            root.join("unused-bridge"),
+            Some(root.to_path_buf()),
+            None,
+        )
+        .expect("state");
+        (state, workspace)
     }
 
     #[tokio::test]
@@ -667,6 +804,151 @@ mod tests {
             .expect("shutdown response");
         assert_eq!(response.status(), StatusCode::OK);
         assert!(shutdown.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn chat_stream_rejects_malformed_json_with_storydex_envelope() {
+        let app = router(AppState::new("test-token").expect("state"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agent/chat/stream")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{"))
+                    .expect("request"),
+            )
+            .await
+            .expect("chat response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn followup_routes_enforce_idempotency_stale_trace_and_corruption() {
+        let root = tempdir().expect("root");
+        let (state, workspace) = followup_test_state(root.path());
+        let workspace_root = workspace.to_string_lossy().into_owned();
+        let payload = json!({
+            "messageId": "followup-1",
+            "sessionId": "session-1",
+            "workspaceRoot": workspace_root,
+            "content": "continue from the durable queue",
+            "mode": "queued"
+        });
+
+        for _ in 0..2 {
+            let response = router(state.clone())
+                .oneshot(protected_json_request(
+                    "/api/v1/agent/followups",
+                    payload.clone(),
+                ))
+                .await
+                .expect("enqueue response");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            assert_eq!(body["data"]["message"]["status"], "pending");
+        }
+
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/agent/followups",
+                json!({
+                    "messageId": "followup-1",
+                    "sessionId": "session-1",
+                    "workspaceRoot": workspace.to_string_lossy(),
+                    "content": "conflicting content",
+                    "mode": "queued"
+                }),
+            ))
+            .await
+            .expect("conflict response");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(response).await["error"]["code"],
+            "message_id_conflict"
+        );
+
+        state
+            .followup_store()
+            .set_active(&workspace, "session-2", "trace-current")
+            .expect("set active trace");
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/agent/followups",
+                json!({
+                    "messageId": "steer-stale",
+                    "sessionId": "session-2",
+                    "workspaceRoot": workspace.to_string_lossy(),
+                    "expectedTraceId": "trace-old",
+                    "content": "steer this turn",
+                    "mode": "steer"
+                }),
+            ))
+            .await
+            .expect("stale trace response");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(response).await["error"]["code"],
+            "stale_trace"
+        );
+
+        let mailbox_root = workspace.join(".storydex").join(".agent").join("followups");
+        let mailbox_path = std::fs::read_dir(&mailbox_root)
+            .expect("mailbox directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                std::fs::read_to_string(path).is_ok_and(|value| value.contains("followup-1"))
+            })
+            .expect("session-1 mailbox path");
+        std::fs::write(mailbox_path, b"not-json").expect("corrupt mailbox");
+        let response = router(state)
+            .oneshot(protected_json_request(
+                "/api/v1/agent/followups",
+                json!({
+                    "messageId": "followup-2",
+                    "sessionId": "session-1",
+                    "workspaceRoot": workspace.to_string_lossy(),
+                    "content": "must fail closed",
+                    "mode": "queued"
+                }),
+            ))
+            .await
+            .expect("corrupt mailbox response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response_json(response).await["error"]["code"],
+            "corrupt_followup_mailbox"
+        );
+    }
+
+    #[tokio::test]
+    async fn followup_route_rejects_workspace_outside_refactor_root() {
+        let root = tempdir().expect("root");
+        let outside = tempdir().expect("outside");
+        let (state, _) = followup_test_state(root.path());
+        let response = router(state)
+            .oneshot(protected_json_request(
+                "/api/v1/agent/followups",
+                json!({
+                    "messageId": "outside-1",
+                    "sessionId": "session-1",
+                    "workspaceRoot": outside.path().to_string_lossy(),
+                    "content": "must stay inside fixture root",
+                    "mode": "queued"
+                }),
+            ))
+            .await
+            .expect("outside workspace response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response_json(response).await["error"]["code"],
+            "workspace_outside_refactor_root"
+        );
     }
 
     #[tokio::test]

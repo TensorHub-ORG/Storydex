@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "contractId": "agent.chat.stream.v1",
+  "scenario": "execution-timeout-after-runtime-ready",
+  "request": {
+    "prompt": "严格只读超时契约：读取 chapters/agent-stream-contract.md 前等待执行超时。请求标记 STORYDEX_AGENT_STREAM_TIMEOUT_PROMPT_E073。",
+    "activeFile": "",
+    "reasoningEffort": "low",
+    "confirmNoSnapshot": true,
+    "timeoutMs": 1000
+  },
+  "workspace": {
+    "files": [
+      {
+        "path": "chapters/agent-stream-contract.md",
+        "content": "# Agent stream timeout fixture\n\n固定标记：STORYDEX_AGENT_STREAM_TIMEOUT_FILE_66B4\n"
+      }
+    ]
+  },
+  "expected": {
+    "providerId": "OPENCODE",
+    "model": "deepseek-v4-flash",
+    "providerMode": "replay",
+    "toolSequence": [],
+    "replyContains": [],
+    "terminalEvent": "AgentCancelled",
+    "terminalReason": "timeout",
+    "sessionPersistence": true,
+    "httpStatus": 200
+  }
+}
