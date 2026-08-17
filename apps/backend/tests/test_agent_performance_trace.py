@@ -98,6 +98,7 @@ def test_runtime_translator_preserves_init_and_read_provenance() -> None:
         {
             "_type": "RuntimeMetrics",
             "_version": 1,
+            "providerMode": "live",
             "bridgeStartMs": 0.0,
             "componentInitMs": 12.346,
             "mcpInitMs": 4.5,

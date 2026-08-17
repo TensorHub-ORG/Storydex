@@ -1148,6 +1148,11 @@ def _run_story_generation_sequence(
             self.prompts: list[str] = []
             self.contracts: list[dict[str, Any]] = []
 
+        def validate_session_for_execution(
+            self, *, session_id: str, workspace_root: Path
+        ) -> dict[str, Any]:
+            return {}
+
         async def stream_events(self, **kwargs: Any):
             self.calls += 1
             self.prompts.append(str(kwargs.get("prompt") or ""))

@@ -339,6 +339,11 @@ def test_slow_task_planning_runs_in_background_without_blocking_agent_start(monk
         def cancel_execution(self, **kwargs):
             return False
 
+        def validate_session_for_execution(
+            self, *, session_id: str, workspace_root: Path
+        ) -> dict:
+            return {}
+
         async def stream_events(self, **kwargs):
             yield "AgentStarted", {"_type": "AgentStarted"}
             await asyncio.sleep(0.06)
@@ -405,6 +410,11 @@ def test_slow_model_first_output_emits_heartbeat_and_success(monkeypatch, tmp_pa
     class Service:
         def cancel_execution(self, **kwargs):
             return False
+
+        def validate_session_for_execution(
+            self, *, session_id: str, workspace_root: Path
+        ) -> dict:
+            return {}
 
         async def stream_events(self, **kwargs):
             yield "AgentStarted", {}

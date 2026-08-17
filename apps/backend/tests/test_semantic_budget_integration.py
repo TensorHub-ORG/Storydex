@@ -373,6 +373,11 @@ def _collect_semantic_worker(
             del workspace_root
             return {"providerId": "test-provider", "model": "test-model"}
 
+        def validate_session_for_execution(
+            self, *, session_id: str, workspace_root: Path
+        ) -> Dict[str, Any]:
+            return {}
+
         async def stream_events(self, **_kwargs: Any):
             self.stream_calls += 1
             if semantic_enabled:
