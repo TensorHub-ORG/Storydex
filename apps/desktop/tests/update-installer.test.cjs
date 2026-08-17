@@ -47,6 +47,17 @@ test("cached installer survives an application restart", () => {
 
 test("cached installer checksum is verified before execution", async () => {
   const fixture = createFixture();
+  let readStreamClosed = false;
+  const observedFs = {
+    ...fs,
+    createReadStream(...args) {
+      const stream = fs.createReadStream(...args);
+      stream.once("close", () => {
+        readStreamClosed = true;
+      });
+      return stream;
+    }
+  };
   try {
     const installer = Buffer.from("verified installer");
     fs.writeFileSync(fixture.installerPath, installer);
@@ -54,9 +65,12 @@ test("cached installer checksum is verified before execution", async () => {
       installerPath: fixture.installerPath,
       sha512: crypto.createHash("sha512").update(installer).digest("base64")
     };
-    assert.equal(await verifyCachedInstaller(cached), true);
+    assert.equal(await verifyCachedInstaller(cached, observedFs), true);
+    assert.equal(readStreamClosed, true);
     fs.appendFileSync(fixture.installerPath, "tampered");
-    assert.equal(await verifyCachedInstaller(cached), false);
+    readStreamClosed = false;
+    assert.equal(await verifyCachedInstaller(cached, observedFs), false);
+    assert.equal(readStreamClosed, true);
   } finally {
     fs.rmSync(fixture.root, { recursive: true, force: true });
   }

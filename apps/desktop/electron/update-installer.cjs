@@ -39,12 +39,33 @@ function verifyCachedInstaller(cached, fsModule = fs) {
     return Promise.resolve(false);
   }
   return new Promise((resolve) => {
-    const hash = crypto.createHash("sha512");
-    const stream = fsModule.createReadStream(installerPath);
-    stream.on("error", () => resolve(false));
-    hash.on("error", () => resolve(false));
-    stream.on("data", (chunk) => hash.update(chunk));
-    stream.on("end", () => resolve(hash.digest("base64") === expected));
+    let verified = false;
+    try {
+      const hash = crypto.createHash("sha512");
+      const stream = fsModule.createReadStream(installerPath);
+      stream.once("error", () => {
+        verified = false;
+      });
+      stream.on("data", (chunk) => {
+        try {
+          hash.update(chunk);
+        } catch {
+          stream.destroy();
+        }
+      });
+      stream.once("end", () => {
+        try {
+          verified = hash.digest("base64") === expected;
+        } catch {
+          verified = false;
+        }
+      });
+      // On Windows, the stream's file handle can remain open after `end`.
+      // Resolve only after `close` so callers may safely replace or remove it.
+      stream.once("close", () => resolve(verified));
+    } catch {
+      resolve(false);
+    }
   });
 }
 
