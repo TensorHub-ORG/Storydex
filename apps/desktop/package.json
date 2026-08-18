@@ -8,8 +8,12 @@
     "dev": "concurrently -k -n FRONTEND,ELECTRON -c cyan,green \"npm:dev:frontend\" \"npm:dev:electron\"",
     "dev:frontend": "npm --prefix ../frontend run dev",
     "dev:electron": "node scripts/wait-for-dev-frontend.cjs && electron .",
+    "dev:rust-beta:electron": "node scripts/wait-for-dev-frontend.cjs && electron electron/rust-beta/main.cjs",
+    "dev:rust-beta": "npm run build:rust-beta && concurrently -k -n FRONTEND,RUST-BETA -c cyan,magenta \"npm:dev:frontend\" \"npm:dev:rust-beta:electron\"",
     "build:frontend": "npm --prefix ../frontend run build",
     "build:coomi-runtime": "node scripts/build-coomi-runtime.cjs",
+    "build:rust-beta": "node scripts/build-rust-beta-runtime.cjs",
+    "build:rust-beta:release": "node scripts/build-rust-beta-runtime.cjs --release",
     "sync:assets": "node scripts/sync-app-assets.cjs",
     "prepare:package:assets": "npm run sync:assets && npm run check:embedded-python",
     "prepare:package": "npm run build:frontend && npm run build:coomi-runtime && npm run prepare:package:assets",
@@ -22,7 +26,8 @@
     "check:rust-candidate": "node scripts/validate-rust-candidate-assets.cjs",
     "check:tauri-preview": "cargo check --manifest-path tauri-preview/Cargo.toml --locked",
     "test": "npm run test:unit",
-    "test:unit": "node --test tests/daily-active.test.cjs tests/update-feed.test.cjs tests/release-contract.test.cjs tests/packaging-policy.test.cjs tests/rust-candidate-assets.test.cjs tests/tauri-candidate-contract.test.cjs tests/preload-updater.test.cjs tests/update-installer.test.cjs tests/update-helper.test.cjs tests/windows-sign.test.cjs ../../scripts/tests/generate-release-metadata.test.cjs",
+    "test:unit": "node --test tests/daily-active.test.cjs tests/update-feed.test.cjs tests/release-contract.test.cjs tests/packaging-policy.test.cjs tests/rust-beta-runtime.test.cjs tests/rust-candidate-assets.test.cjs tests/tauri-candidate-contract.test.cjs tests/preload-updater.test.cjs tests/update-installer.test.cjs tests/update-helper.test.cjs tests/windows-sign.test.cjs ../../scripts/tests/generate-release-metadata.test.cjs",
+    "test:rust-beta": "node --test tests/rust-beta-runtime.test.cjs",
     "test:smoke": "node --test --test-concurrency=1 --test-name-pattern=\"^(packaged updater|packaged backend)\" tests/packaged.e2e.cjs",
     "test:e2e": "node --test --test-concurrency=1 tests/packaged.e2e.cjs",
     "test:update-feed": "node --test tests/update-feed.test.cjs",
@@ -30,7 +35,8 @@
     "package:win:prepared": "set ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/&& electron-builder --win nsis",
     "build:desktop": "npm run prepare:package && npm run build:desktop:prepared",
     "package:win": "npm run prepare:package && npm run package:win:prepared",
-    "build:tauri-preview": "powershell -NoProfile -ExecutionPolicy Bypass -File tauri-preview/scripts/package-preview.ps1"
+    "build:tauri-preview": "powershell -NoProfile -ExecutionPolicy Bypass -File tauri-preview/scripts/package-preview.ps1",
+    "smoke:tauri-preview": "powershell -NoProfile -ExecutionPolicy Bypass -File tauri-preview/scripts/smoke-preview.ps1"
   },
   "dependencies": {
     "electron-updater": "^6.3.9"
