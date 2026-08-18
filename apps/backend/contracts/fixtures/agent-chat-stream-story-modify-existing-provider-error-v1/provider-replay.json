@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "contractId": "agent.chat.stream.v1",
+  "providerId": "OPENCODE",
+  "model": "deepseek-v4-flash",
+  "steps": [
+    {
+      "expect": {
+        "messageContains": "STORYDEX_STORY_MODIFY_PROVIDER_ERROR_INTENTIONAL_MISMATCH_C147",
+        "toolNames": ["write_file"]
+      },
+      "response": {
+        "content": "This response must never be consumed.",
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+        "responseModel": "deepseek-v4-flash",
+        "finishReason": "stop"
+      }
+    }
+  ]
+}

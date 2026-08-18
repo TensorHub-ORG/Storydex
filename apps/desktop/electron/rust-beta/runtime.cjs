@@ -96,23 +96,30 @@ function createIsolatedBetaPaths(options = {}) {
   };
 }
 
-function resolveAgentdBinary(desktopRoot, environment = process.env) {
+function resolveAgentdBinary(desktopRoot, environment = process.env, options = {}) {
   const configured = String(environment.STORYDEX_RUST_BETA_AGENTD || "").trim();
   const profile = String(environment.STORYDEX_RUST_BETA_BUILD_PROFILE || "debug").trim().toLowerCase();
   if (profile !== "debug" && profile !== "release") {
     throw new Error(`Invalid STORYDEX_RUST_BETA_BUILD_PROFILE: ${profile}`);
   }
   const executableName = process.platform === "win32" ? "storydex-agentd.exe" : "storydex-agentd";
-  const resolved = configured
-    ? path.resolve(configured)
-    : path.join(desktopRoot, "agent-runtime", "target", profile, executableName);
-  if (path.basename(resolved).toLowerCase() !== executableName.toLowerCase()) {
-    throw new Error(`Rust Beta backend must be ${executableName}; Python or alternate backend fallbacks are forbidden`);
+  const candidates = configured
+    ? [path.resolve(configured)]
+    : [
+      ...(options.resourcesRoot ? [path.join(options.resourcesRoot, "agent-runtime", executableName)] : []),
+      path.join(desktopRoot, "agent-runtime", "target", profile, executableName)
+    ];
+  for (const candidate of candidates) {
+    const resolved = path.resolve(candidate);
+    if (path.basename(resolved).toLowerCase() !== executableName.toLowerCase()) {
+      continue;
+    }
+    if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
+      return resolved;
+    }
   }
-  if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
-    throw new Error(`Rust Beta storydex-agentd binary is missing: ${resolved}`);
-  }
-  return resolved;
+  const attempted = candidates.map((candidate) => path.resolve(candidate)).join(", ");
+  throw new Error(`Rust Beta storydex-agentd binary is missing (attempted: ${attempted})`);
 }
 
 function buildAgentdEnvironment(baseEnvironment, runtimePaths) {

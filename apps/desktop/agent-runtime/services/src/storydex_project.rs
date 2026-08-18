@@ -346,6 +346,18 @@ pub struct GitCommitResult {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GitRestoreResult {
+    pub restored: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restored_commit: Option<GitCommit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup_commit: Option<GitCommit>,
+    pub backup_ref: String,
+    pub summary: GitSummary,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GitDiffLine {
     pub kind: String,
     pub old_line: Option<usize>,
@@ -513,7 +525,7 @@ impl StorydexGit {
         }
         self.assert_project_repository(&root)?;
         configure_local_identity(&root)?;
-        ensure_gitignore(&root)?;
+        self.ensure_internal_paths_untracked(&root)?;
         self.summary(&root)
     }
 
@@ -1222,22 +1234,51 @@ impl StorydexGit {
         project_root: impl AsRef<Path>,
         commit: &str,
         create_backup: bool,
-    ) -> Result<GitSummary> {
+    ) -> Result<GitRestoreResult> {
         let root = canonical_existing_dir(project_root.as_ref())?;
-        self.assert_project_repository(&root)?;
+        self.initialize(&root)?;
         ensure!(!commit.trim().is_empty(), "target commit id is required");
         let target = self.read_commit(&root, commit)?;
-        let current = self
+        let mut current = self
             .read_head_commit(&root)?
             .context("repository head could not be resolved")?;
+
+        let mut dirty_backup_commit = None;
+        if create_backup && !self.is_worktree_clean(&root)? {
+            let backup = self.commit_all(
+                &root,
+                &format!("workspace: backup before restore to {}", target.short_id),
+            )?;
+            dirty_backup_commit = backup.commit;
+            current = self
+                .read_head_commit(&root)?
+                .context("repository head could not be resolved after backup")?;
+        }
+
+        if current.id == target.id && self.is_worktree_clean(&root)? {
+            return Ok(GitRestoreResult {
+                restored: false,
+                restored_commit: Some(current),
+                backup_commit: dirty_backup_commit,
+                backup_ref: String::new(),
+                summary: self.summary(&root)?,
+            });
+        }
+
+        let mut backup_ref = String::new();
         if create_backup {
-            let suffix = unique_suffix();
-            let name = format!("storydex-backup-{suffix}");
-            run_git_owned(&root, &["branch".to_owned(), name, current.id.clone()])?;
+            backup_ref = self.create_backup_ref(&root, &current.id, &target.short_id)?;
         }
         run_git_owned(&root, &["reset".to_owned(), "--hard".to_owned(), target.id])?;
         run_git(&root, &["clean", "-fd"])?;
-        self.summary(&root)
+        let restored_commit = self.read_head_commit(&root)?;
+        Ok(GitRestoreResult {
+            restored: true,
+            restored_commit,
+            backup_commit: Some(current),
+            backup_ref,
+            summary: self.summary(&root)?,
+        })
     }
 
     fn assert_project_repository(&self, root: &Path) -> Result<()> {
@@ -1432,6 +1473,105 @@ impl StorydexGit {
         )?
         .trim()
         .is_empty())
+    }
+
+    fn ensure_internal_paths_untracked(&self, root: &Path) -> Result<()> {
+        let tracked = tracked_internal_paths(root)?;
+        if tracked.is_empty() {
+            ensure_gitignore(root)?;
+            return Ok(());
+        }
+
+        let has_head = self.has_head_commit(root);
+        if has_head {
+            ensure!(
+                index_is_clean(root)?,
+                "cannot migrate tracked internal Storydex paths while staged changes exist"
+            );
+            ensure!(
+                git_path_status(root, ".gitignore")?.is_empty(),
+                "cannot migrate tracked internal Storydex paths while .gitignore has uncommitted changes"
+            );
+        }
+
+        let ignore_path = root.join(".gitignore");
+        let original_ignore = fs::read(&ignore_path).ok();
+        let ignore_changed = ensure_gitignore(root)?;
+        let migration = (|| -> Result<()> {
+            run_git(
+                root,
+                &[
+                    "rm",
+                    "-r",
+                    "--cached",
+                    "--ignore-unmatch",
+                    "--",
+                    ".storydex/.agent",
+                    ".storydex/.cache",
+                ],
+            )?;
+            if has_head {
+                if ignore_changed {
+                    run_git(root, &["add", "--", ".gitignore"])?;
+                }
+                run_git(
+                    root,
+                    &[
+                        "commit",
+                        "--no-gpg-sign",
+                        "-m",
+                        "chore: untrack internal Storydex paths",
+                    ],
+                )?;
+            }
+            Ok(())
+        })();
+
+        if let Err(error) = migration {
+            if has_head {
+                let _ = run_git(
+                    root,
+                    &[
+                        "reset",
+                        "--quiet",
+                        "HEAD",
+                        "--",
+                        ".gitignore",
+                        ".storydex/.agent",
+                        ".storydex/.cache",
+                    ],
+                );
+            }
+            if ignore_changed {
+                restore_file(&ignore_path, original_ignore.as_deref())?;
+            }
+            return Err(error).context("failed to untrack legacy Storydex internal paths");
+        }
+        Ok(())
+    }
+
+    fn create_backup_ref(
+        &self,
+        root: &Path,
+        current_head: &str,
+        target_short: &str,
+    ) -> Result<String> {
+        let base = format!("storydex-backup-{}-{target_short}", unique_suffix());
+        let mut candidate = base.clone();
+        let mut index = 2usize;
+        while self.branch_exists(root, &candidate) {
+            candidate = format!("{base}-{index}");
+            index += 1;
+        }
+        run_git_owned(
+            root,
+            &[
+                "branch".to_owned(),
+                candidate.clone(),
+                current_head.to_owned(),
+            ],
+        )?;
+        Ok(candidate)
     }
 
     fn clean_internal_paths(&self, root: &Path) -> Result<()> {
@@ -2199,6 +2339,56 @@ fn git_path_is_tracked(root: &Path, relative: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn tracked_internal_paths(root: &Path) -> Result<Vec<String>> {
+    Ok(run_git_raw(
+        root,
+        &[
+            "-c",
+            "core.quotePath=false",
+            "ls-files",
+            "-z",
+            "--",
+            ".storydex/.agent",
+            ".storydex/.cache",
+        ],
+    )?
+    .split('\0')
+    .map(str::trim)
+    .filter(|path| !path.is_empty())
+    .map(str::to_owned)
+    .collect())
+}
+
+fn index_is_clean(root: &Path) -> Result<bool> {
+    let output = Command::new(git_executable())
+        .args(["diff", "--cached", "--quiet"])
+        .current_dir(root)
+        .output()
+        .context("failed to inspect staged Git changes")?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            bail!("git diff --cached --quiet failed: {stderr}")
+        }
+    }
+}
+
+fn git_path_status(root: &Path, relative: &str) -> Result<String> {
+    run_git(
+        root,
+        &[
+            "-c",
+            "core.quotePath=false",
+            "status",
+            "--porcelain=v1",
+            "--",
+            relative,
+        ],
+    )
+}
+
 fn run_git(root: &Path, args: &[&str]) -> Result<String> {
     Ok(run_git_raw(root, args)?.trim().to_owned())
 }
@@ -2281,7 +2471,7 @@ fn configure_local_identity(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn ensure_gitignore(root: &Path) -> Result<()> {
+fn ensure_gitignore(root: &Path) -> Result<bool> {
     let path = root.join(".gitignore");
     let mut existing = fs::read_to_string(&path).unwrap_or_default();
     let mut changed = false;
@@ -2297,6 +2487,15 @@ fn ensure_gitignore(root: &Path) -> Result<()> {
     }
     if changed {
         fs::write(path, existing)?;
+    }
+    Ok(changed)
+}
+
+fn restore_file(path: &Path, original: Option<&[u8]>) -> Result<()> {
+    if let Some(bytes) = original {
+        fs::write(path, bytes)?;
+    } else if path.exists() {
+        fs::remove_file(path)?;
     }
     Ok(())
 }
@@ -2583,8 +2782,31 @@ mod tests {
         let restored = git
             .restore_to_commit(directory.path(), &first_id, true)
             .expect("restore");
+        assert!(restored.restored);
         assert_eq!(
-            restored.head.as_ref().map(|commit| commit.id.as_str()),
+            restored
+                .restored_commit
+                .as_ref()
+                .map(|commit| commit.id.as_str()),
+            Some(first_id.as_str())
+        );
+        let backup_commit = restored.backup_commit.as_ref().expect("backup commit");
+        assert!(
+            backup_commit
+                .subject
+                .starts_with("workspace: backup before restore to ")
+        );
+        assert!(restored.backup_ref.starts_with("storydex-backup-"));
+        assert_eq!(
+            run_git(directory.path(), &["rev-parse", &restored.backup_ref]).expect("backup ref"),
+            backup_commit.id
+        );
+        assert_eq!(
+            restored
+                .summary
+                .head
+                .as_ref()
+                .map(|commit| commit.id.as_str()),
             Some(first_id.as_str())
         );
         let restored_text = fs::read_to_string(directory.path().join("chapter.md"))
@@ -2593,6 +2815,139 @@ mod tests {
         assert_eq!(restored_text, "一\n");
         assert!(!directory.path().join("scratch.tmp").exists());
         assert_ne!(second.commit, first.commit);
+
+        let no_op = git
+            .restore_to_commit(directory.path(), &first_id, true)
+            .expect("no-op restore");
+        assert!(!no_op.restored);
+        assert_eq!(
+            no_op
+                .restored_commit
+                .as_ref()
+                .map(|commit| commit.id.as_str()),
+            Some(first_id.as_str())
+        );
+        assert!(no_op.backup_commit.is_none());
+        assert!(no_op.backup_ref.is_empty());
+        assert!(no_op.summary.clean);
+    }
+
+    #[test]
+    fn git_initialize_untracks_legacy_internal_paths_and_keeps_disk_files() {
+        if !git_available() {
+            return;
+        }
+        let directory = tempdir().expect("legacy project");
+        let root = directory.path();
+        run_git(root, &["init"]).expect("init legacy repository");
+        run_git(root, &["branch", "-M", DEFAULT_BRANCH]).expect("legacy branch");
+        configure_local_identity(root).expect("legacy identity");
+        fs::create_dir_all(root.join(".storydex/.agent/session")).expect("agent directory");
+        fs::create_dir_all(root.join(".storydex/.cache")).expect("cache directory");
+        fs::write(root.join("story.md"), "legacy story\n").expect("legacy story");
+        fs::write(
+            root.join(".storydex/.agent/session/state.json"),
+            b"agent-v1",
+        )
+        .expect("legacy agent state");
+        fs::write(root.join(".storydex/.cache/retrieval.db"), b"cache-v1").expect("legacy cache");
+        run_git(root, &["add", "-A"]).expect("stage legacy files");
+        run_git(
+            root,
+            &["commit", "--no-gpg-sign", "-m", "legacy: tracked internals"],
+        )
+        .expect("commit legacy files");
+
+        fs::write(root.join("story.md"), "local story edit\n").expect("dirty story");
+        fs::write(
+            root.join(".storydex/.agent/session/state.json"),
+            b"agent-v2-kept",
+        )
+        .expect("updated agent state");
+        fs::write(root.join(".storydex/.cache/retrieval.db"), b"cache-v2-kept")
+            .expect("updated cache");
+
+        let git = StorydexGit;
+        let summary = git.initialize(root).expect("migrate legacy internals");
+        let migration_head = summary.head.as_ref().expect("migration head").id.clone();
+        assert_eq!(
+            summary.head.as_ref().map(|commit| commit.subject.as_str()),
+            Some("chore: untrack internal Storydex paths")
+        );
+        assert_eq!(summary.changed_paths, vec!["story.md"]);
+        assert_eq!(
+            fs::read(root.join(".storydex/.agent/session/state.json")).expect("agent state"),
+            b"agent-v2-kept"
+        );
+        assert_eq!(
+            fs::read(root.join(".storydex/.cache/retrieval.db")).expect("cache"),
+            b"cache-v2-kept"
+        );
+        assert!(
+            run_git(
+                root,
+                &["ls-files", "--", ".storydex/.agent", ".storydex/.cache"]
+            )
+            .expect("tracked internals")
+            .is_empty()
+        );
+        let ignore = fs::read_to_string(root.join(".gitignore")).expect("gitignore");
+        assert!(ignore.contains(".storydex/.agent/"));
+        assert!(ignore.contains(".storydex/.cache/"));
+        let migration_paths =
+            run_git(root, &["show", "--format=", "--name-only", "HEAD"]).expect("migration paths");
+        assert!(migration_paths.contains(".gitignore"));
+        assert!(migration_paths.contains(".storydex/.agent/session/state.json"));
+        assert!(migration_paths.contains(".storydex/.cache/retrieval.db"));
+
+        let repeated = git.initialize(root).expect("repeat migration");
+        assert_eq!(
+            repeated.head.as_ref().map(|commit| commit.id.as_str()),
+            Some(migration_head.as_str())
+        );
+    }
+
+    #[test]
+    fn git_initialize_refuses_legacy_migration_with_staged_user_changes() {
+        if !git_available() {
+            return;
+        }
+        let directory = tempdir().expect("legacy project");
+        let root = directory.path();
+        run_git(root, &["init"]).expect("init legacy repository");
+        run_git(root, &["branch", "-M", DEFAULT_BRANCH]).expect("legacy branch");
+        configure_local_identity(root).expect("legacy identity");
+        fs::create_dir_all(root.join(".storydex/.cache")).expect("cache directory");
+        fs::write(root.join("story.md"), "baseline\n").expect("story");
+        fs::write(root.join(".storydex/.cache/retrieval.db"), b"cache-kept").expect("cache");
+        run_git(root, &["add", "-A"]).expect("stage legacy files");
+        run_git(
+            root,
+            &["commit", "--no-gpg-sign", "-m", "legacy: tracked cache"],
+        )
+        .expect("commit legacy files");
+        let original_head = run_git(root, &["rev-parse", "HEAD"]).expect("original head");
+
+        fs::write(root.join("story.md"), "staged user edit\n").expect("user edit");
+        run_git(root, &["add", "--", "story.md"]).expect("stage user edit");
+        let error = StorydexGit
+            .initialize(root)
+            .expect_err("staged user changes must block migration");
+        assert!(error.to_string().contains("staged changes"));
+        assert_eq!(
+            run_git(root, &["rev-parse", "HEAD"]).expect("head after refusal"),
+            original_head
+        );
+        assert_eq!(
+            run_git(root, &["ls-files", "--", ".storydex/.cache/retrieval.db"])
+                .expect("tracked cache"),
+            ".storydex/.cache/retrieval.db"
+        );
+        assert_eq!(
+            fs::read(root.join(".storydex/.cache/retrieval.db")).expect("cache kept"),
+            b"cache-kept"
+        );
+        assert!(!root.join(".gitignore").exists());
     }
 
     #[test]

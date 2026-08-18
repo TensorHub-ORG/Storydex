@@ -34,9 +34,27 @@
     "model": "deepseek-v4-flash",
     "providerMode": "replay",
     "toolSequence": ["write_file"],
+    "providerCompletionCount": 2,
     "replyContains": ["STORYDEX_STORY_SEMANTICS_DONE_2E7C"],
     "terminalEvent": "AgentCompleted",
     "httpStatus": 200,
+    "requiredEventSequence": [
+      "AgentStarted",
+      "ModelCompleted",
+      "ToolStart",
+      "ToolDone",
+      "TextChunk",
+      "ModelCompleted",
+      "AgentCompleted"
+    ],
+    "forbiddenEvents": [
+      "StoryProviderAttempt",
+      "StoryCommitStarted",
+      "StoryCommitFinished",
+      "StoryDraftMeasured",
+      "StoryGenerationValidation",
+      "StoryCallAccounting"
+    ],
     "turnContract": {
       "status": "ready",
       "reasoningEffort": "low",

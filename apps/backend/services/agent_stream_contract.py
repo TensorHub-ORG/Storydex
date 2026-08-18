@@ -744,6 +744,24 @@ def validate_chat_stream_events(
             f"events={names!r}"
         )
 
+    provider_completion_count = names.count("ModelCompleted")
+    expected_provider_completion_count = expected.get("providerCompletionCount")
+    if expected_provider_completion_count is not None:
+        if (
+            isinstance(expected_provider_completion_count, bool)
+            or not isinstance(expected_provider_completion_count, int)
+            or expected_provider_completion_count < 0
+        ):
+            raise AgentStreamContractError(
+                "providerCompletionCount must be a non-negative integer"
+            )
+        if provider_completion_count != expected_provider_completion_count:
+            raise AgentStreamContractError(
+                "provider completion count does not match fixture: "
+                f"expected {expected_provider_completion_count}, "
+                f"got {provider_completion_count}"
+            )
+
     reply = "".join(
         _text(payload.get("content"))
         for name, payload in events
@@ -817,6 +835,7 @@ def validate_chat_stream_events(
         "toolSequence": tool_sequence,
         "toolErrorSequence": tool_error_sequence,
         "interruptedToolSequence": interrupted_tools,
+        "providerCompletionCount": provider_completion_count,
         "providerIds": sorted(provider_ids),
         "models": sorted(models),
         "providerModes": sorted(provider_modes),

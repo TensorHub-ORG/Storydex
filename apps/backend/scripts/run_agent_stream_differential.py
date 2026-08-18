@@ -327,6 +327,29 @@ def compare_reports(
                     "rustRefactor": rust_http_status,
                 }
             )
+    expected_provider_completion_count = expected.get("providerCompletionCount")
+    if expected_provider_completion_count is not None:
+        python_completion_count = python_observation.get(
+            "providerCompletionCount"
+        )
+        rust_completion_count = rust_observation.get("providerCompletionCount")
+        compared["providerCompletionCount"] = {
+            "expected": expected_provider_completion_count,
+            "pythonStable": python_completion_count,
+            "rustRefactor": rust_completion_count,
+        }
+        if (
+            python_completion_count != expected_provider_completion_count
+            or rust_completion_count != expected_provider_completion_count
+        ):
+            differences.append(
+                {
+                    "field": "providerCompletionCount",
+                    "expected": expected_provider_completion_count,
+                    "pythonStable": python_completion_count,
+                    "rustRefactor": rust_completion_count,
+                }
+            )
     required_event_sequence = [
         str(value) for value in expected.get("requiredEventSequence") or []
     ]

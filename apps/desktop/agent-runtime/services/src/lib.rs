@@ -59,6 +59,7 @@ pub use storydex_project::GitDiffHunk;
 pub use storydex_project::GitDiffLine;
 pub use storydex_project::GitDiffTotals;
 pub use storydex_project::GitJumpResult;
+pub use storydex_project::GitRestoreResult;
 pub use storydex_project::GitSummary;
 pub use storydex_project::GitTimeline;
 pub use storydex_project::GitTimelineBranch;

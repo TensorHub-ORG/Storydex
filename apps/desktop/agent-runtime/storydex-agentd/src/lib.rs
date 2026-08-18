@@ -1299,6 +1299,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rust_git_restore_route_matches_stable_observable_fields() {
+        let root = tempdir().expect("root");
+        let (state, workspace) = followup_test_state(root.path());
+        let encoded = encode_query_value(&workspace);
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/workspace/git/init?workspaceRoot={encoded}"
+                    ))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .expect("git init request"),
+            )
+            .await
+            .expect("git init response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        std::fs::write(workspace.join("story.md"), "第一版\n").expect("first story");
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/workspace/git/commit",
+                json!({
+                    "workspaceRoot": workspace.to_string_lossy(),
+                    "message": "故事：第一版"
+                }),
+            ))
+            .await
+            .expect("first commit response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let first = response_json(response).await;
+        let first_id = first["data"]["commit"]["id"]
+            .as_str()
+            .expect("first commit id")
+            .to_owned();
+
+        std::fs::write(workspace.join("story.md"), "第二版\n").expect("second story");
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/workspace/git/commit",
+                json!({
+                    "workspaceRoot": workspace.to_string_lossy(),
+                    "message": "故事：第二版"
+                }),
+            ))
+            .await
+            .expect("second commit response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        std::fs::write(workspace.join("story.md"), "待备份草稿\n").expect("dirty story");
+        std::fs::write(workspace.join("scratch.tmp"), "temporary\n").expect("scratch");
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/workspace/git/restore",
+                json!({
+                    "workspaceRoot": workspace.to_string_lossy(),
+                    "commitId": first_id,
+                    "createBackup": true
+                }),
+            ))
+            .await
+            .expect("restore response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let restored = response_json(response).await;
+        assert_eq!(restored["data"]["restored"], true);
+        assert_eq!(restored["data"]["restoredCommit"]["id"], first_id);
+        assert_eq!(restored["data"]["summary"]["head"]["id"], first_id);
+        assert!(
+            restored["data"]["backupCommit"]["subject"]
+                .as_str()
+                .is_some_and(|subject| subject.starts_with("workspace: backup before restore to "))
+        );
+        assert!(
+            restored["data"]["backupRef"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("storydex-backup-"))
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("story.md"))
+                .expect("restored story")
+                .replace("\r\n", "\n"),
+            "第一版\n"
+        );
+        assert!(!workspace.join("scratch.tmp").exists());
+
+        let response = router(state)
+            .oneshot(protected_json_request(
+                "/api/v1/workspace/git/restore",
+                json!({
+                    "workspaceRoot": workspace.to_string_lossy(),
+                    "commitId": first_id,
+                    "createBackup": false
+                }),
+            ))
+            .await
+            .expect("no-op restore response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let no_op = response_json(response).await;
+        assert_eq!(no_op["data"]["restored"], false);
+        assert_eq!(no_op["data"]["restoredCommit"]["id"], first_id);
+        assert!(no_op["data"]["backupCommit"].is_null());
+        assert_eq!(no_op["data"]["backupRef"], "");
+    }
+
+    #[tokio::test]
     async fn rust_project_routes_cover_git_diff_timeline_and_worldlines() {
         let root = tempdir().expect("root");
         let (state, workspace) = followup_test_state(root.path());

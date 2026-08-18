@@ -492,17 +492,19 @@ pub(crate) async fn git_restore(
         Err(response) => return response,
     };
     match StorydexGit.restore_to_commit(&workspace, &request.commit_id, request.create_backup) {
-        Ok(summary) => success(
-            json!({"restored": true, "summary": map_git_summary(summary)}),
+        Ok(result) => success(
+            json!({
+                "restored": result.restored,
+                "restoredCommit": result.restored_commit,
+                "backupCommit": result.backup_commit,
+                "backupRef": result.backup_ref,
+                "summary": map_git_summary(result.summary),
+            }),
             started,
             "restore_rust_workspace_git",
         )
         .into_response(),
-        Err(error) => error_response(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "git_restore_failed",
-            &format!("Rust Git restore failed: {error:#}"),
-        ),
+        Err(error) => git_failure("git_restore_failed", error),
     }
 }
 

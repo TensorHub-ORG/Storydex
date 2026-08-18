@@ -85,6 +85,7 @@
         "apps/backend/contracts/fixtures/agent-chat-stream-replacement-v1",
         "apps/backend/contracts/fixtures/agent-chat-stream-replacement-restore-v1",
         "apps/backend/contracts/fixtures/agent-chat-stream-story-semantics-v1",
+        "apps/backend/contracts/fixtures/agent-chat-stream-story-modify-existing-provider-error-v1",
         "apps/backend/contracts/fixtures/agent-chat-stream-story-create-new-short-v1",
         "apps/backend/contracts/fixtures/agent-chat-stream-story-create-new-medium-v1",
         "apps/backend/contracts/fixtures/agent-chat-stream-story-create-new-long-v1"
