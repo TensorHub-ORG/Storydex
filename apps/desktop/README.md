@@ -83,3 +83,29 @@ npm --prefix apps/desktop run test:e2e
 2. 服务器上需要保留旧版本的 `.exe.blockmap`，否则客户端会回退为全量下载。
 3. 应用内入口：系统设置 → 更新与关于 → 检查更新 / 下载更新（增量）/ 重启并安装。
 4. 自动更新仅对打包后的版本生效，开发模式（`npm run dev`）不支持。
+
+## Rust/Tauri 候选资产门禁
+
+Rust/Tauri 预览构建必须输出到与 Stable Electron 隔离的 candidate staging
+目录。候选目录不能包含 Python/FastAPI/Uvicorn、Electron 或 Node 运行时，
+也不能通过符号链接指向仓库外的真实用户项目。Stable 的 `electron/`、`app/`
+和 `release/` 目录不会被该门禁扫描。
+
+先生成候选资产，再从仓库根目录执行：
+
+```powershell
+$env:STORYDEX_RUST_CANDIDATE_ROOT = "apps/desktop/candidate/staging"
+npm --prefix apps/desktop run check:rust-candidate
+```
+
+也可以显式传入目录并输出机器可读报告：
+
+```powershell
+node apps/desktop/scripts/validate-rust-candidate-assets.cjs `
+  --root apps/desktop/candidate/staging `
+  --json
+```
+
+策略清单位于 `apps/desktop/candidate/runtime-policy.json`。该检查只约束候选
+构建输入，不改变 Stable Electron 的启动、打包或更新配置；候选目录不存在、
+越出仓库边界或与 Stable 资产根重叠时会直接失败。

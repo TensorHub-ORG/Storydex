@@ -1,0 +1,5 @@
+/target/
+/gen/
+/tauri.generated.conf.json
+/binaries/*
+!/binaries/.gitkeep

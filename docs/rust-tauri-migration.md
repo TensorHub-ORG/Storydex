@@ -1,6 +1,6 @@
 # Storydex Rust 后端与 Tauri 桌面重构计划
 
-- 状态：执行中（M3 首个真实故事纵向切片及 short 长度档校准已完成，继续推进完整 Rust/Tauri 候选；Stable 未切换）
+- 状态：执行中（M3 已扩展 Rust WIKI/Git 基础边界与单片段 medium/long 本地切片，M6 已建立隔离 Tauri 2 预览骨架；完整差分、sidecar 生命周期与 12.0 验收仍未完成，Stable 未切换）
 - 建立日期：2026-08-05
 - 最近修订：2026-08-18
 - 适用范围：Storydex 2.x 稳定维护、完整 Rust 后端候选、Tauri 2 桌面候选与旧运行时退出准备
@@ -33,9 +33,11 @@
 本轮实际进度按里程碑记录如下：
 
 - **M0：当前 Agent Refactor 事实窗口已完成。** 固定 Windows 机器、同一 replay fixture、3 次丢弃预热、每实现/场景 20 个正式样本和 60 秒空闲 RSS；`end_to_end_relative_gate` 的 24 项检查全部通过。真实 LLM 总耗时仍只作 Provider 证据，不作为 Rust 本地收益。生产观察期和 Beta 前 release 组件稳定性复核仍未完成。
-- **M1：Agent 外部语义已扩展冻结。** runtime manifest、health/Coomi status 和 `chat/stream` 状态机已建立；22 组 fixture 在原 20 组控制/会话场景上增加 story intent/context/permission/asset/update/knowledge 外部摘要及首个真实故事写入契约。Rust 已在隔离 fixture 执行单片段 `create_new` 短章节切片，并与 Python 共享 v2 candidate 长度档校准记录；Python WIKI/Knowledge Projection、Git 收尾、其他故事模式及 medium/long 生成集成仍未迁移。
+- **M1：Agent 外部语义已扩展冻结。** runtime manifest、health/Coomi status 和 `chat/stream` 状态机已建立；22 组 fixture 在原 20 组控制/会话场景上增加 story intent/context/permission/asset/update/knowledge 外部摘要及首个真实故事写入契约。Rust 已在隔离 fixture 执行单片段 `create_new` 短章节差分，并与 Python 共享 v2 candidate 长度档校准记录；medium/long 已接入同一 Rust 单片段本地链路，但 Python/Rust replay 差分尚未补齐。
 - **M2：骨架、依赖审计和当前 Agent 切片已实现。** `storydex-agentd` 仍是未接入 Stable 的独立 loopback 服务。仓库固定 `cargo-deny 0.20.2`、官方 RustSec advisory-db、许可证 allowlist 和 crates.io source 门禁；无 advisory ignore。`ratatui 0.30.2` 已移除旧依赖图中的 `lru 0.12.5` 漏洞版本。
-- **M3：受控 Agent Refactor 与首个真实故事切片达到当前 fixture parity。** 除既有读写、取消、审批、follow-up、会话和 replacement 外，黑盒故障模型已覆盖两个同时 pending approval、两个独立 agentd 的 mailbox 竞争以及父 agentd 崩溃后的 bridge 控制 EOF 取消；Rust `create_new` 单片段短章节已完成一次 Provider completion、门禁、原子写入、short 校准读取/记录和唯一终态差分。Python-owned WIKI/Knowledge Projection、Git 收尾、其他故事模式、生产 workspace、Electron Beta、Stable 切换及 Tauri 均未迁移。
+- **M3：受控 Agent Refactor 与首个真实故事切片达到当前 fixture parity，并已开始项目服务迁移。** 除既有读写、取消、审批、follow-up、会话和 replacement 外，黑盒故障模型已覆盖两个同时 pending approval、两个独立 agentd 的 mailbox 竞争以及父 agentd 崩溃后的 bridge 控制 EOF 取消；Rust `create_new` 单片段 short 已完成差分，medium/long 已完成分档门禁、动态 Provider 输出上限、SSE/accounting、校准隔离、Provider 失败、预取消和原子写入本地测试。Rust 还建立了 canonical JSON/source/graph checksum、原子 WIKI bundle、受边界约束的本地 Git primitives，以及 4 个 Git、2 个 WIKI 候选路由；revision、last-good、ChangeSet、完整 WIKI/Git 路由与其他故事模式仍未闭环。
+- **M4-M5：公开接口迁移已有可重复清单，但完整 Rust 后端尚未形成。** 仓库生成器当前盘点 130 个 Python 路由和 78 个前端 API 消费签名，并保持零个“前端消费者无对应 Python 路由”；该清单只用于追踪所有权和待迁移契约，不把未实现路由标记为完成。
+- **M6：隔离 Tauri 2 Preview 骨架已可本地 `cargo check/build/clippy`。** 预览 crate 使用独立应用标识、Vue `dist`、最小 `core:default` capability 和独立 Rust 候选资产门禁，Stable Electron 的入口、打包和更新源未改变。当前只暴露 `runtime_info`，尚未完成动态端口/token、sidecar 启动/监控/关闭、`window.storydexDesktop`、签名更新、安装/回滚及打包态 E2E，因此不能视为 Tauri 候选完成。
 
 这里的“真实主链路”只指 Storydex 自身 `providers.json` 当前激活的 Provider。Replay 报告始终标记 `providerMode=replay`，不得替代 live 证据或被描述为实际 Provider 成功。
 
@@ -585,10 +587,10 @@ Tauri 迁移完成需要同时满足：
 
 1. **已完成：** bridge `complete` 的显式 replay 透传和聚焦测试，以及 Rust 单片段 `create_new` 短章节纵向切片：一次 Provider completion、机械质量/Unicode 字数门禁、程序化安全路径、原子写入、`StoryGenerationValidation`、`StoryCallAccounting`、`TextChunk` 和唯一终态。
 2. **已完成：** 使用同一临时项目和 Provider replay 冻结 Python Stable 真实契约，Rust 已差分到章节文件 SHA、Git status、SSE、调用次数和 v2 short candidate 长度档校准一致；Python-only WIKI/Git 派生行为保持显式，未被忽略。
-3. **当前执行：** 关闭 Knowledge/WIKI 投影和 Git 收尾真实链路，包括 canonical checksum、revision、原子 bundle、last-good、领域事件、ChangeSet 和回滚；同时生成“实际前端/桌面消费者 -> Python 路由/服务 -> Rust 目标模块 -> 契约测试”的剩余接口清单。
-4. 紧接着完成其他 `storyGeneration` 模式、medium/long 校准、失败/取消/写入故障，以及配置、项目、预设、搜索、索引、诊断、文件和其余仍有消费者的公开后端 API；按所有权成组迁移，不为无消费者实现逐行翻译。
+3. **当前执行：** Knowledge/WIKI 与 Git 第一子批已建立 canonical checksum、原子 bundle、安全路径、本地 Git init/status/commit/restore primitives，并接入 4 个 Git、2 个 WIKI fixture 候选路由；130 个 Python 路由和 78 个前端消费签名的接口清单也已生成。继续关闭 revision、last-good、领域事件、ChangeSet、回滚以及 WIKI 冷构建/增量同步和全部实际消费者路由，现有局部路由不得表述为完整 parity。
+4. **当前并行：** 单片段 `create_new` medium/long 已接入分档门禁、动态 Provider 输出上限、SSE/accounting 和 v2 分档校准，并覆盖 Provider 失败、预取消和原子写入保护；紧接着补齐 Python/Rust replay 磁盘 SHA/事件/校准差分、`modify_existing`、多片段及写入故障 fixture，再迁移配置、项目、预设、搜索、索引、诊断、文件和其余仍有消费者的公开后端 API。
 5. 在完整 Rust 后端契约闭环后完成独立 Electron Rust Beta 的启动、认证、端口、进程树、日志、崩溃恢复、更新和回滚验证；Beta 不得静默回退 Python，Stable 配置保持不变。
-6. 后端迁移进行时可以提前并行建立 Tauri 2 壳、`window.storydexDesktop` 窄适配层和 sidecar 生命周期；随后用同一完整 Rust 后端完成 capabilities、安装、签名更新、候选打包和双向项目兼容验证，不得提前接入 Stable 配置或正式更新源。
+6. **骨架已建立、继续执行：** 隔离 Tauri 2 壳现已可 `cargo check/build/clippy`，使用独立应用标识、Vue `dist`、最小 capability 和 Rust 候选资产门禁；下一步实现 `window.storydexDesktop` 窄适配层及动态端口/token、sidecar 生命周期，再用同一完整 Rust 后端完成 capabilities、安装、签名更新、候选打包和双向项目兼容验证。当前骨架不得提前接入 Stable 配置或正式更新源，也不得冒充打包态验收完成。
 7. 完成旧运行时退出准备和 12.0 最终验证，确认目标候选资产不含 Python/FastAPI/Uvicorn 与 Electron/Node 运行依赖，同时保留 Stable 参考实现和人工回滚资产。
 8. 每个可集成交付块执行相关聚焦测试、中文提交并按 0.7 推送；一轮远端门禁成功后继续下一块，可以在同一新对话中多次提交和推送。不要积累一个无法定位失败原因的超大最终提交，也不要把完整目标重新拆成需要用户逐项批准的小计划。
 

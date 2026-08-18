@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "candidate": "rust-tauri-preview",
+  "description": "Runtime boundary for the isolated Rust/Tauri candidate staging output.",
+  "forbiddenPathTokens": [
+    ".git",
+    ".npm",
+    ".pnpm",
+    ".python39",
+    ".yarn",
+    "__pycache__",
+    "electron",
+    "electron-builder",
+    "electron-updater",
+    "fastapi",
+    "node_modules",
+    "python-env",
+    "python39",
+    "requirements",
+    "site-packages",
+    "uvicorn"
+  ],
+  "forbiddenFileNames": [
+    "app.asar",
+    "electron.exe",
+    "electron.dll",
+    "node.exe",
+    "node.dll",
+    "npm.cmd",
+    "pnpm.cjs",
+    "python.exe",
+    "python.dll",
+    "python39.dll",
+    "pyvenv.cfg",
+    "package.json",
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "requirements.txt",
+    "requirements.lock",
+    "requirements-dev.txt",
+    "setup.py",
+    "pyproject.toml"
+  ],
+  "forbiddenExtensions": [
+    ".asar",
+    ".egg",
+    ".py",
+    ".pyc",
+    ".pyd",
+    ".pyo",
+    ".whl",
+    ".node"
+  ],
+  "stableRoots": [
+    "apps/desktop/electron",
+    "apps/desktop/app",
+    "apps/desktop/node_modules",
+    "apps/desktop/release"
+  ]
+}
