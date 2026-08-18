@@ -85,7 +85,7 @@
 
 ### 0.6 剩余工作流与集成顺序
 
-以下是剩余工程工作流，不是要求逐项等待人工确认的微型切片。能独立验证的部分应并行开发，在依赖点按顺序集成：
+以下是剩余工程工作流，不是要求逐项等待人工确认的微型切片。能独立验证的部分应并行开发，在依赖点按顺序集成。完成其中一个切片、一次提交或一次 CI 只表示该交付块关闭，不是暂停整个重构的理由；同一对话应继续领取下一块，直到满足 12.0 的全部完成定义或出现无法自行消除的真实外部阻塞：
 
 1. **故事写入闭环：** 首个 Rust 单片段 `create_new` 短章节切片已完成 Provider completion、Unicode 字数/质量门禁、路径规划、原子写入、调用计数、SSE、唯一终态及 short candidate 长度档校准差分；继续扩展其他故事模式、medium/long 校准集成、失败/取消/写入故障契约，并接入后续 Knowledge/WIKI/Git 闭环。
 2. **知识与 Git 闭环：** 迁移 Python-owned WIKI/Knowledge Projection、canonical checksum、领域事件、Git/ChangeSet/回滚和收尾行为；现有 5 个 Python-only WIKI 路径必须转为显式 parity，不能加入 ignore。
@@ -97,11 +97,12 @@
 
 ### 0.7 新对话直接执行规则
 
-- 新对话从本节和 0.6 直接开始实现，目标是连续完成所有剩余工作流，而不是再输出一份建议计划。先阅读实际代码、配置、调用链和测试；确认事实后可自行调整内部拆分，不需要为常规工程取舍反复询问。
+- 新对话从本节、0.6、12.0 和 13 直接开始实现，目标是连续完成所有剩余工作流，而不是再输出一份建议计划。先阅读实际代码、配置、调用链和测试；确认事实后可自行调整内部拆分，不需要为常规工程取舍反复询问。
+- 一个新对话可以并且应当按风险边界形成多次中文提交和多轮 `dev/windows -> Development CI success -> main -> 完整 CI success`。每轮成功后立即从最新成功 HEAD 继续下一交付块；不得因为已经完成一次 push、一次纵向切片或一次 CI 就提前结束仍可安全推进的迁移工作。
 - 已关闭的 21 组控制/会话 fixture、RustSec 审计方案和 M0 24/24 性能窗口只作回归基线，不重复扩充或重跑大样本，除非相关代码变化或失败证据要求重新验证。
 - Electron Rust Beta、Tauri Preview 和目标候选打包已在本计划范围内获授权，可以在各自前置契约满足后直接推进；这不授权 Stable 激活、真实用户项目访问或正式更新源变更。
-- 重大架构或产品兼容决策继续以正常 Storydex API/SSE 真实调用 `OPENCODE/deepseek-v4-flash` 的结果为主要依据。现有 live 报告可支撑已作出的选择；只有出现新的不可逆格式、外部行为取舍、运行时切换或旧实现删除决策时才新增 live 决策报告。Replay 只用于确定性差分，绝不能冒充 live。
-- 允许使用少量子代理并行做边界清晰的审查、实现或测试，但共享工作区中的编辑必须分区，主代理负责整合、复核和最终验证。
+- 真实主链路验收、性能测量和兼容验证已获直接执行授权：可以在仓库 fixture、临时克隆或脱敏副本中通过正常 Storydex API/SSE 调用 `OPENCODE/deepseek-v4-flash`，不需要为每次实测再次请求授权；仍禁止接触真实用户项目。重大架构或产品兼容决策以这些 live 结果为主要依据，只有出现新的不可逆格式、外部行为取舍、运行时切换或旧实现删除决策时才新增 live 决策报告。Replay 只用于确定性差分，绝不能冒充 live。
+- 默认由主代理连续推进；确有独立边界时最多使用 2 至 3 个子代理并行审查、实现或测试。共享工作区中的编辑必须分区，主代理负责整合、复核和最终验证。
 - 所有 commit 使用中文。每次 push 前运行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_pre_push_ci.ps1`，不得使用 `--no-verify`；本地只运行与改动直接相关的聚焦检查，完整门禁交给 GitHub Actions。
 - 推送顺序固定为：中文提交 -> pre-push 基础检查 -> 推 `dev/windows` -> 等待 Development CI 最终成功 -> 推 `main` -> 等待完整 CI 最终成功。任一 CI 失败都先读取具体 job/step、修复根因并重新验证，不能宣称该交付块完成。
 - 当前架构事实仍是 Stable 使用 `Electron + Python/FastAPI + Rust Coomi bridge`。只有目标候选的实现与验证完成后，才能写“技术迁移候选完成”；在用户另行授权 Stable 激活前，不能写“Stable 已切换”“Python/Electron 已从稳定版退役”。
@@ -551,6 +552,8 @@ Storydex Stable live 决策报告 `output/rust-migration-decision-live/eb2805f48
 - 最后一个交付 HEAD 已按 0.7 的顺序通过 `dev/windows` Development CI 和 `main` 完整 CI。
 - Stable 的默认运行时、正式包和更新源仍未改变。工程完成后应把“Stable 激活与真实用户灰度”列为唯一独立发布决策，不把它伪装成尚未完成的代码迁移。
 
+单个 Rust 切片、局部 parity、一次 Development CI 或一次 `main` 完整 CI 成功都不能单独满足本节。只要上列任一工程项仍未完成且没有真实外部阻塞，新对话就应继续实现、验证并进入下一轮提交和推送；不得把“本轮切片完成”回答成“剩余任务需要以后另开计划”。
+
 ### 12.1 Agent Rust 重构完成定义
 
 只有同时满足以下条件，才可把本轮 Agent 重构标为完成：
@@ -576,15 +579,18 @@ Tauri 迁移完成需要同时满足：
 - Tauri 和上一个 Electron 稳定版可以互相读取项目数据。
 - Electron 和 Python 旧运行时被从目标 Tauri 候选的构建、依赖和运行资产中完整移除；Stable 参考实现及其文档在正式激活前保持隔离。
 
-## 13. 新对话首个执行批次
+## 13. 新对话连续执行批次
 
-新对话不要重新做规划盘点或扩充已关闭的控制面场景，直接从以下交付批次开始：
+新对话不要重新做规划盘点或扩充已关闭的控制面场景，直接从最新成功 HEAD 接续以下交付批次。序号表示依赖和集成顺序，不表示每项完成后暂停等待授权：
 
 1. **已完成：** bridge `complete` 的显式 replay 透传和聚焦测试，以及 Rust 单片段 `create_new` 短章节纵向切片：一次 Provider completion、机械质量/Unicode 字数门禁、程序化安全路径、原子写入、`StoryGenerationValidation`、`StoryCallAccounting`、`TextChunk` 和唯一终态。
 2. **已完成：** 使用同一临时项目和 Provider replay 冻结 Python Stable 真实契约，Rust 已差分到章节文件 SHA、Git status、SSE、调用次数和 v2 short candidate 长度档校准一致；Python-only WIKI/Git 派生行为保持显式，未被忽略。
-3. **当前执行：** 扩大到 Knowledge/WIKI 与 Git 闭环，同时生成“实际前端/桌面消费者 -> Python 路由/服务 -> Rust 目标模块 -> 契约测试”的剩余接口清单，并按所有权成组迁移。
-4. 后端迁移进行时可以并行建立 Tauri 2 壳、`window.storydexDesktop` 窄适配层、sidecar 生命周期和隔离 preview 打包；不得提前接入 Stable 配置。
-5. 每个可集成交付块执行相关聚焦测试、中文提交并按 0.7 推送；不要积累一个无法定位失败原因的超大最终提交，也不要把完整目标重新拆成需要用户逐项批准的小计划。
+3. **当前执行：** 关闭 Knowledge/WIKI 投影和 Git 收尾真实链路，包括 canonical checksum、revision、原子 bundle、last-good、领域事件、ChangeSet 和回滚；同时生成“实际前端/桌面消费者 -> Python 路由/服务 -> Rust 目标模块 -> 契约测试”的剩余接口清单。
+4. 紧接着完成其他 `storyGeneration` 模式、medium/long 校准、失败/取消/写入故障，以及配置、项目、预设、搜索、索引、诊断、文件和其余仍有消费者的公开后端 API；按所有权成组迁移，不为无消费者实现逐行翻译。
+5. 在完整 Rust 后端契约闭环后完成独立 Electron Rust Beta 的启动、认证、端口、进程树、日志、崩溃恢复、更新和回滚验证；Beta 不得静默回退 Python，Stable 配置保持不变。
+6. 后端迁移进行时可以提前并行建立 Tauri 2 壳、`window.storydexDesktop` 窄适配层和 sidecar 生命周期；随后用同一完整 Rust 后端完成 capabilities、安装、签名更新、候选打包和双向项目兼容验证，不得提前接入 Stable 配置或正式更新源。
+7. 完成旧运行时退出准备和 12.0 最终验证，确认目标候选资产不含 Python/FastAPI/Uvicorn 与 Electron/Node 运行依赖，同时保留 Stable 参考实现和人工回滚资产。
+8. 每个可集成交付块执行相关聚焦测试、中文提交并按 0.7 推送；一轮远端门禁成功后继续下一块，可以在同一新对话中多次提交和推送。不要积累一个无法定位失败原因的超大最终提交，也不要把完整目标重新拆成需要用户逐项批准的小计划。
 
 ## 14. 参考边界
 
