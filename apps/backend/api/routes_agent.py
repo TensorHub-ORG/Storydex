@@ -6,6 +6,7 @@ import contextvars
 import copy
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -3946,6 +3947,13 @@ async def _stream_coomi_sse_worker(
                 provider_status = _coomi_status_for_execution(workspace_root)
                 bounded_provider = str(provider_status.get("providerId") or "")
                 bounded_model = str(provider_status.get("model") or "")
+                bounded_provider_mode = (
+                    "replay"
+                    if str(
+                        os.getenv("STORYDEX_AGENT_PROVIDER_REPLAY_FIXTURE") or ""
+                    ).strip()
+                    else "live"
+                )
                 started_packet = {
                     "_type": "AgentStarted",
                     "_version": 1,
@@ -3954,6 +3962,7 @@ async def _stream_coomi_sse_worker(
                     "query": prompt,
                     "llmModel": bounded_model,
                     "llmProvider": bounded_provider,
+                    "providerMode": bounded_provider_mode,
                     "chapterLengthTier": str(
                         bounded_gate.get("chapterLengthTier") or ""
                     ),

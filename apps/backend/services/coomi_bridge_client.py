@@ -506,6 +506,9 @@ class BridgeProvider:
                 or (tools or [{}])[0].get("name")
                 or ""
             ).strip() or None
+        replay_fixture = str(
+            os.getenv("STORYDEX_AGENT_PROVIDER_REPLAY_FIXTURE") or ""
+        ).strip()
         packet = await request_once(
             {
                 **_base_request("complete"),
@@ -517,6 +520,15 @@ class BridgeProvider:
                 "requiredTool": required_tool,
                 "maxOutputTokens": output_token_limit or None,
                 "reasoningEffort": reasoning_effort,
+                **(
+                    {
+                        "providerReplayFixture": str(
+                            Path(replay_fixture).resolve()
+                        )
+                    }
+                    if replay_fixture
+                    else {}
+                ),
             }
         )
         if packet.get("type") != "completion":

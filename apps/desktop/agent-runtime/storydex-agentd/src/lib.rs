@@ -39,10 +39,11 @@ use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
-mod chat;
+pub(crate) mod chat;
 mod execution;
 mod followup;
 mod replacement;
+mod story_generation;
 
 pub const API_PROTOCOL_VERSION: u32 = 1;
 pub const SERVICE_NAME: &str = "storydex-agentd";

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import subprocess
 
 from scripts.run_agent_stream_replay_contract import (
@@ -221,6 +222,50 @@ def test_compare_reports_requires_matching_workspace_effects() -> None:
 
     assert parity["status"] == "passed"
     assert parity["differences"] == []
+
+
+def test_compare_reports_requires_matching_story_event_facts() -> None:
+    python = _report(tools=[])
+    rust = _report(tools=[])
+    expected_story_events = {
+        "StoryDraftMeasured": [
+            {
+                "actualWordCount": 1519,
+                "chapterLengthTier": "short",
+                "tierHit": True,
+            }
+        ],
+        "StoryCallAccounting": [
+            {
+                "logicalStoryCalls": 1,
+                "providerAttempts": 1,
+                "transportRetries": 0,
+            }
+        ],
+    }
+    python["observation"]["storyEvents"] = copy.deepcopy(expected_story_events)
+    rust["observation"]["storyEvents"] = copy.deepcopy(expected_story_events)
+
+    parity = compare_reports(
+        python,
+        rust,
+        {"expected": {"storyEvents": expected_story_events}},
+    )
+
+    assert parity["status"] == "passed"
+    rust["observation"]["storyEvents"]["StoryCallAccounting"][0][
+        "providerAttempts"
+    ] = 2
+    parity = compare_reports(
+        python,
+        rust,
+        {"expected": {"storyEvents": expected_story_events}},
+    )
+    assert parity["status"] == "failed"
+    assert any(
+        difference["field"] == "storyEvents"
+        for difference in parity["differences"]
+    )
 
 
 def test_compare_reports_requires_matching_replacement_persistence() -> None:

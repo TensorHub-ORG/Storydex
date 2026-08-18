@@ -1,6 +1,6 @@
 # Storydex Rust 后端与 Tauri 桌面重构计划
 
-- 状态：执行中（M3 受控 parity 已完成，进入全量 Rust/Tauri 候选实现；Stable 未切换）
+- 状态：执行中（M3 首个真实故事纵向切片已完成，继续推进完整 Rust/Tauri 候选；Stable 未切换）
 - 建立日期：2026-08-05
 - 最近修订：2026-08-18
 - 适用范围：Storydex 2.x 稳定维护、完整 Rust 后端候选、Tauri 2 桌面候选与旧运行时退出准备
@@ -33,9 +33,9 @@
 本轮实际进度按里程碑记录如下：
 
 - **M0：当前 Agent Refactor 事实窗口已完成。** 固定 Windows 机器、同一 replay fixture、3 次丢弃预热、每实现/场景 20 个正式样本和 60 秒空闲 RSS；`end_to_end_relative_gate` 的 24 项检查全部通过。真实 LLM 总耗时仍只作 Provider 证据，不作为 Rust 本地收益。生产观察期和 Beta 前 release 组件稳定性复核仍未完成。
-- **M1：Agent 外部语义已扩展冻结。** runtime manifest、health/Coomi status 和 `chat/stream` 状态机已建立；21 组 fixture 在原 20 组控制/会话场景上增加 story intent/context/permission/asset/update/knowledge 外部摘要。Rust 只在隔离 fixture 接受并携带有界 `storyGeneration`，Python WIKI/Knowledge Projection 和实际故事生成执行仍未迁移。
+- **M1：Agent 外部语义已扩展冻结。** runtime manifest、health/Coomi status 和 `chat/stream` 状态机已建立；22 组 fixture 在原 20 组控制/会话场景上增加 story intent/context/permission/asset/update/knowledge 外部摘要及首个真实故事写入契约。Rust 已在隔离 fixture 执行单片段 `create_new` 短章节切片；Python WIKI/Knowledge Projection、长度档校准、Git 收尾和其他故事模式仍未迁移。
 - **M2：骨架、依赖审计和当前 Agent 切片已实现。** `storydex-agentd` 仍是未接入 Stable 的独立 loopback 服务。仓库固定 `cargo-deny 0.20.2`、官方 RustSec advisory-db、许可证 allowlist 和 crates.io source 门禁；无 advisory ignore。`ratatui 0.30.2` 已移除旧依赖图中的 `lru 0.12.5` 漏洞版本。
-- **M3：受控 Agent Refactor 切片达到当前 fixture parity。** 除既有读写、取消、审批、follow-up、会话和 replacement 外，黑盒故障模型已覆盖两个同时 pending approval、两个独立 agentd 的 mailbox 竞争以及父 agentd 崩溃后的 bridge 控制 EOF 取消。Python-owned WIKI/Knowledge Projection、有界故事生成实际执行、生产 workspace、Electron Beta、Stable 切换及 Tauri 均未迁移。
+- **M3：受控 Agent Refactor 与首个真实故事切片达到当前 fixture parity。** 除既有读写、取消、审批、follow-up、会话和 replacement 外，黑盒故障模型已覆盖两个同时 pending approval、两个独立 agentd 的 mailbox 竞争以及父 agentd 崩溃后的 bridge 控制 EOF 取消；Rust `create_new` 单片段短章节已完成一次 Provider completion、门禁、原子写入和唯一终态差分。Python-owned WIKI/Knowledge Projection、长度档校准、Git 收尾、其他故事模式、生产 workspace、Electron Beta、Stable 切换及 Tauri 均未迁移。
 
 这里的“真实主链路”只指 Storydex 自身 `providers.json` 当前激活的 Provider。Replay 报告始终标记 `providerMode=replay`，不得替代 live 证据或被描述为实际 Provider 成功。
 
@@ -57,10 +57,11 @@
 - 会话故障：损坏 binding、损坏 session、缺失 session 和 workspace mismatch 均 fail closed，原始文件保持不变；关键序列按故障发生边界保持 `RunAccepted -> TurnContract -> [AgentStarted] -> AgentError -> done`。
 - Replacement：成功场景中旧 trace 为 `superseded/accepted`，旧 prompt 从 runtime session 移除，新 prompt 保留；隔离 bridge 启动失败场景中旧 trace 为 `completed/restored`、新 trace 为 `failed`，setup 后的 runtime-session SHA 和 2 条消息原样恢复。两端报告分别位于 `differential-replacement-current` 和 `differential-replacement-restore-current`。
 - Story 外部语义：live 决策选择 `external_semantics_contract_gate`。`story-semantics` fixture 冻结 intent、permission、turnPlan、context、asset/update 和 knowledge policy；`storyGeneration` 只允许 `fragmentCount=1..20`、`chapterLengthTier=short|medium|long` 和受控 template id。三次差分均通过；Python-only 仍是 5 个 WIKI 派生路径和对应领域事件，Rust-only 为空。
+- Story 真实写入：`story-create-new-short` fixture 使用显式 replay 和两份隔离临时项目，冻结一次逻辑调用、一次 Provider 尝试、零 transport retry，以及 `StoryProviderAttempt`、提交、测量、验证、调用计数、唯一终态和磁盘副作用。Python/Rust 均写入 `chapters/第1章 未命名/001.md`，Windows 文件为 4603 字节，SHA-256 为 `8b136a984e034b1919d681c6b9b14653e8821fe0a7d2983d6ed224ed147409ae`；Python-only 的长度档校准、5 个 WIKI 文件、`GitCommitPrompt` 和 `KnowledgeProjectionUpdated` 被显式验证，未加入 ignore。
 - 控制面韧性：`output/agent-runtime-contract/control-resilience-current/acceptance-report.json` 通过。两个独立 agentd 并发写入保留两条消息、revision/eventCount 均为 2；两个同时 pending approval 均仅接受一次；强杀父 agentd 后真实 bridge 通过控制管道 EOF 退出，孤儿数为 0。
 - M0 性能与 live 决策：`output/agent-runtime-contract/m0-performance-current/performance-report.json` 的 24 项相对门槛全部通过。`output/rust-migration-decision-live/eb2805f48eed-20260818T014444-m0-performance-gate/decision-report.json` 经 Stable live 主链路选择 `end_to_end_relative_gate`，一次 `read_file`、Provider HTTP `200`、0 retry、0 fallback、终态 `AgentCompleted`。
 - 依赖审计：`scripts/run_rust_dependency_audit.ps1` 对 advisories/licenses/sources 全部通过；本次本地 RustSec revision 为 `69f93e1d081d8b6fbee010e48f0b5e0d13661415`。CI 仍在每个相关开发/完整门禁中重新安装固定版本并获取官方数据库，不把本地 revision 当成永久快照。
-- 差分入口为 `python apps/backend/scripts/run_agent_stream_differential.py --fixture-dir <fixture> --output-dir <report-dir>`；失败报告同样持久化。21 个受支持 fixture 已列入 `agent-chat-stream-v1.json` 和 runtime manifest。
+- 差分入口为 `python apps/backend/scripts/run_agent_stream_differential.py --fixture-dir <fixture> --output-dir <report-dir>`；失败报告同样持久化。22 个受支持 fixture 已列入 `agent-chat-stream-v1.json` 和 runtime manifest。
 
 ### 0.4 M0 不稳定行为与兼容决策台账
 
@@ -86,7 +87,7 @@
 
 以下是剩余工程工作流，不是要求逐项等待人工确认的微型切片。能独立验证的部分应并行开发，在依赖点按顺序集成：
 
-1. **故事写入闭环：** 让 Rust 实际执行有界 `storyGeneration`，完成 Provider completion、Unicode 字数/质量门禁、路径规划、原子写入、调用计数、SSE 和唯一终态差分。
+1. **故事写入闭环：** 首个 Rust 单片段 `create_new` 短章节切片已完成 Provider completion、Unicode 字数/质量门禁、路径规划、原子写入、调用计数、SSE 和唯一终态差分；继续扩展其他故事模式、失败/取消/写入故障契约，并接入后续 Knowledge/WIKI/Git 闭环。
 2. **知识与 Git 闭环：** 迁移 Python-owned WIKI/Knowledge Projection、canonical checksum、领域事件、Git/ChangeSet/回滚和收尾行为；现有 5 个 Python-only WIKI 路径必须转为显式 parity，不能加入 ignore。
 3. **完整后端闭环：** 以实际前端/桌面消费者和路由 manifest 为索引，迁移配置、项目、预设、搜索、索引、诊断、文件和其余公开 API；每个写路径都保留磁盘与 Git 差分证据。
 4. **运行时闭环：** 在 release 构建调查并关闭 `componentInit/sessionInit` 长尾，补齐崩溃恢复、进程树清理、端口/认证、日志、升级和回滚。
@@ -349,7 +350,7 @@ Agent 重构的 parity 以外部可观察行为为准，而不是以 Python/Rust
 
 上表中的第 8 项 Agent 控制面已经提前完成受控 parity，后续不应回退到从第 1 项重新串行搬运。实际执行使用以下方式：
 
-1. 以 0.6 的七个剩余工作流为主线，先关闭 `storyGeneration -> Knowledge/WIKI -> Git` 的真实写入链，同时并行盘点公开路由消费者、Rust 模块边界和 Tauri 窄适配层。
+1. 以 0.6 的七个剩余工作流为主线；首个 `storyGeneration create_new/short` 纵向切片已经关闭，下一步扩展其余故事模式并关闭 `Knowledge/WIKI -> Git` 真实写入链，同时盘点公开路由消费者、Rust 模块边界和 Tauri 窄适配层。
 2. 领域规则、文件事务、API 适配、桌面生命周期和打包可以由边界清晰的并行任务推进；共享 schema、磁盘格式和 SSE 状态机由主集成线统一裁决。
 3. 每个工作流达到可验证边界就更新 manifest 和差分证据，不要求每个函数或路由单独提交，也不等待重复人工批准。
 4. 已有实现直接复用并补契约；无实际消费者的内部接口可以记录后删除，不为达到文件数量或 crate 数量制造空壳。
@@ -579,9 +580,9 @@ Tauri 迁移完成需要同时满足：
 
 新对话不要重新做规划盘点或扩充已关闭的控制面场景，直接从以下交付批次开始：
 
-1. 先补 bridge `complete` 的显式 replay 透传和聚焦测试，再实现 Rust 单片段 `create_new` 短章节纵向切片：一次 Provider completion、机械质量/Unicode 字数门禁、程序化安全路径、原子写入、`StoryGenerationValidation`、`StoryCallAccounting`、`TextChunk` 和唯一终态。
-2. 使用同一临时项目和 Provider replay 冻结 Python Stable 真实契约，再让 Rust 差分到章节文件 SHA、Git status、SSE、调用次数和失败时零写入一致；Python-only WIKI/Git 派生行为保持显式，不得忽略。
-3. 纵向切片通过后立即扩大到 Knowledge/WIKI 与 Git 闭环，同时并行生成“实际前端/桌面消费者 -> Python 路由/服务 -> Rust 目标模块 -> 契约测试”的剩余接口清单，并按所有权成组迁移。
+1. **已完成：** bridge `complete` 的显式 replay 透传和聚焦测试，以及 Rust 单片段 `create_new` 短章节纵向切片：一次 Provider completion、机械质量/Unicode 字数门禁、程序化安全路径、原子写入、`StoryGenerationValidation`、`StoryCallAccounting`、`TextChunk` 和唯一终态。
+2. **已完成：** 使用同一临时项目和 Provider replay 冻结 Python Stable 真实契约，Rust 已差分到章节文件 SHA、Git status、SSE 和调用次数一致；Python-only WIKI/长度档校准/Git 派生行为保持显式，未被忽略。
+3. **当前执行：** 扩大到 Knowledge/WIKI 与 Git 闭环，同时生成“实际前端/桌面消费者 -> Python 路由/服务 -> Rust 目标模块 -> 契约测试”的剩余接口清单，并按所有权成组迁移。
 4. 后端迁移进行时可以并行建立 Tauri 2 壳、`window.storydexDesktop` 窄适配层、sidecar 生命周期和隔离 preview 打包；不得提前接入 Stable 配置。
 5. 每个可集成交付块执行相关聚焦测试、中文提交并按 0.7 推送；不要积累一个无法定位失败原因的超大最终提交，也不要把完整目标重新拆成需要用户逐项批准的小计划。
 

@@ -64,6 +64,79 @@ _SENSITIVE_KEYS = frozenset(
     }
 )
 
+_STORY_EVENT_FIELDS: dict[str, tuple[str, ...]] = {
+    "StoryProviderAttempt": (
+        "purpose",
+        "attempt",
+        "outcome",
+        "statusCode",
+        "errorType",
+        "retryScheduled",
+        "retryDelaySeconds",
+    ),
+    "StoryCommitStarted": (),
+    "StoryCommitFinished": (),
+    "StoryDraftMeasured": (
+        "initialWordCount",
+        "retainedWordCount",
+        "generatedWordCount",
+        "completionTokens",
+        "capApplied",
+        "wordCountScope",
+        "actualWordCount",
+        "resultingWordCount",
+        "chapterLengthTier",
+        "tierHit",
+        "tierDeviation",
+        "machineQualityPassed",
+        "calibrationStatus",
+    ),
+    "StoryGenerationValidation": (
+        "applicable",
+        "passed",
+        "status",
+        "algorithm",
+        "countingRule",
+        "fragmentCount",
+        "actualWordCount",
+        "generatedWordCount",
+        "retainedWordCount",
+        "resultingWordCount",
+        "chapterLengthTier",
+        "tierHit",
+        "tierDeviation",
+        "structurePassed",
+        "qualityPassed",
+        "machineQualityPassed",
+        "wordCountScope",
+        "writeToolApplied",
+        "writtenPaths",
+        "hardMinimum",
+        "hardMinimumPassed",
+        "runtimeSafetyMaximum",
+        "runtimeSafetyExceeded",
+        "providerCalls",
+        "contractViolations",
+        "initialWordCount",
+        "finalWordCount",
+        "normalBandPassed",
+        "precisionAchieved",
+    ),
+    "StoryCallAccounting": (
+        "chapterLengthTier",
+        "preciseWordCountEnabled",
+        "asymmetricLengthEnabled",
+        "logicalStoryCalls",
+        "providerAttempts",
+        "transportRetries",
+        "initialGenerationCalls",
+        "lengthRevisionCalls",
+        "secondDraftCalls",
+        "nonProseCalls",
+        "contractViolations",
+    ),
+}
+
 
 class AgentStreamContractError(ValueError):
     """A response violated the externally observable Agent stream contract."""
@@ -205,6 +278,20 @@ def _safe_event_summary(name: str, payload: Mapping[str, Any]) -> dict[str, Any]
     if name == "done":
         summary["type"] = _text(payload.get("type"))
     return summary
+
+
+def _story_event_observation(
+    events: Sequence[tuple[str, Mapping[str, Any]]],
+) -> dict[str, list[dict[str, Any]]]:
+    observation: dict[str, list[dict[str, Any]]] = {}
+    for name, payload in events:
+        fields = _STORY_EVENT_FIELDS.get(name)
+        if fields is None:
+            continue
+        observation.setdefault(name, []).append(
+            {key: payload.get(key) for key in fields if key in payload}
+        )
+    return observation
 
 
 def _safe_turn_contract(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -679,6 +766,15 @@ def validate_chat_stream_events(
             f"stream providerMode {sorted(provider_modes)!r} does not match {expected_mode!r}"
         )
 
+    story_events = _story_event_observation(events)
+    expected_story_events = expected.get("storyEvents")
+    if isinstance(expected_story_events, Mapping):
+        _assert_expected_subset(
+            story_events,
+            expected_story_events,
+            path="storyEvents",
+        )
+
     safe_events = [_safe_event_summary(name, payload) for name, payload in events]
     return {
         "schemaVersion": 1,
@@ -705,5 +801,6 @@ def validate_chat_stream_events(
         "replyChars": len(reply),
         "replyPreview": reply[-400:],
         "turnContract": turn_contract,
+        "storyEvents": story_events,
         "events": safe_events,
     }

@@ -58,6 +58,7 @@
       ],
       "rustEvidence": [
         "apps/desktop/agent-runtime/storydex-agentd/src/chat.rs::chat_stream",
+        "apps/desktop/agent-runtime/storydex-agentd/src/story_generation.rs::run_create_new_short",
         "apps/desktop/agent-runtime/storydex-bridge/src/main.rs::run_agent"
       ],
       "contractDocument": "apps/backend/contracts/agent-chat-stream-v1.json",
@@ -82,7 +83,8 @@
         "apps/backend/contracts/fixtures/agent-chat-stream-workspace-mismatch-v1",
         "apps/backend/contracts/fixtures/agent-chat-stream-replacement-v1",
         "apps/backend/contracts/fixtures/agent-chat-stream-replacement-restore-v1",
-        "apps/backend/contracts/fixtures/agent-chat-stream-story-semantics-v1"
+        "apps/backend/contracts/fixtures/agent-chat-stream-story-semantics-v1",
+        "apps/backend/contracts/fixtures/agent-chat-stream-story-create-new-short-v1"
       ],
       "differentialRunner": "apps/backend/scripts/run_agent_stream_differential.py",
       "parityEvidence": [
@@ -107,12 +109,13 @@
         "output/agent-runtime-contract/differential-replacement-current/differential-report.json",
         "output/agent-runtime-contract/differential-replacement-restore-current/differential-report.json",
         "output/agent-runtime-contract/differential-story-semantics-current/differential-report.json",
+        "output/agent-runtime-contract/differential-story-create-new-short-current/differential-report.json",
         "output/agent-runtime-contract/control-resilience-current/acceptance-report.json"
       ],
       "performanceRunner": "apps/backend/scripts/run_agent_refactor_performance.py",
       "performanceEvidence": "output/agent-runtime-contract/m0-performance-current/performance-report.json",
       "performanceDecisionEvidence": "output/rust-migration-decision-live/eb2805f48eed-20260818T014444-m0-performance-gate/decision-report.json",
-      "remaining": "The checked-in Refactor slice has parity evidence for read-only, scoped write, provider failure, stop/timeout/disconnect including preflight and repeated stop, concurrent approval, durable multi-process follow-up storage, interrupted steer recovery, corrupt/missing/mismatched session state, process-crash bridge cancellation, latest-trace replacement, and the externally visible story intent/context/permission contract. Python-owned knowledge projection and Git prompt events remain explicit differences. Bounded story generation execution, production workspace access, Electron Beta and Stable takeover remain out of scope."
+      "remaining": "The checked-in Refactor slice has parity evidence for read-only, scoped write, provider failure, stop/timeout/disconnect including preflight and repeated stop, concurrent approval, durable multi-process follow-up storage, interrupted steer recovery, corrupt/missing/mismatched session state, process-crash bridge cancellation, latest-trace replacement, the externally visible story intent/context/permission contract, and the single-fragment create-new short story slice. Python-owned Knowledge/WIKI projection, length-tier calibration, Git finalization and prompt events remain explicit differences. Other story modes, production workspace access, Electron Beta and Stable takeover remain out of scope."
     },
     {
       "id": "agent.approval.v1",

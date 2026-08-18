@@ -1039,7 +1039,10 @@ async fn complete(request: BridgeRequest, emitter: Emitter) -> Result<()> {
         request.max_output_tokens,
     );
     emit_reasoning_plan(&emitter, &provider_config, &reasoning_plan);
-    let provider = HttpModelProvider::new(provider_config)?;
+    let (provider, replay_provider, provider_mode) = completion_provider(
+        provider_config.clone(),
+        request.provider_replay_fixture.as_deref(),
+    )?;
     let messages = request
         .messages
         .into_iter()
@@ -1055,6 +1058,9 @@ async fn complete(request: BridgeRequest, emitter: Emitter) -> Result<()> {
             reasoning_effort: request.reasoning_effort,
         })
         .await?;
+    if let Some(replay) = replay_provider.as_ref() {
+        replay.assert_complete()?;
+    }
     emitter.event(
         "completion",
         json!({
@@ -1064,10 +1070,30 @@ async fn complete(request: BridgeRequest, emitter: Emitter) -> Result<()> {
             "metadata": response.metadata,
             "provider": provider.provider_id(),
             "model": provider.model(),
+            "providerMode": provider_mode,
             "reasoningRequestPlan": reasoning_plan,
         }),
     );
     Ok(())
+}
+
+fn completion_provider(
+    provider_config: ProviderConfig,
+    replay_fixture: Option<&Path>,
+) -> Result<(
+    Box<dyn ModelProvider>,
+    Option<ReplayModelProvider>,
+    &'static str,
+)> {
+    if let Some(path) = replay_fixture {
+        let replay = ReplayModelProvider::load(provider_config, path)?;
+        return Ok((Box::new(replay.clone()), Some(replay), "replay"));
+    }
+    Ok((
+        Box::new(HttpModelProvider::new(provider_config)?),
+        None,
+        "live",
+    ))
 }
 
 fn emit_reasoning_plan(
@@ -1345,6 +1371,64 @@ mod tests {
         assert_eq!(explicit.model, "main-model");
 
         std::fs::remove_dir_all(&directory).expect("remove provider test directory");
+    }
+
+    #[test]
+    fn completion_provider_requires_explicit_replay_and_preserves_live_default() {
+        let directory = std::env::temp_dir().join(format!(
+            "storydex-coomi-bridge-completion-provider-test-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).expect("create completion provider directory");
+        let provider_path = directory.join("providers.json");
+        std::fs::write(
+            &provider_path,
+            r#"{
+                "active": "primary",
+                "providers": {
+                    "primary": {
+                        "type": "generic",
+                        "base_url": "https://example.test/v1",
+                        "model": "main-model"
+                    }
+                }
+            }"#,
+        )
+        .expect("write completion provider config");
+        let registry =
+            ProviderRegistry::load(&provider_path).expect("load completion provider config");
+        let config = registry.resolve(None).expect("resolve completion provider");
+        let fixture_path = directory.join("replay.json");
+        std::fs::write(
+            &fixture_path,
+            r#"{
+                "schemaVersion": 1,
+                "contractId": "story.generation.v1",
+                "providerId": "primary",
+                "model": "main-model",
+                "steps": [{"response": {"content": "chapter"}}]
+            }"#,
+        )
+        .expect("write completion replay fixture");
+
+        let (replay_provider, replay, replay_mode) =
+            completion_provider(config.clone(), Some(&fixture_path)).expect("replay provider");
+        assert_eq!(replay_mode, "replay");
+        assert_eq!(replay_provider.provider_id(), "primary");
+        assert!(
+            replay
+                .expect("replay provider state")
+                .assert_complete()
+                .is_err()
+        );
+
+        let (live_provider, no_replay, live_mode) =
+            completion_provider(config, None).expect("live provider");
+        assert_eq!(live_mode, "live");
+        assert!(no_replay.is_none());
+        assert_eq!(live_provider.provider_id(), "primary");
+
+        std::fs::remove_dir_all(&directory).expect("remove completion provider directory");
     }
 
     #[test]

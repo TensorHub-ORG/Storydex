@@ -323,6 +323,32 @@ def compare_reports(
                     "rustRefactor": rust_turn_contract,
                 }
             )
+    expected_story_events = expected.get("storyEvents")
+    if isinstance(expected_story_events, Mapping):
+        python_story_events = _project_expected_shape(
+            python_observation.get("storyEvents"), expected_story_events
+        )
+        rust_story_events = _project_expected_shape(
+            rust_observation.get("storyEvents"), expected_story_events
+        )
+        compared["storyEvents"] = {
+            "expected": dict(expected_story_events),
+            "pythonStable": python_story_events,
+            "rustRefactor": rust_story_events,
+        }
+        if (
+            python_story_events != expected_story_events
+            or rust_story_events != expected_story_events
+            or python_story_events != rust_story_events
+        ):
+            differences.append(
+                {
+                    "field": "storyEvents",
+                    "expected": dict(expected_story_events),
+                    "pythonStable": python_story_events,
+                    "rustRefactor": rust_story_events,
+                }
+            )
     if isinstance(fixture.get("interaction"), Mapping):
         python_interaction = python_observation.get("interaction")
         rust_interaction = rust_observation.get("interaction")

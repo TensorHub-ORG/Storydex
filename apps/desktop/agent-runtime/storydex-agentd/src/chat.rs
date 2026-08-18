@@ -41,7 +41,7 @@ const CONTROL_PLANE_PREFLIGHT_GRACE: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ChatStreamRequest {
+pub(crate) struct ChatStreamRequest {
     #[serde(default)]
     pub prompt: String,
     #[serde(default)]
@@ -181,17 +181,17 @@ fn default_followup_mode() -> String {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct StoryGenerationOptions {
-    fragment_count: u64,
-    chapter_length_tier: String,
-    chapter_template_id: String,
+pub(crate) struct StoryGenerationOptions {
+    pub(crate) fragment_count: u64,
+    pub(crate) chapter_length_tier: String,
+    pub(crate) chapter_template_id: String,
 }
 
 #[derive(Clone, Debug)]
-struct ProviderIdentity {
-    id: String,
-    model: String,
-    display: String,
+pub(crate) struct ProviderIdentity {
+    pub(crate) id: String,
+    pub(crate) model: String,
+    pub(crate) display: String,
 }
 
 struct ChatExecution {
@@ -1176,7 +1176,31 @@ async fn run_chat(execution: ChatExecution) {
     }
 
     let identity = provider_identity(&state);
-    let mut turn_contract = build_turn_contract(&payload, &workspace);
+    let mut turn_contract = match build_turn_contract(&payload, &workspace) {
+        Ok(contract) => contract,
+        Err(error) => {
+            let contract = json!({
+                "status": "error",
+                "reasoningEffort": payload.reasoning_effort,
+                "requiredQuestions": [],
+            });
+            if !send_event(&sender, "TurnContract", contract, &trace_id, &session_id).await {
+                cancellation.cancel("client_disconnected");
+                return;
+            }
+            send_terminal_error(
+                &sender,
+                &mut terminal_sent,
+                &trace_id,
+                &session_id,
+                "story_generation_plan_error",
+                &format!("Rust story target planning failed: {error:#}"),
+            )
+            .await;
+            send_done(&sender).await;
+            return;
+        }
+    };
     if let (Some(contract), Ok(identity)) = (turn_contract.as_object_mut(), identity.as_ref()) {
         contract.insert("providerId".into(), Value::String(identity.id.clone()));
         contract.insert("model".into(), Value::String(identity.model.clone()));
@@ -1195,7 +1219,7 @@ async fn run_chat(execution: ChatExecution) {
     if !send_event(
         &sender,
         "TurnContract",
-        turn_contract,
+        turn_contract.clone(),
         &trace_id,
         &session_id,
     )
@@ -1279,6 +1303,82 @@ async fn run_chat(execution: ChatExecution) {
         cancellation.cancel("client_disconnected");
         return;
     }
+
+    let story_options = parse_story_generation(&payload.story_generation)
+        .expect("validated storyGeneration request");
+    let story_create_new = story_options.as_ref().is_some_and(|options| {
+        options.fragment_count == 1
+            && options.chapter_length_tier == "short"
+            && (payload.active_file.trim().is_empty()
+                || !workspace.join(&payload.active_file).is_file())
+    });
+    if story_create_new {
+        let outcome = match crate::story_generation::run_create_new_short(
+            &state,
+            &payload,
+            story_options.as_ref().expect("story generation options"),
+            &workspace,
+            &trace_id,
+            &session_id,
+            &identity,
+            &cancellation,
+            &sender,
+            &mut trace_events,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                terminal_event = "AgentError".to_owned();
+                trace_events.push((
+                    terminal_event.clone(),
+                    with_event_identity(
+                        "AgentError",
+                        json!({
+                            "error_type": "story_generation_runtime_error",
+                            "code": "story_generation_runtime_error",
+                            "message": format!("Rust story generation failed: {error:#}"),
+                        }),
+                        &trace_id,
+                        &session_id,
+                    ),
+                ));
+                send_terminal_error(
+                    &sender,
+                    &mut terminal_sent,
+                    &trace_id,
+                    &session_id,
+                    "story_generation_runtime_error",
+                    &format!("Rust story generation failed: {error:#}"),
+                )
+                .await;
+                send_done(&sender).await;
+                return;
+            }
+        };
+        terminal_event = outcome.terminal_event;
+        let status = match terminal_event.as_str() {
+            "AgentCompleted" => "completed",
+            "AgentCancelled" => "cancelled",
+            _ => "failed",
+        };
+        if let Err(error) = persist_execution_record_with_events(ExecutionRecordInput {
+            workspace: &workspace,
+            session_id: &session_id,
+            trace_id: &trace_id,
+            prompt: &payload.prompt,
+            status,
+            events: &trace_events,
+            reply: &outcome.reply,
+            provider_id: &provider_id,
+            model: &model,
+        }) {
+            tracing::warn!(error = %error, trace_id = %trace_id, "unable to persist Rust story generation trace");
+        }
+        send_done(&sender).await;
+        return;
+    }
+
     if let Err(error) = run_bridge(BridgeRunContext {
         state: &state,
         payload: &payload,
@@ -1383,11 +1483,11 @@ async fn run_chat(execution: ChatExecution) {
     send_done(&sender).await;
 }
 
-fn build_turn_contract(payload: &ChatStreamRequest, workspace: &Path) -> Value {
+fn build_turn_contract(payload: &ChatStreamRequest, workspace: &Path) -> anyhow::Result<Value> {
     let story_generation = parse_story_generation(&payload.story_generation)
         .expect("validated storyGeneration request");
     let Some(story_generation) = story_generation else {
-        return json!({
+        return Ok(json!({
             "status": "ready",
             "reasoningEffort": payload.reasoning_effort,
             "intentFrame": {
@@ -1415,12 +1515,44 @@ fn build_turn_contract(payload: &ChatStreamRequest, workspace: &Path) -> Value {
                 "promptBlocks": [],
                 "activeFile": payload.active_file,
             },
-        });
+        }));
     };
 
     let chapter_count = count_story_chapters(workspace);
     let chapter_word_count_target = story_chapter_word_count_target(workspace);
     let active_file_exists = workspace.join(&payload.active_file).is_file();
+    let story_create_new = story_generation.fragment_count == 1
+        && story_generation.chapter_length_tier == "short"
+        && (payload.active_file.trim().is_empty() || !active_file_exists);
+    let (target_chapter_number, authoritative_chapter_path, authoritative_fragment_path) =
+        if story_create_new {
+            let target = crate::story_generation::plan_create_new_target(
+                workspace,
+                &story_generation.chapter_template_id,
+            )?;
+            let relative = target
+                .strip_prefix(workspace)
+                .map_err(|_| anyhow::anyhow!("planned story target is outside workspace"))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let chapter_path = Path::new(&relative)
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("planned story target has no chapter directory"))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let chapter_name = Path::new(&chapter_path)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| anyhow::anyhow!("planned story chapter name is invalid"))?;
+            let chapter_number = chapter_name
+                .strip_prefix('第')
+                .and_then(|value| value.split('章').next())
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(|| anyhow::anyhow!("planned story chapter number is invalid"))?;
+            (chapter_number, chapter_path, relative)
+        } else {
+            (0, String::new(), String::new())
+        };
     let script_path = workspace.join(".storydex/scripts/README.md");
     let story_script_exists = script_path.is_file();
     let mut prompt_blocks = Vec::new();
@@ -1461,7 +1593,7 @@ fn build_turn_contract(payload: &ChatStreamRequest, workspace: &Path) -> Value {
         ".storydex/wiki/"
     ]);
 
-    json!({
+    let mut contract = json!({
         "status": "ready",
         "reasoningEffort": payload.reasoning_effort,
         "intentFrame": {
@@ -1469,9 +1601,9 @@ fn build_turn_contract(payload: &ChatStreamRequest, workspace: &Path) -> Value {
             "confidence": "medium",
             "signals": ["story_keywords"],
             "method": "deterministic_hybrid",
-            "operationType": "modify_existing",
+            "operationType": if story_create_new { "create_new" } else { "modify_existing" },
             "decision": "decided",
-            "effect": "modify",
+            "effect": if story_create_new { "create" } else { "modify" },
             "artifact": "chapter_prose",
             "targetScope": "none",
             "targetValue": "",
@@ -1479,7 +1611,7 @@ fn build_turn_contract(payload: &ChatStreamRequest, workspace: &Path) -> Value {
             "ambiguities": [],
             "evidence": [],
             "canWrite": payload.writes_allowed,
-            "complexity": "complex",
+            "complexity": if story_create_new { "simple" } else { "complex" },
             "existingChapterCount": chapter_count,
             "assetTargets": asset_roots,
             "matchedSkills": ["变量思考", "故事生成后更新"],
@@ -1496,21 +1628,21 @@ fn build_turn_contract(payload: &ChatStreamRequest, workspace: &Path) -> Value {
             "highRiskChangeRequiresNotice": true,
         },
         "turnPlan": {
-            "operationType": "modify_existing",
+            "operationType": if story_create_new { "create_new" } else { "modify_existing" },
             "fragmentCount": story_generation.fragment_count,
             "selectedChapterTemplate": story_generation.chapter_template_id,
             "chapterWordCountTarget": chapter_word_count_target,
             "fragmentWordCount": chapter_word_count_target,
             "fragmentWordCountMin": chapter_word_count_target,
             "fragmentWordCountMax": chapter_word_count_target,
-            "chapterAction": "",
-            "targetChapterNumber": 0,
-            "authoritativeChapterPath": "",
-            "authoritativeFragmentPaths": [],
-            "nextSegmentPath": "",
+            "chapterAction": if story_create_new { "create_next_chapter" } else { "" },
+            "targetChapterNumber": target_chapter_number,
+            "authoritativeChapterPath": authoritative_chapter_path,
+            "authoritativeFragmentPaths": if story_create_new { json!([authoritative_fragment_path.clone()]) } else { json!([]) },
+            "nextSegmentPath": authoritative_fragment_path,
             "chapterCount": chapter_count,
             "activeFile": payload.active_file,
-            "storyFormatSource": "existing_project",
+            "storyFormatSource": if story_create_new && chapter_count == 0 { "selected_chapter_template" } else { "existing_project" },
             "wordCountPolicy": {
                 "version": 5,
                 "mode": "target",
@@ -1579,7 +1711,33 @@ fn build_turn_contract(payload: &ChatStreamRequest, workspace: &Path) -> Value {
             "chapterLengthTier": story_generation.chapter_length_tier,
             "chapterTemplateId": story_generation.chapter_template_id,
         },
-    })
+    });
+    if story_create_new
+        && let Some(turn_plan) = contract.get_mut("turnPlan").and_then(Value::as_object_mut)
+    {
+        for legacy_key in [
+            "chapterWordCountTarget",
+            "fragmentWordCount",
+            "fragmentWordCountMin",
+            "fragmentWordCountMax",
+        ] {
+            turn_plan.remove(legacy_key);
+        }
+        turn_plan.insert(
+            "chapterLengthTier".into(),
+            Value::String("short".to_owned()),
+        );
+        turn_plan.insert(
+            "wordCountPolicy".into(),
+            json!({
+                "version": 5,
+                "mode": "tier",
+                "scope": "candidate",
+                "tier": "short",
+            }),
+        );
+    }
+    Ok(contract)
 }
 
 fn count_story_chapters(workspace: &Path) -> usize {
@@ -2318,7 +2476,11 @@ async fn send_event(
     send_event_value(sender, name, payload).await
 }
 
-async fn send_event_value(sender: &mpsc::Sender<String>, name: &str, payload: Value) -> bool {
+pub(crate) async fn send_event_value(
+    sender: &mpsc::Sender<String>,
+    name: &str,
+    payload: Value,
+) -> bool {
     let Ok(data) = serde_json::to_string(&payload) else {
         return false;
     };
@@ -2328,7 +2490,12 @@ async fn send_event_value(sender: &mpsc::Sender<String>, name: &str, payload: Va
         .is_ok()
 }
 
-fn with_event_identity(name: &str, data: Value, trace_id: &str, session_id: &str) -> Value {
+pub(crate) fn with_event_identity(
+    name: &str,
+    data: Value,
+    trace_id: &str,
+    session_id: &str,
+) -> Value {
     if name == "done" {
         return json!({"type": "done"});
     }
@@ -2569,7 +2736,7 @@ mod tests {
         }))
         .expect("request");
 
-        let contract = build_turn_contract(&payload, &workspace);
+        let contract = build_turn_contract(&payload, &workspace).expect("turn contract");
         assert_eq!(contract["intentFrame"]["primary"], "story_generation");
         assert_eq!(contract["turnPlan"]["chapterCount"], 1);
         assert_eq!(contract["contextAssembly"]["budget"]["blockCount"], 2);
@@ -2590,5 +2757,56 @@ mod tests {
             request["allowedWriteRoots"].as_array().map(Vec::len),
             Some(1)
         );
+    }
+
+    #[test]
+    fn create_new_short_turn_contract_uses_tier_paths_without_target_legacy_fields() {
+        let directory = tempdir().expect("tempdir");
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("chapters")).expect("chapters");
+        std::fs::create_dir_all(workspace.join(".storydex/scripts")).expect("scripts");
+        std::fs::write(workspace.join(".storydex/scripts/README.md"), "fixture\n").expect("script");
+        let workspace = workspace.canonicalize().expect("canonical workspace");
+        let payload: ChatStreamRequest = serde_json::from_value(json!({
+            "prompt": "create the next chapter",
+            "activeFile": "",
+            "reasoningEffort": "low",
+            "storyGeneration": {
+                "fragmentCount": 1,
+                "chapterLengthTier": "short",
+                "chapterTemplateId": "default_chapter_directory"
+            },
+            "capabilityMode": "scoped_write",
+            "writesAllowed": true,
+            "coreWritesAllowed": true,
+            "allowedWriteRoots": ["chapters/"]
+        }))
+        .expect("request");
+
+        let contract = build_turn_contract(&payload, &workspace).expect("turn contract");
+        assert_eq!(contract["intentFrame"]["operationType"], "create_new");
+        assert_eq!(contract["intentFrame"]["effect"], "create");
+        assert_eq!(contract["intentFrame"]["complexity"], "simple");
+        assert_eq!(contract["turnPlan"]["operationType"], "create_new");
+        assert_eq!(contract["turnPlan"]["chapterLengthTier"], "short");
+        assert_eq!(contract["turnPlan"]["chapterAction"], "create_next_chapter");
+        assert_eq!(contract["turnPlan"]["targetChapterNumber"], 1);
+        assert_eq!(
+            contract["turnPlan"]["authoritativeFragmentPaths"],
+            json!(["chapters/第1章 未命名/001.md"])
+        );
+        assert_eq!(contract["turnPlan"]["wordCountPolicy"]["mode"], "tier");
+        assert_eq!(
+            contract["turnPlan"]["wordCountPolicy"]["scope"],
+            "candidate"
+        );
+        for legacy_key in [
+            "chapterWordCountTarget",
+            "fragmentWordCount",
+            "fragmentWordCountMin",
+            "fragmentWordCountMax",
+        ] {
+            assert!(contract["turnPlan"].get(legacy_key).is_none());
+        }
     }
 }
