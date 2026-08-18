@@ -35,15 +35,22 @@
 - **M0：当前 Agent Refactor 事实窗口已完成。** 固定 Windows 机器、同一 replay fixture、3 次丢弃预热、每实现/场景 20 个正式样本和 60 秒空闲 RSS；`end_to_end_relative_gate` 的 24 项检查全部通过。真实 LLM 总耗时仍只作 Provider 证据，不作为 Rust 本地收益。生产观察期和 Beta 前 release 组件稳定性复核仍未完成。
 - **M1：Agent 外部语义已扩展冻结。** runtime manifest、health/Coomi status 和 `chat/stream` 状态机已建立；24 组 fixture 在原 20 组控制/会话场景上增加 story intent/context/permission/asset/update/knowledge 外部摘要及 short/medium/long 三档真实故事写入契约。Rust 已在隔离 fixture 执行单片段 `create_new` 三档差分，并与 Python 共享按档隔离的 v2 candidate 长度档校准记录。
 - **M2：骨架、依赖审计和当前 Agent 切片已实现。** `storydex-agentd` 仍是未接入 Stable 的独立 loopback 服务。仓库固定 `cargo-deny 0.20.2`、官方 RustSec advisory-db、许可证 allowlist 和 crates.io source 门禁；无 advisory ignore。`ratatui 0.30.2` 已移除旧依赖图中的 `lru 0.12.5` 漏洞版本。
-- **M3：受控 Agent Refactor 与单片段真实故事写入达到当前 fixture parity，并继续迁移项目服务。** 除既有读写、取消、审批、follow-up、会话和 replacement 外，黑盒故障模型已覆盖两个同时 pending approval、两个独立 agentd 的 mailbox 竞争以及父 agentd 崩溃后的 bridge 控制 EOF 取消；Rust `create_new` 单片段 short/medium/long 均已完成章节 SHA、SSE/故事事件顺序、调用计数和按档 v2 校准差分，Provider 失败、预取消和原子写入保护继续由 Rust 聚焦契约覆盖。Rust 还建立了 canonical JSON/source/graph checksum、原子 WIKI bundle、受边界约束的本地 Git primitives，并把 Git 候选扩展到 summary/diff/init/commit/restore、branch/checkout、timeline/jump、commit-diff 和 worldline 管理共 14 个方法端点；2 个 WIKI 候选路由保持不变。WIKI revision/last-good/ChangeSet/冷构建与增量同步、Git restore 完整响应和旧内部路径解除跟踪、其他故事模式仍未闭环。
+- **M3：受控 Agent Refactor 与单片段真实故事写入达到当前 fixture parity，并继续迁移项目服务。** 除既有读写、取消、审批、follow-up、会话和 replacement 外，黑盒故障模型已覆盖两个同时 pending approval、两个独立 agentd 的 mailbox 竞争以及父 agentd 崩溃后的 bridge 控制 EOF 取消；Rust `create_new` 单片段 short/medium/long 均已完成章节 SHA、SSE/故事事件顺序、调用计数和按档 v2 校准差分，Provider 失败、预取消和原子写入保护继续由 Rust 聚焦契约覆盖。Rust 还建立了 canonical JSON/source/graph checksum、原子 WIKI bundle、受边界约束的本地 Git primitives，并把 Git 候选扩展到 summary/diff/init/commit/restore、branch/checkout、timeline/jump、commit-diff 和 worldline 管理共 14 个方法端点；本轮又闭合了 Rust WIKI/Knowledge 候选的 revision、last-good、ChangeSet、领域事件、冷构建、增量同步、无变更同步、读写故障恢复和图查询分页契约。该切片仍只覆盖 Rust 候选的证据型投影与公开 WIKI 路由，完整关系账本、全部实际消费者 API、故事多片段和完整桌面发布链路仍未闭环。
 - **M4-M5：公开接口迁移已有可重复清单，但完整 Rust 后端尚未形成。** 仓库生成器当前盘点 130 个 Python 路由和 78 个前端 API 消费签名，并保持零个“前端消费者无对应 Python 路由”；该清单只用于追踪所有权和待迁移契约，不把未实现路由标记为完成。
 - **M6：独立 Electron Rust Beta 与隔离 Tauri 2 Preview 已闭合首轮桌面生命周期。** Electron Beta 使用独立 main/preload、动态 loopback 端口和随机 token，只启动 `storydex-agentd`，将 profile/workspace/Coomi/AppData/userData 隔离到系统临时目录，清除 Python、Stable workspace、Replay 与外部 bridge 环境变量；真实二进制 health/auth/shutdown smoke 和崩溃可见/进程树清理契约已通过，但独立安装包、候选更新源和安装/更新/回滚 E2E 尚未完成。Tauri Core 已自行启动并监控 bundled agentd，等待动态端口/token 与 health 后才创建 Vue 窗口，通过最小 `core:default` capability 和窄 `window.storydexDesktop` 暴露 runtime 连接、目录选择、路径显示与打开方式；真实 NSIS 已构建，最小两文件 staging 通过候选资产门禁，release smoke 已验证动态 health、token 不落日志以及 Tauri/agentd 优雅退出。Tauri updater、签名、安装/升级/失败恢复、主要工作流和双向项目兼容仍未完成，因此不能视为 Tauri 候选完成。
 
 这里的“真实主链路”只指 Storydex 自身 `providers.json` 当前激活的 Provider。Replay 报告始终标记 `providerMode=replay`，不得替代 live 证据或被描述为实际 Provider 成功。
 
+### 0.1.1 2026-08-19 Rust WIKI/Knowledge 候选切片证据
+
+- `StorydexKnowledge` 只扫描受边界约束的 UTF-8 `md/txt/json/jsonl` 来源，跳过 `.git`、运行时目录、WIKI 生成目录、配置/模板/预设和备份目录；symlink、越界和不可解码来源 fail closed。来源快照保留 `relativePath/kind/title/text/size/mtime/sha256`，`sourceSetChecksum` 与 Python Stable 的规范化 JSON/换行规则一致。
+- 投影 bundle 以原子事务写入 `knowledge_graph.json`、`WIKI.md`、`index.json`、`projection_status.json`、`source_snapshot.json` 和 `change_set.json`；目标字节相同则跳过写盘。同步返回 `knowledgeRevision`、`builtFromRevision`、`lastSuccessfulRevision`、`changeSet`、`changedSourcePaths`、`KnowledgeProjectionUpdated`/`KnowledgeProjectionSynchronized` 领域事件及 `projectionFreshness`。
+- `storydex-agentd` 暴露 `GET /api/v1/story/wiki`、`POST /api/v1/story/wiki/sync`、`POST /api/v1/story/wiki/rebuild`、`GET /api/v1/story/wiki/graph` 和投影写入路由。图查询支持 `q/category/entryId/nodeId/depth/limit/offset/includeReview`、邻域扩展、空结果、统计和分页；查询只读 last-good 投影，不在 graph 读取中重写文件。
+- 聚焦验证：`cargo test -p coomi-services -p storydex-agentd`（86 + 53 通过）；WIKI/项目/Git Python 聚焦回归（70 通过）；额外覆盖 query-only 空 body、冷构建/无变更同步、ChangeSet ID、分页不写盘、写入失败保留 last-good、恢复和来源格式兼容。该证据不代表 12.0 完成，完整关系投影、其余公开 API、故事多片段、桌面 updater/签名/安装回滚和最终打包态门禁仍待实现。
+
 ### 0.2 基线、分支与生产边界
 
-- 当前最新成功基线为 `32373ce1e0b163a4e05a2312c3ae85b7d8f77cb2`；该提交上的 `dev/windows` Development CI `32155814128` 与 `main` 完整 CI `32156255029` 均为 `success`。
+- 上一成功基线为 `89bc8129700fa11c909def2472fd2010454e4f2a`；该提交上的 `dev/windows` Development CI `32183341032` 与 `main` 完整 CI `32183893726` 均为 `success`。本轮 WIKI/Knowledge 改动须在新的 HEAD 上重新按同一顺序通过两条门禁。
 - 每个准备同步到 `main` 的可验证交付块都必须先推 `dev/windows` 并等待该 HEAD 的 Development CI 最终 `success`，再推 `main` 并等待同一交付内容的完整 CI 最终 `success`；不得在已知失败的远端 CI 基线上继续堆叠推送。
 - 本轮依赖审计、story 外部语义、控制面故障模型、M0 性能窗口、Windows session 路径竞态修复和文档属于同一 Refactor 收口块；不得拆出一个绕开完整契约证据的 Stable 切换提交。
 - Stable 继续固定使用 `Electron + Python/FastAPI + Rust Coomi bridge`。`storydex-agentd` 只接入明确隔离的 Electron Rust Beta 与 Tauri Preview 候选入口，并只允许仓库 fixture 或系统临时 workspace；不得读取真实用户项目、不得静默 fallback，也未接入 Stable 默认启动、正式打包或正式更新源。
@@ -587,9 +594,11 @@ Tauri 迁移完成需要同时满足：
 
 新对话不要重新做规划盘点或扩充已关闭的控制面场景，直接从最新成功 HEAD 接续以下交付批次。序号表示依赖和集成顺序，不表示每项完成后暂停等待授权：
 
+本轮已将第 3 项中的 Rust WIKI/Knowledge 候选证据型投影切片推进到可提交状态：revision/last-good、ChangeSet、领域事件、冷构建、增量/无变更同步、故障恢复、公开 WIKI 路由、查询筛选和分页均有聚焦回归。第 3 项仍未整体完成；关系领域完整 parity、所有实际前端消费者 API、配置/项目/Preset/搜索/索引/诊断/文件迁移以及桌面发布链路仍须继续推进。
+
 1. **已完成：** bridge `complete` 的显式 replay 透传和聚焦测试，以及 Rust 单片段 `create_new` 短章节纵向切片：一次 Provider completion、机械质量/Unicode 字数门禁、程序化安全路径、原子写入、`StoryGenerationValidation`、`StoryCallAccounting`、`TextChunk` 和唯一终态。
 2. **已完成：** 使用同一临时项目和 Provider replay 冻结 Python Stable 真实契约，Rust 已差分到章节文件 SHA、Git status、SSE、调用次数和 v2 short candidate 长度档校准一致；Python-only WIKI/Git 派生行为保持显式，未被忽略。
-3. **当前执行：** Knowledge/WIKI 与 Git 子批已建立 canonical checksum、原子 bundle、安全路径、本地 Git init/status/commit/restore primitives，并把 Git 候选扩展到 diff、branch/checkout、timeline/jump、commit-diff 与 worldline 管理；130 个 Python 路由和 78 个前端消费签名的接口清单也已生成。继续关闭 WIKI revision/last-good、领域事件、ChangeSet、冷构建/增量同步、Git restore 响应细节、旧内部路径解除跟踪和全部实际消费者路由，现有局部 parity 不得表述为完整后端。
+3. **当前执行：** Knowledge/WIKI 与 Git 子批已建立 canonical checksum、原子 bundle、安全路径、本地 Git init/status/commit/restore primitives，并把 Git 候选扩展到 diff、branch/checkout、timeline/jump、commit-diff 与 worldline 管理；Rust WIKI 候选的 revision/last-good、领域事件、ChangeSet、冷构建、增量/无变更同步和故障恢复也已有聚焦证据。130 个 Python 路由和 78 个前端消费签名的接口清单已经生成；继续关闭关系领域完整 parity、Git/Knowledge 与故事写入的收尾集成和全部实际消费者路由，现有局部 parity 不得表述为完整后端。
 4. **已完成当前故事子批、继续执行：** 单片段 `create_new` short/medium/long 已完成 Python/Rust Replay 的章节 SHA、故事事件顺序、调用次数和 v2 分档校准差分，Provider 失败、预取消和原子写入保护已有 Rust 聚焦契约；紧接着实现 `modify_existing`、多片段及可稳定对齐的跨端写入故障 fixture，再迁移配置、项目、预设、搜索、索引、诊断、文件和其余仍有消费者的公开后端 API。
 5. **生命周期子批已完成、继续执行：** 独立 Electron Rust Beta 已闭合启动、动态端口、runtime token、临时 profile/workspace、日志脱敏、崩溃可见、进程树清理和真实 agentd shutdown smoke，且不静默回退 Python、Stable 配置保持不变；继续完成独立 Beta 安装包、候选更新源和安装/更新/回滚 E2E。
 6. **首轮候选打包与生命周期已完成、继续执行：** 隔离 Tauri 2 Core 已接通 `window.storydexDesktop` 窄适配层、动态端口/token、sidecar 监控与 Windows Job Object，真实 NSIS、两文件 staging 资产门禁和 release lifecycle smoke 已通过；继续用同一完整 Rust 后端完成主要工作流、updater、签名、安装/升级/失败恢复、双向项目兼容和第二次独立打包态验证。当前候选不得接入 Stable 配置或正式更新源，也不得冒充 12.0 完成。

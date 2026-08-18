@@ -636,6 +636,9 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/story/wiki", get(project::wiki_read))
         .route("/api/v1/story/wiki/projection", post(project::wiki_write))
+        .route("/api/v1/story/wiki/sync", post(project::wiki_sync))
+        .route("/api/v1/story/wiki/rebuild", post(project::wiki_rebuild))
+        .route("/api/v1/story/wiki/graph", get(project::wiki_graph))
         .route(
             "/api/v1/agent/followups",
             get(chat::list_followups).post(chat::enqueue_followup),
@@ -1296,6 +1299,230 @@ mod tests {
             .expect("git summary response");
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response_json(response).await["data"]["clean"], true);
+    }
+
+    #[tokio::test]
+    async fn rust_wiki_sync_exposes_cold_incremental_noop_and_graph_contract() {
+        let root = tempdir().expect("root");
+        let (state, workspace) = followup_test_state(root.path());
+        let chapters = workspace.join("chapters");
+        std::fs::create_dir_all(&chapters).expect("chapters");
+        std::fs::write(chapters.join("001.md"), "# 第一章\n林澈抵达雾港。\n").expect("chapter");
+        let payload = json!({"workspaceRoot": workspace.to_string_lossy()});
+
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/story/wiki/sync",
+                payload.clone(),
+            ))
+            .await
+            .expect("cold sync response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let cold = response_json(response).await;
+        assert_eq!(cold["data"]["knowledgeRevision"], 1);
+        assert_eq!(cold["data"]["event"]["type"], "KnowledgeProjectionUpdated");
+
+        let encoded = encode_query_value(&workspace);
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/story/wiki/sync?workspaceRoot={encoded}"))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .expect("query-only sync request"),
+            )
+            .await
+            .expect("noop sync response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let noop = response_json(response).await;
+        assert_eq!(noop["data"]["noChanges"], true);
+        assert_eq!(noop["data"]["knowledgeRevision"], 1);
+
+        std::fs::write(chapters.join("001.md"), "# 第一章\n林澈离开雾港。\n")
+            .expect("chapter edit");
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/story/wiki/sync",
+                payload.clone(),
+            ))
+            .await
+            .expect("incremental sync response");
+        let incremental = response_json(response).await;
+        assert_eq!(incremental["data"]["knowledgeRevision"], 2);
+        assert_eq!(
+            incremental["data"]["changeSet"]["modifiedSourcePaths"],
+            json!(["chapters/001.md"])
+        );
+
+        let response = router(state.clone())
+            .oneshot(protected_get_request(&format!(
+                "/api/v1/story/wiki/graph?workspaceRoot={encoded}&q=%E6%9E%97%E6%BE%88"
+            )))
+            .await
+            .expect("graph response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let graph = response_json(response).await;
+        assert_eq!(graph["data"]["mode"], "search");
+        assert_eq!(graph["data"]["knowledgeRevision"], 2);
+        assert_eq!(graph["data"]["returnedNodeCount"], 1);
+        assert_eq!(graph["data"]["hasMore"], false);
+        assert_eq!(graph["data"]["pagination"]["nextOffset"], Value::Null);
+        assert!(
+            graph["data"]["graph"]["nodes"]
+                .as_array()
+                .is_some_and(|nodes| !nodes.is_empty())
+        );
+
+        let response = router(state)
+            .oneshot(protected_get_request(&format!(
+                "/api/v1/story/wiki/graph?workspaceRoot={encoded}&q=not-present"
+            )))
+            .await
+            .expect("empty graph response");
+        let empty = response_json(response).await;
+        assert_eq!(empty["data"]["entries"], json!([]));
+        assert_eq!(empty["data"]["graph"]["nodes"], json!([]));
+        assert_eq!(empty["data"]["matchedEntryIds"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn rust_wiki_graph_paginates_without_rewriting_the_warm_projection() {
+        let root = tempdir().expect("root");
+        let (state, workspace) = followup_test_state(root.path());
+        let chapters = workspace.join("chapters");
+        std::fs::create_dir_all(&chapters).expect("chapters");
+        for index in 1..=3 {
+            std::fs::write(
+                chapters.join(format!("{index:03}.md")),
+                format!("# 第{index}章\n第{index}段正文。\n"),
+            )
+            .expect("chapter");
+        }
+        let payload = json!({"workspaceRoot": workspace.to_string_lossy()});
+        let response = router(state.clone())
+            .oneshot(protected_json_request("/api/v1/story/wiki/sync", payload))
+            .await
+            .expect("sync response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let graph_path = workspace.join(".storydex/wiki/knowledge_graph.json");
+        let before_bytes = std::fs::read(&graph_path).expect("graph bytes");
+        let before_modified = std::fs::metadata(&graph_path)
+            .expect("graph metadata")
+            .modified()
+            .expect("graph modified time");
+        let encoded = encode_query_value(&workspace);
+        let response = router(state.clone())
+            .oneshot(protected_get_request(&format!(
+                "/api/v1/story/wiki/graph?workspaceRoot={encoded}&category=plot&limit=1&offset=0"
+            )))
+            .await
+            .expect("first graph page");
+        let first = response_json(response).await;
+        assert_eq!(first["data"]["mode"], "category");
+        assert_eq!(first["data"]["returnedNodeCount"], 1);
+        assert_eq!(first["data"]["hasMore"], true);
+        assert_eq!(first["data"]["nextOffset"], 1);
+        assert_eq!(first["data"]["pagination"]["limit"], 1);
+
+        let response = router(state)
+            .oneshot(protected_get_request(&format!(
+                "/api/v1/story/wiki/graph?workspaceRoot={encoded}&category=plot&limit=1&offset=1"
+            )))
+            .await
+            .expect("second graph page");
+        let second = response_json(response).await;
+        assert_eq!(second["data"]["returnedNodeCount"], 1);
+        assert_eq!(second["data"]["nextOffset"], 2);
+        assert_ne!(
+            first["data"]["graph"]["nodes"][0]["id"],
+            second["data"]["graph"]["nodes"][0]["id"]
+        );
+        assert_eq!(
+            std::fs::read(&graph_path).expect("warm graph bytes"),
+            before_bytes
+        );
+        assert_eq!(
+            std::fs::metadata(&graph_path)
+                .expect("warm graph metadata")
+                .modified()
+                .expect("warm graph modified time"),
+            before_modified
+        );
+    }
+
+    #[tokio::test]
+    async fn rust_wiki_routes_expose_last_good_status_and_recover_after_write_failure() {
+        let root = tempdir().expect("root");
+        let (state, workspace) = followup_test_state(root.path());
+        let chapters = workspace.join("chapters");
+        std::fs::create_dir_all(&chapters).expect("chapters");
+        let chapter = chapters.join("001.md");
+        std::fs::write(&chapter, "# 第一章\nlast-good 正文。\n").expect("chapter");
+        let payload = json!({"workspaceRoot": workspace.to_string_lossy()});
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/story/wiki/sync",
+                payload.clone(),
+            ))
+            .await
+            .expect("baseline sync");
+        assert_eq!(response.status(), StatusCode::OK);
+        let graph_path = workspace.join(".storydex/wiki/knowledge_graph.json");
+        let baseline_graph = std::fs::read(&graph_path).expect("baseline graph");
+
+        let blocked = workspace.join(".storydex/wiki/WIKI.md");
+        std::fs::remove_file(&blocked).expect("remove markdown");
+        std::fs::create_dir(&blocked).expect("block markdown target");
+        std::fs::write(&chapter, "# 第一章\nfailed-write 正文。\n").expect("chapter edit");
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/story/wiki/sync",
+                payload.clone(),
+            ))
+            .await
+            .expect("failed sync response");
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            std::fs::read(&graph_path).expect("last-good graph"),
+            baseline_graph
+        );
+
+        let encoded = encode_query_value(&workspace);
+        let response = router(state.clone())
+            .oneshot(protected_get_request(&format!(
+                "/api/v1/story/wiki?workspaceRoot={encoded}"
+            )))
+            .await
+            .expect("last-good read");
+        let wiki = response_json(response).await;
+        assert_eq!(wiki["data"]["status"], "error");
+        assert_eq!(wiki["data"]["projectionFreshness"], "stale");
+        assert_eq!(wiki["data"]["lastSuccessfulRevision"], 1);
+        assert_eq!(wiki["data"]["wiki"]["status"], "error");
+
+        let response = router(state.clone())
+            .oneshot(protected_get_request(&format!(
+                "/api/v1/story/wiki/graph?workspaceRoot={encoded}&category=plot"
+            )))
+            .await
+            .expect("unavailable graph read");
+        let graph = response_json(response).await;
+        assert_eq!(graph["data"]["mode"], "unavailable");
+        assert_eq!(graph["data"]["status"], "error");
+        assert_eq!(graph["data"]["graph"]["nodes"], json!([]));
+
+        std::fs::remove_dir(&blocked).expect("unblock markdown target");
+        let response = router(state)
+            .oneshot(protected_json_request("/api/v1/story/wiki/sync", payload))
+            .await
+            .expect("recovery sync");
+        assert_eq!(response.status(), StatusCode::OK);
+        let recovered = response_json(response).await;
+        assert_eq!(recovered["data"]["status"], "ready");
+        assert_eq!(recovered["data"]["knowledgeRevision"], 2);
+        assert_eq!(recovered["data"]["lastSuccessfulRevision"], 2);
     }
 
     #[tokio::test]

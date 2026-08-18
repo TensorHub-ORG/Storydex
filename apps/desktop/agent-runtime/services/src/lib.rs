@@ -71,6 +71,7 @@ pub use storydex_project::ProjectionBundleWriter;
 pub use storydex_project::ProjectionSource;
 pub use storydex_project::ProjectionWriteResult;
 pub use storydex_project::StorydexGit;
+pub use storydex_project::StorydexKnowledge;
 pub use storydex_project::canonical_json_bytes;
 pub use storydex_project::graph_checksum;
 pub use storydex_project::resolve_bounded_path;

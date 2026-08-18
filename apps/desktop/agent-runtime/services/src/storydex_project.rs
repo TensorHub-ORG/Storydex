@@ -7,6 +7,7 @@
 //! source of truth.
 
 use anyhow::{Context, Result, bail, ensure};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -47,9 +48,17 @@ pub struct ProjectionSource {
     pub sha256: String,
     #[serde(default)]
     pub kind: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub mtime: String,
 }
 
-/// The four generated WIKI files and the optional source snapshot are written
+/// The generated WIKI bundle and optional source/change snapshots are written
 /// as one transaction.  Callers build the semantic payload; this type only
 /// handles deterministic serialization and replacement.
 #[derive(Clone, Debug, Default)]
@@ -59,6 +68,10 @@ pub struct ProjectionBundle {
     pub index: Value,
     pub status: Value,
     pub source_snapshot: Option<Value>,
+    /// Optional revision/change-set metadata persisted alongside the bundle.
+    /// Existing callers may leave this unset; the Rust sync path uses it to
+    /// make revision transitions and domain events durable and inspectable.
+    pub change_set: Option<Value>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -219,7 +232,24 @@ impl ProjectionBundleWriter {
                 pretty_json_bytes(snapshot)?,
             ));
         }
+        if let Some(change_set) = &bundle.change_set {
+            targets.push((
+                self.wiki_root().join("change_set.json"),
+                pretty_json_bytes(change_set)?,
+            ));
+        }
         self.write_targets(targets)
+    }
+
+    /// Atomically update only the projection status sidecar.  This is used on
+    /// failed rebuilds so the previous graph remains the last-good projection
+    /// while callers still get an explicit stale/error state and diagnostics.
+    pub fn write_status(&self, status: &Value) -> Result<ProjectionWriteResult> {
+        self.write_targets(vec![(self.status_path(), pretty_json_bytes(status)?)])
+    }
+
+    pub fn read_change_set(&self) -> Result<Option<Value>> {
+        read_json_if_present(&self.wiki_root().join("change_set.json"))
     }
 
     fn write_targets(&self, targets: Vec<(PathBuf, Vec<u8>)>) -> Result<ProjectionWriteResult> {
@@ -236,7 +266,11 @@ impl ProjectionBundleWriter {
                     fs::create_dir_all(parent)
                         .with_context(|| format!("failed to create {}", parent.display()))?;
                 }
-                originals.insert(target.clone(), read_bytes_if_present(target)?);
+                let original = read_bytes_if_present(target)?;
+                if original.as_deref() == Some(content.as_slice()) {
+                    continue;
+                }
+                originals.insert(target.clone(), original);
                 let temporary = temporary_path(target)?;
                 let mut file = OpenOptions::new()
                     .write(true)
@@ -284,6 +318,664 @@ impl ProjectionBundleWriter {
         }
         Ok(ProjectionWriteResult { changed_paths })
     }
+}
+
+/// Deterministic, local Story Knowledge/WIKI synchronizer used by the Rust
+/// candidate.  It intentionally keeps the projection format small and
+/// evidence based: every entry is backed by one source path and every
+/// revision is derived from the canonical source-set checksum.  The service
+/// does not call a provider and therefore works for cold builds, no-op reads,
+/// incremental updates and failure recovery alike.
+#[derive(Clone, Debug)]
+pub struct StorydexKnowledge {
+    project_root: PathBuf,
+}
+
+impl StorydexKnowledge {
+    pub fn new(project_root: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self {
+            project_root: canonical_existing_dir(project_root.as_ref())?,
+        })
+    }
+
+    pub fn project_root(&self) -> &Path {
+        &self.project_root
+    }
+
+    pub fn sync(&self, force: bool) -> Result<Value> {
+        let writer = ProjectionBundleWriter::new(&self.project_root)?;
+        let sources = self.collect_sources()?;
+        let source_snapshot = self.source_snapshot(&sources);
+        let existing = read_json_if_present(&writer.wiki_root().join("knowledge_graph.json"))?;
+        let previous_snapshot =
+            read_json_if_present(&writer.wiki_root().join("source_snapshot.json"))?;
+        let previous_status = writer.read_status()?.unwrap_or_else(|| json!({}));
+        let previous_revision = previous_revision(existing.as_ref(), Some(&previous_status));
+        let diff = source_change_set(
+            previous_snapshot.as_ref(),
+            &source_snapshot,
+            previous_revision,
+        )?;
+        let existing_ready = existing
+            .as_ref()
+            .and_then(Value::as_object)
+            .is_some_and(|value| {
+                value
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("ready")
+                    == "ready"
+            })
+            && previous_status
+                .get("status")
+                .and_then(Value::as_str)
+                .is_none_or(|status| status == "ready");
+        if !force
+            && existing_ready
+            && diff["changedSourcePaths"]
+                .as_array()
+                .is_some_and(Vec::is_empty)
+        {
+            let mut result = existing.unwrap_or_else(|| json!({}));
+            if let Some(object) = result.as_object_mut() {
+                object.insert("status".to_owned(), Value::String("ready".to_owned()));
+                object.insert(
+                    "projectionFreshness".to_owned(),
+                    Value::String("fresh".to_owned()),
+                );
+                object.insert("noChanges".to_owned(), Value::Bool(true));
+                object.insert("changedSourcePaths".to_owned(), json!([]));
+                object.insert("changeSet".to_owned(), diff.clone());
+                object.insert(
+                    "event".to_owned(),
+                    json!({
+                        "type": "KnowledgeProjectionSynchronized",
+                        "revision": object.get("knowledgeRevision").cloned().unwrap_or(json!(0)),
+                        "baseRevision": diff.get("baseRevision").cloned().unwrap_or(json!(0)),
+                        "changeSetId": diff.get("changeSetId").cloned().unwrap_or(Value::Null),
+                        "sourceSetChecksum": object.get("sourceSetChecksum").cloned().unwrap_or(Value::Null),
+                        "graphChecksum": object.get("graphChecksum").cloned().unwrap_or(Value::Null),
+                        "noChanges": true,
+                        "occurredAt": now_rfc3339(),
+                    }),
+                );
+            }
+            return Ok(result);
+        }
+
+        let source_checksum = source_set_checksum(&sources)?;
+        let changed = diff
+            .get("changedSourcePaths")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let next_revision = if previous_revision == 0 || !changed.is_empty() {
+            previous_revision + 1
+        } else {
+            previous_revision
+        };
+        let mut payload = self.build_payload(&sources, next_revision, &source_checksum)?;
+        let graph = graph_checksum(&payload)?;
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("graphChecksum".to_owned(), Value::String(graph.clone()));
+            object.insert(
+                "sourceSetChecksum".to_owned(),
+                Value::String(source_checksum.clone()),
+            );
+            object.insert("knowledgeRevision".to_owned(), json!(next_revision));
+            object.insert("builtFromRevision".to_owned(), json!(next_revision));
+            object.insert("lastSuccessfulRevision".to_owned(), json!(next_revision));
+            object.insert(
+                "projectionFreshness".to_owned(),
+                Value::String("fresh".to_owned()),
+            );
+            object.insert("noChanges".to_owned(), Value::Bool(false));
+            object.insert(
+                "changedSourcePaths".to_owned(),
+                Value::Array(changed.clone()),
+            );
+            object.insert("changeSet".to_owned(), diff.clone());
+            object.insert(
+                "event".to_owned(),
+                json!({
+                    "type": "KnowledgeProjectionUpdated",
+                    "revision": next_revision,
+                    "baseRevision": diff.get("baseRevision").cloned().unwrap_or(json!(0)),
+                    "changeSetId": diff.get("changeSetId").cloned().unwrap_or(Value::Null),
+                    "sourceSetChecksum": source_checksum,
+                    "graphChecksum": graph,
+                    "changedSourcePaths": changed,
+                    "noChanges": false,
+                    "mode": if force { "rebuild" } else { "sync" },
+                    "occurredAt": now_rfc3339(),
+                }),
+            );
+        }
+        let status = json!({
+            "schemaVersion": 3,
+            "status": "ready",
+            "knowledgeRevision": next_revision,
+            "builtFromRevision": next_revision,
+            "lastSuccessfulRevision": next_revision,
+            "sourceSetChecksum": source_checksum,
+            "graphChecksum": graph,
+            "projectionFreshness": "fresh",
+            "diagnostics": [],
+            "updatedAt": now_rfc3339(),
+        });
+        let index = self.build_index(&sources, &payload, &status, &diff);
+        let markdown = self.render_markdown(&payload);
+        match writer.write(&ProjectionBundle {
+            payload: payload.clone(),
+            markdown,
+            index,
+            status,
+            source_snapshot: Some(source_snapshot),
+            change_set: Some(diff),
+        }) {
+            Ok(_) => Ok(payload),
+            Err(error) => {
+                let last_good = previous_revision;
+                let failure = json!({
+                    "schemaVersion": 3,
+                    "status": "error",
+                    "projectionFreshness": "stale",
+                    "knowledgeRevision": existing.as_ref().and_then(|value| value.get("knowledgeRevision")).cloned().unwrap_or(json!(last_good)),
+                    "builtFromRevision": existing.as_ref().and_then(|value| value.get("builtFromRevision")).cloned().unwrap_or(json!(last_good)),
+                    "lastSuccessfulRevision": last_good,
+                    "sourceSetChecksum": existing.as_ref().and_then(|value| value.get("sourceSetChecksum")).cloned().unwrap_or(Value::Null),
+                    "attemptedSourceSetChecksum": source_checksum,
+                    "diagnostics": [{"code": "wiki.write_failed", "severity": "error", "message": error.to_string()}],
+                    "updatedAt": now_rfc3339(),
+                });
+                let _ = writer.write_status(&failure);
+                Err(error
+                    .context("Rust WIKI projection write failed; last-good projection preserved"))
+            }
+        }
+    }
+
+    fn collect_sources(&self) -> Result<Vec<ProjectionSource>> {
+        let mut files = Vec::new();
+        collect_source_files(&self.project_root, &self.project_root, &mut files)?;
+        files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+        Ok(files)
+    }
+
+    fn source_snapshot(&self, sources: &[ProjectionSource]) -> Value {
+        json!({
+            "version": 1,
+            "updatedAt": now_rfc3339(),
+            "sources": sources.iter().map(|source| (
+                source.relative_path.clone(),
+                serde_json::to_value(source).unwrap_or_else(|_| json!({}))
+            )).collect::<Map<_, _>>(),
+        })
+    }
+
+    fn build_payload(
+        &self,
+        sources: &[ProjectionSource],
+        revision: u64,
+        checksum: &str,
+    ) -> Result<Value> {
+        let project_name = self
+            .project_root
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("Storydex");
+        let chapter_count = sources
+            .iter()
+            .filter(|source| source.kind == "chapter")
+            .count();
+        let character_count = sources
+            .iter()
+            .filter(|source| source.kind == "character")
+            .count();
+        let overview_summary = if sources.is_empty() {
+            format!("《{project_name}》暂无故事内容，创建章节/角色后图谱将自动构建。")
+        } else {
+            format!(
+                "覆盖 {chapter_count} 个正文章节/片段、{character_count} 个角色来源与 {} 个可索引文件。",
+                sources.len()
+            )
+        };
+        let mut entries = vec![json!({
+            "id": "overview:project",
+            "title": "项目总览",
+            "category": "overview",
+            "categoryLabel": "项目总览",
+            "summary": overview_summary,
+            "details": [format!("工作区: {}", normalized_path(&self.project_root))],
+            "sourcePaths": [],
+            "knowledgeStatus": "observed",
+        })];
+        let mut nodes = vec![json!({
+            "id": "project:root",
+            "label": project_name,
+            "type": "project",
+            "category": "overview",
+            "entryId": "overview:project",
+            "summary": format!("{project_name} 项目知识库"),
+        })];
+        let mut edges = Vec::new();
+        let mut previous_chapter_id = None::<String>;
+        let mut chapter_order = 0usize;
+        for source in sources {
+            let title = if source.title.trim().is_empty() {
+                Path::new(&source.relative_path)
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("未命名")
+                    .to_owned()
+            } else {
+                source.title.clone()
+            };
+            let id = format!(
+                "source:{}",
+                hex_digest(source.relative_path.as_bytes())[..16].to_owned()
+            );
+            let kind = source.kind.as_str();
+            let node_type = match kind {
+                "chapter" => "chapter",
+                "character" => "character",
+                "planned" => "event",
+                "world" | "setting" => "setting",
+                _ => "document",
+            };
+            let category = match kind {
+                "character" => "characters",
+                "chapter" | "planned" => "plot",
+                _ => "setting",
+            };
+            let summary = compress_source_text(&source.text, 260);
+            entries.push(json!({
+                "id": id,
+                "title": title,
+                "category": category,
+                "categoryLabel": category_label(category),
+                "summary": summary,
+                "details": [format!("来源: {}", source.relative_path)],
+                "sourcePaths": [source.relative_path],
+                "knowledgeStatus": "observed",
+            }));
+            if kind == "chapter" {
+                chapter_order += 1;
+            }
+            nodes.push(json!({
+                "id": id,
+                "label": title,
+                "type": node_type,
+                "category": category,
+                "entryId": id,
+                "summary": summary,
+                "knowledgeStatus": "observed",
+                "narrativeOrder": if kind == "chapter" { chapter_order } else { 0 },
+            }));
+            if kind == "chapter" {
+                if let Some(previous_id) = previous_chapter_id.as_ref() {
+                    edges.push(json!({"source": previous_id, "target": id, "type": "timeline", "label": "承接"}));
+                }
+                previous_chapter_id = Some(id);
+            }
+        }
+        Ok(json!({
+            "version": 1,
+            "schemaVersion": 3,
+            "categorySchemaVersion": "story-wiki-rust-v1",
+            "projectName": project_name,
+            "workspaceRoot": normalized_path(&self.project_root),
+            "generatedAt": now_rfc3339(),
+            "generator": "storydex-rust-knowledge",
+            "generationMode": "local evidence-grounded",
+            "llmStatus": "not_required",
+            "summary": overview_summary,
+            "categoryLabels": {"overview": "项目总览", "characters": "角色", "plot": "剧情", "setting": "设定"},
+            "nodeTypeLabels": {"project": "项目", "chapter": "章节", "character": "角色", "event": "事件", "setting": "设定", "document": "文档"},
+            "graphPolicy": {"mode": "evidence_grounded_local_v1", "agentGraphAccepted": false, "coOccurrenceIsRelationship": false},
+            "status": "ready",
+            "projectionFreshness": "fresh",
+            "knowledgeRevision": revision,
+            "builtFromRevision": revision,
+            "lastSuccessfulRevision": revision,
+            "sourceSetChecksum": checksum,
+            "entries": entries,
+            "graph": {"nodes": nodes, "edges": edges},
+            "sourceStats": {"scannedFiles": sources.len(), "chapterFiles": chapter_count, "characters": character_count},
+            "diagnostics": [],
+        }))
+    }
+
+    fn build_index(
+        &self,
+        sources: &[ProjectionSource],
+        payload: &Value,
+        status: &Value,
+        change_set: &Value,
+    ) -> Value {
+        let mut source_index = Map::new();
+        for source in sources {
+            let related_id = format!(
+                "source:{}",
+                hex_digest(source.relative_path.as_bytes())[..16].to_owned()
+            );
+            source_index.insert(
+                source.relative_path.clone(),
+                json!({
+                    "sha256": source.sha256,
+                    "kind": source.kind,
+                    "size": source.size,
+                    "mtime": source.mtime,
+                    "lastAnalyzedAt": now_rfc3339(),
+                    "relatedEntryIds": [related_id],
+                    "relatedNodeIds": [related_id],
+                }),
+            );
+        }
+        json!({
+            "version": 2,
+            "schemaVersion": 3,
+            "projectName": self.project_root.file_name().and_then(|value| value.to_str()).unwrap_or("Storydex"),
+            "status": status.get("status").cloned().unwrap_or(json!("ready")),
+            "knowledgeRevision": payload.get("knowledgeRevision").cloned().unwrap_or(json!(0)),
+            "builtFromRevision": payload.get("builtFromRevision").cloned().unwrap_or(json!(0)),
+            "lastSuccessfulRevision": payload.get("lastSuccessfulRevision").cloned().unwrap_or(json!(0)),
+            "sourceSetChecksum": payload.get("sourceSetChecksum").cloned().unwrap_or(Value::Null),
+            "graphChecksum": payload.get("graphChecksum").cloned().unwrap_or(Value::Null),
+            "changedSourcePaths": change_set.get("changedSourcePaths").cloned().unwrap_or(json!([])),
+            "sourceStats": payload.get("sourceStats").cloned().unwrap_or_else(|| json!({})),
+            "entryCount": payload.get("entries").and_then(Value::as_array).map(Vec::len).unwrap_or(0),
+            "nodeCount": payload.get("graph").and_then(|value| value.get("nodes")).and_then(Value::as_array).map(Vec::len).unwrap_or(0),
+            "edgeCount": payload.get("graph").and_then(|value| value.get("edges")).and_then(Value::as_array).map(Vec::len).unwrap_or(0),
+            "sources": source_index,
+        })
+    }
+
+    fn render_markdown(&self, payload: &Value) -> String {
+        let mut output = format!(
+            "# {}\n\n",
+            payload
+                .get("projectName")
+                .and_then(Value::as_str)
+                .unwrap_or("Storydex WIKI")
+        );
+        if let Some(entries) = payload.get("entries").and_then(Value::as_array) {
+            for entry in entries {
+                let title = entry
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("未命名");
+                let summary = entry.get("summary").and_then(Value::as_str).unwrap_or("");
+                output.push_str(&format!("## {title}\n\n{summary}\n\n"));
+            }
+        }
+        output
+    }
+}
+
+fn collect_source_files(
+    root: &Path,
+    directory: &Path,
+    output: &mut Vec<ProjectionSource>,
+) -> Result<()> {
+    for entry in fs::read_dir(directory)
+        .with_context(|| format!("failed to read {}", directory.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() {
+            bail!(
+                "symlinked Storydex source is not accepted: {}",
+                path.display()
+            );
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if matches!(
+            name.as_str(),
+            ".git" | "__pycache__" | ".cache" | "traces" | "sessions" | "target"
+        ) {
+            continue;
+        }
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if relative.starts_with(".storydex/wiki/")
+            || relative.starts_with(".storydex/.agent/")
+            || relative.starts_with(".storydex/.cache/")
+            || relative.starts_with(".storydex/config/")
+            || relative.starts_with(".storydex/templates/")
+            || relative.starts_with(".storydex/presets/")
+            || relative.starts_with(".storydex/temp/")
+            || relative.starts_with(".storydex/memory/backups/")
+        {
+            continue;
+        }
+        if path.is_dir() {
+            collect_source_files(root, &path, output)?;
+            continue;
+        }
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !matches!(extension.as_str(), "md" | "txt" | "json" | "jsonl") {
+            continue;
+        }
+        if name.eq_ignore_ascii_case("README.md")
+            || relative.to_ascii_lowercase().ends_with(".relations.md")
+        {
+            continue;
+        }
+        let bytes = fs::read(&path)?;
+        let raw_text = String::from_utf8(bytes.clone())
+            .with_context(|| format!("Storydex source is not valid UTF-8: {}", path.display()))?;
+        if raw_text.is_empty() {
+            continue;
+        }
+        let text = if extension == "json" {
+            match serde_json::from_str::<Value>(&raw_text) {
+                Ok(value) => serde_json::to_string_pretty(&value)
+                    .context("failed to normalize JSON Storydex source")?,
+                Err(_) => normalize_source_text(&raw_text),
+            }
+        } else {
+            normalize_source_text(&raw_text)
+        };
+        let kind =
+            if relative.starts_with("chapters/") && matches!(extension.as_str(), "md" | "txt") {
+                "chapter"
+            } else if relative.starts_with(".storydex/scripts/") {
+                "planned"
+            } else if is_character_card_path(&relative) {
+                "character"
+            } else if relative.contains("/characters/") || relative.starts_with("characters/") {
+                "memory"
+            } else if relative.contains("/worldbook/") || relative.starts_with("worldbook/") {
+                "world"
+            } else if relative.contains("/presets/") || relative.starts_with("presets/") {
+                "preset"
+            } else if relative.contains("/memory/") || relative.starts_with("memory/") {
+                "memory"
+            } else {
+                "project"
+            };
+        let title = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("未命名")
+            .to_owned();
+        output.push(ProjectionSource {
+            relative_path: relative,
+            sha256: hex_digest(text.as_bytes()),
+            kind: kind.to_owned(),
+            title,
+            text,
+            size: metadata.len(),
+            mtime: metadata
+                .modified()
+                .map(DateTime::<Utc>::from)
+                .map(|value| value.to_rfc3339())
+                .unwrap_or_default(),
+        });
+    }
+    Ok(())
+}
+
+fn is_character_card_path(relative_path: &str) -> bool {
+    let normalized = relative_path.replace('\\', "/");
+    if normalized.to_ascii_lowercase().ends_with(".relations.md") {
+        return false;
+    }
+    let parts = normalized
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let Some(index) = parts.iter().position(|part| *part == "characters") else {
+        return false;
+    };
+    let tail = &parts[index + 1..];
+    if tail.len() == 1 {
+        return matches!(
+            Path::new(tail[0])
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .as_str(),
+            "md" | "txt" | "json" | "jsonl"
+        );
+    }
+    tail.len() == 2 && tail[0] == "cards"
+}
+
+fn compress_source_text(text: &str, limit: usize) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = normalized.chars();
+    let prefix = chars.by_ref().take(limit).collect::<String>();
+    if chars.next().is_some() {
+        format!("{}...", prefix.trim_end())
+    } else {
+        prefix
+    }
+}
+
+fn normalize_source_text(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn category_label(category: &str) -> &'static str {
+    match category {
+        "characters" => "角色",
+        "plot" => "剧情",
+        "setting" => "设定",
+        _ => "项目总览",
+    }
+}
+
+fn normalized_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn now_rfc3339() -> String {
+    Utc::now().to_rfc3339()
+}
+
+fn previous_revision(existing: Option<&Value>, status: Option<&Value>) -> u64 {
+    existing
+        .and_then(|value| value.get("knowledgeRevision"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .max(
+            status
+                .and_then(|value| value.get("lastSuccessfulRevision"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        )
+}
+
+fn source_change_set(
+    previous: Option<&Value>,
+    current: &Value,
+    base_revision: u64,
+) -> Result<Value> {
+    let old = previous
+        .and_then(|value| value.get("sources"))
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let new = current
+        .get("sources")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut added = Vec::new();
+    let mut modified = Vec::new();
+    let mut deleted = Vec::new();
+    for (path, value) in &new {
+        if !old.contains_key(path) {
+            added.push(Value::String(path.clone()));
+        } else if old.get(path).and_then(|item| item.get("sha256")) != value.get("sha256") {
+            modified.push(Value::String(path.clone()));
+        }
+    }
+    for path in old.keys() {
+        if !new.contains_key(path) {
+            deleted.push(Value::String(path.clone()));
+        }
+    }
+    added.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    modified.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    deleted.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    let mut changed = Vec::new();
+    changed.extend(added.iter().cloned());
+    changed.extend(modified.iter().cloned());
+    changed.extend(deleted.iter().cloned());
+    let revision = if base_revision == 0 || !changed.is_empty() {
+        base_revision + 1
+    } else {
+        base_revision
+    };
+    let mut source_changes = Vec::new();
+    for (kind, paths) in [
+        ("added", &added),
+        ("modified", &modified),
+        ("deleted", &deleted),
+    ] {
+        for path in paths {
+            let relative_path = path.as_str().unwrap_or_default();
+            source_changes.push(json!({
+                "path": relative_path,
+                "changeKind": kind,
+                "beforeSha256": old.get(relative_path).and_then(|value| value.get("sha256")).cloned().unwrap_or(Value::Null),
+                "afterSha256": new.get(relative_path).and_then(|value| value.get("sha256")).cloned().unwrap_or(Value::Null),
+            }));
+        }
+    }
+    let identity = json!({
+        "baseRevision": base_revision,
+        "revision": revision,
+        "sourceChanges": source_changes,
+    });
+    let id = format!(
+        "changeset:{}",
+        &hex_digest(&canonical_json_bytes(&identity)?)[..16]
+    );
+    Ok(json!({
+        "schemaVersion": 1,
+        "changeSetId": id,
+        "baseRevision": base_revision,
+        "revision": revision,
+        "addedSourcePaths": added,
+        "modifiedSourcePaths": modified,
+        "deletedSourcePaths": deleted,
+        "changedSourcePaths": changed,
+        "sourceChanges": identity.get("sourceChanges").cloned().unwrap_or_else(|| json!([])),
+        "noChanges": changed.is_empty(),
+    }))
 }
 
 /// A small local Git adapter.  It intentionally rejects a project nested in a
@@ -2613,17 +3305,29 @@ mod tests {
                 relative_path: "chapters\\002.md".into(),
                 sha256: "b".into(),
                 kind: "chapter".into(),
+                title: String::new(),
+                text: String::new(),
+                size: 0,
+                mtime: String::new(),
             },
             ProjectionSource {
                 relative_path: "chapters/001.md".into(),
                 sha256: "a".into(),
                 kind: "chapter".into(),
+                title: String::new(),
+                text: String::new(),
+                size: 0,
+                mtime: String::new(),
             },
         ];
         let second = vec![first[1].clone(), first[0].clone()];
         assert_eq!(
             source_set_checksum(&first).expect("checksum"),
             source_set_checksum(&second).expect("checksum")
+        );
+        assert_eq!(
+            source_set_checksum(&first).expect("python-compatible checksum"),
+            "sha256:b857919c068c1b66865adc9a41b622ba0bb2f8cea935ead24dc97a8d7c33c7bc"
         );
     }
 
@@ -2688,6 +3392,7 @@ mod tests {
                 index: json!({"entries": []}),
                 status: json!({"status": "ready", "lastSuccessfulRevision": 1}),
                 source_snapshot: Some(json!({"sources": []})),
+                change_set: None,
             })
             .expect("write bundle");
         assert_eq!(result.changed_paths.len(), 5);
@@ -2712,6 +3417,7 @@ mod tests {
                 index: json!({"version": 1}),
                 status: json!({"status": "ready"}),
                 source_snapshot: None,
+                change_set: None,
             })
             .expect("initial bundle");
         // A directory at the target path makes replacement fail after the
@@ -2725,12 +3431,220 @@ mod tests {
             index: json!({"version": 2}),
             status: json!({"status": "rebuilding"}),
             source_snapshot: None,
+            change_set: None,
         });
         assert!(error.is_err());
         assert_eq!(
             fs::read_to_string(directory.path().join(".storydex/wiki/knowledge_graph.json"))
                 .expect("old payload"),
             "{\n  \"version\": 1\n}\n"
+        );
+    }
+
+    #[test]
+    fn knowledge_sync_supports_cold_incremental_and_no_change_paths() {
+        let directory = tempdir().expect("knowledge project");
+        let chapters = directory.path().join("chapters");
+        fs::create_dir_all(&chapters).expect("chapters");
+        fs::write(chapters.join("001.md"), "# 第一章\n林澈抵达雾港。\n").expect("chapter");
+
+        let knowledge = StorydexKnowledge::new(directory.path()).expect("knowledge service");
+        let cold = knowledge.sync(false).expect("cold sync");
+        assert_eq!(cold["knowledgeRevision"], 1);
+        assert_eq!(cold["status"], "ready");
+        assert_eq!(cold["noChanges"], false);
+        assert!(
+            cold["changedSourcePaths"]
+                .as_array()
+                .is_some_and(|paths| paths.iter().any(|path| path == "chapters/001.md"))
+        );
+        assert!(
+            cold["changeSet"]["addedSourcePaths"]
+                .as_array()
+                .is_some_and(|paths| paths.iter().any(|path| path == "chapters/001.md"))
+        );
+
+        let wiki_root = directory.path().join(".storydex/wiki");
+        let projection_files = [
+            "knowledge_graph.json",
+            "index.json",
+            "WIKI.md",
+            "projection_status.json",
+            "source_snapshot.json",
+            "change_set.json",
+        ];
+        let before_noop = projection_files
+            .iter()
+            .map(|name| {
+                let path = wiki_root.join(name);
+                (
+                    name.to_string(),
+                    fs::read(&path).expect("projection bytes"),
+                    fs::metadata(&path)
+                        .expect("projection metadata")
+                        .modified()
+                        .expect("projection modified time"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let no_change = knowledge.sync(false).expect("no-op sync");
+        assert_eq!(no_change["knowledgeRevision"], 1);
+        assert_eq!(no_change["noChanges"], true);
+        assert_eq!(no_change["changedSourcePaths"], json!([]));
+        for (name, bytes, modified) in before_noop {
+            let path = wiki_root.join(name);
+            assert_eq!(fs::read(&path).expect("no-op bytes"), bytes);
+            assert_eq!(
+                fs::metadata(path)
+                    .expect("no-op metadata")
+                    .modified()
+                    .expect("no-op modified time"),
+                modified
+            );
+        }
+
+        fs::write(chapters.join("001.md"), "# 第一章\n林澈离开雾港。\n").expect("chapter edit");
+        let incremental = knowledge.sync(false).expect("incremental sync");
+        assert_eq!(incremental["knowledgeRevision"], 2);
+        assert_eq!(
+            incremental["changeSet"]["modifiedSourcePaths"],
+            json!(["chapters/001.md"])
+        );
+        assert_eq!(incremental["event"]["type"], "KnowledgeProjectionUpdated");
+        let first_change_set_id = incremental["changeSet"]["changeSetId"]
+            .as_str()
+            .expect("first change set id")
+            .to_owned();
+
+        fs::write(chapters.join("001.md"), "# 第一章\n林澈返回雾港。\n")
+            .expect("second chapter edit");
+        let second_incremental = knowledge.sync(false).expect("second incremental sync");
+        assert_eq!(second_incremental["knowledgeRevision"], 3);
+        assert_ne!(
+            second_incremental["changeSet"]["changeSetId"],
+            first_change_set_id
+        );
+        assert_eq!(
+            second_incremental["event"]["changeSetId"],
+            second_incremental["changeSet"]["changeSetId"]
+        );
+
+        for name in ["knowledge_graph.json", "index.json", "WIKI.md"] {
+            let path = wiki_root.join(name);
+            if path.exists() {
+                fs::remove_file(path).expect("remove projection file");
+            }
+        }
+        let rebuilt = knowledge
+            .sync(false)
+            .expect("cold rebuild after cache loss");
+        assert_eq!(rebuilt["knowledgeRevision"], 3);
+        assert_eq!(
+            rebuilt["graphChecksum"],
+            second_incremental["graphChecksum"]
+        );
+    }
+
+    #[test]
+    fn knowledge_sync_failure_keeps_last_good_graph_and_records_error_status() {
+        let directory = tempdir().expect("knowledge failure project");
+        let chapters = directory.path().join("chapters");
+        fs::create_dir_all(&chapters).expect("chapters");
+        fs::write(chapters.join("001.md"), "# 第一章\n正文。\n").expect("chapter");
+        let knowledge = StorydexKnowledge::new(directory.path()).expect("knowledge service");
+        let baseline = knowledge.sync(false).expect("baseline");
+        let blocked = directory.path().join(".storydex/wiki/WIKI.md");
+        fs::remove_file(&blocked).expect("remove markdown");
+        fs::create_dir(&blocked).expect("block markdown");
+        fs::write(chapters.join("001.md"), "# 第一章\n故障注入。\n").expect("edit chapter");
+
+        let error = knowledge.sync(false).expect_err("write must fail");
+        assert!(
+            error.to_string().contains("last-good") || error.to_string().contains("projection")
+        );
+        let status = ProjectionBundleWriter::new(directory.path())
+            .expect("writer")
+            .read_status()
+            .expect("status read")
+            .expect("status exists");
+        assert_eq!(status["status"], "error");
+        assert_eq!(
+            status["lastSuccessfulRevision"],
+            baseline["knowledgeRevision"]
+        );
+        assert!(
+            directory
+                .path()
+                .join(".storydex/wiki/knowledge_graph.json")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn knowledge_source_snapshot_keeps_stable_source_fields_and_exclusions() {
+        let directory = tempdir().expect("knowledge compatibility project");
+        fs::write(directory.path().join("README.md"), "framework notes\n").expect("readme");
+        fs::create_dir_all(directory.path().join("chapters")).expect("chapters");
+        fs::write(
+            directory.path().join("chapters/001.md"),
+            "# 第一章\n正文。\n",
+        )
+        .expect("chapter");
+        fs::create_dir_all(directory.path().join(".storydex/characters")).expect("characters");
+        fs::write(
+            directory.path().join(".storydex/characters/林澈.md"),
+            "# 林澈\n角色档案。\n",
+        )
+        .expect("character");
+        fs::create_dir_all(directory.path().join(".storydex/scripts")).expect("scripts");
+        fs::write(
+            directory.path().join(".storydex/scripts/大纲.md"),
+            "# 大纲\n规划剧情。\n",
+        )
+        .expect("script");
+        fs::create_dir_all(directory.path().join(".storydex/config")).expect("config");
+        fs::write(
+            directory.path().join(".storydex/config/runtime.json"),
+            "{\"ignored\":true}\n",
+        )
+        .expect("config");
+        fs::create_dir_all(directory.path().join(".storydex/worldbook")).expect("worldbook");
+        fs::write(
+            directory.path().join(".storydex/worldbook/港口.json"),
+            "{\n  \"name\": \"雾港\",\n  \"tags\": [\"setting\"]\n}\n",
+        )
+        .expect("worldbook JSON");
+
+        StorydexKnowledge::new(directory.path())
+            .expect("knowledge")
+            .sync(false)
+            .expect("sync");
+        let snapshot =
+            read_json_if_present(&directory.path().join(".storydex/wiki/source_snapshot.json"))
+                .expect("snapshot read")
+                .expect("snapshot exists");
+        let sources = snapshot["sources"].as_object().expect("source map");
+        assert_eq!(sources.len(), 4);
+        assert_eq!(sources["chapters/001.md"]["kind"], "chapter");
+        assert_eq!(sources[".storydex/characters/林澈.md"]["kind"], "character");
+        assert_eq!(sources[".storydex/scripts/大纲.md"]["kind"], "planned");
+        assert_eq!(sources[".storydex/worldbook/港口.json"]["kind"], "world");
+        assert_eq!(
+            sources[".storydex/worldbook/港口.json"]["text"],
+            "{\n  \"name\": \"雾港\",\n  \"tags\": [\n    \"setting\"\n  ]\n}"
+        );
+        assert_eq!(sources["chapters/001.md"]["title"], "001");
+        assert_eq!(sources["chapters/001.md"]["text"], "# 第一章\n正文。\n");
+        assert!(
+            sources["chapters/001.md"]["sha256"]
+                .as_str()
+                .is_some_and(|value| value.len() == 64 && !value.starts_with("sha256:"))
+        );
+        assert!(sources["chapters/001.md"]["size"].as_u64().is_some());
+        assert!(
+            sources["chapters/001.md"]["mtime"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
         );
     }
 
