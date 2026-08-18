@@ -43,6 +43,7 @@ pub(crate) mod chat;
 mod execution;
 mod followup;
 mod length_tier_calibration;
+mod project;
 mod replacement;
 mod story_generation;
 
@@ -575,6 +576,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/sys/version", get(version))
         .route("/api/v1/sys/shutdown", post(shutdown))
         .route("/api/v1/agent/coomi/status", get(coomi_status))
+        .route("/api/v1/workspace/git/summary", get(project::git_summary))
+        .route("/api/v1/workspace/git/init", post(project::git_init))
+        .route("/api/v1/workspace/git/commit", post(project::git_commit))
+        .route("/api/v1/workspace/git/restore", post(project::git_restore))
+        .route("/api/v1/story/wiki", get(project::wiki_read))
+        .route("/api/v1/story/wiki/projection", post(project::wiki_write))
         .route(
             "/api/v1/agent/followups",
             get(chat::list_followups).post(chat::enqueue_followup),
@@ -658,6 +665,16 @@ mod tests {
 
     fn protected_json_request(uri: &str, payload: Value) -> Request<Body> {
         protected_json_request_with_method("POST", uri, payload)
+    }
+
+    fn encode_query_value(value: &Path) -> String {
+        value
+            .to_string_lossy()
+            .replace('%', "%25")
+            .replace(':', "%3A")
+            .replace('\\', "%5C")
+            .replace('/', "%2F")
+            .replace(' ', "%20")
     }
 
     fn followup_test_state(root: &Path) -> (AppState, PathBuf) {
@@ -1045,6 +1062,133 @@ mod tests {
             ))
             .await
             .expect("outside workspace response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response_json(response).await["error"]["code"],
+            "workspace_outside_refactor_root"
+        );
+    }
+
+    #[tokio::test]
+    async fn rust_project_routes_write_projection_and_finish_local_git() {
+        let root = tempdir().expect("root");
+        let (state, workspace) = followup_test_state(root.path());
+        let encoded = encode_query_value(&workspace);
+
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/workspace/git/init?workspaceRoot={encoded}"
+                    ))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .expect("git init request"),
+            )
+            .await
+            .expect("git init response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await["data"]["initialized"], true);
+
+        let projection = json!({
+            "workspaceRoot": workspace.to_string_lossy(),
+            "payload": {
+                "schemaVersion": 3,
+                "entries": [{"id": "character:lin", "title": "林澈"}],
+                "graph": {"nodes": [{"id": "character:lin", "label": "林澈"}], "edges": []}
+            },
+            "markdown": "# WIKI\n\n- 林澈\n",
+            "index": {"schemaVersion": 3, "entries": [{"id": "character:lin"}]},
+            "status": {"schemaVersion": 3, "status": "ready", "knowledgeRevision": 1},
+            "sourceSnapshot": {"sources": []}
+        });
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/story/wiki/projection",
+                projection,
+            ))
+            .await
+            .expect("projection response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["data"]["event"], "KnowledgeProjectionUpdated");
+        assert_eq!(
+            body["data"]["changedPaths"].as_array().map(Vec::len),
+            Some(5)
+        );
+        assert!(
+            body["data"]["graphChecksum"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("sha256:"))
+        );
+
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/story/wiki?workspaceRoot={encoded}"))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .expect("wiki read request"),
+            )
+            .await
+            .expect("wiki read response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await["data"]["wiki"]["entries"][0]["title"],
+            "林澈"
+        );
+
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/workspace/git/commit",
+                json!({
+                    "workspaceRoot": workspace.to_string_lossy(),
+                    "message": "故事：提交 Rust WIKI 投影"
+                }),
+            ))
+            .await
+            .expect("git commit response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["data"]["created"], true);
+        assert_eq!(body["data"]["event"], "GitAutoCommit");
+        assert_eq!(body["data"]["summary"]["clean"], true);
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/workspace/git/summary?workspaceRoot={encoded}"
+                    ))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .expect("git summary request"),
+            )
+            .await
+            .expect("git summary response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await["data"]["clean"], true);
+    }
+
+    #[tokio::test]
+    async fn rust_project_routes_reject_workspace_outside_fixture_boundary() {
+        let root = tempdir().expect("root");
+        let outside = tempdir().expect("outside");
+        let (state, _) = followup_test_state(root.path());
+        let encoded = encode_query_value(outside.path());
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/workspace/git/summary?workspaceRoot={encoded}"
+                    ))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .expect("outside request"),
+            )
+            .await
+            .expect("outside response");
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert_eq!(
             response_json(response).await["error"]["code"],
