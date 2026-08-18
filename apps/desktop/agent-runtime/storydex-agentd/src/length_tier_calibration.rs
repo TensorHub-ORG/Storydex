@@ -45,11 +45,17 @@ pub(crate) struct CalibrationSampleInput<'a> {
     pub(crate) trace_id: &'a str,
 }
 
-pub(crate) fn read_short_summary(
+/// Read the preferred band for one supported story length tier.
+pub(crate) fn read_tier_summary(
     workspace: &Path,
     provider: &str,
     model: &str,
+    tier: &str,
 ) -> Result<ShortCalibrationSummary> {
+    ensure!(
+        TIERS.contains(&tier),
+        "unsupported story length tier {tier}"
+    );
     let root = workspace
         .canonicalize()
         .context("story calibration workspace is unavailable")?;
@@ -60,11 +66,13 @@ pub(crate) fn read_short_summary(
     let band = observation
         .get("bands")
         .and_then(Value::as_object)
-        .and_then(|bands| bands.get("short"))
+        .and_then(|bands| bands.get(tier))
         .and_then(Value::as_array)
-        .context("short calibration observation has no band")?;
-    let mut preferred_minimum = band.first().and_then(Value::as_u64).unwrap_or(1_000) as usize;
-    let mut preferred_maximum = band.get(1).and_then(Value::as_u64).unwrap_or(3_000) as usize;
+        .with_context(|| format!("{tier} calibration observation has no band"))?;
+    let defaults = fixed_band(tier);
+    let mut preferred_minimum =
+        band.first().and_then(Value::as_u64).unwrap_or(defaults[0]) as usize;
+    let mut preferred_maximum = band.get(1).and_then(Value::as_u64).unwrap_or(defaults[1]) as usize;
     preferred_minimum = preferred_minimum.max(1);
     preferred_maximum = preferred_maximum.max(1);
     if preferred_minimum > preferred_maximum {
@@ -81,10 +89,16 @@ pub(crate) fn read_short_summary(
     })
 }
 
-pub(crate) fn record_short_sample(
+/// Record one candidate sample in the v2 calibration payload for `tier`.
+pub(crate) fn record_tier_sample(
     workspace: &Path,
+    tier: &str,
     input: CalibrationSampleInput<'_>,
 ) -> Result<bool> {
+    ensure!(
+        TIERS.contains(&tier),
+        "unsupported story length tier {tier}"
+    );
     if !input.structure_passed || input.actual_word_count == 0 {
         return Ok(false);
     }
@@ -103,7 +117,7 @@ pub(crate) fn record_short_sample(
             .is_some_and(|samples| {
                 samples.iter().any(|sample| {
                     sample.get("traceId").and_then(Value::as_str) == Some(trace_id)
-                        && sample.get("tier").and_then(Value::as_str) == Some("short")
+                        && sample.get("tier").and_then(Value::as_str) == Some(tier)
                         && sample.get("promptVersion").and_then(Value::as_str)
                             == Some(identity.prompt_version.as_str())
                 })
@@ -119,7 +133,7 @@ pub(crate) fn record_short_sample(
         "traceId": trace_id,
         "provider": identity.provider,
         "model": identity.model,
-        "tier": "short",
+        "tier": tier,
         "promptVersion": identity.prompt_version,
         "wordCountScope": WORD_COUNT_SCOPE,
         "actualWordCount": input.actual_word_count,
@@ -675,8 +689,13 @@ mod tests {
     #[test]
     fn records_candidate_sample_and_rejects_duplicate_trace() {
         let directory = tempdir().expect("tempdir");
-        assert!(record_short_sample(directory.path(), input("trace-1", 1519)).expect("record"));
-        assert!(!record_short_sample(directory.path(), input("trace-1", 1519)).expect("duplicate"));
+        assert!(
+            record_tier_sample(directory.path(), "short", input("trace-1", 1519)).expect("record")
+        );
+        assert!(
+            !record_tier_sample(directory.path(), "short", input("trace-1", 1519))
+                .expect("duplicate")
+        );
         let payload = read_payload(&calibration_path(directory.path())).expect("payload");
         assert_eq!(payload["_version"], 2);
         assert_eq!(payload["samples"].as_array().map(Vec::len), Some(1));
@@ -685,11 +704,37 @@ mod tests {
         assert_eq!(payload["observations"][0]["status"], "cold_start");
         assert_eq!(payload["observations"][0]["sampleCounts"]["short"], 1);
 
-        let summary =
-            read_short_summary(directory.path(), "OPENCODE", "deepseek-v4-flash").expect("summary");
+        let summary = read_tier_summary(directory.path(), "OPENCODE", "deepseek-v4-flash", "short")
+            .expect("summary");
         assert_eq!(summary.status, "cold_start");
         assert_eq!(summary.preferred_minimum, 1_000);
         assert_eq!(summary.preferred_maximum, 3_000);
+    }
+
+    #[test]
+    fn records_and_reads_medium_and_long_samples_without_cross_tier_deduplication() {
+        let directory = tempdir().expect("tempdir");
+        assert!(
+            record_tier_sample(directory.path(), "medium", input("same-trace", 2_800))
+                .expect("medium record")
+        );
+        assert!(
+            !record_tier_sample(directory.path(), "medium", input("same-trace", 2_800))
+                .expect("medium duplicate")
+        );
+        assert!(
+            record_tier_sample(directory.path(), "long", input("same-trace", 4_400))
+                .expect("long record")
+        );
+
+        let medium = read_tier_summary(directory.path(), "OPENCODE", "deepseek-v4-flash", "medium")
+            .expect("medium summary");
+        let long = read_tier_summary(directory.path(), "OPENCODE", "deepseek-v4-flash", "long")
+            .expect("long summary");
+        assert_eq!(medium.preferred_minimum, 2_200);
+        assert_eq!(medium.preferred_maximum, 5_000);
+        assert_eq!(long.preferred_minimum, 3_000);
+        assert_eq!(long.preferred_maximum, 6_000);
     }
 
     #[test]
@@ -699,8 +744,8 @@ mod tests {
         fs::create_dir_all(path.parent().expect("parent")).expect("calibration parent");
         fs::write(&path, b"{not-json").expect("corrupt calibration");
 
-        assert!(read_short_summary(directory.path(), "OPENCODE", "model").is_err());
-        assert!(record_short_sample(directory.path(), input("trace-1", 1_519)).is_err());
+        assert!(read_tier_summary(directory.path(), "OPENCODE", "model", "short").is_err());
+        assert!(record_tier_sample(directory.path(), "short", input("trace-1", 1_519)).is_err());
         assert_eq!(
             fs::read(&path).expect("preserved calibration"),
             b"{not-json"

@@ -1308,12 +1308,11 @@ async fn run_chat(execution: ChatExecution) {
         .expect("validated storyGeneration request");
     let story_create_new = story_options.as_ref().is_some_and(|options| {
         options.fragment_count == 1
-            && options.chapter_length_tier == "short"
             && (payload.active_file.trim().is_empty()
                 || !workspace.join(&payload.active_file).is_file())
     });
     if story_create_new {
-        let outcome = match crate::story_generation::run_create_new_short(
+        let outcome = match crate::story_generation::run_create_new(
             &state,
             &payload,
             story_options.as_ref().expect("story generation options"),
@@ -1522,7 +1521,6 @@ fn build_turn_contract(payload: &ChatStreamRequest, workspace: &Path) -> anyhow:
     let chapter_word_count_target = story_chapter_word_count_target(workspace);
     let active_file_exists = workspace.join(&payload.active_file).is_file();
     let story_create_new = story_generation.fragment_count == 1
-        && story_generation.chapter_length_tier == "short"
         && (payload.active_file.trim().is_empty() || !active_file_exists);
     let (target_chapter_number, authoritative_chapter_path, authoritative_fragment_path) =
         if story_create_new {
@@ -1725,7 +1723,7 @@ fn build_turn_contract(payload: &ChatStreamRequest, workspace: &Path) -> anyhow:
         }
         turn_plan.insert(
             "chapterLengthTier".into(),
-            Value::String("short".to_owned()),
+            Value::String(story_generation.chapter_length_tier.clone()),
         );
         turn_plan.insert(
             "wordCountPolicy".into(),
@@ -1733,7 +1731,7 @@ fn build_turn_contract(payload: &ChatStreamRequest, workspace: &Path) -> anyhow:
                 "version": 5,
                 "mode": "tier",
                 "scope": "candidate",
-                "tier": "short",
+                "tier": story_generation.chapter_length_tier,
             }),
         );
     }
@@ -2808,5 +2806,34 @@ mod tests {
         ] {
             assert!(contract["turnPlan"].get(legacy_key).is_none());
         }
+    }
+
+    #[test]
+    fn create_new_medium_turn_contract_keeps_medium_tier_for_rust_slice() {
+        let directory = tempdir().expect("tempdir");
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("chapters")).expect("chapters");
+        let workspace = workspace.canonicalize().expect("canonical workspace");
+        let payload: ChatStreamRequest = serde_json::from_value(json!({
+            "prompt": "create a medium chapter",
+            "activeFile": "",
+            "reasoningEffort": "low",
+            "storyGeneration": {
+                "fragmentCount": 1,
+                "chapterLengthTier": "medium",
+                "chapterTemplateId": "default_chapter_directory"
+            },
+            "capabilityMode": "scoped_write",
+            "writesAllowed": true,
+            "coreWritesAllowed": true,
+            "allowedWriteRoots": ["chapters/"]
+        }))
+        .expect("request");
+
+        let contract = build_turn_contract(&payload, &workspace).expect("turn contract");
+        assert_eq!(contract["intentFrame"]["operationType"], "create_new");
+        assert_eq!(contract["turnPlan"]["chapterLengthTier"], "medium");
+        assert_eq!(contract["turnPlan"]["wordCountPolicy"]["mode"], "tier");
+        assert_eq!(contract["storyGeneration"]["chapterLengthTier"], "medium");
     }
 }
