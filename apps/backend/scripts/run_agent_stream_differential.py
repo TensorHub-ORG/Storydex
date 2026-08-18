@@ -220,6 +220,15 @@ def _phase_sequence(observation: Mapping[str, Any]) -> list[str]:
     return [name for _, name in sorted(indexed)]
 
 
+def _filtered_event_sequence(
+    observation: Mapping[str, Any], expected_sequence: list[str]
+) -> list[str]:
+    names = observation.get("eventNames")
+    names = names if isinstance(names, list) else []
+    selected = set(expected_sequence)
+    return [str(name) for name in names if str(name) in selected]
+
+
 def _project_expected_shape(actual: Any, expected: Any) -> Any:
     if isinstance(expected, Mapping):
         actual_mapping = actual if isinstance(actual, Mapping) else {}
@@ -297,6 +306,74 @@ def compare_reports(
     rust_names = {str(name) for name in rust_observation.get("eventNames") or []}
     expected = fixture.get("expected")
     expected = expected if isinstance(expected, Mapping) else {}
+    expected_http_status = expected.get("httpStatus")
+    if expected_http_status is not None:
+        python_http_status = python_observation.get("httpStatus")
+        rust_http_status = rust_observation.get("httpStatus")
+        compared["expectedHttpStatus"] = {
+            "expected": expected_http_status,
+            "pythonStable": python_http_status,
+            "rustRefactor": rust_http_status,
+        }
+        if (
+            python_http_status != expected_http_status
+            or rust_http_status != expected_http_status
+        ):
+            differences.append(
+                {
+                    "field": "httpStatus",
+                    "expected": expected_http_status,
+                    "pythonStable": python_http_status,
+                    "rustRefactor": rust_http_status,
+                }
+            )
+    required_event_sequence = [
+        str(value) for value in expected.get("requiredEventSequence") or []
+    ]
+    if required_event_sequence:
+        python_sequence = _filtered_event_sequence(
+            python_observation, required_event_sequence
+        )
+        rust_sequence = _filtered_event_sequence(
+            rust_observation, required_event_sequence
+        )
+        compared["requiredEventSequence"] = {
+            "expected": required_event_sequence,
+            "pythonStable": python_sequence,
+            "rustRefactor": rust_sequence,
+        }
+        if (
+            python_sequence != required_event_sequence
+            or rust_sequence != required_event_sequence
+        ):
+            differences.append(
+                {
+                    "field": "requiredEventSequence",
+                    "expected": required_event_sequence,
+                    "pythonStable": python_sequence,
+                    "rustRefactor": rust_sequence,
+                }
+            )
+    forbidden_events = {
+        str(value) for value in expected.get("forbiddenEvents") or []
+    }
+    if forbidden_events:
+        python_forbidden = sorted(python_names.intersection(forbidden_events))
+        rust_forbidden = sorted(rust_names.intersection(forbidden_events))
+        compared["forbiddenEvents"] = {
+            "expected": sorted(forbidden_events),
+            "pythonStable": python_forbidden,
+            "rustRefactor": rust_forbidden,
+        }
+        if python_forbidden or rust_forbidden:
+            differences.append(
+                {
+                    "field": "forbiddenEvents",
+                    "expected": sorted(forbidden_events),
+                    "pythonStable": python_forbidden,
+                    "rustRefactor": rust_forbidden,
+                }
+            )
     expected_turn_contract = expected.get("turnContract")
     if isinstance(expected_turn_contract, Mapping):
         python_turn_contract = _project_expected_shape(

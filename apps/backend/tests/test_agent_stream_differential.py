@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import copy
+import json
 import subprocess
+from pathlib import Path
 
 from scripts.run_agent_stream_replay_contract import (
     _prepare_contract_workspace,
@@ -9,6 +11,10 @@ from scripts.run_agent_stream_replay_contract import (
     _workspace_effect_snapshot,
 )
 from scripts.run_agent_stream_differential import compare_reports
+from services.story_word_count_service import count_story_text_words
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _report(
@@ -314,6 +320,176 @@ def test_compare_reports_requires_matching_story_event_facts() -> None:
         difference["field"] == "storyEvents"
         for difference in parity["differences"]
     )
+
+
+def test_compare_reports_enforces_required_and_forbidden_event_contracts() -> None:
+    expected_sequence = [
+        "StoryProviderAttempt",
+        "StoryCommitStarted",
+        "StoryCommitFinished",
+        "StoryDraftMeasured",
+        "StoryGenerationValidation",
+        "StoryCallAccounting",
+    ]
+    python = _report(tools=[])
+    rust = _report(tools=[])
+    for report in (python, rust):
+        names = report["observation"]["eventNames"]
+        names[-2:-2] = expected_sequence
+        report["observation"]["eventCount"] = len(names)
+    fixture = {
+        "expected": {
+            "httpStatus": 200,
+            "requiredEventSequence": expected_sequence,
+            "forbiddenEvents": ["StoryGenerationFailed"],
+        }
+    }
+
+    assert compare_reports(python, rust, fixture)["status"] == "passed"
+
+    rust["observation"]["eventNames"].remove("StoryCommitFinished")
+    rust["observation"]["eventNames"].insert(-2, "StoryCommitFinished")
+    parity = compare_reports(python, rust, fixture)
+    assert parity["status"] == "failed"
+    assert any(
+        difference["field"] == "requiredEventSequence"
+        for difference in parity["differences"]
+    )
+
+    rust["observation"]["eventNames"] = list(
+        python["observation"]["eventNames"]
+    )
+    rust["observation"]["eventNames"].insert(-2, "StoryGenerationFailed")
+    parity = compare_reports(python, rust, fixture)
+    assert parity["status"] == "failed"
+    assert any(
+        difference["field"] == "forbiddenEvents"
+        for difference in parity["differences"]
+    )
+
+
+def test_compare_reports_enforces_fixture_http_status() -> None:
+    python = _report()
+    rust = _report()
+
+    parity = compare_reports(
+        python,
+        rust,
+        {"expected": {"httpStatus": 201}},
+    )
+
+    assert parity["status"] == "failed"
+    assert any(
+        difference["field"] == "httpStatus"
+        for difference in parity["differences"]
+    )
+
+
+def test_create_new_tier_fixtures_are_registered_and_freeze_disk_event_calibration() -> None:
+    contract = json.loads(
+        (
+            REPOSITORY_ROOT
+            / "apps/backend/contracts/agent-chat-stream-v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    manifest = json.loads(
+        (
+            REPOSITORY_ROOT
+            / "apps/backend/contracts/agent-runtime-manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+    stream_contract = next(
+        item
+        for item in manifest["contracts"]
+        if item["id"] == "agent.chat.stream.v1"
+    )
+    expected = {
+        "short": {
+            "count": 1519,
+            "tokens": 980,
+            "preferred": (1000, 3000),
+            "hard": 700,
+            "ceiling": 4000,
+            "size": 4603,
+            "sha256": "8b136a984e034b1919d681c6b9b14653e8821fe0a7d2983d6ed224ed147409ae",
+            "sampleCounts": {"short": 1, "medium": 0, "long": 0},
+        },
+        "medium": {
+            "count": 2202,
+            "tokens": 1420,
+            "preferred": (2200, 5000),
+            "hard": 1800,
+            "ceiling": 7200,
+            "size": 6680,
+            "sha256": "027f907cf66b7dea870d779a4c077d48588c53dc369beb6286a469669a19f65f",
+            "sampleCounts": {"short": 0, "medium": 1, "long": 0},
+        },
+        "long": {
+            "count": 3181,
+            "tokens": 2050,
+            "preferred": (3000, 6000),
+            "hard": 2500,
+            "ceiling": 9000,
+            "size": 9645,
+            "sha256": "bc1e7417a7ca01e6106d085ef689c9673f166c925a68b39e63ba5d58a9205e7d",
+            "sampleCounts": {"short": 0, "medium": 0, "long": 1},
+        },
+    }
+    required_sequence = [
+        "StoryProviderAttempt",
+        "StoryCommitStarted",
+        "StoryCommitFinished",
+        "StoryDraftMeasured",
+        "StoryGenerationValidation",
+        "StoryCallAccounting",
+    ]
+
+    for tier, facts in expected.items():
+        relative = (
+            "apps/backend/contracts/fixtures/"
+            f"agent-chat-stream-story-create-new-{tier}-v1"
+        )
+        assert relative in contract["replay"]["fixtures"]
+        assert relative in stream_contract["replayFixtures"]
+        fixture_root = REPOSITORY_ROOT / relative
+        scenario = json.loads(
+            (fixture_root / "scenario.json").read_text(encoding="utf-8")
+        )
+        replay = json.loads(
+            (fixture_root / "provider-replay.json").read_text(encoding="utf-8")
+        )
+        expected_contract = scenario["expected"]
+        draft = expected_contract["storyEvents"]["StoryDraftMeasured"][0]
+        validation = expected_contract["storyEvents"][
+            "StoryGenerationValidation"
+        ][0]
+        accounting = expected_contract["storyEvents"]["StoryCallAccounting"][0]
+        chapter = expected_contract["workspaceEffects"]["files"][
+            "chapters/第1章 未命名/001.md"
+        ]
+        calibration = expected_contract["workspaceEffects"][
+            "sharedDerivedFiles"
+        ][".storydex/memory/length_tier_calibration.json"]["jsonFacts"]
+        response = replay["steps"][0]["response"]
+
+        assert scenario["request"]["storyGeneration"]["chapterLengthTier"] == tier
+        assert expected_contract["requiredEventSequence"] == required_sequence
+        assert count_story_text_words(response["content"]) == facts["count"]
+        assert draft["actualWordCount"] == facts["count"]
+        assert draft["completionTokens"] == facts["tokens"]
+        assert response["usage"]["output_tokens"] == facts["tokens"]
+        assert validation["hardMinimum"] == facts["hard"]
+        assert validation["runtimeSafetyMaximum"] == facts["ceiling"]
+        assert accounting["chapterLengthTier"] == tier
+        assert accounting["logicalStoryCalls"] == 1
+        assert accounting["providerAttempts"] == 1
+        assert accounting["transportRetries"] == 0
+        assert chapter["size"] == facts["size"]
+        assert chapter["sha256"] == facts["sha256"]
+        observation = calibration["observations"][0]
+        assert observation["sampleCounts"] == facts["sampleCounts"]
+        assert observation["medians"][tier] == facts["count"]
+        assert observation["bands"][tier] == list(facts["preferred"])
 
 
 def test_compare_reports_requires_matching_replacement_persistence() -> None:

@@ -398,6 +398,77 @@ def test_chat_stream_contract_rejects_turn_contract_semantic_drift() -> None:
         )
 
 
+def test_chat_stream_contract_enforces_required_and_forbidden_events() -> None:
+    events = _valid_chat_stream_events()
+    story_events = [
+        _event("StoryProviderAttempt"),
+        _event("StoryCommitStarted"),
+        _event("StoryCommitFinished"),
+        _event("StoryDraftMeasured"),
+        _event("StoryGenerationValidation"),
+        _event("StoryCallAccounting"),
+    ]
+    text_index = next(
+        index for index, (name, _) in enumerate(events) if name == "TextChunk"
+    )
+    events[text_index:text_index] = story_events
+    expected_sequence = [name for name, _ in story_events]
+    fixture = {
+        "expected": {
+            "terminalEvent": "AgentCompleted",
+            "toolSequence": ["read_file"],
+            "replyContains": ["STORYDEX_AGENT_STREAM_CONTRACT_FILE_91C7"],
+            "requiredEventSequence": expected_sequence,
+            "forbiddenEvents": ["StoryGenerationFailed"],
+        }
+    }
+    headers = {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        "x-accel-buffering": "no",
+    }
+
+    observed = validate_chat_stream_events(
+        events,
+        status_code=200,
+        headers=headers,
+        trace_id="trace-contract",
+        session_id="session-contract",
+        fixture=fixture,
+    )
+    assert observed["eventNames"].count("StoryCommitStarted") == 1
+
+    reordered = list(events)
+    started = next(
+        index for index, (name, _) in enumerate(reordered) if name == "StoryCommitStarted"
+    )
+    finished = next(
+        index for index, (name, _) in enumerate(reordered) if name == "StoryCommitFinished"
+    )
+    reordered[started], reordered[finished] = reordered[finished], reordered[started]
+    with pytest.raises(AgentStreamContractError, match="required event sequence"):
+        validate_chat_stream_events(
+            reordered,
+            status_code=200,
+            headers=headers,
+            trace_id="trace-contract",
+            session_id="session-contract",
+            fixture=fixture,
+        )
+
+    forbidden = list(events)
+    forbidden.insert(-2, _event("StoryGenerationFailed"))
+    with pytest.raises(AgentStreamContractError, match="forbidden event"):
+        validate_chat_stream_events(
+            forbidden,
+            status_code=200,
+            headers=headers,
+            trace_id="trace-contract",
+            session_id="session-contract",
+            fixture=fixture,
+        )
+
+
 def test_chat_stream_contract_allows_explicit_mutating_fixture() -> None:
     events = _valid_chat_stream_events()
     for index, (name, payload) in enumerate(events):

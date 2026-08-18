@@ -1,15 +1,15 @@
 {
   "schemaVersion": 1,
   "contractId": "agent.chat.stream.v1",
-  "scenario": "story-create-new-short-replay",
+  "scenario": "story-create-new-long-replay",
   "allowMutatingTools": true,
   "request": {
-    "prompt": "请生成故事的下一章，只写正文并推进林澈在雨夜车站发现失踪信使留下证据的情节。请求标记 STORYDEX_CREATE_NEW_SHORT_PROMPT_6F2A。",
+    "prompt": "请生成故事的下一章，只写正文并推进林澈在雨夜车站发现失踪信使留下证据的情节。请求标记 STORYDEX_CREATE_NEW_LONG_PROMPT_1D7E。",
     "activeFile": "",
     "reasoningEffort": "low",
     "storyGeneration": {
       "fragmentCount": 1,
-      "chapterLengthTier": "short",
+      "chapterLengthTier": "long",
       "chapterTemplateId": "default_chapter_directory"
     },
     "confirmNoSnapshot": true,
@@ -41,8 +41,8 @@
     "toolSequence": [],
     "replyContains": [
       "章节已写入 chapters/第1章 未命名",
-      "本次续写 1519 字",
-      "短档已命中"
+      "本次续写 3181 字",
+      "长档已命中"
     ],
     "terminalEvent": "AgentCompleted",
     "httpStatus": 200,
@@ -103,7 +103,7 @@
       "turnPlan": {
         "operationType": "create_new",
         "fragmentCount": 1,
-        "chapterLengthTier": "short",
+        "chapterLengthTier": "long",
         "selectedChapterTemplate": "default_chapter_directory",
         "chapterAction": "create_next_chapter",
         "targetChapterNumber": 1,
@@ -117,7 +117,7 @@
           "version": 5,
           "mode": "tier",
           "scope": "candidate",
-          "tier": "short"
+          "tier": "long"
         }
       },
       "contextAssembly": {
@@ -178,15 +178,15 @@
       "StoryCommitFinished": [{}],
       "StoryDraftMeasured": [
         {
-          "initialWordCount": 1519,
+          "initialWordCount": 3181,
           "retainedWordCount": 0,
-          "generatedWordCount": 1519,
-          "completionTokens": 980,
+          "generatedWordCount": 3181,
+          "completionTokens": 2050,
           "capApplied": false,
           "wordCountScope": "candidate",
-          "actualWordCount": 1519,
-          "resultingWordCount": 1519,
-          "chapterLengthTier": "short",
+          "actualWordCount": 3181,
+          "resultingWordCount": 3181,
+          "chapterLengthTier": "long",
           "tierHit": true,
           "tierDeviation": "in_preferred",
           "machineQualityPassed": true,
@@ -201,32 +201,32 @@
           "algorithm": "storydex_visible_characters_v1",
           "countingRule": "count every non-whitespace Unicode character in the prose itself; summary/details/thinking wrapper blocks are excluded",
           "fragmentCount": 1,
-          "actualWordCount": 1519,
-          "generatedWordCount": 1519,
+          "actualWordCount": 3181,
+          "generatedWordCount": 3181,
           "retainedWordCount": 0,
-          "resultingWordCount": 1519,
-          "chapterLengthTier": "short",
+          "resultingWordCount": 3181,
+          "chapterLengthTier": "long",
           "tierHit": true,
           "tierDeviation": "in_preferred",
           "structurePassed": true,
           "machineQualityPassed": true,
           "wordCountScope": "candidate",
           "writeToolApplied": true,
-          "hardMinimum": 700,
+          "hardMinimum": 2500,
           "hardMinimumPassed": true,
-          "runtimeSafetyMaximum": 4000,
+          "runtimeSafetyMaximum": 9000,
           "runtimeSafetyExceeded": false,
           "providerCalls": 1,
           "contractViolations": [],
-          "initialWordCount": 1519,
-          "finalWordCount": 1519,
+          "initialWordCount": 3181,
+          "finalWordCount": 3181,
           "normalBandPassed": true,
           "precisionAchieved": null
         }
       ],
       "StoryCallAccounting": [
         {
-          "chapterLengthTier": "short",
+          "chapterLengthTier": "long",
           "preciseWordCountEnabled": false,
           "asymmetricLengthEnabled": false,
           "logicalStoryCalls": 1,
@@ -257,8 +257,8 @@
       "files": {
         "chapters/第1章 未命名/001.md": {
           "exists": true,
-          "size": 4603,
-          "sha256": "8b136a984e034b1919d681c6b9b14653e8821fe0a7d2983d6ed224ed147409ae"
+          "size": 9645,
+          "sha256": "bc1e7417a7ca01e6106d085ef689c9673f166c925a68b39e63ba5d58a9205e7d"
         }
       },
       "pythonStableDerivedPaths": [
@@ -293,16 +293,16 @@
               {
                 "provider": "OPENCODE",
                 "model": "deepseek-v4-flash",
-                "tier": "short",
+                "tier": "long",
                 "promptVersion": "story_length_tier_v1",
                 "wordCountScope": "candidate",
-                "actualWordCount": 1519,
+                "actualWordCount": 3181,
                 "tierHit": true,
                 "structurePassed": true,
                 "machineQualityPassed": true,
                 "attemptKind": "initial",
                 "logicalProseCalls": 1,
-                "completionTokens": 980,
+                "completionTokens": 2050,
                 "sampleIdPresent": true,
                 "traceIdPresent": true,
                 "timestampPresent": true,
@@ -318,8 +318,8 @@
                 "calibrationVersion": 1,
                 "status": "cold_start",
                 "reason": "insufficient_samples",
-                "sampleCounts": {"short": 1, "medium": 0, "long": 0},
-                "medians": {"short": 1519, "medium": null, "long": null},
+                "sampleCounts": {"short": 0, "medium": 0, "long": 1},
+                "medians": {"short": null, "medium": null, "long": 3181},
                 "bands": {
                   "short": [1000, 3000],
                   "medium": [2200, 5000],

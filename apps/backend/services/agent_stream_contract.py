@@ -500,6 +500,13 @@ def _first_index(names: Sequence[str], value: str) -> int | None:
         return None
 
 
+def _filtered_event_sequence(
+    names: Sequence[str], expected_sequence: Sequence[str]
+) -> list[str]:
+    selected = {str(name) for name in expected_sequence}
+    return [str(name) for name in names if str(name) in selected]
+
+
 def validate_chat_stream_events(
     events: Sequence[tuple[str, Mapping[str, Any]]],
     *,
@@ -540,6 +547,22 @@ def validate_chat_stream_events(
         else bool(allow_client_disconnect)
     )
     names = [str(name) for name, _ in events]
+    required_event_sequence = [
+        str(value) for value in expected.get("requiredEventSequence") or []
+    ]
+    if required_event_sequence:
+        actual_sequence = _filtered_event_sequence(names, required_event_sequence)
+        if actual_sequence != required_event_sequence:
+            raise AgentStreamContractError(
+                "required event sequence does not match fixture: "
+                f"expected {required_event_sequence!r}, got {actual_sequence!r}"
+            )
+    forbidden_events = {str(value) for value in expected.get("forbiddenEvents") or []}
+    emitted_forbidden = sorted(forbidden_events.intersection(names))
+    if emitted_forbidden:
+        raise AgentStreamContractError(
+            f"stream emitted forbidden event(s): {emitted_forbidden!r}"
+        )
     if names[0] != "RunAccepted":
         raise AgentStreamContractError("RunAccepted must be the first SSE event")
     done_count = names.count("done")
