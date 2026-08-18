@@ -27,6 +27,7 @@ pub(crate) struct StoryGenerationOutcome {
     pub(crate) reply: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_create_new_short(
     state: &AppState,
     payload: &ChatStreamRequest,
@@ -601,8 +602,7 @@ fn validate_candidate(content: &str, target: &Path, provider_mode: &str) -> Valu
     .filter_map(|(failed, issue)| failed.then_some(issue))
     .collect::<Vec<_>>();
     let passed = target.extension().is_some()
-        && count >= SHORT_HARD_MINIMUM
-        && count <= SHORT_RUNTIME_MAXIMUM
+        && (SHORT_HARD_MINIMUM..=SHORT_RUNTIME_MAXIMUM).contains(&count)
         && quality_issues.is_empty();
     let tier_hit = (SHORT_PREFERRED_MINIMUM..=SHORT_PREFERRED_MAXIMUM).contains(&count);
     json!({
