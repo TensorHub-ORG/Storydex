@@ -18,11 +18,17 @@ describe("Coomi streaming API contract", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     setApiAuthToken("");
+    delete window.storydexDesktop;
     apiClient.defaults.baseURL = "/api/v1";
   });
 
   it("streams fragmented packets with auth, trace and session context", async () => {
     setApiAuthToken("secret");
+    window.storydexDesktop = {
+      platform: "win32",
+      backendAuthToken: "runtime-secret",
+      versions: { electron: "", chrome: "WebView2", node: "" }
+    };
     const body = sse({ type: "RunAccepted", traceId: "t" }) + sse({ type: "TextChunk", content: "hi" }) + sse({ type: "AgentCompleted" }) + sse({ type: "done" });
     const response = streamResponse([body.slice(0, 17), body.slice(17)]);
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(response);
@@ -30,7 +36,11 @@ describe("Coomi streaming API contract", () => {
     await streamAgentPrompt({ prompt: "hello" }, (packet) => packets.push(packet), "trace-1", "session 1");
     expect(packets.map((packet) => packet.type)).toEqual(["RunAccepted", "TextChunk", "AgentCompleted"]);
     expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("sessionId=session+1"), expect.objectContaining({
-      headers: expect.objectContaining({ Authorization: "Bearer secret", "x-trace-id": "trace-1" })
+      headers: expect.objectContaining({
+        Authorization: "Bearer secret",
+        "X-Storydex-Runtime-Token": "runtime-secret",
+        "x-trace-id": "trace-1"
+      })
     }));
   });
 

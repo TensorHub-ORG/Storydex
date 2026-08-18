@@ -1,5 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { apiClient, ApiResponseError, describeTransportError, getApiAuthToken, setApiAuthToken, unwrapEnvelope } from "@/api/client";
+import {
+  apiClient,
+  ApiResponseError,
+  describeTransportError,
+  getApiAuthToken,
+  getRuntimeAuthToken,
+  setApiAuthToken,
+  unwrapEnvelope
+} from "@/api/client";
 import * as agentApi from "@/api/agent";
 import * as authApi from "@/api/auth";
 import * as helpApi from "@/api/help";
@@ -51,6 +59,13 @@ describe("API envelope and transport contracts", () => {
   it("preserves auth tokens and unwraps successful and failed envelopes", () => {
     setApiAuthToken(" token ");
     expect(getApiAuthToken()).toBe("token");
+    window.storydexDesktop = {
+      platform: "win32",
+      backendAuthToken: " runtime-token ",
+      versions: { electron: "", chrome: "WebView2", node: "" }
+    };
+    expect(getRuntimeAuthToken()).toBe("runtime-token");
+    delete window.storydexDesktop;
     expect(unwrapEnvelope({ ok: true, data: { value: 1 }, trace: null, audit: [] }, "fallback").data).toEqual({ value: 1 });
     expect(() => unwrapEnvelope({ ok: false, data: null, error: { message: "bad", code: "bad_code", details: { field: "x" } }, trace: null, audit: [] }, "fallback"))
       .toThrowError(ApiResponseError);

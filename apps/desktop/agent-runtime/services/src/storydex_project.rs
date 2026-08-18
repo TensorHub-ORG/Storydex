@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 #[cfg(unix)]
 use std::fs::File;
 use std::fs::{self, OpenOptions};
@@ -21,6 +21,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const WIKI_ROOT: &str = ".storydex/wiki";
 const INTERNAL_PATH_PREFIXES: [&str; 2] = [".storydex/.agent/", ".storydex/.cache/"];
+const DEFAULT_BRANCH: &str = "develop";
+const DIFF_MAX_LINES: usize = 2_000;
+const HISTORY_LIMIT: usize = 24;
 const GRAPH_CHECKSUM_VOLATILE_KEYS: [&str; 12] = [
     "generatedAt",
     "lastUpdatedAt",
@@ -301,13 +304,33 @@ pub struct GitChangedFile {
 #[serde(rename_all = "camelCase")]
 pub struct GitSummary {
     pub available: bool,
+    pub git_installed: bool,
     pub initialized: bool,
     pub branch: String,
     pub clean: bool,
     pub changed_paths: Vec<String>,
     pub changed_files: Vec<GitChangedFile>,
+    pub recent_commits: Vec<GitCommit>,
+    pub graph_lines: Vec<String>,
+    pub default_branch: String,
+    pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub head: Option<String>,
+    pub head: Option<GitCommit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generated_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCommit {
+    pub id: String,
+    pub short_id: String,
+    pub author_name: String,
+    pub authored_at: String,
+    pub refs: String,
+    pub subject: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_current_branch: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
@@ -315,17 +338,176 @@ pub struct GitSummary {
 pub struct GitCommitResult {
     pub created: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub commit: Option<String>,
+    pub commit: Option<GitCommit>,
     pub summary: GitSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worldline_branch: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitDiffLine {
+    pub kind: String,
+    pub old_line: Option<usize>,
+    pub new_line: Option<usize>,
+    pub content: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitDiffHunk {
+    pub header: String,
+    pub old_start: usize,
+    pub old_lines: usize,
+    pub new_start: usize,
+    pub new_lines: usize,
+    pub lines: Vec<GitDiffLine>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitDiffFile {
+    pub relative_path: String,
+    pub status: String,
+    pub added: usize,
+    pub removed: usize,
+    pub hunks: Vec<GitDiffHunk>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitDiffTotals {
+    pub files: usize,
+    pub added: usize,
+    pub removed: usize,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitDiff {
+    pub available: bool,
+    pub git_installed: bool,
+    pub initialized: bool,
+    pub branch: String,
+    pub files: Vec<GitDiffFile>,
+    pub totals: GitDiffTotals,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitBranch {
+    pub name: String,
+    pub current: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitBranches {
+    pub current: String,
+    pub branches: Vec<GitBranch>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<GitSummary>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitTimelineBranch {
+    pub name: String,
+    pub head: String,
+    pub is_current: bool,
+    pub lane: usize,
+    pub fork_column: usize,
+    pub tip_column: usize,
+    pub commit_count: usize,
+    pub total_count: usize,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitTimelineNode {
+    pub id: String,
+    pub short_id: String,
+    pub author_name: String,
+    pub authored_at: String,
+    pub subject: String,
+    pub refs: String,
+    pub parents: Vec<String>,
+    pub branches: Vec<String>,
+    pub head_branches: Vec<String>,
+    pub is_branch_head: bool,
+    pub is_current: bool,
+    pub column: usize,
+    pub row: usize,
+    pub lane_branch: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitTimelineEdge {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitTimeline {
+    pub available: bool,
+    pub git_installed: bool,
+    pub initialized: bool,
+    pub current_branch: String,
+    pub current_head: Option<GitCommit>,
+    pub detached: bool,
+    pub branches: Vec<GitTimelineBranch>,
+    pub nodes: Vec<GitTimelineNode>,
+    pub edges: Vec<GitTimelineEdge>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitJumpResult {
+    pub detached: bool,
+    pub branch: String,
+    pub commit: Option<GitCommit>,
+    pub summary: GitSummary,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitWorldlineResult {
+    pub current: String,
+    pub branches: Vec<GitBranch>,
+    pub summary: GitSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worldline: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub renamed_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub renamed_to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleted: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclusive_commits: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+struct TimelineCommit {
+    commit: GitCommit,
+    parents: Vec<String>,
 }
 
 impl StorydexGit {
     pub fn initialize(&self, project_root: impl AsRef<Path>) -> Result<GitSummary> {
         let root = canonical_existing_dir(project_root.as_ref())?;
+        ensure!(git_available(), "Storydex Git executable is not available");
         if repository_top_level(&root)?.is_none() {
             run_git(&root, &["init"])?;
             // Keep the historical Storydex branch name on fresh repositories.
-            let _ = run_git(&root, &["branch", "-M", "develop"]);
+            run_git(&root, &["branch", "-M", DEFAULT_BRANCH])?;
         } else {
             self.assert_project_repository(&root)?;
         }
@@ -337,14 +519,17 @@ impl StorydexGit {
 
     pub fn summary(&self, project_root: impl AsRef<Path>) -> Result<GitSummary> {
         let root = canonical_existing_dir(project_root.as_ref())?;
+        if !git_available() {
+            return Ok(uninitialized_summary(
+                false,
+                "Storydex bundled Git is not available.",
+            ));
+        }
         let Some(top) = repository_top_level(&root)? else {
-            return Ok(GitSummary {
-                available: git_available(),
-                initialized: false,
-                branch: "develop".to_owned(),
-                clean: true,
-                ..GitSummary::default()
-            });
+            return Ok(uninitialized_summary(
+                true,
+                "Local repository is not initialized yet.",
+            ));
         };
         if !same_path(&root, &top) {
             bail!("refusing Git operation: project root is nested in a parent repository")
@@ -365,16 +550,610 @@ impl StorydexGit {
             .iter()
             .map(|item| item.relative_path.clone())
             .collect::<Vec<_>>();
-        let head = run_git(&root, &["rev-parse", "HEAD"]).ok();
+        let head = self.read_head_commit(&root)?;
+        let recent_commits = if head.is_some() {
+            self.read_recent_commits(&root, HISTORY_LIMIT)?
+        } else {
+            Vec::new()
+        };
+        let graph_lines = if head.is_some() {
+            self.read_graph_lines(&root, HISTORY_LIMIT.min(16))?
+        } else {
+            Vec::new()
+        };
         Ok(GitSummary {
             available: true,
+            git_installed: true,
             initialized: true,
             branch,
             clean: changed_files.is_empty(),
             changed_paths,
             changed_files,
+            recent_commits,
+            graph_lines,
+            default_branch: DEFAULT_BRANCH.to_owned(),
+            message: String::new(),
             head,
+            generated_at: unix_timestamp_millis(),
         })
+    }
+
+    pub fn diff(&self, project_root: impl AsRef<Path>) -> Result<GitDiff> {
+        let root = canonical_existing_dir(project_root.as_ref())?;
+        if !git_available() {
+            return Ok(uninitialized_diff(
+                false,
+                "Storydex bundled Git is not available.",
+            ));
+        }
+        let Some(top) = repository_top_level(&root)? else {
+            return Ok(uninitialized_diff(
+                true,
+                "Local repository is not initialized yet.",
+            ));
+        };
+        ensure!(
+            same_path(&root, &top),
+            "refusing Git operation: project root is nested in a parent repository"
+        );
+
+        let summary = self.summary(&root)?;
+        let has_head = summary.head.is_some();
+        let mut files = Vec::new();
+        for changed in &summary.changed_files {
+            let relative = validate_git_relative_path(&root, &changed.relative_path)?;
+            let status = {
+                let value = changed.status.trim();
+                if value.is_empty() { "M" } else { value }
+            };
+            let file = if status == "??" || !has_head {
+                build_untracked_diff(&root, &relative, status)?
+            } else {
+                let output = run_git_raw(
+                    &root,
+                    &[
+                        "-c",
+                        "core.quotePath=false",
+                        "diff",
+                        "--unified=3",
+                        "--no-ext-diff",
+                        "--no-color",
+                        "HEAD",
+                        "--",
+                        &relative,
+                    ],
+                )?;
+                parse_unified_diff_file(&output, &relative, status)
+            };
+            files.push(file);
+        }
+        Ok(complete_diff(summary.branch, files))
+    }
+
+    pub fn commit_diff(&self, project_root: impl AsRef<Path>, commit_id: &str) -> Result<GitDiff> {
+        let root = canonical_existing_dir(project_root.as_ref())?;
+        if !git_available() {
+            return Ok(uninitialized_diff(
+                false,
+                "Storydex bundled Git is not available.",
+            ));
+        }
+        let Some(top) = repository_top_level(&root)? else {
+            return Ok(uninitialized_diff(
+                true,
+                "Local repository is not initialized yet.",
+            ));
+        };
+        ensure!(
+            same_path(&root, &top),
+            "refusing Git operation: project root is nested in a parent repository"
+        );
+        let commit_id = commit_id.trim();
+        ensure!(
+            !commit_id.is_empty(),
+            "commit id is required for commit diff"
+        );
+        let commit = self.read_commit(&root, commit_id)?;
+        let changed_files = read_commit_changed_files(&root, &commit.id)?;
+        let mut files = Vec::new();
+        for (status, relative) in changed_files {
+            let relative = validate_git_relative_path(&root, &relative)?;
+            let args = vec![
+                "-c".to_owned(),
+                "core.quotePath=false".to_owned(),
+                "show".to_owned(),
+                "--format=".to_owned(),
+                "--unified=3".to_owned(),
+                "--no-ext-diff".to_owned(),
+                "--no-color".to_owned(),
+                "--find-renames".to_owned(),
+                "--end-of-options".to_owned(),
+                commit.id.clone(),
+                "--".to_owned(),
+                relative.clone(),
+            ];
+            let output = run_git_owned_raw(&root, &args)?;
+            files.push(parse_unified_diff_file(&output, &relative, &status));
+        }
+        let branch = self.summary(&root)?.branch;
+        Ok(complete_diff(branch, files))
+    }
+
+    pub fn branches(&self, project_root: impl AsRef<Path>) -> Result<GitBranches> {
+        let root = canonical_existing_dir(project_root.as_ref())?;
+        self.initialize(&root)?;
+        self.branch_result(&root)
+    }
+
+    fn branch_result(&self, root: &Path) -> Result<GitBranches> {
+        let (current, branches) = self.read_branches(root)?;
+        Ok(GitBranches {
+            current,
+            branches,
+            summary: Some(self.summary(root)?),
+        })
+    }
+
+    pub fn create_branch(
+        &self,
+        project_root: impl AsRef<Path>,
+        name: &str,
+        checkout: bool,
+    ) -> Result<GitBranches> {
+        let root = canonical_existing_dir(project_root.as_ref())?;
+        self.initialize(&root)?;
+        let branch = validate_branch_name(name)?;
+        ensure!(
+            !self.branch_exists(&root, &branch),
+            "branch already exists: {branch}"
+        );
+        let has_head = self.has_head_commit(&root);
+        if checkout && !self.is_worktree_clean(&root)? {
+            bail!("cannot switch branches with uncommitted changes")
+        }
+        if has_head {
+            run_git_owned(&root, &["branch".to_owned(), branch.clone()])?;
+            if checkout {
+                self.clean_internal_paths(&root)?;
+                run_git_owned(&root, &["checkout".to_owned(), branch])?;
+            }
+        } else if checkout {
+            run_git_owned(
+                &root,
+                &[
+                    "symbolic-ref".to_owned(),
+                    "HEAD".to_owned(),
+                    format!("refs/heads/{branch}"),
+                ],
+            )?;
+        } else {
+            bail!("cannot create a non-current branch before the first commit")
+        }
+        self.branch_result(&root)
+    }
+
+    pub fn switch_branch(&self, project_root: impl AsRef<Path>, name: &str) -> Result<GitBranches> {
+        let root = canonical_existing_dir(project_root.as_ref())?;
+        self.initialize(&root)?;
+        let branch = validate_branch_name(name)?;
+        let current = self.current_branch(&root)?;
+        if branch == current {
+            return self.branch_result(&root);
+        }
+        ensure!(
+            self.branch_exists(&root, &branch),
+            "branch does not exist: {branch}"
+        );
+        ensure!(
+            self.is_worktree_clean(&root)?,
+            "cannot switch branches with uncommitted changes"
+        );
+        self.clean_internal_paths(&root)?;
+        run_git_owned(&root, &["checkout".to_owned(), branch])?;
+        self.branch_result(&root)
+    }
+
+    pub fn timeline(&self, project_root: impl AsRef<Path>) -> Result<GitTimeline> {
+        let root = canonical_existing_dir(project_root.as_ref())?;
+        if !git_available() {
+            return Ok(uninitialized_timeline(
+                false,
+                "Storydex bundled Git is not available.",
+            ));
+        }
+        let Some(top) = repository_top_level(&root)? else {
+            return Ok(uninitialized_timeline(
+                true,
+                "Local repository is not initialized yet.",
+            ));
+        };
+        ensure!(
+            same_path(&root, &top),
+            "refusing Git operation: project root is nested in a parent repository"
+        );
+
+        let branch_heads = self.read_branch_heads(&root)?;
+        let current_branch = self.current_branch(&root)?;
+        let current_head = self.read_head_commit(&root)?;
+        let detached = current_branch.is_empty() && current_head.is_some();
+        let Some(current_head_value) = current_head.clone() else {
+            let branches = branch_heads
+                .iter()
+                .enumerate()
+                .map(|(lane, (name, head))| GitTimelineBranch {
+                    name: name.clone(),
+                    head: head.clone(),
+                    is_current: false,
+                    lane,
+                    fork_column: 0,
+                    tip_column: 0,
+                    commit_count: 0,
+                    total_count: 0,
+                })
+                .collect();
+            return Ok(GitTimeline {
+                available: true,
+                git_installed: true,
+                initialized: true,
+                current_branch,
+                current_head: None,
+                detached,
+                branches,
+                nodes: Vec::new(),
+                edges: Vec::new(),
+                message: String::new(),
+            });
+        };
+
+        let raw = run_git_raw(
+            &root,
+            &[
+                "log",
+                "--all",
+                "HEAD",
+                "--date=iso-strict",
+                "--pretty=format:%H%x1f%P%x1f%h%x1f%an%x1f%ad%x1f%D%x1f%s",
+            ],
+        )?;
+        let commits = parse_timeline_commits(&raw);
+        let commit_ids = commits
+            .iter()
+            .map(|item| item.commit.id.clone())
+            .collect::<HashSet<_>>();
+        let parents_by_id = commits
+            .iter()
+            .map(|item| {
+                (
+                    item.commit.id.clone(),
+                    item.parents
+                        .iter()
+                        .filter(|parent| commit_ids.contains(*parent))
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        let branch_reachable = branch_heads
+            .iter()
+            .map(|(name, head)| (name.clone(), reachable_commits(head, &parents_by_id)))
+            .collect::<HashMap<_, _>>();
+        let columns = topology_columns(&commit_ids, &parents_by_id);
+        let mut containing_count = HashMap::<String, usize>::new();
+        for reachable in branch_reachable.values() {
+            for commit_id in reachable {
+                *containing_count.entry(commit_id.clone()).or_default() += 1;
+            }
+        }
+
+        let mut fork_columns = HashMap::<String, usize>::new();
+        let mut exclusive_counts = HashMap::<String, usize>::new();
+        for (name, head) in &branch_heads {
+            let exclusive = branch_reachable
+                .get(name)
+                .into_iter()
+                .flatten()
+                .filter(|commit_id| containing_count.get(*commit_id).copied() == Some(1))
+                .collect::<Vec<_>>();
+            exclusive_counts.insert(name.clone(), exclusive.len());
+            let fork = exclusive
+                .iter()
+                .map(|commit_id| columns.get(*commit_id).copied().unwrap_or_default())
+                .min()
+                .unwrap_or_else(|| columns.get(head).copied().unwrap_or_default());
+            fork_columns.insert(name.clone(), fork);
+        }
+
+        let mut sorted_branches = branch_heads.clone();
+        sorted_branches.sort_by(|left, right| {
+            let left_key = (
+                usize::from(left.0 != current_branch),
+                fork_columns.get(&left.0).copied().unwrap_or_default(),
+                left.0.as_str(),
+            );
+            let right_key = (
+                usize::from(right.0 != current_branch),
+                fork_columns.get(&right.0).copied().unwrap_or_default(),
+                right.0.as_str(),
+            );
+            left_key.cmp(&right_key)
+        });
+        let branch_lanes = sorted_branches
+            .iter()
+            .enumerate()
+            .map(|(lane, (name, _))| (name.clone(), lane))
+            .collect::<HashMap<_, _>>();
+        let lane_names = sorted_branches
+            .iter()
+            .enumerate()
+            .map(|(lane, (name, _))| (lane, name.clone()))
+            .collect::<HashMap<_, _>>();
+        let fallback_lane = sorted_branches.len();
+
+        let mut head_to_branches = HashMap::<String, Vec<String>>::new();
+        for (name, head) in &branch_heads {
+            head_to_branches
+                .entry(head.clone())
+                .or_default()
+                .push(name.clone());
+        }
+        for names in head_to_branches.values_mut() {
+            names.sort();
+        }
+
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+        for item in commits {
+            let commit_id = item.commit.id.clone();
+            let mut containing_branches = branch_reachable
+                .iter()
+                .filter(|(_, reachable)| reachable.contains(&commit_id))
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>();
+            containing_branches.sort_by_key(|name| {
+                (
+                    branch_lanes.get(name).copied().unwrap_or(fallback_lane),
+                    name.clone(),
+                )
+            });
+            let row = containing_branches
+                .iter()
+                .filter_map(|name| branch_lanes.get(name).copied())
+                .min()
+                .unwrap_or(fallback_lane);
+            let lane_branch = lane_names.get(&row).cloned().unwrap_or_default();
+            let head_branches = head_to_branches
+                .get(&commit_id)
+                .cloned()
+                .unwrap_or_default();
+            for parent in &item.parents {
+                if commit_ids.contains(parent) {
+                    edges.push(GitTimelineEdge {
+                        from: parent.clone(),
+                        to: commit_id.clone(),
+                    });
+                }
+            }
+            nodes.push(GitTimelineNode {
+                id: commit_id.clone(),
+                short_id: item.commit.short_id,
+                author_name: item.commit.author_name,
+                authored_at: item.commit.authored_at,
+                subject: item.commit.subject,
+                refs: item.commit.refs,
+                parents: item.parents,
+                branches: containing_branches,
+                is_branch_head: !head_branches.is_empty(),
+                head_branches,
+                is_current: commit_id == current_head_value.id,
+                column: columns.get(&commit_id).copied().unwrap_or_default(),
+                row,
+                lane_branch,
+            });
+        }
+        nodes.sort_by(|left, right| {
+            (left.column, left.row, left.id.as_str()).cmp(&(
+                right.column,
+                right.row,
+                right.id.as_str(),
+            ))
+        });
+        edges.sort_by(|left, right| {
+            (left.from.as_str(), left.to.as_str()).cmp(&(right.from.as_str(), right.to.as_str()))
+        });
+        let branches = sorted_branches
+            .into_iter()
+            .map(|(name, head)| GitTimelineBranch {
+                is_current: name == current_branch,
+                lane: branch_lanes.get(&name).copied().unwrap_or(fallback_lane),
+                fork_column: fork_columns.get(&name).copied().unwrap_or_default(),
+                tip_column: columns.get(&head).copied().unwrap_or_default(),
+                commit_count: exclusive_counts.get(&name).copied().unwrap_or_default(),
+                total_count: branch_reachable.get(&name).map_or(0, HashSet::len),
+                name,
+                head,
+            })
+            .collect();
+
+        Ok(GitTimeline {
+            available: true,
+            git_installed: true,
+            initialized: true,
+            current_branch,
+            current_head,
+            detached,
+            branches,
+            nodes,
+            edges,
+            message: String::new(),
+        })
+    }
+
+    pub fn jump_to_commit(
+        &self,
+        project_root: impl AsRef<Path>,
+        commit_id: &str,
+    ) -> Result<GitJumpResult> {
+        let root = canonical_existing_dir(project_root.as_ref())?;
+        self.initialize(&root)?;
+        let commit_id = commit_id.trim();
+        ensure!(
+            !commit_id.is_empty(),
+            "target commit id is required for jump"
+        );
+        ensure!(
+            self.has_head_commit(&root),
+            "repository has no commits yet, so there is nothing to jump to"
+        );
+        let target = self.read_commit(&root, commit_id)?;
+        ensure!(
+            self.is_worktree_clean(&root)?,
+            "cannot jump to commit with uncommitted changes"
+        );
+        let current_branch = self.current_branch(&root)?;
+        let current_head = self.read_head_commit(&root)?;
+        let target_branches = self.branches_at_commit(&root, &target.id)?;
+        let landing_branch = if target_branches.contains(&current_branch) {
+            current_branch.clone()
+        } else {
+            target_branches.first().cloned().unwrap_or_default()
+        };
+        let already_there = current_head
+            .as_ref()
+            .is_some_and(|current| current.id == target.id)
+            && ((landing_branch.is_empty() && current_branch.is_empty())
+                || landing_branch == current_branch);
+        if !already_there {
+            self.clean_internal_paths(&root)?;
+            if landing_branch.is_empty() {
+                run_git_owned(
+                    &root,
+                    &[
+                        "checkout".to_owned(),
+                        "--detach".to_owned(),
+                        target.id.clone(),
+                    ],
+                )?;
+            } else {
+                run_git_owned(&root, &["checkout".to_owned(), landing_branch.clone()])?;
+            }
+        }
+        Ok(GitJumpResult {
+            detached: landing_branch.is_empty(),
+            branch: landing_branch,
+            commit: self.read_head_commit(&root)?,
+            summary: self.summary(&root)?,
+        })
+    }
+
+    pub fn create_worldline(
+        &self,
+        project_root: impl AsRef<Path>,
+        from_commit: &str,
+        name: &str,
+    ) -> Result<GitWorldlineResult> {
+        let root = canonical_existing_dir(project_root.as_ref())?;
+        self.initialize(&root)?;
+        let branch = validate_branch_name(name)?;
+        ensure!(
+            self.has_head_commit(&root),
+            "repository has no commits yet, so there is no node to branch from"
+        );
+        ensure!(
+            !self.branch_exists(&root, &branch),
+            "a worldline with this name already exists"
+        );
+        let target = self.read_commit(&root, from_commit.trim())?;
+        ensure!(
+            self.is_worktree_clean(&root)?,
+            "cannot open a new worldline with uncommitted changes"
+        );
+        self.clean_internal_paths(&root)?;
+        run_git_owned(
+            &root,
+            &[
+                "checkout".to_owned(),
+                "-b".to_owned(),
+                branch.clone(),
+                target.id.clone(),
+            ],
+        )?;
+        self.worldline_result(&root, Some(branch), Some(target.id), None, None, None, None)
+    }
+
+    pub fn rename_worldline(
+        &self,
+        project_root: impl AsRef<Path>,
+        name: &str,
+        new_name: &str,
+    ) -> Result<GitWorldlineResult> {
+        let root = canonical_existing_dir(project_root.as_ref())?;
+        self.initialize(&root)?;
+        let current_name = validate_branch_name(name)?;
+        let target_name = validate_branch_name(new_name)?;
+        if current_name == target_name {
+            return self.worldline_result(&root, None, None, None, None, None, None);
+        }
+        ensure!(
+            self.branch_exists(&root, &current_name),
+            "worldline does not exist: {current_name}"
+        );
+        ensure!(
+            !self.branch_exists(&root, &target_name),
+            "a worldline with this name already exists: {target_name}"
+        );
+        run_git_owned(
+            &root,
+            &[
+                "branch".to_owned(),
+                "-m".to_owned(),
+                current_name.clone(),
+                target_name.clone(),
+            ],
+        )?;
+        self.worldline_result(
+            &root,
+            None,
+            None,
+            Some(current_name),
+            Some(target_name),
+            None,
+            None,
+        )
+    }
+
+    pub fn delete_worldline(
+        &self,
+        project_root: impl AsRef<Path>,
+        name: &str,
+    ) -> Result<GitWorldlineResult> {
+        let root = canonical_existing_dir(project_root.as_ref())?;
+        self.initialize(&root)?;
+        let branch = validate_branch_name(name)?;
+        ensure!(
+            self.branch_exists(&root, &branch),
+            "worldline does not exist: {branch}"
+        );
+        ensure!(
+            self.current_branch(&root)? != branch,
+            "cannot delete the worldline you are currently on"
+        );
+        let (_, branches) = self.read_branches(&root)?;
+        ensure!(
+            branches.len() > 1,
+            "cannot delete the only worldline in the project"
+        );
+        let others = branches
+            .iter()
+            .filter(|item| item.name != branch)
+            .map(|item| item.name.clone())
+            .collect::<Vec<_>>();
+        let exclusive = count_exclusive_commits(&root, &branch, &others)?;
+        run_git_owned(
+            &root,
+            &["branch".to_owned(), "-D".to_owned(), branch.clone()],
+        )?;
+        self.worldline_result(&root, None, None, None, None, Some(branch), Some(exclusive))
     }
 
     pub fn commit_all(
@@ -406,6 +1185,7 @@ impl StorydexGit {
                 created: false,
                 commit: None,
                 summary: self.summary(&root)?,
+                worldline_branch: None,
             });
         }
         let stageable = normalized
@@ -418,6 +1198,7 @@ impl StorydexGit {
                 created: false,
                 commit: None,
                 summary: self.summary(&root)?,
+                worldline_branch: None,
             });
         }
         let mut args = vec!["add", "--"];
@@ -445,19 +1226,22 @@ impl StorydexGit {
         let root = canonical_existing_dir(project_root.as_ref())?;
         self.assert_project_repository(&root)?;
         ensure!(!commit.trim().is_empty(), "target commit id is required");
-        run_git(&root, &["cat-file", "-e", &format!("{commit}^{{commit}}")])?;
-        let current = run_git(&root, &["rev-parse", "HEAD"])?;
+        let target = self.read_commit(&root, commit)?;
+        let current = self
+            .read_head_commit(&root)?
+            .context("repository head could not be resolved")?;
         if create_backup {
             let suffix = unique_suffix();
             let name = format!("storydex-backup-{suffix}");
-            run_git(&root, &["branch", &name, &current])?;
+            run_git_owned(&root, &["branch".to_owned(), name, current.id.clone()])?;
         }
-        run_git(&root, &["reset", "--hard", commit])?;
+        run_git_owned(&root, &["reset".to_owned(), "--hard".to_owned(), target.id])?;
         run_git(&root, &["clean", "-fd"])?;
         self.summary(&root)
     }
 
     fn assert_project_repository(&self, root: &Path) -> Result<()> {
+        ensure!(git_available(), "Storydex Git executable is not available");
         let Some(top) = repository_top_level(root)? else {
             bail!("Storydex project is not an initialized Git repository")
         };
@@ -479,21 +1263,720 @@ impl StorydexGit {
                 created: false,
                 commit: None,
                 summary: self.summary(root)?,
+                worldline_branch: None,
             });
         }
+        let worldline_branch = self.ensure_branch_before_commit(root)?;
         let message = if message.trim().is_empty() {
             "storydex: local snapshot"
         } else {
             message.trim()
         };
         run_git(root, &["commit", "--no-gpg-sign", "-m", message])?;
-        let commit = run_git(root, &["rev-parse", "HEAD"])?;
+        let commit = self.read_head_commit(root)?;
         Ok(GitCommitResult {
             created: true,
-            commit: Some(commit),
+            commit,
             summary: self.summary(root)?,
+            worldline_branch,
         })
     }
+
+    fn read_commit(&self, root: &Path, commit_id: &str) -> Result<GitCommit> {
+        ensure!(!commit_id.trim().is_empty(), "target commit id is required");
+        let revision = format!("{}^{{commit}}", commit_id.trim());
+        let args = vec![
+            "show".to_owned(),
+            "-s".to_owned(),
+            "--date=iso-strict".to_owned(),
+            "--pretty=format:%H%x1f%h%x1f%an%x1f%ad%x1f%D%x1f%s".to_owned(),
+            "--end-of-options".to_owned(),
+            revision,
+        ];
+        let output = run_git_owned_raw(root, &args)?;
+        parse_commit(&output).context("target commit could not be resolved")
+    }
+
+    fn read_head_commit(&self, root: &Path) -> Result<Option<GitCommit>> {
+        if !self.has_head_commit(root) {
+            return Ok(None);
+        }
+        self.read_commit(root, "HEAD").map(Some)
+    }
+
+    fn read_recent_commits(&self, root: &Path, limit: usize) -> Result<Vec<GitCommit>> {
+        let reachable = run_git_raw(root, &["rev-list", &format!("-n{}", limit * 8), "HEAD"])?
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect::<HashSet<_>>();
+        let limit = format!("-n{}", limit.max(1));
+        let output = run_git_raw(
+            root,
+            &[
+                "log",
+                "--all",
+                &limit,
+                "--decorate=short",
+                "--date=iso-strict",
+                "--pretty=format:%H%x1f%h%x1f%an%x1f%ad%x1f%D%x1f%s",
+            ],
+        )?;
+        Ok(output
+            .lines()
+            .filter_map(parse_commit)
+            .map(|mut commit| {
+                commit.on_current_branch =
+                    Some(reachable.is_empty() || reachable.contains(&commit.id));
+                commit
+            })
+            .collect())
+    }
+
+    fn read_graph_lines(&self, root: &Path, limit: usize) -> Result<Vec<String>> {
+        let limit = format!("-n{}", limit.max(1));
+        Ok(run_git_raw(
+            root,
+            &["log", "--graph", "--decorate", "--oneline", "--all", &limit],
+        )?
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .map(str::to_owned)
+        .collect())
+    }
+
+    fn current_branch(&self, root: &Path) -> Result<String> {
+        run_git(root, &["branch", "--show-current"])
+    }
+
+    fn read_branch_heads(&self, root: &Path) -> Result<Vec<(String, String)>> {
+        let output = run_git_raw(
+            root,
+            &[
+                "for-each-ref",
+                "--format=%(refname:short) %(objectname)",
+                "refs/heads/",
+            ],
+        )?;
+        let mut heads = output
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.split_whitespace();
+                let name = parts.next()?;
+                let head = parts.next()?;
+                if parts.next().is_some() {
+                    return None;
+                }
+                Some((name.to_owned(), head.to_owned()))
+            })
+            .collect::<Vec<_>>();
+        heads.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(heads)
+    }
+
+    fn read_branches(&self, root: &Path) -> Result<(String, Vec<GitBranch>)> {
+        let current = self.current_branch(root)?;
+        let mut names = self
+            .read_branch_heads(root)?
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        if !current.is_empty() && !names.contains(&current) {
+            names.push(current.clone());
+            names.sort();
+        }
+        let branches = names
+            .into_iter()
+            .map(|name| GitBranch {
+                current: name == current,
+                name,
+            })
+            .collect();
+        Ok((current, branches))
+    }
+
+    fn branch_exists(&self, root: &Path, branch: &str) -> bool {
+        Command::new(git_executable())
+            .args(["show-ref", "--verify", &format!("refs/heads/{branch}")])
+            .current_dir(root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    fn has_head_commit(&self, root: &Path) -> bool {
+        Command::new(git_executable())
+            .args(["rev-parse", "--verify", "HEAD"])
+            .current_dir(root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    fn is_worktree_clean(&self, root: &Path) -> Result<bool> {
+        Ok(run_git_raw(
+            root,
+            &[
+                "-c",
+                "core.quotePath=false",
+                "status",
+                "--porcelain=v1",
+                "-uall",
+            ],
+        )?
+        .trim()
+        .is_empty())
+    }
+
+    fn clean_internal_paths(&self, root: &Path) -> Result<()> {
+        for prefix in INTERNAL_PATH_PREFIXES {
+            run_git(root, &["clean", "-fd", "--", prefix.trim_end_matches('/')])?;
+        }
+        Ok(())
+    }
+
+    fn branches_at_commit(&self, root: &Path, commit_id: &str) -> Result<Vec<String>> {
+        let mut names = self
+            .read_branch_heads(root)?
+            .into_iter()
+            .filter(|(_, head)| head == commit_id)
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        names.sort();
+        Ok(names)
+    }
+
+    fn ensure_branch_before_commit(&self, root: &Path) -> Result<Option<String>> {
+        if !self.current_branch(root)?.is_empty() || !self.has_head_commit(root) {
+            return Ok(None);
+        }
+        let base = format!("worldline/{}", unique_suffix());
+        let mut branch = base.clone();
+        let mut index = 2usize;
+        while self.branch_exists(root, &branch) {
+            branch = format!("{base}-{index}");
+            index += 1;
+        }
+        run_git_owned(
+            root,
+            &["checkout".to_owned(), "-b".to_owned(), branch.clone()],
+        )?;
+        Ok(Some(branch))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn worldline_result(
+        &self,
+        root: &Path,
+        worldline: Option<String>,
+        from_commit: Option<String>,
+        renamed_from: Option<String>,
+        renamed_to: Option<String>,
+        deleted: Option<String>,
+        exclusive_commits: Option<usize>,
+    ) -> Result<GitWorldlineResult> {
+        let (current, branches) = self.read_branches(root)?;
+        Ok(GitWorldlineResult {
+            current,
+            branches,
+            summary: self.summary(root)?,
+            worldline,
+            from_commit,
+            renamed_from,
+            renamed_to,
+            deleted,
+            exclusive_commits,
+        })
+    }
+}
+
+fn uninitialized_summary(git_installed: bool, message: &str) -> GitSummary {
+    GitSummary {
+        available: git_installed,
+        git_installed,
+        initialized: false,
+        branch: DEFAULT_BRANCH.to_owned(),
+        clean: true,
+        changed_paths: Vec::new(),
+        changed_files: Vec::new(),
+        recent_commits: Vec::new(),
+        graph_lines: Vec::new(),
+        default_branch: DEFAULT_BRANCH.to_owned(),
+        message: message.to_owned(),
+        head: None,
+        generated_at: unix_timestamp_millis(),
+    }
+}
+
+fn uninitialized_diff(git_installed: bool, message: &str) -> GitDiff {
+    GitDiff {
+        available: git_installed,
+        git_installed,
+        initialized: false,
+        branch: if git_installed {
+            DEFAULT_BRANCH.to_owned()
+        } else {
+            String::new()
+        },
+        files: Vec::new(),
+        totals: GitDiffTotals::default(),
+        message: message.to_owned(),
+    }
+}
+
+fn complete_diff(branch: String, files: Vec<GitDiffFile>) -> GitDiff {
+    let totals = GitDiffTotals {
+        files: files.len(),
+        added: files.iter().map(|item| item.added).sum(),
+        removed: files.iter().map(|item| item.removed).sum(),
+    };
+    GitDiff {
+        available: true,
+        git_installed: true,
+        initialized: true,
+        branch,
+        files,
+        totals,
+        message: String::new(),
+    }
+}
+
+fn uninitialized_timeline(git_installed: bool, message: &str) -> GitTimeline {
+    GitTimeline {
+        available: git_installed,
+        git_installed,
+        initialized: false,
+        current_branch: if git_installed {
+            DEFAULT_BRANCH.to_owned()
+        } else {
+            String::new()
+        },
+        current_head: None,
+        detached: false,
+        branches: Vec::new(),
+        nodes: Vec::new(),
+        edges: Vec::new(),
+        message: message.to_owned(),
+    }
+}
+
+fn unix_timestamp_millis() -> Option<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+}
+
+fn validate_git_relative_path(root: &Path, raw: &str) -> Result<String> {
+    let raw = raw.trim();
+    ensure!(!raw.is_empty(), "Git path must not be empty");
+    let path = Path::new(raw);
+    ensure!(!path.is_absolute(), "Git path must be relative: {raw}");
+    ensure!(
+        !path.components().any(|component| matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )),
+        "Git path must not escape the project root: {raw}"
+    );
+    let relative = raw.replace('\\', "/").trim_start_matches("./").to_owned();
+    ensure!(!relative.is_empty(), "Git path must not be empty");
+    ensure!(
+        relative != ".git" && !relative.starts_with(".git/"),
+        "Git metadata paths are not readable"
+    );
+    let target = root.join(&relative);
+    if target.exists() {
+        let canonical = target.canonicalize()?;
+        ensure!(
+            path_is_within(root, &canonical),
+            "Git path resolves outside project root: {relative}"
+        );
+    }
+    Ok(relative)
+}
+
+fn validate_branch_name(name: &str) -> Result<String> {
+    let branch = name.trim();
+    ensure!(
+        !branch.is_empty()
+            && branch.len() <= 120
+            && !branch.starts_with('-')
+            && !branch.contains("..")
+            && branch
+                .chars()
+                .all(|value| value.is_ascii_alphanumeric() || ".-_/".contains(value)),
+        "invalid branch name: {branch}"
+    );
+    Ok(branch.to_owned())
+}
+
+fn build_untracked_diff(root: &Path, relative_path: &str, status: &str) -> Result<GitDiffFile> {
+    let relative_path = validate_git_relative_path(root, relative_path)?;
+    let target = root.join(&relative_path);
+    if !target.is_file() {
+        return Ok(GitDiffFile {
+            relative_path,
+            status: status.to_owned(),
+            ..GitDiffFile::default()
+        });
+    }
+    let raw = fs::read(&target)
+        .with_context(|| format!("failed to read untracked file {}", target.display()))?;
+    if raw.iter().take(4_096).any(|value| *value == 0) {
+        return Ok(GitDiffFile {
+            relative_path,
+            status: status.to_owned(),
+            hunks: vec![GitDiffHunk {
+                header: "Binary file not shown".to_owned(),
+                lines: vec![GitDiffLine {
+                    kind: "context".to_owned(),
+                    content: "Binary file changed.".to_owned(),
+                    ..GitDiffLine::default()
+                }],
+                ..GitDiffHunk::default()
+            }],
+            ..GitDiffFile::default()
+        });
+    }
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    let lines = text.lines().collect::<Vec<_>>();
+    let visible = lines
+        .iter()
+        .take(DIFF_MAX_LINES)
+        .copied()
+        .collect::<Vec<_>>();
+    let mut diff_lines = visible
+        .iter()
+        .enumerate()
+        .map(|(index, line)| GitDiffLine {
+            kind: "added".to_owned(),
+            old_line: None,
+            new_line: Some(index + 1),
+            content: (*line).to_owned(),
+        })
+        .collect::<Vec<_>>();
+    if visible.is_empty() && !text.is_empty() {
+        diff_lines.push(GitDiffLine {
+            kind: "added".to_owned(),
+            old_line: None,
+            new_line: Some(1),
+            content: text.clone(),
+        });
+    }
+    let truncated = lines.len() > DIFF_MAX_LINES;
+    if truncated {
+        diff_lines.push(GitDiffLine {
+            kind: "context".to_owned(),
+            old_line: None,
+            new_line: None,
+            content: format!("... truncated {} lines", lines.len() - DIFF_MAX_LINES),
+        });
+    }
+    let added = if lines.is_empty() {
+        usize::from(!text.is_empty())
+    } else {
+        lines.len()
+    };
+    Ok(GitDiffFile {
+        relative_path,
+        status: status.to_owned(),
+        added,
+        removed: 0,
+        hunks: vec![GitDiffHunk {
+            header: format!("@@ -0,0 +1,{} @@", lines.len().max(1)),
+            old_start: 0,
+            old_lines: 0,
+            new_start: 1,
+            new_lines: lines.len().max(1),
+            lines: diff_lines,
+        }],
+        truncated,
+    })
+}
+
+fn parse_unified_diff_file(output: &str, relative_path: &str, status: &str) -> GitDiffFile {
+    let mut hunks = Vec::<GitDiffHunk>::new();
+    let mut current = None::<GitDiffHunk>;
+    let mut old_line = 0usize;
+    let mut new_line = 0usize;
+    let mut added = 0usize;
+    let mut removed = 0usize;
+    for raw_line in output.lines() {
+        if let Some((old_start, old_lines, new_start, new_lines)) = parse_hunk_header(raw_line) {
+            if let Some(hunk) = current.take() {
+                hunks.push(hunk);
+            }
+            current = Some(GitDiffHunk {
+                header: raw_line.to_owned(),
+                old_start,
+                old_lines,
+                new_start,
+                new_lines,
+                lines: Vec::new(),
+            });
+            old_line = old_start;
+            new_line = new_start;
+            continue;
+        }
+        let Some(hunk) = current.as_mut() else {
+            continue;
+        };
+        if raw_line.starts_with("\\ No newline") {
+            hunk.lines.push(GitDiffLine {
+                kind: "context".to_owned(),
+                old_line: None,
+                new_line: None,
+                content: raw_line.to_owned(),
+            });
+            continue;
+        }
+        let marker = raw_line.as_bytes().first().copied();
+        let content = if matches!(marker, Some(b' ' | b'+' | b'-')) {
+            &raw_line[1..]
+        } else {
+            raw_line
+        };
+        match marker {
+            Some(b'+') => {
+                hunk.lines.push(GitDiffLine {
+                    kind: "added".to_owned(),
+                    old_line: None,
+                    new_line: Some(new_line),
+                    content: content.to_owned(),
+                });
+                new_line += 1;
+                added += 1;
+            }
+            Some(b'-') => {
+                hunk.lines.push(GitDiffLine {
+                    kind: "removed".to_owned(),
+                    old_line: Some(old_line),
+                    new_line: None,
+                    content: content.to_owned(),
+                });
+                old_line += 1;
+                removed += 1;
+            }
+            _ => {
+                hunk.lines.push(GitDiffLine {
+                    kind: "context".to_owned(),
+                    old_line: Some(old_line),
+                    new_line: Some(new_line),
+                    content: content.to_owned(),
+                });
+                old_line += 1;
+                new_line += 1;
+            }
+        }
+    }
+    if let Some(hunk) = current {
+        hunks.push(hunk);
+    }
+    if hunks.is_empty() && !output.trim().is_empty() {
+        hunks.push(GitDiffHunk {
+            header: "File changed".to_owned(),
+            lines: output
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| GitDiffLine {
+                    kind: "context".to_owned(),
+                    content: line.to_owned(),
+                    ..GitDiffLine::default()
+                })
+                .collect(),
+            ..GitDiffHunk::default()
+        });
+    }
+    GitDiffFile {
+        relative_path: relative_path
+            .replace('\\', "/")
+            .trim_matches('/')
+            .to_owned(),
+        status: status.to_owned(),
+        added,
+        removed,
+        hunks,
+        truncated: false,
+    }
+}
+
+fn parse_hunk_header(header: &str) -> Option<(usize, usize, usize, usize)> {
+    let body = header.strip_prefix("@@ ")?;
+    let end = body.find(" @@")?;
+    let mut ranges = body[..end].split_whitespace();
+    let old = parse_diff_range(ranges.next()?, '-')?;
+    let new = parse_diff_range(ranges.next()?, '+')?;
+    Some((old.0, old.1, new.0, new.1))
+}
+
+fn parse_diff_range(raw: &str, prefix: char) -> Option<(usize, usize)> {
+    let raw = raw.strip_prefix(prefix)?;
+    let mut parts = raw.splitn(2, ',');
+    let start = parts.next()?.parse().ok()?;
+    let lines = parts.next().map_or(Some(1), |value| value.parse().ok())?;
+    Some((start, lines))
+}
+
+fn read_commit_changed_files(root: &Path, commit_id: &str) -> Result<Vec<(String, String)>> {
+    let args = vec![
+        "-c".to_owned(),
+        "core.quotePath=false".to_owned(),
+        "diff-tree".to_owned(),
+        "--no-commit-id".to_owned(),
+        "--name-status".to_owned(),
+        "-r".to_owned(),
+        "--root".to_owned(),
+        "-M".to_owned(),
+        commit_id.to_owned(),
+    ];
+    let output = run_git_owned_raw(root, &args)?;
+    let mut files = Vec::new();
+    for line in output.lines() {
+        let parts = line.split('\t').collect::<Vec<_>>();
+        if parts.len() < 2 {
+            continue;
+        }
+        let raw_status = parts[0].trim();
+        let (status, relative) = if raw_status.starts_with('R') && parts.len() >= 3 {
+            ("R", parts[2])
+        } else {
+            (
+                &raw_status[..raw_status.len().min(1)],
+                parts[parts.len() - 1],
+            )
+        };
+        let relative = normalize_status_path(relative).trim().to_owned();
+        if !relative.is_empty() {
+            files.push((
+                if status.is_empty() { "M" } else { status }.to_owned(),
+                relative,
+            ));
+        }
+    }
+    Ok(files)
+}
+
+fn parse_commit(raw: &str) -> Option<GitCommit> {
+    let parts = raw
+        .trim_end_matches(['\r', '\n'])
+        .splitn(6, '\x1f')
+        .collect::<Vec<_>>();
+    if parts.len() != 6 {
+        return None;
+    }
+    Some(GitCommit {
+        id: parts[0].trim().to_owned(),
+        short_id: parts[1].trim().to_owned(),
+        author_name: parts[2].trim().to_owned(),
+        authored_at: parts[3].trim().to_owned(),
+        refs: parts[4].trim().to_owned(),
+        subject: parts[5].trim().to_owned(),
+        on_current_branch: None,
+    })
+}
+
+fn parse_timeline_commits(output: &str) -> Vec<TimelineCommit> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let parts = line.splitn(7, '\x1f').collect::<Vec<_>>();
+            if parts.len() != 7 {
+                return None;
+            }
+            Some(TimelineCommit {
+                commit: GitCommit {
+                    id: parts[0].trim().to_owned(),
+                    short_id: parts[2].trim().to_owned(),
+                    author_name: parts[3].trim().to_owned(),
+                    authored_at: parts[4].trim().to_owned(),
+                    refs: parts[5].trim().to_owned(),
+                    subject: parts[6].trim().to_owned(),
+                    on_current_branch: None,
+                },
+                parents: parts[1].split_whitespace().map(str::to_owned).collect(),
+            })
+        })
+        .collect()
+}
+
+fn reachable_commits(head: &str, parents_by_id: &HashMap<String, Vec<String>>) -> HashSet<String> {
+    if !parents_by_id.contains_key(head) {
+        return HashSet::new();
+    }
+    let mut seen = HashSet::from([head.to_owned()]);
+    let mut pending = VecDeque::from([head.to_owned()]);
+    while let Some(current) = pending.pop_front() {
+        for parent in parents_by_id.get(&current).into_iter().flatten() {
+            if seen.insert(parent.clone()) {
+                pending.push_back(parent.clone());
+            }
+        }
+    }
+    seen
+}
+
+fn topology_columns(
+    commit_ids: &HashSet<String>,
+    parents_by_id: &HashMap<String, Vec<String>>,
+) -> HashMap<String, usize> {
+    let mut children = HashMap::<String, Vec<String>>::new();
+    let mut indegree = HashMap::<String, usize>::new();
+    for commit_id in commit_ids {
+        let parents = parents_by_id.get(commit_id).cloned().unwrap_or_default();
+        indegree.insert(commit_id.clone(), parents.len());
+        for parent in parents {
+            children.entry(parent).or_default().push(commit_id.clone());
+        }
+    }
+    let mut columns = commit_ids
+        .iter()
+        .map(|commit_id| (commit_id.clone(), 0usize))
+        .collect::<HashMap<_, _>>();
+    let mut ready = indegree
+        .iter()
+        .filter(|(_, degree)| **degree == 0)
+        .map(|(commit_id, _)| commit_id.clone())
+        .collect::<VecDeque<_>>();
+    while let Some(current) = ready.pop_front() {
+        let next_column = columns.get(&current).copied().unwrap_or_default() + 1;
+        for child in children.get(&current).into_iter().flatten() {
+            let column = columns.entry(child.clone()).or_default();
+            *column = (*column).max(next_column);
+            if let Some(degree) = indegree.get_mut(child) {
+                *degree = degree.saturating_sub(1);
+                if *degree == 0 {
+                    ready.push_back(child.clone());
+                }
+            }
+        }
+    }
+    columns
+}
+
+fn count_exclusive_commits(root: &Path, branch: &str, others: &[String]) -> Result<usize> {
+    let mut args = vec![
+        "rev-list".to_owned(),
+        "--count".to_owned(),
+        branch.to_owned(),
+    ];
+    if !others.is_empty() {
+        args.push("--not".to_owned());
+        args.extend(others.iter().cloned());
+    }
+    run_git_owned(root, &args)?
+        .lines()
+        .next()
+        .context("git rev-list did not return an exclusive commit count")?
+        .trim()
+        .parse()
+        .context("git rev-list returned an invalid exclusive commit count")
 }
 
 fn canonical_value(value: &Value, strip_volatile: bool) -> Value {
@@ -717,7 +2200,10 @@ fn git_path_is_tracked(root: &Path, relative: &str) -> bool {
 }
 
 fn run_git(root: &Path, args: &[&str]) -> Result<String> {
-    ensure!(git_available(), "Storydex Git executable is not available");
+    Ok(run_git_raw(root, args)?.trim().to_owned())
+}
+
+fn run_git_raw(root: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new(git_executable())
         .args(args)
         .current_dir(root)
@@ -727,7 +2213,16 @@ fn run_git(root: &Path, args: &[&str]) -> Result<String> {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         bail!("git {} failed: {}", args.join(" "), stderr);
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn run_git_owned(root: &Path, args: &[String]) -> Result<String> {
+    Ok(run_git_owned_raw(root, args)?.trim().to_owned())
+}
+
+fn run_git_owned_raw(root: &Path, args: &[String]) -> Result<String> {
+    let borrowed = args.iter().map(String::as_str).collect::<Vec<_>>();
+    run_git_raw(root, &borrowed)
 }
 
 fn repository_top_level(root: &Path) -> Result<Option<PathBuf>> {
@@ -1079,19 +2574,19 @@ mod tests {
         let first = git
             .commit_all(directory.path(), "故事：第一版")
             .expect("first commit");
+        let first_id = first.commit.as_ref().expect("first id").id.clone();
         fs::write(directory.path().join("chapter.md"), "二\n").expect("write second");
         let second = git
             .commit_all(directory.path(), "故事：第二版")
             .expect("second commit");
         fs::write(directory.path().join("scratch.tmp"), "discard\n").expect("scratch");
         let restored = git
-            .restore_to_commit(
-                directory.path(),
-                first.commit.as_deref().expect("first id"),
-                true,
-            )
+            .restore_to_commit(directory.path(), &first_id, true)
             .expect("restore");
-        assert_eq!(restored.head.as_deref(), first.commit.as_deref());
+        assert_eq!(
+            restored.head.as_ref().map(|commit| commit.id.as_str()),
+            Some(first_id.as_str())
+        );
         let restored_text = fs::read_to_string(directory.path().join("chapter.md"))
             .expect("chapter")
             .replace("\r\n", "\n");
@@ -1120,5 +2615,185 @@ mod tests {
             .expect("stale path should be a no-op");
         assert!(!result.created);
         assert!(result.summary.clean);
+    }
+
+    #[test]
+    fn git_diff_includes_tracked_and_unicode_untracked_files() {
+        if !git_available() {
+            return;
+        }
+        let directory = tempdir().expect("project");
+        let git = StorydexGit;
+        git.initialize(directory.path()).expect("init");
+        fs::write(directory.path().join("chapter.md"), "第一行\n第二行\n")
+            .expect("baseline chapter");
+        git.commit_all(directory.path(), "故事：差分基线")
+            .expect("baseline commit");
+
+        fs::write(directory.path().join("chapter.md"), "第一行\n改写行\n")
+            .expect("changed chapter");
+        fs::write(directory.path().join("新章.md"), "新内容\n第二段\n").expect("unicode chapter");
+        let diff = git.diff(directory.path()).expect("working tree diff");
+        assert_eq!(diff.totals.files, 2);
+        let tracked = diff
+            .files
+            .iter()
+            .find(|item| item.relative_path == "chapter.md")
+            .expect("tracked diff");
+        assert_eq!(tracked.added, 1);
+        assert_eq!(tracked.removed, 1);
+        assert!(tracked.hunks.iter().any(|hunk| {
+            hunk.lines
+                .iter()
+                .any(|line| line.kind == "added" && line.content == "改写行")
+        }));
+        let untracked = diff
+            .files
+            .iter()
+            .find(|item| item.relative_path == "新章.md")
+            .expect("unicode untracked diff");
+        assert_eq!(untracked.status, "??");
+        assert_eq!(untracked.added, 2);
+        assert_eq!(untracked.hunks[0].lines[0].content, "新内容");
+    }
+
+    #[test]
+    fn git_commit_diff_reports_the_selected_commit_only() {
+        if !git_available() {
+            return;
+        }
+        let directory = tempdir().expect("project");
+        let git = StorydexGit;
+        git.initialize(directory.path()).expect("init");
+        fs::write(directory.path().join("chapter.md"), "旧版本\n").expect("first version");
+        git.commit_all(directory.path(), "故事：旧版本")
+            .expect("first commit");
+        fs::write(directory.path().join("chapter.md"), "新版本\n").expect("second version");
+        let second = git
+            .commit_all(directory.path(), "故事：新版本")
+            .expect("second commit");
+        let second_id = &second.commit.as_ref().expect("second id").id;
+
+        let diff = git
+            .commit_diff(directory.path(), second_id)
+            .expect("commit diff");
+        assert_eq!(diff.totals.files, 1);
+        assert_eq!(diff.files[0].relative_path, "chapter.md");
+        assert_eq!(diff.files[0].added, 1);
+        assert_eq!(diff.files[0].removed, 1);
+    }
+
+    #[test]
+    fn git_branches_timeline_jump_and_worldlines_are_bounded() {
+        if !git_available() {
+            return;
+        }
+        let directory = tempdir().expect("project");
+        let git = StorydexGit;
+        git.initialize(directory.path()).expect("init");
+        fs::write(directory.path().join("story.md"), "共同前史\n").expect("baseline");
+        let baseline = git
+            .commit_all(directory.path(), "故事：共同前史")
+            .expect("baseline commit");
+        let baseline_id = baseline.commit.as_ref().expect("baseline id").id.clone();
+
+        let branches = git
+            .create_branch(directory.path(), "alternate", true)
+            .expect("create alternate");
+        assert_eq!(branches.current, "alternate");
+        fs::write(directory.path().join("story.md"), "支线版本\n").expect("alternate story");
+        let alternate = git
+            .commit_all(directory.path(), "故事：支线版本")
+            .expect("alternate commit");
+        let alternate_id = alternate.commit.as_ref().expect("alternate id").id.clone();
+
+        git.switch_branch(directory.path(), DEFAULT_BRANCH)
+            .expect("switch develop");
+        fs::write(directory.path().join("story.md"), "主线版本\n").expect("develop story");
+        let develop = git
+            .commit_all(directory.path(), "故事：主线版本")
+            .expect("develop commit");
+        let develop_id = develop.commit.as_ref().expect("develop id").id.clone();
+
+        let timeline = git.timeline(directory.path()).expect("timeline");
+        assert_eq!(timeline.current_branch, DEFAULT_BRANCH);
+        assert_eq!(timeline.nodes.len(), 3);
+        assert_eq!(
+            timeline
+                .branches
+                .iter()
+                .find(|branch| branch.name == DEFAULT_BRANCH)
+                .expect("develop branch")
+                .lane,
+            0
+        );
+        for name in [DEFAULT_BRANCH, "alternate"] {
+            let branch = timeline
+                .branches
+                .iter()
+                .find(|branch| branch.name == name)
+                .expect("timeline branch");
+            assert_eq!(branch.fork_column, 1);
+            assert_eq!(branch.tip_column, 1);
+            assert_eq!(branch.commit_count, 1);
+            assert_eq!(branch.total_count, 2);
+        }
+        assert_eq!(
+            timeline
+                .nodes
+                .iter()
+                .find(|node| node.id == baseline_id)
+                .expect("baseline node")
+                .column,
+            0
+        );
+
+        let observed = git
+            .jump_to_commit(directory.path(), &baseline_id)
+            .expect("jump historical");
+        assert!(observed.detached);
+        assert!(observed.branch.is_empty());
+        let landed = git
+            .jump_to_commit(directory.path(), &alternate_id)
+            .expect("jump branch tip");
+        assert!(!landed.detached);
+        assert_eq!(landed.branch, "alternate");
+
+        fs::write(directory.path().join("dirty.md"), "未提交\n").expect("dirty file");
+        let dirty_error = git
+            .switch_branch(directory.path(), DEFAULT_BRANCH)
+            .expect_err("dirty checkout must fail");
+        assert!(dirty_error.to_string().contains("uncommitted"));
+        fs::remove_file(directory.path().join("dirty.md")).expect("remove dirty file");
+
+        let worldline = git
+            .create_worldline(directory.path(), &baseline_id, "rewrite")
+            .expect("create worldline");
+        assert_eq!(worldline.worldline.as_deref(), Some("rewrite"));
+        assert_eq!(worldline.from_commit.as_deref(), Some(baseline_id.as_str()));
+        let renamed = git
+            .rename_worldline(directory.path(), "rewrite", "rewrite-v2")
+            .expect("rename worldline");
+        assert_eq!(renamed.current, "rewrite-v2");
+        assert_eq!(renamed.renamed_from.as_deref(), Some("rewrite"));
+        assert_eq!(renamed.renamed_to.as_deref(), Some("rewrite-v2"));
+
+        git.switch_branch(directory.path(), DEFAULT_BRANCH)
+            .expect("return develop");
+        let deleted = git
+            .delete_worldline(directory.path(), "alternate")
+            .expect("delete alternate");
+        assert_eq!(deleted.deleted.as_deref(), Some("alternate"));
+        assert_eq!(deleted.exclusive_commits, Some(1));
+        assert!(
+            deleted
+                .branches
+                .iter()
+                .all(|branch| branch.name != "alternate")
+        );
+        assert_eq!(
+            deleted.summary.head.as_ref().map(|head| &head.id),
+            Some(&develop_id)
+        );
     }
 }

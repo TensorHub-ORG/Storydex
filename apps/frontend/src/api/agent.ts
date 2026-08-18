@@ -1,4 +1,10 @@
-import { ApiResponseError, apiClient, getApiAuthToken, unwrapEnvelope } from "@/api/client";
+import {
+  ApiResponseError,
+  apiClient,
+  getApiAuthToken,
+  getRuntimeAuthToken,
+  unwrapEnvelope
+} from "@/api/client";
 import type {
   AgentChatRequest,
   AgentChatResponse,
@@ -125,11 +131,13 @@ export async function streamAgentPrompt(
 
   try {
     const authToken = getApiAuthToken();
+    const runtimeAuthToken = getRuntimeAuthToken();
     const response = await fetch(appendSessionQuery(resolveApiUrl("/agent/chat/stream"), sessionId), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Accept: "text/event-stream",
+        ...(runtimeAuthToken ? { "X-Storydex-Runtime-Token": runtimeAuthToken } : {}),
         ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
         ...(buildTraceHeaders(traceId) ?? {})
       },

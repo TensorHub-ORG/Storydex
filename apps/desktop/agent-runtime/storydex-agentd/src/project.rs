@@ -48,6 +48,66 @@ pub(crate) struct GitRestoreRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct GitCommitDiffQuery {
+    #[serde(default)]
+    pub workspace_root: String,
+    #[serde(default)]
+    pub commit_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GitBranchCreateRequest {
+    #[serde(default)]
+    pub workspace_root: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub checkout: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GitBranchRequest {
+    #[serde(default)]
+    pub workspace_root: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GitJumpRequest {
+    #[serde(default)]
+    pub workspace_root: String,
+    #[serde(default)]
+    pub commit_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GitWorldlineCreateRequest {
+    #[serde(default)]
+    pub workspace_root: String,
+    #[serde(default)]
+    pub from_commit: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GitWorldlineRenameRequest {
+    #[serde(default)]
+    pub workspace_root: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub new_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ProjectionWriteRequest {
     pub workspace_root: String,
     pub payload: Value,
@@ -122,15 +182,44 @@ fn resolve_workspace(state: &AppState, raw: &str) -> Result<PathBuf, Response> {
 fn map_git_summary(summary: coomi_services::GitSummary) -> Value {
     json!({
         "available": summary.available,
-        "gitInstalled": summary.available,
+        "gitInstalled": summary.git_installed,
         "initialized": summary.initialized,
         "branch": summary.branch,
         "clean": summary.clean,
         "changedFiles": summary.changed_files,
+        "recentCommits": summary.recent_commits,
+        "graphLines": summary.graph_lines,
         "head": summary.head,
-        "defaultBranch": "develop",
-        "message": "",
+        "defaultBranch": summary.default_branch,
+        "message": summary.message,
+        "generatedAt": summary.generated_at,
     })
+}
+
+fn git_failure(code: &str, error: anyhow::Error) -> Response {
+    let message = format!("{error:#}");
+    let normalized = message.to_ascii_lowercase();
+    let status = if normalized.contains("invalid branch name") || normalized.contains("is required")
+    {
+        StatusCode::BAD_REQUEST
+    } else if normalized.contains("does not exist") {
+        StatusCode::NOT_FOUND
+    } else if normalized.contains("uncommitted changes")
+        || normalized.contains("already exists")
+        || normalized.contains("only worldline")
+        || normalized.contains("currently on")
+        || normalized.contains("no commits yet")
+        || normalized.contains("before the first commit")
+    {
+        StatusCode::CONFLICT
+    } else {
+        StatusCode::UNPROCESSABLE_ENTITY
+    };
+    error_response(
+        status,
+        code,
+        &format!("Rust Git operation failed: {message}"),
+    )
 }
 
 pub(crate) async fn git_summary(
@@ -154,6 +243,188 @@ pub(crate) async fn git_summary(
             "git_summary_failed",
             &format!("Rust Git summary failed: {error:#}"),
         ),
+    }
+}
+
+pub(crate) async fn git_diff(
+    State(state): State<AppState>,
+    Query(query): Query<WorkspaceQuery>,
+) -> Response {
+    let started = Instant::now();
+    let workspace = match resolve_workspace(&state, &query.workspace_root) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    match StorydexGit.diff(&workspace) {
+        Ok(result) => {
+            success(json!(result), started, "read_rust_workspace_git_diff").into_response()
+        }
+        Err(error) => git_failure("git_diff_failed", error),
+    }
+}
+
+pub(crate) async fn git_branches(
+    State(state): State<AppState>,
+    Query(query): Query<WorkspaceQuery>,
+) -> Response {
+    let started = Instant::now();
+    let workspace = match resolve_workspace(&state, &query.workspace_root) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    match StorydexGit.branches(&workspace) {
+        Ok(result) => {
+            success(json!(result), started, "read_rust_workspace_git_branches").into_response()
+        }
+        Err(error) => git_failure("git_branches_failed", error),
+    }
+}
+
+pub(crate) async fn git_create_branch(
+    State(state): State<AppState>,
+    Json(request): Json<GitBranchCreateRequest>,
+) -> Response {
+    let started = Instant::now();
+    let workspace = match resolve_workspace(&state, &request.workspace_root) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    match StorydexGit.create_branch(&workspace, &request.name, request.checkout) {
+        Ok(result) => {
+            success(json!(result), started, "create_rust_workspace_git_branch").into_response()
+        }
+        Err(error) => git_failure("git_branch_create_failed", error),
+    }
+}
+
+pub(crate) async fn git_checkout(
+    State(state): State<AppState>,
+    Json(request): Json<GitBranchRequest>,
+) -> Response {
+    let started = Instant::now();
+    let workspace = match resolve_workspace(&state, &request.workspace_root) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    match StorydexGit.switch_branch(&workspace, &request.name) {
+        Ok(result) => {
+            success(json!(result), started, "switch_rust_workspace_git_branch").into_response()
+        }
+        Err(error) => git_failure("git_checkout_failed", error),
+    }
+}
+
+pub(crate) async fn git_timeline(
+    State(state): State<AppState>,
+    Query(query): Query<WorkspaceQuery>,
+) -> Response {
+    let started = Instant::now();
+    let workspace = match resolve_workspace(&state, &query.workspace_root) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    match StorydexGit.timeline(&workspace) {
+        Ok(result) => {
+            success(json!(result), started, "read_rust_workspace_git_timeline").into_response()
+        }
+        Err(error) => git_failure("git_timeline_failed", error),
+    }
+}
+
+pub(crate) async fn git_commit_diff(
+    State(state): State<AppState>,
+    Query(query): Query<GitCommitDiffQuery>,
+) -> Response {
+    let started = Instant::now();
+    let workspace = match resolve_workspace(&state, &query.workspace_root) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    match StorydexGit.commit_diff(&workspace, &query.commit_id) {
+        Ok(result) => success(
+            json!(result),
+            started,
+            "read_rust_workspace_git_commit_diff",
+        )
+        .into_response(),
+        Err(error) => git_failure("git_commit_diff_failed", error),
+    }
+}
+
+pub(crate) async fn git_jump(
+    State(state): State<AppState>,
+    Json(request): Json<GitJumpRequest>,
+) -> Response {
+    let started = Instant::now();
+    let workspace = match resolve_workspace(&state, &request.workspace_root) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    match StorydexGit.jump_to_commit(&workspace, &request.commit_id) {
+        Ok(result) => {
+            success(json!(result), started, "jump_rust_workspace_git_commit").into_response()
+        }
+        Err(error) => git_failure("git_jump_failed", error),
+    }
+}
+
+pub(crate) async fn git_worldline_create(
+    State(state): State<AppState>,
+    Json(request): Json<GitWorldlineCreateRequest>,
+) -> Response {
+    let started = Instant::now();
+    let workspace = match resolve_workspace(&state, &request.workspace_root) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    match StorydexGit.create_worldline(&workspace, &request.from_commit, &request.name) {
+        Ok(result) => success(
+            json!(result),
+            started,
+            "create_rust_workspace_git_worldline",
+        )
+        .into_response(),
+        Err(error) => git_failure("git_worldline_create_failed", error),
+    }
+}
+
+pub(crate) async fn git_worldline_rename(
+    State(state): State<AppState>,
+    Json(request): Json<GitWorldlineRenameRequest>,
+) -> Response {
+    let started = Instant::now();
+    let workspace = match resolve_workspace(&state, &request.workspace_root) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    match StorydexGit.rename_worldline(&workspace, &request.name, &request.new_name) {
+        Ok(result) => success(
+            json!(result),
+            started,
+            "rename_rust_workspace_git_worldline",
+        )
+        .into_response(),
+        Err(error) => git_failure("git_worldline_rename_failed", error),
+    }
+}
+
+pub(crate) async fn git_worldline_delete(
+    State(state): State<AppState>,
+    Json(request): Json<GitBranchRequest>,
+) -> Response {
+    let started = Instant::now();
+    let workspace = match resolve_workspace(&state, &request.workspace_root) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    match StorydexGit.delete_worldline(&workspace, &request.name) {
+        Ok(result) => success(
+            json!(result),
+            started,
+            "delete_rust_workspace_git_worldline",
+        )
+        .into_response(),
+        Err(error) => git_failure("git_worldline_delete_failed", error),
     }
 }
 
@@ -196,6 +467,7 @@ pub(crate) async fn git_commit(
                 "created": result.created,
                 "commit": result.commit,
                 "summary": map_git_summary(result.summary),
+                "worldlineBranch": result.worldline_branch,
                 "event": if result.created { "GitAutoCommit" } else { "GitCommitPrompt" },
             }),
             started,

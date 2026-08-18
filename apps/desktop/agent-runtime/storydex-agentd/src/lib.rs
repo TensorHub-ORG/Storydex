@@ -5,6 +5,7 @@ use axum::extract::State;
 use axum::http::Request;
 use axum::http::StatusCode;
 use axum::http::header;
+use axum::http::{HeaderName, Method};
 use axum::middleware;
 use axum::middleware::Next;
 use axum::response::IntoResponse;
@@ -36,6 +37,7 @@ use std::time::Instant;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tower_http::catch_panic::CatchPanicLayer;
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
@@ -476,16 +478,21 @@ pub(crate) fn error_response(status: StatusCode, code: &str, message: &str) -> R
 }
 
 async fn auth_layer(State(state): State<AppState>, request: Request<Body>, next: Next) -> Response {
-    if request.uri().path() == "/api/v1/sys/health" {
+    if request.uri().path() == "/api/v1/sys/health" || request.method() == Method::OPTIONS {
         return next.run(request).await;
     }
-    let authorized = request
+    let bearer_authorized = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .is_some_and(|value| value == state.token.as_ref());
-    if authorized {
+    let runtime_authorized = request
+        .headers()
+        .get("x-storydex-runtime-token")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == state.token.as_ref());
+    if bearer_authorized || runtime_authorized {
         next.run(request).await
     } else {
         error_response(
@@ -494,6 +501,26 @@ async fn auth_layer(State(state): State<AppState>, request: Request<Body>, next:
             "Missing or invalid Storydex Agent access token.",
         )
     }
+}
+
+fn cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            header::ACCEPT,
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            HeaderName::from_static("x-storydex-runtime-token"),
+            HeaderName::from_static("x-trace-id"),
+        ])
 }
 
 async fn health(State(state): State<AppState>) -> Json<ApiEnvelope<HealthData>> {
@@ -577,9 +604,36 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/sys/shutdown", post(shutdown))
         .route("/api/v1/agent/coomi/status", get(coomi_status))
         .route("/api/v1/workspace/git/summary", get(project::git_summary))
+        .route("/api/v1/workspace/git/diff", get(project::git_diff))
         .route("/api/v1/workspace/git/init", post(project::git_init))
+        .route(
+            "/api/v1/workspace/git/branches",
+            get(project::git_branches).post(project::git_create_branch),
+        )
+        .route(
+            "/api/v1/workspace/git/checkout",
+            post(project::git_checkout),
+        )
         .route("/api/v1/workspace/git/commit", post(project::git_commit))
         .route("/api/v1/workspace/git/restore", post(project::git_restore))
+        .route("/api/v1/workspace/git/timeline", get(project::git_timeline))
+        .route("/api/v1/workspace/git/jump", post(project::git_jump))
+        .route(
+            "/api/v1/workspace/git/commit-diff",
+            get(project::git_commit_diff),
+        )
+        .route(
+            "/api/v1/workspace/git/worldlines",
+            post(project::git_worldline_create),
+        )
+        .route(
+            "/api/v1/workspace/git/worldlines/rename",
+            post(project::git_worldline_rename),
+        )
+        .route(
+            "/api/v1/workspace/git/worldlines/delete",
+            post(project::git_worldline_delete),
+        )
         .route("/api/v1/story/wiki", get(project::wiki_read))
         .route("/api/v1/story/wiki/projection", post(project::wiki_write))
         .route(
@@ -612,6 +666,7 @@ pub fn router(state: AppState) -> Router {
         }))
         .layer(TraceLayer::new_for_http())
         .layer(middleware::from_fn_with_state(state.clone(), auth_layer))
+        .layer(cors_layer())
         .with_state(state)
 }
 
@@ -665,6 +720,14 @@ mod tests {
 
     fn protected_json_request(uri: &str, payload: Value) -> Request<Body> {
         protected_json_request_with_method("POST", uri, payload)
+    }
+
+    fn protected_get_request(uri: &str) -> Request<Body> {
+        Request::builder()
+            .uri(uri)
+            .header(header::AUTHORIZATION, "Bearer test-token")
+            .body(Body::empty())
+            .expect("request")
     }
 
     fn encode_query_value(value: &Path) -> String {
@@ -753,6 +816,70 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(body["data"]["runtime"], SERVICE_NAME);
         assert_eq!(body["data"]["protocolVersion"], API_PROTOCOL_VERSION);
+    }
+
+    #[tokio::test]
+    async fn protected_version_accepts_desktop_runtime_token() {
+        let app = router(AppState::new("test-token").expect("state"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/sys/version")
+                    .header("x-storydex-runtime-token", "test-token")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("version response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["data"]["runtime"], SERVICE_NAME);
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_allows_the_narrow_desktop_runtime_header() {
+        let app = router(AppState::new("test-token").expect("state"));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/api/v1/sys/version")
+                    .header(header::ORIGIN, "http://tauri.localhost")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                    .header(
+                        header::ACCESS_CONTROL_REQUEST_HEADERS,
+                        "x-storydex-runtime-token",
+                    )
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("preflight response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            Some(&header::HeaderValue::from_static("*"))
+        );
+        let allowed_methods = response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+            .and_then(|value| value.to_str().ok())
+            .expect("allowed methods");
+        assert!(
+            allowed_methods
+                .split(',')
+                .any(|method| method.trim() == "GET")
+        );
+        let allowed_headers = response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_HEADERS)
+            .and_then(|value| value.to_str().ok())
+            .expect("allowed headers");
+        assert!(
+            allowed_headers
+                .split(',')
+                .any(|name| { name.trim().eq_ignore_ascii_case("x-storydex-runtime-token") })
+        );
     }
 
     #[tokio::test]
@@ -1169,6 +1296,208 @@ mod tests {
             .expect("git summary response");
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response_json(response).await["data"]["clean"], true);
+    }
+
+    #[tokio::test]
+    async fn rust_project_routes_cover_git_diff_timeline_and_worldlines() {
+        let root = tempdir().expect("root");
+        let (state, workspace) = followup_test_state(root.path());
+        let encoded = encode_query_value(&workspace);
+
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/workspace/git/init?workspaceRoot={encoded}"
+                    ))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .expect("git init request"),
+            )
+            .await
+            .expect("git init response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        std::fs::write(workspace.join("story.md"), "共同前史\n").expect("baseline story");
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/workspace/git/commit",
+                json!({
+                    "workspaceRoot": workspace.to_string_lossy(),
+                    "message": "故事：共同前史"
+                }),
+            ))
+            .await
+            .expect("baseline commit response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let baseline = response_json(response).await;
+        let baseline_id = baseline["data"]["commit"]["id"]
+            .as_str()
+            .expect("baseline commit id")
+            .to_owned();
+
+        std::fs::write(workspace.join("story.md"), "改写主线\n").expect("changed story");
+        std::fs::write(workspace.join("新章.md"), "新内容\n").expect("unicode story");
+        let response = router(state.clone())
+            .oneshot(protected_get_request(&format!(
+                "/api/v1/workspace/git/diff?workspaceRoot={encoded}"
+            )))
+            .await
+            .expect("diff response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let diff = response_json(response).await;
+        assert_eq!(diff["data"]["totals"]["files"], 2);
+        assert!(diff["data"]["files"].as_array().is_some_and(|files| {
+            files
+                .iter()
+                .any(|file| file["relativePath"] == "新章.md" && file["added"] == 1)
+        }));
+
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/workspace/git/commit",
+                json!({
+                    "workspaceRoot": workspace.to_string_lossy(),
+                    "message": "故事：改写主线"
+                }),
+            ))
+            .await
+            .expect("second commit response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let second = response_json(response).await;
+        let second_id = second["data"]["commit"]["id"]
+            .as_str()
+            .expect("second commit id")
+            .to_owned();
+
+        let response = router(state.clone())
+            .oneshot(protected_get_request(&format!(
+                "/api/v1/workspace/git/commit-diff?workspaceRoot={encoded}&commitId={second_id}"
+            )))
+            .await
+            .expect("commit diff response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let commit_diff = response_json(response).await;
+        assert_eq!(commit_diff["data"]["totals"]["files"], 2);
+
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/workspace/git/branches",
+                json!({
+                    "workspaceRoot": workspace.to_string_lossy(),
+                    "name": "alternate",
+                    "checkout": true
+                }),
+            ))
+            .await
+            .expect("create branch response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await["data"]["current"],
+            "alternate"
+        );
+
+        let response = router(state.clone())
+            .oneshot(protected_get_request(&format!(
+                "/api/v1/workspace/git/branches?workspaceRoot={encoded}"
+            )))
+            .await
+            .expect("branches response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await["data"]["branches"]
+                .as_array()
+                .map(Vec::len),
+            Some(2)
+        );
+
+        let response = router(state.clone())
+            .oneshot(protected_get_request(&format!(
+                "/api/v1/workspace/git/timeline?workspaceRoot={encoded}"
+            )))
+            .await
+            .expect("timeline response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let timeline = response_json(response).await;
+        assert_eq!(timeline["data"]["currentBranch"], "alternate");
+        assert_eq!(timeline["data"]["branches"][0]["lane"], 0);
+        assert_eq!(timeline["data"]["nodes"].as_array().map(Vec::len), Some(2));
+
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/workspace/git/jump",
+                json!({
+                    "workspaceRoot": workspace.to_string_lossy(),
+                    "commitId": baseline_id
+                }),
+            ))
+            .await
+            .expect("jump response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await["data"]["detached"], true);
+
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/workspace/git/worldlines",
+                json!({
+                    "workspaceRoot": workspace.to_string_lossy(),
+                    "fromCommit": baseline_id,
+                    "name": "rewrite"
+                }),
+            ))
+            .await
+            .expect("create worldline response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await["data"]["worldline"],
+            "rewrite"
+        );
+
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/workspace/git/worldlines/rename",
+                json!({
+                    "workspaceRoot": workspace.to_string_lossy(),
+                    "name": "rewrite",
+                    "newName": "rewrite-v2"
+                }),
+            ))
+            .await
+            .expect("rename worldline response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await["data"]["current"],
+            "rewrite-v2"
+        );
+
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/workspace/git/checkout",
+                json!({
+                    "workspaceRoot": workspace.to_string_lossy(),
+                    "name": "develop"
+                }),
+            ))
+            .await
+            .expect("checkout response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await["data"]["current"], "develop");
+
+        let response = router(state)
+            .oneshot(protected_json_request(
+                "/api/v1/workspace/git/worldlines/delete",
+                json!({
+                    "workspaceRoot": workspace.to_string_lossy(),
+                    "name": "rewrite-v2"
+                }),
+            ))
+            .await
+            .expect("delete worldline response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let deleted = response_json(response).await;
+        assert_eq!(deleted["data"]["deleted"], "rewrite-v2");
+        assert_eq!(deleted["data"]["exclusiveCommits"], 0);
     }
 
     #[tokio::test]

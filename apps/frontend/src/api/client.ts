@@ -3,6 +3,12 @@ import type { ApiAuditRecord, ApiEnvelope, ApiResult, ApiTrace } from "@/types/a
 
 let currentAuthToken = "";
 
+export function getRuntimeAuthToken(): string {
+  return typeof window !== "undefined"
+    ? window.storydexDesktop?.backendAuthToken?.trim() || ""
+    : "";
+}
+
 function resolveApiBaseUrl(): string {
   const envBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim();
   if (envBaseUrl) {
@@ -36,12 +42,18 @@ export function getApiAuthToken(): string {
 }
 
 apiClient.interceptors.request.use((config) => {
-  if (!currentAuthToken) {
+  const runtimeAuthToken = getRuntimeAuthToken();
+  if (!currentAuthToken && !runtimeAuthToken) {
     return config;
   }
 
   const headers = AxiosHeaders.from(config.headers ?? {});
-  headers.set("Authorization", `Bearer ${currentAuthToken}`);
+  if (runtimeAuthToken) {
+    headers.set("X-Storydex-Runtime-Token", runtimeAuthToken);
+  }
+  if (currentAuthToken) {
+    headers.set("Authorization", `Bearer ${currentAuthToken}`);
+  }
   config.headers = headers;
   return config;
 });

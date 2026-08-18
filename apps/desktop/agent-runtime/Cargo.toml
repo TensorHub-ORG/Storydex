@@ -42,7 +42,7 @@ tempfile = "3"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["catch-panic", "trace"] }
+tower-http = { version = "0.6", features = ["catch-panic", "cors", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "json"] }
 unicode-width = "0.2"

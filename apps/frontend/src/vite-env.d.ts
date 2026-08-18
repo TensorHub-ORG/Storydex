@@ -6,11 +6,12 @@ interface StorydexDesktopBridge {
   onOpenTarget?: (listener: (target: StorydexDesktopOpenTarget) => void) => () => void;
   platform: string;
   backendBaseUrl?: string;
+  backendAuthToken?: string;
   isTitleBarOverlaySupported?: boolean;
-  versions: {
-    electron: string;
-    chrome: string;
-    node: string;
+  versions?: {
+    electron?: string;
+    chrome?: string;
+    node?: string;
   };
   setTitleBarTheme?: (theme: { color: string; symbolColor: string }) => Promise<{
     applied: boolean;
