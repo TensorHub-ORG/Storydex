@@ -220,6 +220,25 @@ def _phase_sequence(observation: Mapping[str, Any]) -> list[str]:
     return [name for _, name in sorted(indexed)]
 
 
+def _project_expected_shape(actual: Any, expected: Any) -> Any:
+    if isinstance(expected, Mapping):
+        actual_mapping = actual if isinstance(actual, Mapping) else {}
+        return {
+            str(key): _project_expected_shape(actual_mapping.get(key), value)
+            for key, value in expected.items()
+        }
+    if isinstance(expected, list):
+        actual_list = actual if isinstance(actual, list) else []
+        return [
+            _project_expected_shape(
+                actual_list[index] if index < len(actual_list) else None,
+                value,
+            )
+            for index, value in enumerate(expected)
+        ]
+    return actual
+
+
 def compare_reports(
     python_report: Mapping[str, Any],
     rust_report: Mapping[str, Any],
@@ -278,6 +297,32 @@ def compare_reports(
     rust_names = {str(name) for name in rust_observation.get("eventNames") or []}
     expected = fixture.get("expected")
     expected = expected if isinstance(expected, Mapping) else {}
+    expected_turn_contract = expected.get("turnContract")
+    if isinstance(expected_turn_contract, Mapping):
+        python_turn_contract = _project_expected_shape(
+            python_observation.get("turnContract"), expected_turn_contract
+        )
+        rust_turn_contract = _project_expected_shape(
+            rust_observation.get("turnContract"), expected_turn_contract
+        )
+        compared["turnContract"] = {
+            "expected": dict(expected_turn_contract),
+            "pythonStable": python_turn_contract,
+            "rustRefactor": rust_turn_contract,
+        }
+        if (
+            python_turn_contract != expected_turn_contract
+            or rust_turn_contract != expected_turn_contract
+            or python_turn_contract != rust_turn_contract
+        ):
+            differences.append(
+                {
+                    "field": "turnContract",
+                    "expected": dict(expected_turn_contract),
+                    "pythonStable": python_turn_contract,
+                    "rustRefactor": rust_turn_contract,
+                }
+            )
     if isinstance(fixture.get("interaction"), Mapping):
         python_interaction = python_observation.get("interaction")
         rust_interaction = rust_observation.get("interaction")

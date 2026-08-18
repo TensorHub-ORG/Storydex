@@ -229,19 +229,40 @@ def _validated_persisted_session_bound(data: Dict[str, Any]) -> str:
         raise StorydexCoomiSessionRestoreError(
             "Coomi session_bound event is missing the persisted session path"
         )
-    session_path = Path(raw_path).expanduser().resolve()
-    expected_path = (STORYDEX_COOMI_SESSIONS / f"{runtime_id}.json").resolve()
-    if not session_path.is_file():
-        raise StorydexCoomiSessionRestoreError(
-            f"Coomi session_bound history does not exist: {session_path}"
-        )
-    try:
-        same_session_file = session_path.samefile(expected_path)
-    except OSError:
-        same_session_file = False
+    session_candidate = Path(raw_path).expanduser()
+    expected_candidate = STORYDEX_COOMI_SESSIONS / f"{runtime_id}.json"
+
+    def path_identity(value: str) -> str:
+        if os.name == "nt":
+            value = value.replace("/", "\\")
+            folded = value.casefold()
+            if folded.startswith("\\\\?\\unc\\"):
+                value = "\\\\" + value[8:]
+            elif folded.startswith("\\\\?\\"):
+                value = value[4:]
+            return os.path.normcase(value)
+        return value
+
+    same_session_file = path_identity(raw_path) == path_identity(str(expected_candidate))
+    if not same_session_file:
+        session_path = session_candidate.resolve()
+        expected_path = expected_candidate.resolve()
+        same_session_file = path_identity(str(session_path)) == path_identity(str(expected_path))
+    else:
+        session_path = session_candidate
+        expected_path = expected_candidate
+    if not same_session_file:
+        try:
+            same_session_file = session_path.samefile(expected_path)
+        except OSError:
+            same_session_file = False
     if not same_session_file:
         raise StorydexCoomiSessionRestoreError(
             "Coomi session_bound event points outside the expected session path"
+        )
+    if not session_path.is_file():
+        raise StorydexCoomiSessionRestoreError(
+            f"Coomi session_bound history does not exist: {session_path}"
         )
     return runtime_id
 

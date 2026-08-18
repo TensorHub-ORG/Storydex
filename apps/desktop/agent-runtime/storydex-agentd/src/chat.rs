@@ -180,6 +180,13 @@ fn default_followup_mode() -> String {
     "queued".to_owned()
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StoryGenerationOptions {
+    fragment_count: u64,
+    chapter_length_tier: String,
+    chapter_template_id: String,
+}
+
 #[derive(Clone, Debug)]
 struct ProviderIdentity {
     id: String,
@@ -910,18 +917,7 @@ fn validate_refactor_request(
             "Agent reasoningEffort is not supported by the v1 contract.",
         ));
     }
-    let Some(story_generation) = payload.story_generation.as_object() else {
-        return Err((
-            "invalid_request",
-            "Agent storyGeneration must be a JSON object.",
-        ));
-    };
-    if !story_generation.is_empty() {
-        return Err((
-            "refactor_feature_not_ported",
-            "Story generation remains Python-owned.",
-        ));
-    }
+    parse_story_generation(&payload.story_generation)?;
     if payload.source_followup_message_id.trim().is_empty()
         && !payload.source_followup_expected_trace_id.trim().is_empty()
     {
@@ -985,6 +981,71 @@ fn validate_refactor_request(
         }
     }
     Ok(())
+}
+
+fn parse_story_generation(
+    value: &Value,
+) -> Result<Option<StoryGenerationOptions>, (&'static str, &'static str)> {
+    let Some(story_generation) = value.as_object() else {
+        return Err((
+            "invalid_request",
+            "Agent storyGeneration must be a JSON object.",
+        ));
+    };
+    if story_generation.is_empty() {
+        return Ok(None);
+    }
+    if story_generation.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "fragmentCount" | "chapterLengthTier" | "chapterTemplateId"
+        )
+    }) {
+        return Err((
+            "invalid_request",
+            "Agent storyGeneration contains unsupported fields.",
+        ));
+    }
+    let fragment_count = story_generation
+        .get("fragmentCount")
+        .map(Value::as_u64)
+        .unwrap_or(Some(1))
+        .filter(|value| (1..=20).contains(value))
+        .ok_or((
+            "invalid_request",
+            "Agent storyGeneration.fragmentCount must be an integer from 1 to 20.",
+        ))?;
+    let chapter_length_tier = story_generation
+        .get("chapterLengthTier")
+        .map(Value::as_str)
+        .unwrap_or(Some("medium"))
+        .filter(|value| matches!(*value, "short" | "medium" | "long"))
+        .ok_or((
+            "invalid_request",
+            "Agent storyGeneration.chapterLengthTier must be short, medium, or long.",
+        ))?
+        .to_owned();
+    let chapter_template_id = story_generation
+        .get("chapterTemplateId")
+        .map(Value::as_str)
+        .unwrap_or(Some("default_chapter_directory"))
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        })
+        .ok_or((
+            "invalid_request",
+            "Agent storyGeneration.chapterTemplateId must be a safe template identifier.",
+        ))?
+        .to_owned();
+    Ok(Some(StoryGenerationOptions {
+        fragment_count,
+        chapter_length_tier,
+        chapter_template_id,
+    }))
 }
 
 fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -1115,35 +1176,7 @@ async fn run_chat(execution: ChatExecution) {
     }
 
     let identity = provider_identity(&state);
-    let mut turn_contract = json!({
-        "status": "ready",
-        "reasoningEffort": payload.reasoning_effort,
-        "intentFrame": {
-            "primary": "general",
-            "operationType": if payload.writes_allowed { "modify_existing" } else { "inquiry" },
-            "canWrite": payload.writes_allowed,
-            "method": "refactor_deterministic",
-        },
-        "executionPolicy": {
-            "capabilityMode": payload.capability_mode,
-            "allowedWriteRoots": payload.allowed_write_roots,
-            "directFileWrites": payload.core_writes_allowed.unwrap_or(payload.writes_allowed),
-            "noRestorePointConfirmed": payload.confirm_no_snapshot,
-        },
-        "routeHints": {
-            "operationSignals": if payload.writes_allowed {
-                vec!["read", "write"]
-            } else {
-                vec!["read", "no_write"]
-            }
-        },
-        "contextAssembly": {
-            "budget": {"maxTotalChars": 10000, "totalChars": 0, "blockCount": 0},
-            "contextTrace": {"sources": [], "totals": {"assembleMs": 0}},
-            "promptBlocks": [],
-            "activeFile": payload.active_file,
-        },
-    });
+    let mut turn_contract = build_turn_contract(&payload, &workspace);
     if let (Some(contract), Ok(identity)) = (turn_contract.as_object_mut(), identity.as_ref()) {
         contract.insert("providerId".into(), Value::String(identity.id.clone()));
         contract.insert("model".into(), Value::String(identity.model.clone()));
@@ -1348,6 +1381,238 @@ async fn run_chat(execution: ChatExecution) {
         tracing::warn!(error = %error, trace_id = %trace_id, "unable to persist Refactor Agent trace");
     }
     send_done(&sender).await;
+}
+
+fn build_turn_contract(payload: &ChatStreamRequest, workspace: &Path) -> Value {
+    let story_generation = parse_story_generation(&payload.story_generation)
+        .expect("validated storyGeneration request");
+    let Some(story_generation) = story_generation else {
+        return json!({
+            "status": "ready",
+            "reasoningEffort": payload.reasoning_effort,
+            "intentFrame": {
+                "primary": "general",
+                "operationType": if payload.writes_allowed { "modify_existing" } else { "inquiry" },
+                "canWrite": payload.writes_allowed,
+                "method": "refactor_deterministic",
+            },
+            "executionPolicy": {
+                "capabilityMode": payload.capability_mode,
+                "allowedWriteRoots": payload.allowed_write_roots,
+                "directFileWrites": payload.core_writes_allowed.unwrap_or(payload.writes_allowed),
+                "noRestorePointConfirmed": payload.confirm_no_snapshot,
+            },
+            "routeHints": {
+                "operationSignals": if payload.writes_allowed {
+                    vec!["read", "write"]
+                } else {
+                    vec!["read", "no_write"]
+                }
+            },
+            "contextAssembly": {
+                "budget": {"maxTotalChars": 10000, "totalChars": 0, "blockCount": 0},
+                "contextTrace": {"sources": [], "totals": {"assembleMs": 0}},
+                "promptBlocks": [],
+                "activeFile": payload.active_file,
+            },
+        });
+    };
+
+    let chapter_count = count_story_chapters(workspace);
+    let chapter_word_count_target = story_chapter_word_count_target(workspace);
+    let active_file_exists = workspace.join(&payload.active_file).is_file();
+    let script_path = workspace.join(".storydex/scripts/README.md");
+    let story_script_exists = script_path.is_file();
+    let mut prompt_blocks = Vec::new();
+    if active_file_exists {
+        prompt_blocks.push(json!({
+            "id": "recent_segments",
+            "title": "Recent story segments",
+            "sourcePaths": [payload.active_file],
+            "truncated": false,
+            "omitted": false,
+            "dropReason": "",
+        }));
+    }
+    if story_script_exists {
+        prompt_blocks.push(json!({
+            "id": "story_scripts",
+            "title": "Relevant story scripts",
+            "sourcePaths": [".storydex/scripts/README.md"],
+            "truncated": false,
+            "omitted": false,
+            "dropReason": "",
+        }));
+    }
+    let context_source = |kind: &str, policy: &str, included: bool| {
+        json!({
+            "kind": kind,
+            "policy": policy,
+            "included": included,
+            "truncated": false,
+            "dropReason": if included { "" } else { "empty" },
+        })
+    };
+    let asset_roots = json!([
+        "chapters/",
+        ".storydex/memory/chapters/",
+        ".storydex/characters/",
+        ".storydex/memory/",
+        ".storydex/wiki/"
+    ]);
+
+    json!({
+        "status": "ready",
+        "reasoningEffort": payload.reasoning_effort,
+        "intentFrame": {
+            "primary": "story_generation",
+            "confidence": "medium",
+            "signals": ["story_keywords"],
+            "method": "deterministic_hybrid",
+            "operationType": "modify_existing",
+            "decision": "decided",
+            "effect": "modify",
+            "artifact": "chapter_prose",
+            "targetScope": "none",
+            "targetValue": "",
+            "explicitConstraints": [],
+            "ambiguities": [],
+            "evidence": [],
+            "canWrite": payload.writes_allowed,
+            "complexity": "complex",
+            "existingChapterCount": chapter_count,
+            "assetTargets": asset_roots,
+            "matchedSkills": ["变量思考", "故事生成后更新"],
+        },
+        "executionPolicy": {
+            "coomiRole": "general_agent_runtime",
+            "storydexRole": "fiction_orchestration",
+            "capabilityMode": payload.capability_mode,
+            "directFileWrites": payload.core_writes_allowed.unwrap_or(payload.writes_allowed),
+            "pendingWriteApproval": false,
+            "localGitAutoCommit": true,
+            "allowedWriteRoots": asset_roots,
+            "remotePush": false,
+            "highRiskChangeRequiresNotice": true,
+        },
+        "turnPlan": {
+            "operationType": "modify_existing",
+            "fragmentCount": story_generation.fragment_count,
+            "selectedChapterTemplate": story_generation.chapter_template_id,
+            "chapterWordCountTarget": chapter_word_count_target,
+            "fragmentWordCount": chapter_word_count_target,
+            "fragmentWordCountMin": chapter_word_count_target,
+            "fragmentWordCountMax": chapter_word_count_target,
+            "chapterAction": "",
+            "targetChapterNumber": 0,
+            "authoritativeChapterPath": "",
+            "authoritativeFragmentPaths": [],
+            "nextSegmentPath": "",
+            "chapterCount": chapter_count,
+            "activeFile": payload.active_file,
+            "storyFormatSource": "existing_project",
+            "wordCountPolicy": {
+                "version": 5,
+                "mode": "target",
+                "scope": "chapter",
+                "target": chapter_word_count_target,
+                "minimum": chapter_word_count_target,
+                "maximum": chapter_word_count_target,
+            },
+        },
+        "contextAssembly": {
+            "budget": {"maxTotalChars": 10000, "blockCount": prompt_blocks.len()},
+            "contextTrace": {"sources": [
+                context_source("runtime_presets", "active_or_compiled_safe_only", false),
+                context_source("recent_segments", "compact_recent_only", active_file_exists),
+                context_source("rolling_summaries", "latest_chapters_only", false),
+                context_source("active_characters", "structure_map_matched_spans_jit_read", false),
+                context_source("worldbook", "structure_map_matched_spans_jit_read", false),
+                context_source("facts", "relevant_only", false),
+                context_source("relationships", "neighborhood_only", false),
+                context_source("items", "compact_relevant_only", false),
+                context_source("related_passages", "fts5_v3_chunk_bm25", false),
+                context_source("wiki_reference", "entity_matched_reference_only", false),
+                context_source("story_scripts", "relevant_only", story_script_exists),
+                context_source("variable_snapshot", "compact_preview_only", false),
+            ]},
+            "promptBlocks": prompt_blocks,
+        },
+        "knowledgeWritePolicy": {
+            "mode": "standard",
+            "confirmationRequired": false,
+            "confirmed": true,
+        },
+        "assetTargets": {
+            "chapterRoot": "chapters/",
+            "characterRoot": ".storydex/characters/",
+            "variableThoughtRoot": ".storydex/memory/chapters/",
+            "factMemoryPath": ".storydex/memory/current/facts.json",
+            "relationshipGraphPath": ".storydex/memory/current/relationship_graph.json",
+            "wikiRoot": ".storydex/wiki/",
+        },
+        "contextPolicy": {
+            "activePresetsOnly": true,
+            "compiledSafePresetsAllowed": true,
+            "recentActiveCharactersOnly": true,
+            "avoidFullMemoryDump": true,
+            "variableThinkingFormat": "markdown_first",
+            "machineVariableOperations": "optional",
+            "sources": {
+                "base_story_context": true,
+                "story_structured_memory": true,
+                "passive_fts": true,
+                "wiki_context": true,
+                "coomi_memory": true,
+                "active_retrieval_tools": true,
+            },
+        },
+        "updatePolicy": {
+            "autoUpdateVariables": false,
+            "autoUpdateWiki": false,
+            "autoUpdateVariablesNote": "自动更新变量需要较多耗时，建议每次仅生成单条剧情片段。",
+        },
+        "requiredQuestions": [],
+        "routeHints": {"operationSignals": ["read", "write"]},
+        "storyGeneration": {
+            "fragmentCount": story_generation.fragment_count,
+            "chapterLengthTier": story_generation.chapter_length_tier,
+            "chapterTemplateId": story_generation.chapter_template_id,
+        },
+    })
+}
+
+fn count_story_chapters(workspace: &Path) -> usize {
+    fs::read_dir(workspace.join("chapters"))
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    let path = entry.path();
+                    path.is_dir()
+                        || (path.is_file()
+                            && !matches!(
+                                path.file_name().and_then(|value| value.to_str()),
+                                Some("README.md")
+                            ))
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn story_chapter_word_count_target(workspace: &Path) -> u64 {
+    let settings_path = workspace.join(".storydex/config/project-settings.json");
+    fs::read_to_string(settings_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|settings| {
+            settings
+                .get("chapterWordCountTarget")
+                .and_then(Value::as_u64)
+        })
+        .filter(|target| (100..=20_000).contains(target))
+        .unwrap_or(3000)
 }
 
 fn provider_identity(state: &AppState) -> anyhow::Result<ProviderIdentity> {
@@ -1823,6 +2088,7 @@ fn bridge_request(
         "basePermissionMode": payload.permission_mode,
         "capabilityMode": payload.capability_mode,
         "reasoningEffort": payload.reasoning_effort,
+        "storyGeneration": payload.story_generation,
         "writesAllowed": payload.writes_allowed,
         "coreWritesAllowed": payload.core_writes_allowed.unwrap_or(payload.writes_allowed),
         "allowedWriteRoots": allowed_write_roots,
@@ -2178,7 +2444,7 @@ mod tests {
     }
 
     #[test]
-    fn refactor_request_rejects_python_owned_features() {
+    fn refactor_request_accepts_controlled_story_generation() {
         let directory = tempdir().expect("tempdir");
         let workspace = directory.path();
         let mut payload: ChatStreamRequest = serde_json::from_value(json!({
@@ -2188,13 +2454,17 @@ mod tests {
         .expect("request");
         assert!(validate_refactor_request(&payload, workspace).is_ok());
 
+        payload.story_generation = json!({
+            "fragmentCount": 1,
+            "chapterLengthTier": "short",
+            "chapterTemplateId": "default_chapter_directory"
+        });
+        assert!(validate_refactor_request(&payload, workspace).is_ok());
+
         payload.story_generation = json!({"enabled": true});
         assert_eq!(
-            validate_refactor_request(&payload, workspace),
-            Err((
-                "refactor_feature_not_ported",
-                "Story generation remains Python-owned."
-            ))
+            validate_refactor_request(&payload, workspace).map_err(|error| error.0),
+            Err("invalid_request")
         );
 
         payload.story_generation = json!({});
@@ -2225,6 +2495,23 @@ mod tests {
             validate_refactor_request(&invalid_story, workspace).map_err(|error| error.0),
             Err("invalid_request")
         );
+
+        for invalid_story in [
+            json!({"fragmentCount": 0}),
+            json!({"fragmentCount": 1.5}),
+            json!({"chapterLengthTier": "unbounded"}),
+            json!({"chapterTemplateId": "../../escape"}),
+        ] {
+            let payload: ChatStreamRequest = serde_json::from_value(json!({
+                "prompt": "read only",
+                "storyGeneration": invalid_story
+            }))
+            .expect("request");
+            assert_eq!(
+                validate_refactor_request(&payload, workspace).map_err(|error| error.0),
+                Err("invalid_request")
+            );
+        }
     }
 
     #[test]
@@ -2258,6 +2545,50 @@ mod tests {
         assert_eq!(
             request["allowedWriteRoots"],
             json!([allowed.canonicalize().expect("canonical allowed root")])
+        );
+    }
+
+    #[test]
+    fn story_turn_contract_freezes_external_semantics_without_expanding_bridge_roots() {
+        let directory = tempdir().expect("tempdir");
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("chapters")).expect("chapters");
+        std::fs::create_dir_all(workspace.join(".storydex/scripts")).expect("scripts");
+        std::fs::write(workspace.join("chapters/fixture.md"), "fixture\n").expect("chapter");
+        std::fs::write(workspace.join(".storydex/scripts/README.md"), "fixture\n").expect("script");
+        let workspace = workspace.canonicalize().expect("canonical workspace");
+        let payload: ChatStreamRequest = serde_json::from_value(json!({
+            "prompt": "rewrite the story",
+            "activeFile": "chapters/fixture.md",
+            "reasoningEffort": "low",
+            "storyGeneration": {"fragmentCount": 1, "chapterLengthTier": "short"},
+            "capabilityMode": "scoped_write",
+            "writesAllowed": true,
+            "coreWritesAllowed": true,
+            "allowedWriteRoots": ["chapters/"]
+        }))
+        .expect("request");
+
+        let contract = build_turn_contract(&payload, &workspace);
+        assert_eq!(contract["intentFrame"]["primary"], "story_generation");
+        assert_eq!(contract["turnPlan"]["chapterCount"], 1);
+        assert_eq!(contract["contextAssembly"]["budget"]["blockCount"], 2);
+        assert_eq!(contract["updatePolicy"]["autoUpdateWiki"], false);
+
+        let state = AppState::with_paths(
+            "token",
+            directory.path().join("home"),
+            directory.path().join("bridge"),
+            Some(directory.path().to_path_buf()),
+            None,
+        )
+        .expect("state");
+        let request =
+            bridge_request(&state, &payload, &workspace, "session", None).expect("bridge request");
+        assert_eq!(request["storyGeneration"]["fragmentCount"], 1);
+        assert_eq!(
+            request["allowedWriteRoots"].as_array().map(Vec::len),
+            Some(1)
         );
     }
 }

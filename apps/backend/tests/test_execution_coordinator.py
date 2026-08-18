@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import types
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 
 import pytest
 
@@ -14,6 +17,7 @@ from services.execution_coordinator import (
     ExecutionStateError,
     SnapshotConfirmationRequired,
 )
+from services import execution_coordinator as execution_coordinator_module
 
 
 class _TraceHistory:
@@ -112,6 +116,240 @@ def test_cancel_is_idempotent_and_forces_cancelled_terminal(tmp_path):
     )
     assert result.status == "cancelled"
     assert reasons == ["client_disconnected"]
+
+
+def test_cancel_and_snapshot_intent_writes_are_serialized(monkeypatch, tmp_path):
+    coordinator = ExecutionCoordinator(trace_history_service=_TraceHistory())
+    handle = coordinator.begin(tmp_path, "session-1", "trace-concurrent-intent")
+    initial = json.loads(handle.intent_path.read_text(encoding="utf-8"))
+    snapshot_write_started = Event()
+    release_snapshot_write = Event()
+    cancel_attempted = Event()
+    original_atomic_write = execution_coordinator_module._atomic_write_json
+
+    def block_snapshot_write(path, payload):
+        if payload.get("snapshot") and not snapshot_write_started.is_set():
+            snapshot_write_started.set()
+            assert release_snapshot_write.wait(timeout=2)
+        original_atomic_write(path, payload)
+
+    def cancel():
+        cancel_attempted.set()
+        return handle.cancel("manual_stop")
+
+    monkeypatch.setattr(execution_coordinator_module, "_atomic_write_json", block_snapshot_write)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        snapshot_future = executor.submit(handle.register_snapshot, _snapshot(available=True))
+        assert snapshot_write_started.wait(timeout=2)
+        cancel_future = executor.submit(cancel)
+        assert cancel_attempted.wait(timeout=2)
+        assert not cancel_future.done()
+        release_snapshot_write.set()
+        snapshot_future.result(timeout=2)
+        assert cancel_future.result(timeout=2) is True
+
+    payload = json.loads(handle.intent_path.read_text(encoding="utf-8"))
+    assert payload["state"] == "cancelling"
+    assert payload["cancelReason"] == "manual_stop"
+    assert payload["snapshotAvailable"] is True
+    assert payload["snapshot"]["available"] is True
+    assert payload["createdAt"] == initial["createdAt"]
+
+
+def test_snapshot_cannot_restore_stale_running_intent_after_cancel(monkeypatch, tmp_path):
+    coordinator = ExecutionCoordinator(trace_history_service=_TraceHistory())
+    handle = coordinator.begin(tmp_path, "session-1", "trace-stale-snapshot-state")
+    snapshot_write_called = Event()
+    cancel_attempted = Event()
+    cancel_finished = Event()
+    original_write_intent = handle._write_intent
+
+    def delay_snapshot_before_intent_lock(*, state, extra=None):
+        if extra and extra.get("snapshot"):
+            snapshot_write_called.set()
+            assert cancel_attempted.wait(timeout=2)
+            cancel_finished.wait(timeout=0.5)
+        return original_write_intent(state=state, extra=extra)
+
+    def cancel():
+        cancel_attempted.set()
+        try:
+            return handle.cancel("manual_stop")
+        finally:
+            cancel_finished.set()
+
+    monkeypatch.setattr(handle, "_write_intent", delay_snapshot_before_intent_lock)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        snapshot_future = executor.submit(handle.register_snapshot, _snapshot(available=True))
+        assert snapshot_write_called.wait(timeout=2)
+        cancel_future = executor.submit(cancel)
+        snapshot_future.result(timeout=2)
+        assert cancel_future.result(timeout=2) is True
+
+    payload = json.loads(handle.intent_path.read_text(encoding="utf-8"))
+    assert payload["state"] == "cancelling"
+    assert payload["cancelReason"] == "manual_stop"
+    assert payload["snapshotAvailable"] is True
+
+
+def test_cancel_is_rejected_after_finalization_deletes_intent(monkeypatch, tmp_path):
+    coordinator = ExecutionCoordinator(trace_history_service=_TraceHistory())
+    handle = coordinator.begin(tmp_path, "session-1", "trace-late-cancel")
+    handle.register_snapshot(_snapshot(available=True))
+    reasons: list[str] = []
+    handle.bind_cancellation(reasons.append)
+    intent_deleted = Event()
+    release_finalizer = Event()
+    original_delete_intent = handle._delete_intent
+
+    def pause_after_delete():
+        original_delete_intent()
+        intent_deleted.set()
+        assert release_finalizer.wait(timeout=2)
+
+    monkeypatch.setattr(handle, "_delete_intent", pause_after_delete)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        finalize_future = executor.submit(
+            lambda: asyncio.run(
+                handle.finalize(ExecutionObservation(completed=True), _finalization([]))
+            )
+        )
+        assert intent_deleted.wait(timeout=2)
+        cancel_future = executor.submit(handle.cancel, "late-stop")
+        release_finalizer.set()
+        result = finalize_future.result(timeout=2)
+        accepted = cancel_future.result(timeout=2)
+
+    assert accepted is False
+    assert reasons == []
+    assert result.status == "completed"
+    assert handle.state == "completed"
+    assert not handle.intent_path.exists()
+
+
+def test_atomic_intent_write_retries_transient_windows_file_sharing_error(monkeypatch, tmp_path):
+    path = tmp_path / "execution-intent.json"
+    original_replace = execution_coordinator_module.os.replace
+    calls = []
+
+    def replace_once_locked(source, target):
+        calls.append((source, target))
+        if len(calls) == 1:
+            raise PermissionError("temporary file sharing violation")
+        return original_replace(source, target)
+
+    monkeypatch.setattr(execution_coordinator_module.os, "replace", replace_once_locked)
+    monkeypatch.setattr(execution_coordinator_module.time, "sleep", lambda _seconds: None)
+
+    execution_coordinator_module._atomic_write_json(path, {"state": "cancelling"})
+
+    assert len(calls) == 2
+    assert json.loads(path.read_text(encoding="utf-8")) == {"state": "cancelling"}
+
+
+def test_atomic_intent_write_raises_persistent_error_and_cleans_temporary(monkeypatch, tmp_path):
+    path = tmp_path / "execution-intent.json"
+    path.write_text('{"state":"running"}\n', encoding="utf-8")
+    original = path.read_bytes()
+    temporary_paths = []
+
+    def always_locked(source, _target):
+        temporary_paths.append(source)
+        raise PermissionError("persistent file sharing violation")
+
+    monkeypatch.setattr(execution_coordinator_module.os, "replace", always_locked)
+    monkeypatch.setattr(execution_coordinator_module.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(PermissionError, match="persistent file sharing violation"):
+        execution_coordinator_module._atomic_write_json(path, {"state": "cancelling"})
+
+    assert len(temporary_paths) == len(execution_coordinator_module._ATOMIC_REPLACE_RETRY_DELAYS) + 1
+    assert not temporary_paths[0].exists()
+    assert path.read_bytes() == original
+
+
+def test_active_intent_read_error_does_not_replace_existing_file(monkeypatch, tmp_path):
+    coordinator = ExecutionCoordinator(trace_history_service=_TraceHistory())
+    handle = coordinator.begin(tmp_path, "session-1", "trace-read-error")
+    handle.register_snapshot(_snapshot(available=True))
+    reasons: list[str] = []
+    handle.bind_cancellation(reasons.append)
+    original = handle.intent_path.read_bytes()
+    path_type = type(handle.intent_path)
+    original_read_text = path_type.read_text
+
+    def deny_intent_read(path, *args, **kwargs):
+        if path == handle.intent_path:
+            raise PermissionError("intent is temporarily locked")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(path_type, "read_text", deny_intent_read)
+
+    with pytest.raises(PermissionError, match="temporarily locked"):
+        handle.cancel("manual_stop")
+
+    assert handle.intent_path.read_bytes() == original
+    assert handle.state == "cancelling"
+    assert reasons == ["manual_stop"]
+
+
+@pytest.mark.parametrize(
+    ("malformed", "message"),
+    [(b"{broken\n", "invalid JSON"), (b"[]\n", "JSON object")],
+)
+def test_malformed_active_intent_is_not_rebuilt(malformed, message, tmp_path):
+    coordinator = ExecutionCoordinator(trace_history_service=_TraceHistory())
+    handle = coordinator.begin(tmp_path, "session-1", "trace-malformed-intent")
+    handle.intent_path.write_bytes(malformed)
+
+    with pytest.raises(ExecutionStateError, match=message):
+        handle.register_snapshot(_snapshot(available=True))
+
+    assert handle.intent_path.read_bytes() == malformed
+
+
+def test_closed_intent_rejects_late_write(tmp_path):
+    coordinator = ExecutionCoordinator(trace_history_service=_TraceHistory())
+    handle = coordinator.begin(tmp_path, "session-1", "trace-closed-intent")
+    handle.reject_preflight("test")
+
+    with pytest.raises(ExecutionStateError, match="already closed"):
+        handle._write_intent(state="running")
+
+
+def test_finalization_failure_intent_write_error_is_logged(monkeypatch, caplog, tmp_path):
+    coordinator = ExecutionCoordinator(trace_history_service=_TraceHistory())
+    handle = coordinator.begin(tmp_path, "session-1", "trace-finalization-log")
+    original_write_intent = handle._write_intent
+
+    def fail_failure_intent(*, state, extra=None):
+        if state == "finalization_failed":
+            raise PermissionError("failure intent is locked")
+        return original_write_intent(state=state, extra=extra)
+
+    def fail_payload(_status, _error_message, _no_restore_point, _timings):
+        raise ValueError("payload failed")
+
+    context = ExecutionFinalizationContext(
+        finish_git=lambda: {"_type": "GitAutoCommit", "status": "success", "created": False},
+        build_payload=fail_payload,
+    )
+    monkeypatch.setattr(handle, "_write_intent", fail_failure_intent)
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(ValueError, match="payload failed"):
+            asyncio.run(handle.finalize(ExecutionObservation(completed=True), context))
+
+    records = [
+        record
+        for record in caplog.records
+        if "Unable to persist finalization failure intent" in record.getMessage()
+    ]
+    assert len(records) == 1
+    assert records[0].exc_info is not None
 
 
 def test_busy_releases_after_finalization(tmp_path):

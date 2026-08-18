@@ -2,7 +2,7 @@
 
 - 状态：执行中（M3 受控 Agent Refactor 切片，Stable 未切换）
 - 建立日期：2026-08-05
-- 最近修订：2026-08-17
+- 最近修订：2026-08-18
 - 适用范围：Storydex 2.x 稳定维护、Agent Rust 重构、后续 Rust 后端与 Tauri 桌面迁移
 
 ## 0. 本轮 Agent 重构边界
@@ -23,25 +23,25 @@
 
 执行方向只规定边界，不规定每个内部模块的固定拆分。实现过程中以现有代码和测量结果决定 crate、进程和适配器的最小划分；不得为了“重构完整”增加无消费者的中间层、额外模型调用或重复上下文构建。外部技术资料在确有疑问时可用 `smartsearch` 查询，不是本计划的必需依赖。
 
-### 0.1 2026-08-17 当前执行状态
+### 0.1 2026-08-18 当前执行状态
 
 本轮实际进度按里程碑记录如下：
 
-- **M0：部分完成。** Storydex 当前生效的 `OPENCODE/deepseek-v4-flash` 已再次通过严格只读 live 主链路；取消、超时、断连、审批、follow-up、steer、会话故障、写入和 replacement 的确定性复现已进入台账。完整性能统计窗口、所有 P1 决策和生产观察期仍未完成。
-- **M1：Agent 切片部分完成。** Agent runtime manifest、health/Coomi status 契约和 `chat/stream` 状态机已建立；20 组 fixture 覆盖只读、受限写、Provider 错误、取消/超时/断连、启动前 stop、审批允许/拒绝/超时/重复决策、follow-up/resume/编辑/删除/存储失败、steer、会话损坏/缺失/工作区不匹配和 replacement。故事生成、完整 intent/context/permission 字段、多个并发审批及全后端路由仍未冻结。
-- **M2：骨架与当前 Agent 切片已实现。** `storydex-agentd` 仍是未接入 Stable 的独立 loopback 服务，具备动态端口、启动 token、统一 envelope、trace、任务/取消注册、持久 follow-up mailbox、审批控制和受控关闭。收口提交 `21d22765f18c4c90ee6ad7d4b6c5d4180758ac39` 已依次进入 `dev/windows` 与 `main`，并通过 Development CI run `32022067256` 和完整 CI run `32023666547`。依赖漏洞与许可证审计没有仓库级门禁，因此 M2 治理项未关闭。
-- **M3：受控 Agent Refactor 切片达到当前 fixture parity。** Rust `/api/v1/agent/chat/stream` 已接通现有 Rust Agent loop，并在隔离临时项目中覆盖读、受限写、控制面、会话持久化、故障注入和对话 replacement。Python-owned WIKI/Knowledge Projection、故事生成、普通项目服务、Electron Beta、Stable 切换及 Tauri 均未迁移。
+- **M0：当前 Agent Refactor 事实窗口已完成。** 固定 Windows 机器、同一 replay fixture、3 次丢弃预热、每实现/场景 20 个正式样本和 60 秒空闲 RSS；`end_to_end_relative_gate` 的 24 项检查全部通过。真实 LLM 总耗时仍只作 Provider 证据，不作为 Rust 本地收益。生产观察期和 Beta 前 release 组件稳定性复核仍未完成。
+- **M1：Agent 外部语义已扩展冻结。** runtime manifest、health/Coomi status 和 `chat/stream` 状态机已建立；21 组 fixture 在原 20 组控制/会话场景上增加 story intent/context/permission/asset/update/knowledge 外部摘要。Rust 只在隔离 fixture 接受并携带有界 `storyGeneration`，Python WIKI/Knowledge Projection 和实际故事生成执行仍未迁移。
+- **M2：骨架、依赖审计和当前 Agent 切片已实现。** `storydex-agentd` 仍是未接入 Stable 的独立 loopback 服务。仓库固定 `cargo-deny 0.20.2`、官方 RustSec advisory-db、许可证 allowlist 和 crates.io source 门禁；无 advisory ignore。`ratatui 0.30.2` 已移除旧依赖图中的 `lru 0.12.5` 漏洞版本。
+- **M3：受控 Agent Refactor 切片达到当前 fixture parity。** 除既有读写、取消、审批、follow-up、会话和 replacement 外，黑盒故障模型已覆盖两个同时 pending approval、两个独立 agentd 的 mailbox 竞争以及父 agentd 崩溃后的 bridge 控制 EOF 取消。Python-owned WIKI/Knowledge Projection、有界故事生成实际执行、生产 workspace、Electron Beta、Stable 切换及 Tauri 均未迁移。
 
 这里的“真实主链路”只指 Storydex 自身 `providers.json` 当前激活的 Provider。Replay 报告始终标记 `providerMode=replay`，不得替代 live 证据或被描述为实际 Provider 成功。
 
 ### 0.2 基线、分支与生产边界
 
-- 本次控制面与会话故障收口的起始基线为 `10ae9b73a9890ed4b715df82f269b496feff1c42`；开始时 `origin/main` 与 `origin/dev/windows` 均指向该提交。
-- 本轮 Agent 代码、契约、fixture 和文档属于同一 Refactor 功能块；已以中文提交 `完善 Agent 控制面与会话故障门禁` 收口到 `21d22765f18c4c90ee6ad7d4b6c5d4180758ac39`，并按顺序完成 `dev/windows`、`main` 推送和对应 CI 监控。
+- 本次续作起始基线为 `eb2805f48eed78e9a33d15ff59643e79ff6ac2d2`；开始时 `origin/main` 指向该提交，最近完整 CI 为成功基线。本轮提交仍必须先推 `dev/windows` 并等待 Development CI 成功，再推 `main` 并等待完整 CI 成功。
+- 本轮依赖审计、story 外部语义、控制面故障模型、M0 性能窗口、Windows session 路径竞态修复和文档属于同一 Refactor 收口块；不得拆出一个绕开完整契约证据的 Stable 切换提交。
 - Stable 继续固定使用 `Electron + Python/FastAPI + Rust Coomi bridge`。`storydex-agentd` 只允许 Refactor CI 的隔离 fixture workspace，不得读取真实用户项目，不得静默 fallback，也未接入当前桌面启动或打包入口。
-- 最新 live 脱敏决策报告为 `output/rust-migration-decision-live/10ae9b73a989-20260817T162840/decision-report.json`；它经过正常 Python Backend HTTP/SSE + Rust bridge，而不是 `storydex-agentd`。
+- 最新 live 脱敏决策报告为 `output/rust-migration-decision-live/eb2805f48eed-20260818T014444-m0-performance-gate/decision-report.json`；story 语义依据为 `output/rust-migration-decision-live/eb2805f48eed-20260817T213817-story-semantics/decision-report.json`。两者均经过正常 Python Backend HTTP/SSE + Rust bridge，而不是 `storydex-agentd`。
 
-### 0.3 2026-08-17 chat/SSE Refactor 差分与 live 证据
+### 0.3 2026-08-18 chat/SSE Refactor 差分与 live 证据
 
 - 基础执行：只读成功与 Provider 请求不匹配报告均通过；成功场景为 `read_file` 一次、`AgentCompleted -> done`，错误场景为 `AgentError -> done`，两端均使用 `OPENCODE/deepseek-v4-flash` replay。
 - 生命周期：手动 stop、执行超时均为 `AgentCancelled -> done`，客户端断连在观测流中不伪造业务终态；`RunAccepted` 后、runtime 启动前的 stop 及重复 stop 也已覆盖，只有首次请求被接受，且不会启动 bridge/模型。控制面 fixture 通过明确事件锁定触发点，避免依赖偶然调度时序。
@@ -50,9 +50,11 @@
 - 受限写：两份临时克隆均只修改 `.storydex/characters/fixture.md`，文件 SHA、Git HEAD/状态和变更路径一致；Python Stable 额外生成的 WIKI 投影文件作为明确的 Python-owned 派生副作用单独验证，未从报告中隐藏。
 - 会话故障：损坏 binding、损坏 session、缺失 session 和 workspace mismatch 均 fail closed，原始文件保持不变；关键序列按故障发生边界保持 `RunAccepted -> TurnContract -> [AgentStarted] -> AgentError -> done`。
 - Replacement：成功场景中旧 trace 为 `superseded/accepted`，旧 prompt 从 runtime session 移除，新 prompt 保留；隔离 bridge 启动失败场景中旧 trace 为 `completed/restored`、新 trace 为 `failed`，setup 后的 runtime-session SHA 和 2 条消息原样恢复。两端报告分别位于 `differential-replacement-current` 和 `differential-replacement-restore-current`。
-- Live：`output/rust-migration-decision-live/10ae9b73a989-20260817T162840/decision-report.json` 为 `passed`，HTTP/SSE 总耗时 `43,690ms`，2 个模型回合、1 次 `read_file`、Provider HTTP `200,200`、0 重试、0 fallback，终态 `AgentCompleted`。
-- 决策依据：该次真实调用选择 `control_session_failure_matrix` 为当前第一优先级，其后依次为 Rust 依赖审计门禁、故事生成与知识投影 parity、M0 性能窗口；本轮据此先关闭可在隔离 fixture 中确定性验证的控制面与会话故障，不把后续三项写成已完成。
-- 差分入口为 `python apps/backend/scripts/run_agent_stream_differential.py --fixture-dir <fixture> --output-dir <report-dir>`；失败报告同样持久化。20 个受支持 fixture 已列入 `agent-chat-stream-v1.json` 和 runtime manifest。
+- Story 外部语义：live 决策选择 `external_semantics_contract_gate`。`story-semantics` fixture 冻结 intent、permission、turnPlan、context、asset/update 和 knowledge policy；`storyGeneration` 只允许 `fragmentCount=1..20`、`chapterLengthTier=short|medium|long` 和受控 template id。三次差分均通过；Python-only 仍是 5 个 WIKI 派生路径和对应领域事件，Rust-only 为空。
+- 控制面韧性：`output/agent-runtime-contract/control-resilience-current/acceptance-report.json` 通过。两个独立 agentd 并发写入保留两条消息、revision/eventCount 均为 2；两个同时 pending approval 均仅接受一次；强杀父 agentd 后真实 bridge 通过控制管道 EOF 退出，孤儿数为 0。
+- M0 性能与 live 决策：`output/agent-runtime-contract/m0-performance-current/performance-report.json` 的 24 项相对门槛全部通过。`output/rust-migration-decision-live/eb2805f48eed-20260818T014444-m0-performance-gate/decision-report.json` 经 Stable live 主链路选择 `end_to_end_relative_gate`，一次 `read_file`、Provider HTTP `200`、0 retry、0 fallback、终态 `AgentCompleted`。
+- 依赖审计：`scripts/run_rust_dependency_audit.ps1` 对 advisories/licenses/sources 全部通过；本次本地 RustSec revision 为 `69f93e1d081d8b6fbee010e48f0b5e0d13661415`。CI 仍在每个相关开发/完整门禁中重新安装固定版本并获取官方数据库，不把本地 revision 当成永久快照。
+- 差分入口为 `python apps/backend/scripts/run_agent_stream_differential.py --fixture-dir <fixture> --output-dir <report-dir>`；失败报告同样持久化。21 个受支持 fixture 已列入 `agent-chat-stream-v1.json` 和 runtime manifest。
 
 ### 0.4 M0 不稳定行为与兼容决策台账
 
@@ -60,33 +62,35 @@
 | --- | --- | --- | --- | --- |
 | AGENT-001 | Python 多数场景额外发出 `GitAutoCommit` 或 `GitCommitPrompt` | Python-owned 项目 Git 收尾；当前 Rust fixture 切片不复制该领域事件，不影响核心终态，但阻断 Stable 接管 | 各 `differential-*-current` 报告的 `eventKindDifferences` | 迁移项目/Git 服务时补齐，不扩大 ignore 字段 |
 | AGENT-002 | scoped-write 后仅 Python 生成 `KnowledgeProjectionUpdated` 和 WIKI 派生文件 | 这是当前生产投影副作用，不是可删除噪声；Rust 仅比较目标文件并显式验证 Python 派生文件 | `differential-scoped-write-current` | WIKI/Story Knowledge 迁移前保持 Python-owned，Stable 切换前必须闭环 |
-| AGENT-003 | approval 场景曾仅由 Rust 额外发出 `PermissionResolved` | 审批 HTTP 响应、bridge `ToolDone` 和终态已提供可观察结果，仓库无该事件消费者；本轮按 Python Stable 隐藏该额外 SSE | approval/approval-deny/approval-timeout 差分报告 | 保持公开事件面一致；多个并发 approval 另设黑盒案例 |
-| AGENT-004 | queued follow-up 的 `ContinuationStarted` 曾在两端落点不同 | 本轮直接消费入口不再由 Rust 重复发 SSE，mailbox 的持久事件与 Python 一致；自动续接入口语义不变 | followup/followup-mutations 差分报告 | 保持当前唯一公开来源；补多进程竞争与崩溃恢复 |
+| AGENT-003 | approval 场景曾仅由 Rust 额外发出 `PermissionResolved` | 审批 HTTP 响应、bridge `ToolDone` 和终态已提供可观察结果，仓库无该事件消费者；本轮按 Python Stable 隐藏该额外 SSE，两个同时 pending approval 的黑盒案例也已通过 | approval 差分与 `control-resilience-current` | 保持公开事件面一致；剩余 permission mode 随对应业务切片处理 |
+| AGENT-004 | queued follow-up 的 `ContinuationStarted` 曾在两端落点不同 | 本轮直接消费入口不再由 Rust 重复发 SSE，mailbox 的持久事件与 Python 一致；OS 文件锁已关闭两个独立进程的丢更新竞态 | followup 差分与 `control-resilience-current` | 保持当前唯一公开来源；生产桌面生命周期恢复仍在 Beta 前验证 |
 | AGENT-005 | Provider 请求阶段错误会在已有 `ProviderStream` 后接受 replacement | 这是现行 Stable 边界；该错误不能冒充“启动失败恢复” | provider-error 与 replacement 报告 | 使用 bridge spawn 故障验证未接受恢复；保留两类独立 fixture |
 | AGENT-006 | Rust 源码变化后旧 bridge 会被运行时指纹门禁拒绝 | 正确的 fail-closed 构建约束，不允许绕过 | `scripts/verify_coomi_runtime.py` 与 Backend 启动检查 | 每次 Rust 改动后重建当前提交产物，CI 继续校验 |
+| AGENT-007 | Windows 扩展路径与普通盘符路径在 `resolve()`/`samefile()` 多次文件查询间遇到 session 原子替换会被误判为越界 | 原始 bound 路径先做严格的无 I/O 表示等价比较，只折叠 Windows 扩展前缀、分隔符和大小写，不折叠 `.`/`..`；表示不等价才调用 `resolve()`/`samefile()`，真实逃逸仍 fail closed | expected/扩展盘符/扩展 UNC 快路、父路径段强制慢路和 symlink 逃逸回归，以及最终 20 样本性能窗口 | 保留竞态与逃逸回归；不得用忽略 session restore 错误或创建新 session 替代 |
+| AGENT-008 | Rust debug 的 `componentInit/sessionInit` 有长尾抖动 | 最新正式窗口只读 p95 比值为 `17.9373x/21.6833x`，取消为 `2.1476x/2.3881x`；端到端 24/24 仍通过，但只读两项已进入 `investigate_before_beta`，不能以 median 或端到端收益掩盖 | M0 performance report 的 `comparisons` 与 2 个 `diagnosticInvestigations` | Beta 前用 release 构建复核组件初始化稳定性并关闭两项调查；当前不启动 P2 常驻 bridge |
+| AGENT-009 | stop、snapshot 与 finalizer 并发 read-modify-replace execution intent 时，Windows 曾返回 `PermissionError [WinError 5]`，且旧状态可能覆盖取消或迟到 stop 被虚假接受 | handle 统一按 state lock → intent lock 串行状态变更与 intent 写删；finalization 建立后 stop 返回未接受，关闭 intent 后写入显式失败；活动 intent 只有缺失可新建，权限错误、损坏 JSON 或非对象均 fail closed；`os.replace` 仅做 10/25/50ms 有界重试 | 正反序 snapshot/cancel、删除窗口 late cancel、严格读取、日志、瞬时冲突和永久失败回归，以及最终 M0 窗口 | 保持 fail closed；不得吞错、无限重试、按空对象重建损坏 intent 或删除 intent 掩盖 |
 
 ### 0.5 M2 依赖审计现状
 
-- `cargo metadata --locked --format-version 1 --no-deps` 已通过，`Cargo.lock` 可解析；`cargo tree --duplicates` 显示 `getrandom`、`hashbrown`、`syn`、`unicode-width` 等多版本依赖，当前仅作为依赖图事实，不据此宣称安全或许可证合规。
-- workspace 包声明 `license = "MIT"`，但这不是第三方许可证清单。仓库中没有 `deny.toml`、`cargo-deny`/`cargo-audit` 配置、第三方许可证生成脚本或对应 GitHub Actions 门禁；本机也未安装 `cargo deny` 与 `cargo audit`。
-- 因此漏洞、来源和许可证审计仍是明确未完成项。后续应把工具版本、advisory 数据来源、允许许可证和例外记录固定到仓库/CI 后再关闭 M2，当前不得写成“审计通过”。
+- 仓库固定 `cargo-deny 0.20.2`，统一入口为 `scripts/run_rust_dependency_audit.ps1`；脚本校验工具版本并以 `--locked` 执行 advisories、licenses、sources 三类检查。
+- `apps/desktop/agent-runtime/deny.toml` 只使用官方 `https://github.com/RustSec/advisory-db`，许可证采用显式 allowlist，source 只允许 crates.io；没有 advisory ignore。本次本地数据库 revision 为 `69f93e1d081d8b6fbee010e48f0b5e0d13661415`。
+- `ratatui` 从 `0.29` 升为 `0.30.2`，依赖图中的 `lru` 从有漏洞的 `0.12.5` 收敛为 `0.18.2`。当前 advisories/licenses/sources 均通过；Development CI 与完整质量门禁均重新运行固定审计，不能以一次本地成功永久豁免后续依赖变化。
 
 ### 0.6 未完成边界与下一阶段入口
 
-1. 建立可重复的 Rust 漏洞、来源与许可证审计门禁，固定工具版本、advisory 数据来源、允许许可证和例外记录；这是当前续作的第一优先级。
-2. 补齐故事生成、完整 intent/context/permission 字段和 Python WIKI/Knowledge Projection 的外部语义；这些不应借由当前 Agent fixture parity 被视为已迁移。
-3. 补多个并发 approval、多进程 mailbox 竞争和 process-crash cancellation 黑盒案例；当前进程内幂等、存储失败与启动前 stop 不能替代这些故障模型。
-4. 完成 M0 性能统计窗口和剩余 P1 决策，以可重复测量验证 Rust 本地路径收益，不以 LLM 网络耗时替代本地性能结论。
-5. 只有上述 Agent 门禁无未解释差异后才评估 Electron Rust Beta；Stable 接管、其余 Python 后端迁移和 Tauri Preview 继续按后续里程碑独立推进。
+1. 实现有界 `storyGeneration` 的实际执行 fixture；当前只冻结输入/外部摘要并携带到 bridge，不能据此宣称 Rust 已生成章节。
+2. 迁移并差分 Python-owned WIKI/Knowledge Projection 与 Git 领域收尾，或在 Beta 范围中继续明确排除；5 个 Python-only WIKI 派生路径不得被忽略。
+3. 在 release 构建和 Beta 前环境复核 Rust `componentInit/sessionInit` 稳定性与早期 debug 抖动，并完成生产桌面生命周期、真实用户项目副本和观察期；当前隔离 debug 数据不能授权生产 workspace。
+4. 只有上述边界完成且用户另行决定后才评估 Electron Rust Beta；Stable 接管、其余 Python 后端迁移和 Tauri Preview 继续按后续里程碑独立推进。
 
 在这些门禁完成前，不接管 Stable，不启动 Electron Rust Beta，不开始 Tauri 切换。
 
 ### 0.7 新对话续作起点
 
-- Agent 实现收口点（不含后续纯文档同步提交）：`21d22765f18c4c90ee6ad7d4b6c5d4180758ac39`，该提交已同时进入 `main` 与 `dev/windows`；新工作开始前仍须重新执行 `git status --short --branch`、检查本地 hooks，并确认 `origin/main` 最新 CI 没有失败基线。
-- 已验证基线：Python 聚焦测试 `64 passed`、`storydex-agentd` `25 passed`、`cargo fmt --check` 通过、Stable/Refactor 差分 `20/20 passed`，20 份报告的 Rust-only 公开事件集合均为空，轻量 pre-push 检查通过。
-- 真实 Provider 依据：`output/rust-migration-decision-live/10ae9b73a989-20260817T162840/decision-report.json` 使用 Storydex 当前 `OPENCODE/deepseek-v4-flash` 配置，Provider HTTP 为 `200,200`、0 retry、0 fallback，终态为 `AgentCompleted`。后续重大优先级或契约决策继续通过 Storydex 自身 API 配置调用该模型并保留脱敏报告；日常确定性测试继续使用 replay，不依赖外部模型在线。
-- 下一项实施从 M2 依赖审计门禁开始：先盘点仓库现有 CI/policy 和 Rust workspace，再以最小可复现配置引入漏洞、来源和许可证检查；不得在没有实际 advisory/许可证结果时宣称审计通过。
+- 本轮续作起始点为 `eb2805f48eed78e9a33d15ff59643e79ff6ac2d2`；交付提交、`dev/windows` Development CI 和 `main` 完整 CI 只能在实际完成后记录。新工作开始前仍须执行 `git status --short --branch`、检查 hooks，并确认 `origin/main` 没有失败基线。
+- 当前证据入口：依赖审计 `scripts/run_rust_dependency_audit.ps1`；story 差分 `differential-story-semantics-current`；控制面韧性 `control-resilience-current`；性能窗口 `m0-performance-current`。性能正式样本为每实现/场景 20 个，门槛 24/24 通过；只读 `componentInit/sessionInit` 有 2 个 Beta 前调查项，必须在 release/Beta 前关闭，当前不授权启动 Beta。
+- 真实 Provider 依据：story 语义选择 `external_semantics_contract_gate`，M0 门槛选择 `end_to_end_relative_gate`；两次均使用 Storydex 当前 `OPENCODE/deepseek-v4-flash` 隔离配置、正常 Stable HTTP/SSE + Rust bridge，未经过 `storydex-agentd`，没有授权 Stable/Beta/Tauri 切换。
+- 下一项产品实现只能从 0.6 的剩余边界继续，不重复 P1、依赖审计、已关闭的控制面故障模型或本轮 M0 窗口；若启动 Electron Rust Beta，必须由用户另行明确决定。
 - 当前架构事实不变：Stable 是 `Electron + Python/FastAPI + Rust Coomi bridge`，`storydex-agentd` 仅在隔离 Refactor 轨道达到当前 fixture parity；不能将其表述为 Python 已退役或 Tauri 已切换。
 
 ## 1. 结论
@@ -462,6 +466,35 @@ M0 先固定机器、数据集、预热方式、样本数和统计口径，再�
 - 用户可感知的首个 SSE、取消响应和普通文件操作不得超出基线允许的测量误差。
 - 本地 CPU/文件密集路径必须出现可重复的实质改善，否则不得仅凭语言变化宣称性能完成。
 - LLM 总响应时间单独记录，但不作为 Rust 本地性能结论的主要依据。
+
+### 9.1 2026-08-18 M0 Agent Refactor 性能窗口
+
+统一入口：
+
+```powershell
+python apps/backend/scripts/run_agent_refactor_performance.py `
+  --warmups 3 `
+  --samples 20 `
+  --idle-seconds 60 `
+  --output output/agent-runtime-contract/m0-performance-current/performance-report.json
+```
+
+口径固定为当前 Windows 机器、debug Rust 二进制、同一只读/取消 replay、每个样本全新进程、workspace、Coomi home 和 session；3 个预热样本不进入统计，每个实现/场景保留 20 个正式样本。`totalMs` 只作确定性本地 replay 对照，真实 Provider 网络时间不进入 Rust 收益判断。
+
+| 指标 | Python Stable median / p95 | Rust Refactor median / p95 |
+| --- | ---: | ---: |
+| 启动至 health（只读样本） | `4029.092 / 4372.584ms` | `745.265 / 783.702ms` |
+| 首个 SSE（只读） | `742.054 / 816.627ms` | `687.411 / 710.613ms` |
+| TurnContract（只读） | `3507.095 / 3763.722ms` | `756.070 / 779.379ms` |
+| ToolStart（只读） | `3595.997 / 3853.454ms` | `806.414 / 1018.609ms` |
+| 只读终态 | `6619.417 / 7016.476ms` | `822.676 / 1035.383ms` |
+| stop HTTP accepted | `44.203 / 54.135ms` | `16.922 / 26.916ms` |
+| stop 至 AgentCancelled | `2893.959 / 3017.809ms` | `29.410 / 40.098ms` |
+| 60 秒空闲进程树 RSS | `95.65MiB` | `23.17MiB` |
+
+Storydex Stable live 决策报告 `output/rust-migration-decision-live/eb2805f48eed-20260818T014444-m0-performance-gate/decision-report.json` 选择 `end_to_end_relative_gate`：用户可见 p95 允许因子 `1.10`；本地端到端里程碑要求 Rust median 不高于 Python 的 `0.80`、p95 不高于 Python；60 秒 RSS 不高于 Python 的 `0.80`。报告中 24 项 gate 全部通过。
+
+最终窗口中 Rust debug 的 `componentInit/sessionInit` p95 比值分别为：只读 `17.9373x / 21.6833x`，取消 `2.1476x / 2.3881x`。只读两项已写入 `diagnosticInvestigations`，必须在 release/Beta 前以 release 构建继续调查；它们不改变当前端到端门槛 24/24 通过，也不能被端到端结果掩盖。该窗口只关闭 M0 的可重复本地统计和门槛决策，不构成 release-ready、Stable 接管或 Tauri 依据。
 
 ## 10. 主要风险与处置
 

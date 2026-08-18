@@ -201,6 +201,8 @@ struct BridgeRequest {
     max_output_tokens: Option<u64>,
     #[serde(default)]
     reasoning_effort: ReasoningEffort,
+    #[serde(default, rename = "storyGeneration")]
+    _story_generation: Value,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -569,44 +571,51 @@ fn wire_tool_result(result: &ToolResult) -> Value {
     })
 }
 
+fn read_controls(reader: impl BufRead, controls: &ControlHub, emitter: &Emitter) {
+    for line in reader.lines() {
+        let Ok(line) = line else {
+            break;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            emitter.event(
+                "protocol_warning",
+                json!({"message": "invalid control JSON"}),
+            );
+            continue;
+        };
+        match value.get("action").and_then(Value::as_str) {
+            Some("resolve") => {
+                let request_id = value
+                    .get("requestId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                controls.resolve(
+                    request_id,
+                    value.get("value").cloned().unwrap_or(Value::Null),
+                );
+            }
+            Some("cancel") => controls.cancel(
+                value
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("requested"),
+            ),
+            Some("steer") => controls.cancel("steer"),
+            _ => emitter.event(
+                "protocol_warning",
+                json!({"message": "unknown control action"}),
+            ),
+        }
+    }
+    if !controls.cancellation_requested.load(Ordering::Acquire) {
+        controls.cancel("control_channel_closed");
+    }
+}
+
 fn start_control_reader(controls: Arc<ControlHub>, emitter: Emitter) {
     std::thread::spawn(move || {
         let stdin = std::io::stdin();
-        for line in stdin.lock().lines() {
-            let Ok(line) = line else {
-                break;
-            };
-            let Ok(value) = serde_json::from_str::<Value>(&line) else {
-                emitter.event(
-                    "protocol_warning",
-                    json!({"message": "invalid control JSON"}),
-                );
-                continue;
-            };
-            match value.get("action").and_then(Value::as_str) {
-                Some("resolve") => {
-                    let request_id = value
-                        .get("requestId")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    controls.resolve(
-                        request_id,
-                        value.get("value").cloned().unwrap_or(Value::Null),
-                    );
-                }
-                Some("cancel") => controls.cancel(
-                    value
-                        .get("reason")
-                        .and_then(Value::as_str)
-                        .unwrap_or("requested"),
-                ),
-                Some("steer") => controls.cancel("steer"),
-                _ => emitter.event(
-                    "protocol_warning",
-                    json!({"message": "unknown control action"}),
-                ),
-            }
-        }
+        read_controls(stdin.lock(), &controls, &emitter);
     });
 }
 
@@ -1238,6 +1247,28 @@ mod tests {
             .expect("deserialize bridge request");
             assert_eq!(request.reasoning_effort, expected);
         }
+    }
+
+    #[test]
+    fn closed_control_channel_cancels_pending_run() {
+        let controls = ControlHub::default();
+        let emitter = Emitter::new();
+        read_controls(std::io::Cursor::new(Vec::<u8>::new()), &controls, &emitter);
+        assert!(controls.cancellation_requested.load(Ordering::Acquire));
+        assert_eq!(controls.cancellation_reason(), "control_channel_closed");
+    }
+
+    #[test]
+    fn closed_control_channel_preserves_explicit_cancel_reason() {
+        let controls = ControlHub::default();
+        let emitter = Emitter::new();
+        read_controls(
+            std::io::Cursor::new(b"{\"action\":\"cancel\",\"reason\":\"manual_stop\"}\n"),
+            &controls,
+            &emitter,
+        );
+        assert!(controls.cancellation_requested.load(Ordering::Acquire));
+        assert_eq!(controls.cancellation_reason(), "manual_stop");
     }
 
     #[test]

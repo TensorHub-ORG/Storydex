@@ -20,6 +20,7 @@ coomi-engine = { path = "../engine" }
 coomi-services = { path = "../services" }
 dirs.workspace = true
 futures-util.workspace = true
+fs2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

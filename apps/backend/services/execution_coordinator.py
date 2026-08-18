@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Lock
+from threading import Lock, RLock
 from typing import Any, Awaitable, Callable, Dict, Iterable, TypeVar
 from uuid import uuid4
 
@@ -18,6 +18,7 @@ from uuid import uuid4
 _LOGGER = logging.getLogger(__name__)
 _OUTCOMES = {"completed", "failed", "cancelled"}
 _TERMINAL_STATES = _OUTCOMES | {"rejected", "unfinished"}
+_ATOMIC_REPLACE_RETRY_DELAYS = (0.01, 0.025, 0.05)
 _T = TypeVar("_T")
 
 
@@ -330,7 +331,9 @@ class ExecutionHandle:
     snapshot_details: Dict[str, Any] = field(default_factory=dict)
     cancel_reason: str = ""
     _created_at: str = field(default_factory=lambda: _now_iso(), init=False)
-    _state_lock: Lock = field(default_factory=Lock, init=False, repr=False)
+    _state_lock: RLock = field(default_factory=RLock, init=False, repr=False)
+    _intent_lock: Lock = field(default_factory=Lock, init=False, repr=False)
+    _intent_closed: bool = field(default=False, init=False, repr=False)
     _cancel_callbacks: list[Callable[[str], Any]] = field(default_factory=list, init=False, repr=False)
     _finalization_task: asyncio.Task[ExecutionFinalizationResult] | None = field(default=None, init=False, repr=False)
     _timings_ms: Dict[str, float] = field(default_factory=dict, init=False, repr=False)
@@ -364,40 +367,58 @@ class ExecutionHandle:
                 details=details,
             )
         with self._state_lock:
+            if (
+                self._released
+                or self._finalization_task is not None
+                or self.state in _TERMINAL_STATES
+                or self.state == "finalization_failed"
+            ):
+                raise ExecutionStateError(
+                    f"execution {self.trace_id} cannot register a snapshot after finalization"
+                )
             self.snapshot_available = available
             self.no_restore_point = not available
             self.snapshot_details = details
-        self._write_intent(
-            state=self.state,
-            extra={
-                "snapshotAvailable": available,
-                "noRestorePoint": self.no_restore_point,
-                "snapshot": details,
-            },
-        )
+            self._write_intent(
+                state=self.state,
+                extra={
+                    "snapshotAvailable": available,
+                    "noRestorePoint": self.no_restore_point,
+                    "snapshot": details,
+                },
+            )
         self._record_timing("snapshot_registration", started)
 
     def cancel(self, reason: str = "cancelled") -> bool:
         started = time.perf_counter()
         callbacks: list[Callable[[str], Any]] = []
-        with self._state_lock:
-            if self._released or self.state in _TERMINAL_STATES or self.state == "cancelling":
-                self._record_timing("cancel", started)
-                return False
-            self.state = "cancelling"
-            self.cancel_reason = str(reason or "cancelled")
-            callbacks = list(self._cancel_callbacks)
+        cancel_reason = str(reason or "cancelled")
+        accepted = False
         try:
-            self._write_intent(
-                state="cancelling",
-                extra={"cancelReason": self.cancel_reason, "cancelledAt": _now_iso()},
-            )
+            with self._state_lock:
+                if (
+                    self._released
+                    or self._finalization_task is not None
+                    or self.state != "running"
+                ):
+                    return False
+                self.state = "cancelling"
+                self.cancel_reason = cancel_reason
+                callbacks = list(self._cancel_callbacks)
+                accepted = True
+                self._write_intent(
+                    state="cancelling",
+                    extra={"cancelReason": cancel_reason, "cancelledAt": _now_iso()},
+                )
         finally:
-            for callback in callbacks:
-                try:
-                    callback(self.cancel_reason)
-                except Exception as exc:
-                    _LOGGER.warning("Execution cancel callback failed for %s: %s", self.trace_id, exc)
+            if accepted:
+                for callback in callbacks:
+                    try:
+                        callback(cancel_reason)
+                    except Exception as exc:
+                        _LOGGER.warning(
+                            "Execution cancel callback failed for %s: %s", self.trace_id, exc
+                        )
             self._record_timing("cancel", started)
         return True
 
@@ -409,47 +430,59 @@ class ExecutionHandle:
         as unfinished instead of manufacturing a terminal trace.
         """
         started = time.perf_counter()
+        normalized_reason = str(reason or "worker_cancelled")
         with self._state_lock:
             if self._released:
                 self._record_timing("abandon", started)
                 return False
-            if self._finalization_task is not None and not self._finalization_task.done():
+            if self._finalization_task is not None:
                 # A shielded finalization is still responsible for releasing us.
                 self._record_timing("abandon", started)
                 return False
-            normalized_reason = str(reason or "worker_cancelled")
             if not self.cancel_reason:
                 self.cancel_reason = normalized_reason
             self.state = "finalization_failed"
+            try:
+                self._write_intent(
+                    state="finalization_failed",
+                    extra={
+                        "unfinished": True,
+                        "abandonReason": normalized_reason,
+                        "finalizationFailedAt": _now_iso(),
+                    },
+                )
+            except Exception as exc:
+                _LOGGER.warning(
+                    "Unable to persist abandoned execution intent for %s: %s",
+                    self.trace_id,
+                    exc,
+                )
         try:
-            self._write_intent(
-                state="finalization_failed",
-                extra={
-                    "unfinished": True,
-                    "abandonReason": normalized_reason,
-                    "finalizationFailedAt": _now_iso(),
-                },
-            )
-        except Exception as exc:
-            _LOGGER.warning("Unable to persist abandoned execution intent for %s: %s", self.trace_id, exc)
+            return True
         finally:
             self._record_timing("abandon", started)
             self._release()
-        return True
 
     def reject_preflight(self, error_code: str, message: str = "") -> None:
         with self._state_lock:
-            if self._released or self.state in _TERMINAL_STATES:
+            if (
+                self._released
+                or self._finalization_task is not None
+                or self.state in _TERMINAL_STATES
+            ):
                 return
             self.state = "rejected"
-        try:
-            self._write_intent(
-                state="rejected",
-                extra={"errorCode": str(error_code or ""), "errorMessage": str(message or "")},
-            )
-            self._delete_intent()
-        finally:
-            self._release()
+            try:
+                self._write_intent(
+                    state="rejected",
+                    extra={
+                        "errorCode": str(error_code or ""),
+                        "errorMessage": str(message or ""),
+                    },
+                )
+                self._delete_intent()
+            finally:
+                self._release()
 
     async def finalize(
         self,
@@ -483,10 +516,12 @@ class ExecutionHandle:
         payload_data: Dict[str, Any] = {}
         persisted = False
         try:
-            self._write_intent(
-                state="finalizing",
-                extra={"outcome": status, "finalizationStartedAt": _now_iso()},
-            )
+            with self._state_lock:
+                self.state = "finalizing"
+                self._write_intent(
+                    state="finalizing",
+                    extra={"outcome": status, "finalizationStartedAt": _now_iso()},
+                )
 
             step_started = time.perf_counter()
             try:
@@ -569,27 +604,30 @@ class ExecutionHandle:
             persisted = True
             self._record_timing("persist_trace", step_started)
 
-            self._delete_intent()
-            with self._state_lock:
-                self.state = status
-            return ExecutionFinalizationResult(
+            result = ExecutionFinalizationResult(
                 status=status,
                 error_message=error_message,
                 git_payload=dict(git_payload),
                 payload_data=payload_data,
                 timings_ms=dict(self._timings_ms),
             )
+            with self._state_lock:
+                self.state = status
+                self._delete_intent()
+            return result
         except Exception:
             with self._state_lock:
                 self.state = "failed"
-            if not persisted:
-                try:
-                    self._write_intent(
-                        state="finalization_failed",
-                        extra={"outcome": status, "finalizationFailedAt": _now_iso()},
-                    )
-                except Exception:
-                    pass
+                if not persisted:
+                    try:
+                        self._write_intent(
+                            state="finalization_failed",
+                            extra={"outcome": status, "finalizationFailedAt": _now_iso()},
+                        )
+                    except Exception:
+                        _LOGGER.exception(
+                            "Unable to persist finalization failure intent for %s", self.trace_id
+                        )
             raise
         finally:
             self._record_timing("finalize", finalize_started)
@@ -615,28 +653,37 @@ class ExecutionHandle:
         return "completed"
 
     def _write_intent(self, *, state: str, extra: Dict[str, Any] | None = None) -> None:
-        existing = _read_json(self.intent_path)
-        payload = {
-            **existing,
-            "_type": "ExecutionFinalizationIntent",
-            "_version": 1,
-            "traceId": self.trace_id,
-            "sessionId": self.session_id,
-            "workspaceRoot": self.workspace_root.as_posix(),
-            "state": state,
-            "createdAt": str(existing.get("createdAt") or self._created_at),
-            "updatedAt": _now_iso(),
-            "snapshotAvailable": self.snapshot_available,
-            "noRestorePoint": self.no_restore_point,
-        }
-        payload.update(extra or {})
-        _atomic_write_json(self.intent_path, payload)
+        with self._state_lock:
+            with self._intent_lock:
+                if self._intent_closed:
+                    raise ExecutionStateError(
+                        f"execution {self.trace_id} intent is already closed"
+                    )
+                existing = _read_json_for_update(self.intent_path)
+                payload = {
+                    **existing,
+                    "_type": "ExecutionFinalizationIntent",
+                    "_version": 1,
+                    "traceId": self.trace_id,
+                    "sessionId": self.session_id,
+                    "workspaceRoot": self.workspace_root.as_posix(),
+                    "state": state,
+                    "createdAt": str(existing.get("createdAt") or self._created_at),
+                    "updatedAt": _now_iso(),
+                    "snapshotAvailable": self.snapshot_available,
+                    "noRestorePoint": self.no_restore_point,
+                }
+                payload.update(extra or {})
+                _atomic_write_json(self.intent_path, payload)
 
     def _delete_intent(self) -> None:
-        try:
-            self.intent_path.unlink()
-        except FileNotFoundError:
-            pass
+        with self._state_lock:
+            with self._intent_lock:
+                try:
+                    self.intent_path.unlink()
+                except FileNotFoundError:
+                    pass
+                self._intent_closed = True
 
     def _record_timing(self, name: str, started: float) -> None:
         elapsed_ms = round(max(0.0, (time.perf_counter() - started) * 1000), 4)
@@ -677,7 +724,14 @@ def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        for attempt in range(len(_ATOMIC_REPLACE_RETRY_DELAYS) + 1):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if attempt >= len(_ATOMIC_REPLACE_RETRY_DELAYS):
+                    raise
+                time.sleep(_ATOMIC_REPLACE_RETRY_DELAYS[attempt])
     finally:
         try:
             temporary.unlink()
@@ -691,6 +745,20 @@ def _read_json(path: Path) -> Dict[str, Any]:
     except (OSError, ValueError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _read_json_for_update(path: Path) -> Dict[str, Any]:
+    try:
+        raw_payload = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    try:
+        payload = json.loads(raw_payload)
+    except ValueError as exc:
+        raise ExecutionStateError(f"execution intent contains invalid JSON: {path}") from exc
+    if not isinstance(payload, dict):
+        raise ExecutionStateError(f"execution intent must be a JSON object: {path}")
+    return payload
 
 
 def _now_iso() -> str:

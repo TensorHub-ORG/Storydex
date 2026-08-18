@@ -8,6 +8,14 @@
     "parity",
     "release-ready"
   ],
+  "dependencyAudit": {
+    "runner": "scripts/run_rust_dependency_audit.ps1",
+    "config": "apps/desktop/agent-runtime/deny.toml",
+    "tool": "cargo-deny 0.20.2",
+    "advisorySource": "https://github.com/RustSec/advisory-db",
+    "checks": ["advisories", "licenses", "sources"],
+    "advisoryIgnores": []
+  },
   "contracts": [
     {
       "id": "agent.sys.health.v1",
@@ -73,7 +81,8 @@
         "apps/backend/contracts/fixtures/agent-chat-stream-missing-session-v1",
         "apps/backend/contracts/fixtures/agent-chat-stream-workspace-mismatch-v1",
         "apps/backend/contracts/fixtures/agent-chat-stream-replacement-v1",
-        "apps/backend/contracts/fixtures/agent-chat-stream-replacement-restore-v1"
+        "apps/backend/contracts/fixtures/agent-chat-stream-replacement-restore-v1",
+        "apps/backend/contracts/fixtures/agent-chat-stream-story-semantics-v1"
       ],
       "differentialRunner": "apps/backend/scripts/run_agent_stream_differential.py",
       "parityEvidence": [
@@ -96,9 +105,14 @@
         "output/agent-runtime-contract/differential-workspace-mismatch-current/differential-report.json",
         "output/agent-runtime-contract/differential-stop-preflight-current/differential-report.json",
         "output/agent-runtime-contract/differential-replacement-current/differential-report.json",
-        "output/agent-runtime-contract/differential-replacement-restore-current/differential-report.json"
+        "output/agent-runtime-contract/differential-replacement-restore-current/differential-report.json",
+        "output/agent-runtime-contract/differential-story-semantics-current/differential-report.json",
+        "output/agent-runtime-contract/control-resilience-current/acceptance-report.json"
       ],
-      "remaining": "The checked-in Refactor slice has parity evidence for read-only, scoped write, provider failure, stop/timeout/disconnect including preflight and repeated stop, approval allow/deny/timeout including duplicate and late decisions, durable follow-up enqueue/edit/delete/idempotency/storage failure, interrupted steer recovery, corrupt/missing/mismatched session state, and latest-trace replacement. Python-owned knowledge projection and Git prompt events remain explicit differences. Multiple concurrent approvals, multi-process mailbox contention, process-crash cancellation, story generation, full context/intent parity, production workspace access, Electron Beta and Stable takeover remain out of scope."
+      "performanceRunner": "apps/backend/scripts/run_agent_refactor_performance.py",
+      "performanceEvidence": "output/agent-runtime-contract/m0-performance-current/performance-report.json",
+      "performanceDecisionEvidence": "output/rust-migration-decision-live/eb2805f48eed-20260818T014444-m0-performance-gate/decision-report.json",
+      "remaining": "The checked-in Refactor slice has parity evidence for read-only, scoped write, provider failure, stop/timeout/disconnect including preflight and repeated stop, concurrent approval, durable multi-process follow-up storage, interrupted steer recovery, corrupt/missing/mismatched session state, process-crash bridge cancellation, latest-trace replacement, and the externally visible story intent/context/permission contract. Python-owned knowledge projection and Git prompt events remain explicit differences. Bounded story generation execution, production workspace access, Electron Beta and Stable takeover remain out of scope."
     },
     {
       "id": "agent.approval.v1",
@@ -120,9 +134,10 @@
       "parityEvidence": [
         "output/agent-runtime-contract/differential-approval-current/differential-report.json",
         "output/agent-runtime-contract/differential-approval-deny-current/differential-report.json",
-        "output/agent-runtime-contract/differential-approval-timeout-current/differential-report.json"
+        "output/agent-runtime-contract/differential-approval-timeout-current/differential-report.json",
+        "output/agent-runtime-contract/control-resilience-current/acceptance-report.json"
       ],
-      "remaining": "Answer, deny, timeout, duplicate decisions and a late decision after timeout have dedicated black-box parity evidence. Multiple concurrent approvals and the remaining permission modes still need dedicated cases."
+      "remaining": "Answer, deny, timeout, duplicate decisions, a late decision after timeout, and two simultaneously pending approvals have dedicated black-box evidence. Permission modes outside the current externally frozen story contract remain tied to their future business slices."
     },
     {
       "id": "agent.followup.v1",
@@ -150,9 +165,10 @@
         "output/agent-runtime-contract/differential-followup-current/differential-report.json",
         "output/agent-runtime-contract/differential-steer-recovery-current/differential-report.json",
         "output/agent-runtime-contract/differential-followup-mutations-current/differential-report.json",
-        "output/agent-runtime-contract/differential-followup-storage-error-current/differential-report.json"
+        "output/agent-runtime-contract/differential-followup-storage-error-current/differential-report.json",
+        "output/agent-runtime-contract/control-resilience-current/acceptance-report.json"
       ],
-      "remaining": "Queued dispatch/resume, interrupted steer requeue, edit/delete idempotency and storage-write failure are covered. True multi-process mailbox contention and cross-process recovery remain outside the black-box slice."
+      "remaining": "Queued dispatch/resume, interrupted steer requeue, edit/delete idempotency, storage-write failure, and two independent agentd processes contending on one mailbox are covered. Production desktop lifecycle recovery remains outside the isolated black-box slice."
     },
     {
       "id": "agent.cancel.v1",
@@ -176,9 +192,10 @@
         "output/agent-runtime-contract/differential-cancel-current/differential-report.json",
         "output/agent-runtime-contract/differential-stop-preflight-current/differential-report.json",
         "output/agent-runtime-contract/differential-timeout-current/differential-report.json",
-        "output/agent-runtime-contract/differential-disconnect-current/differential-report.json"
+        "output/agent-runtime-contract/differential-disconnect-current/differential-report.json",
+        "output/agent-runtime-contract/control-resilience-current/acceptance-report.json"
       ],
-      "remaining": "Manual stop, timeout, client disconnect, stop before runtime readiness and repeated stop have terminal/session parity. Process-crash cancellation still needs coverage."
+      "remaining": "Manual stop, timeout, client disconnect, stop before runtime readiness, repeated stop, and parent-agentd crash cancellation through bridge control EOF have black-box evidence. Packaged desktop process-tree shutdown remains a later Beta concern."
     },
     {
       "id": "agent.resume.v1",
@@ -206,9 +223,10 @@
         "output/agent-runtime-contract/differential-corrupt-binding-current/differential-report.json",
         "output/agent-runtime-contract/differential-corrupt-session-current/differential-report.json",
         "output/agent-runtime-contract/differential-missing-session-current/differential-report.json",
-        "output/agent-runtime-contract/differential-workspace-mismatch-current/differential-report.json"
+        "output/agent-runtime-contract/differential-workspace-mismatch-current/differential-report.json",
+        "output/agent-runtime-contract/control-resilience-current/acceptance-report.json"
       ],
-      "remaining": "Explicit queued resume, steer interruption and fail-closed corrupt, missing and workspace-mismatched session cases are covered. Multi-process mailbox contention remains."
+      "remaining": "Explicit queued resume, steer interruption, fail-closed corrupt/missing/workspace-mismatched session cases, and multi-process mailbox serialization are covered. Production desktop lifecycle recovery remains outside this isolated slice."
     }
   ]
 }

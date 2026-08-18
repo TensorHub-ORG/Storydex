@@ -207,6 +207,193 @@ def _safe_event_summary(name: str, payload: Mapping[str, Any]) -> dict[str, Any]
     return summary
 
 
+def _safe_turn_contract(payload: Mapping[str, Any]) -> dict[str, Any]:
+    intent = payload.get("intentFrame") if isinstance(payload.get("intentFrame"), Mapping) else {}
+    execution = (
+        payload.get("executionPolicy")
+        if isinstance(payload.get("executionPolicy"), Mapping)
+        else {}
+    )
+    turn_plan = payload.get("turnPlan") if isinstance(payload.get("turnPlan"), Mapping) else {}
+    assembly = (
+        payload.get("contextAssembly")
+        if isinstance(payload.get("contextAssembly"), Mapping)
+        else {}
+    )
+    budget = assembly.get("budget") if isinstance(assembly.get("budget"), Mapping) else {}
+    context_trace = (
+        assembly.get("contextTrace")
+        if isinstance(assembly.get("contextTrace"), Mapping)
+        else {}
+    )
+    context_sources = []
+    for source in context_trace.get("sources", []):
+        if not isinstance(source, Mapping):
+            continue
+        context_sources.append(
+            {
+                key: source.get(key)
+                for key in (
+                    "kind",
+                    "policy",
+                    "candidateChars",
+                    "chars",
+                    "included",
+                    "truncated",
+                    "dropReason",
+                    "requiresFullReadBeforeWrite",
+                )
+                if key in source
+            }
+        )
+    prompt_blocks = []
+    for block in assembly.get("promptBlocks", []):
+        if not isinstance(block, Mapping):
+            continue
+        prompt_blocks.append(
+            {
+                key: block.get(key)
+                for key in (
+                    "id",
+                    "title",
+                    "charCount",
+                    "sourcePaths",
+                    "truncated",
+                    "omitted",
+                    "dropReason",
+                )
+                if key in block
+            }
+        )
+
+    word_count_policy = (
+        turn_plan.get("wordCountPolicy")
+        if isinstance(turn_plan.get("wordCountPolicy"), Mapping)
+        else {}
+    )
+    safe: dict[str, Any] = {
+        "status": payload.get("status"),
+        "reasoningEffort": payload.get("reasoningEffort"),
+        "intentFrame": {
+            key: intent.get(key)
+            for key in (
+                "primary",
+                "confidence",
+                "signals",
+                "method",
+                "operationType",
+                "decision",
+                "effect",
+                "artifact",
+                "targetScope",
+                "targetValue",
+                "explicitConstraints",
+                "ambiguities",
+                "evidence",
+                "canWrite",
+                "complexity",
+                "existingChapterCount",
+                "assetTargets",
+                "matchedSkills",
+            )
+            if key in intent
+        },
+        "executionPolicy": {
+            key: execution.get(key)
+            for key in (
+                "coomiRole",
+                "storydexRole",
+                "capabilityMode",
+                "directFileWrites",
+                "pendingWriteApproval",
+                "localGitAutoCommit",
+                "allowedWriteRoots",
+                "remotePush",
+                "highRiskChangeRequiresNotice",
+                "noRestorePointConfirmed",
+            )
+            if key in execution
+        },
+        "turnPlan": {
+            key: turn_plan.get(key)
+            for key in (
+                "operationType",
+                "fragmentCount",
+                "chapterLengthTier",
+                "selectedChapterTemplate",
+                "chapterWordCountTarget",
+                "fragmentWordCount",
+                "fragmentWordCountMin",
+                "fragmentWordCountMax",
+                "chapterAction",
+                "targetChapterNumber",
+                "authoritativeChapterPath",
+                "authoritativeFragmentPaths",
+                "nextSegmentPath",
+                "chapterCount",
+                "activeFile",
+                "storyFormatSource",
+            )
+            if key in turn_plan
+        },
+        "contextAssembly": {
+            "activeFile": assembly.get("activeFile"),
+            "budget": {
+                key: budget.get(key)
+                for key in ("maxTotalChars", "totalChars", "blockCount")
+                if key in budget
+            },
+            "contextTrace": {"sources": context_sources},
+            "promptBlocks": prompt_blocks,
+        },
+    }
+    if word_count_policy:
+        safe["turnPlan"]["wordCountPolicy"] = {
+            key: word_count_policy.get(key)
+            for key in ("version", "mode", "scope", "tier", "target", "minimum", "maximum")
+            if key in word_count_policy
+        }
+    for key in (
+        "knowledgeWritePolicy",
+        "assetTargets",
+        "contextPolicy",
+        "updatePolicy",
+        "requiredQuestions",
+    ):
+        value = payload.get(key)
+        if isinstance(value, Mapping):
+            safe[key] = dict(value)
+        elif isinstance(value, list):
+            safe[key] = list(value)
+    return safe
+
+
+def _assert_expected_subset(actual: Any, expected: Any, *, path: str) -> None:
+    if isinstance(expected, Mapping):
+        if not isinstance(actual, Mapping):
+            raise AgentStreamContractError(f"{path} must be an object")
+        for key, value in expected.items():
+            if key not in actual:
+                raise AgentStreamContractError(f"{path}.{key} is missing")
+            _assert_expected_subset(actual[key], value, path=f"{path}.{key}")
+        return
+    if isinstance(expected, list):
+        if not isinstance(actual, list):
+            raise AgentStreamContractError(f"{path} must be an array")
+        if len(actual) != len(expected):
+            raise AgentStreamContractError(
+                f"{path} length does not match fixture: "
+                f"expected {len(expected)}, got {len(actual)}"
+            )
+        for index, value in enumerate(expected):
+            _assert_expected_subset(actual[index], value, path=f"{path}[{index}]")
+        return
+    if actual != expected:
+        raise AgentStreamContractError(
+            f"{path} does not match fixture: expected {expected!r}, got {actual!r}"
+        )
+
+
 def _assert_common_payload(name: str, payload: Mapping[str, Any]) -> None:
     if name == "done":
         return
@@ -344,6 +531,17 @@ def validate_chat_stream_events(
         and agent_started_index <= turn_contract_index
     ):
         raise AgentStreamContractError("AgentStarted must follow TurnContract")
+
+    turn_contract: dict[str, Any] = {}
+    if turn_contract_index is not None:
+        turn_contract = _safe_turn_contract(events[turn_contract_index][1])
+        expected_turn_contract = expected.get("turnContract")
+        if isinstance(expected_turn_contract, Mapping):
+            _assert_expected_subset(
+                turn_contract,
+                expected_turn_contract,
+                path="TurnContract",
+            )
 
     phase_first_seen: dict[str, int] = {}
     heartbeat_count = 0
@@ -506,5 +704,6 @@ def validate_chat_stream_events(
         "errorCount": len(errors),
         "replyChars": len(reply),
         "replyPreview": reply[-400:],
+        "turnContract": turn_contract,
         "events": safe_events,
     }

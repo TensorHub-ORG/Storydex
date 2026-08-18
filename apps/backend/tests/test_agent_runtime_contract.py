@@ -288,6 +288,116 @@ def test_chat_stream_contract_accepts_ordered_read_only_replay() -> None:
     assert observed["doneCount"] == 1
 
 
+def test_chat_stream_contract_freezes_safe_turn_contract_subset() -> None:
+    events = _valid_chat_stream_events()
+    for name, payload in events:
+        if name == "TurnContract":
+            payload.update(
+                {
+                    "status": "ready",
+                    "reasoningEffort": "low",
+                    "intentFrame": {
+                        "primary": "story_generation",
+                        "operationType": "modify_existing",
+                        "canWrite": True,
+                    },
+                    "executionPolicy": {
+                        "capabilityMode": "scoped_write",
+                        "allowedWriteRoots": ["chapters/"],
+                    },
+                    "contextAssembly": {
+                        "activeFile": "chapters/fixture.md",
+                        "budget": {
+                            "maxTotalChars": 10000,
+                            "totalChars": 24,
+                            "blockCount": 1,
+                        },
+                        "contextTrace": {"sources": []},
+                        "promptBlocks": [
+                            {
+                                "id": "active_file",
+                                "title": "Active file",
+                                "content": "must-not-enter-the-report",
+                                "charCount": 24,
+                                "sourcePaths": ["chapters/fixture.md"],
+                            }
+                        ],
+                    },
+                }
+            )
+
+    observed = validate_chat_stream_events(
+        events,
+        status_code=200,
+        headers={
+            "content-type": "text/event-stream",
+            "cache-control": "no-cache",
+            "x-accel-buffering": "no",
+        },
+        trace_id="trace-contract",
+        session_id="session-contract",
+        fixture={
+            "expected": {
+                "terminalEvent": "AgentCompleted",
+                "turnContract": {
+                    "intentFrame": {
+                        "primary": "story_generation",
+                        "operationType": "modify_existing",
+                        "canWrite": True,
+                    },
+                    "executionPolicy": {
+                        "capabilityMode": "scoped_write",
+                        "allowedWriteRoots": ["chapters/"],
+                    },
+                    "contextAssembly": {
+                        "activeFile": "chapters/fixture.md",
+                        "budget": {"blockCount": 1},
+                        "promptBlocks": [
+                            {
+                                "id": "active_file",
+                                "sourcePaths": ["chapters/fixture.md"],
+                            }
+                        ],
+                    },
+                },
+            }
+        },
+    )
+
+    assert observed["turnContract"]["contextAssembly"]["promptBlocks"] == [
+        {
+            "id": "active_file",
+            "title": "Active file",
+            "charCount": 24,
+            "sourcePaths": ["chapters/fixture.md"],
+        }
+    ]
+    assert "must-not-enter-the-report" not in json.dumps(observed)
+
+
+def test_chat_stream_contract_rejects_turn_contract_semantic_drift() -> None:
+    with pytest.raises(AgentStreamContractError, match="TurnContract.intentFrame.primary"):
+        validate_chat_stream_events(
+            _valid_chat_stream_events(),
+            status_code=200,
+            headers={
+                "content-type": "text/event-stream",
+                "cache-control": "no-cache",
+                "x-accel-buffering": "no",
+            },
+            trace_id="trace-contract",
+            session_id="session-contract",
+            fixture={
+                "expected": {
+                    "terminalEvent": "AgentCompleted",
+                    "turnContract": {
+                        "intentFrame": {"primary": "story_generation"}
+                    },
+                }
+            },
+        )
+
+
 def test_chat_stream_contract_allows_explicit_mutating_fixture() -> None:
     events = _valid_chat_stream_events()
     for index, (name, payload) in enumerate(events):

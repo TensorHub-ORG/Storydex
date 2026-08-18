@@ -122,7 +122,8 @@
       "apps/backend/contracts/fixtures/agent-chat-stream-missing-session-v1",
       "apps/backend/contracts/fixtures/agent-chat-stream-workspace-mismatch-v1",
       "apps/backend/contracts/fixtures/agent-chat-stream-replacement-v1",
-      "apps/backend/contracts/fixtures/agent-chat-stream-replacement-restore-v1"
+      "apps/backend/contracts/fixtures/agent-chat-stream-replacement-restore-v1",
+      "apps/backend/contracts/fixtures/agent-chat-stream-story-semantics-v1"
     ],
     "activation": "Explicit STORYDEX_AGENT_PROVIDER_REPLAY_FIXTURE only; missing or mismatched fixtures fail closed.",
     "liveEvidence": "Replay observations are labelled providerMode=replay and must never be reported as live provider success."

@@ -51,6 +51,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/desktop/agent-runtime -> target
+      - name: Install pinned Rust dependency auditor
+        run: cargo install cargo-deny --version 0.20.2 --locked
+      - name: Audit Rust dependencies
+        shell: pwsh
+        run: ./scripts/run_rust_dependency_audit.ps1
       - name: Test Windows Agent runtime
         run: cargo test --manifest-path apps/desktop/agent-runtime/Cargo.toml --locked --workspace
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4

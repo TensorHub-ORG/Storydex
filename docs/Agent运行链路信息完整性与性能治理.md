@@ -821,6 +821,12 @@ session_load_status / session_save_status
 - P2：连续回合 bridge 初始化次数从每回合 1 次降到每 worker 生命周期 1 次。
 - P2：工具轮 transmitted input 不再重复发送可复用前缀；按 Provider 能力分别设定基线。
 
+2026-08-18 的 Rust Agent M0 窗口不替代上述 P1 大型 fixture 基线，而是补充 Python Stable/Rust Refactor 的同 fixture 进程与 SSE 对照。固定门槛由 Storydex Stable live `OPENCODE/deepseek-v4-flash` 选择 `end_to_end_relative_gate`：用户可见 p95 因子 `1.10`；TurnContract、AgentStarted、RuntimeMetrics、ToolStart 和终态的 Rust median 因子 `0.80`、p95 因子 `1.00`；60 秒进程树 RSS 因子 `0.80`。报告 `output/agent-runtime-contract/m0-performance-current/performance-report.json` 为 `24/24 passed`，真实 LLM 网络时间被排除。最终 p95 的 Python/Rust 对照为：启动 `4372.584/783.702ms`、首个 SSE `816.627/710.613ms`、TurnContract `3763.722/779.379ms`、ToolStart `3853.454/1018.609ms`、stop HTTP `54.135/26.916ms`、stop 至终态 `3017.809/40.098ms`；60 秒 RSS 为 `95.65/23.17MiB`。
+
+最终窗口中 Rust debug 的 `componentInit/sessionInit` p95 比值为只读 `17.9373x/21.6833x`、取消 `2.1476x/2.3881x`；只读两项进入 `diagnosticInvestigations`，须在 release/Beta 前关闭。不得以端到端通过为由提前启动 P2 常驻 bridge，也不得把 median 改善用于掩盖 p95 长尾。
+
+M0 长序列的两个 Windows 根因均已显式修复：session bound 的无 I/O 快路只处理扩展前缀、分隔符和大小写等价，`.`/`..` 必须进入 `resolve()`/`samefile()`；execution intent 统一按 state lock → intent lock 串行状态变更与写删，迟到 stop 不再被虚假接受，活动 intent 读取失败或损坏不会按空对象重建。替换仍只对 `PermissionError` 做 10/25/50ms 有界重试；永久错误、真实路径逃逸和 session restore 错误继续 fail closed。
+
 ## 13. 验证矩阵
 
 | 范围 | 必测内容 |
@@ -881,6 +887,8 @@ P0-1/P0-2/P0-3 已分别提交为 `b0dd6cf`、`151ca45`、`785a46f`；P0-1F、P1
 
 上述 stash 和工作区说明记录的是 P1 收口时的历史交付状态；P1 治理代码基线为 `d7909d6`，当前远端 `main` 基线为 `219cb05`（对应 CI run `31949698044` 已成功），本轮 Rust Agent 迁移本地提交为 `2cf446e`，与 P1 治理提交分离且远端 CI 尚未完成。不得在新对话中 pop、删除或覆盖历史 stash，也不要把 Rust M3 的旁路代码当成 Stable 已切换。
 
+上段提交和远端信息是 P1 历史记录，不是当前分支指针。2026-08-18 Rust 续作起始 `origin/main` 为 `eb2805f48eed78e9a33d15ff59643e79ff6ac2d2`；当前收口包含依赖审计、story 外部语义、控制面故障模型、M0 性能门槛和 Windows session path identity 竞态修复。最终提交及 CI 只能按实际 `dev/windows -> Development CI success -> main -> full CI success` 结果交付。
+
 真实验收使用临时目录复制单个 Provider 配置，结束后自动删除临时配置和密钥副本。`output/` 下的验收报告被 Git 忽略；每次提交前仍检查暂存差异没有 API key、Authorization header 值或临时 Provider 配置。本文档明确记录的是本机 `OPENCODE / deepseek-v4-flash` 配置的使用事实，不包含凭证。
 
 ## 15. 明确禁止的修复方式
@@ -900,8 +908,8 @@ P0-1/P0-2/P0-3 已分别提交为 `b0dd6cf`、`151ca45`、`785a46f`；P0-1F、P1
 ### Rust 重构对接（P1 已完成）
 
 ```text
-P1-2c、P1-3、P1-4、P1-5、P1-6、P1-7 已完成，不要重复实施。若出现新的性能或信息完整性证据，只在本文件记录复现和影响；当前对话不启动性能专项。
-当前主任务转到 docs/rust-tauri-migration.md：M3 已冻结 Agent chat/SSE 有序事件契约，并完成 20 组 Python Stable/Rust Refactor 规范化差分，覆盖读、受限写、Provider 错误、取消/超时/断连、启动前 stop、审批允许/拒绝/超时/重复决策、follow-up 编辑/删除/存储失败、steer、会话损坏/缺失/工作区不匹配和 replacement。真实主链路仍只使用本机 Storydex OPENCODE/deepseek-v4-flash 的隔离配置副本，凭证不得输出或提交；Rust 只在 Refactor/Beta 轨道运行，不接管 Stable。
+P1-2c、P1-3、P1-4、P1-5、P1-6、P1-7 已完成，不要重复实施。Rust Agent M0 的 20 样本统计窗口也已完成；不得为刷新数字更换 fixture、降低样本数或把 live 网络时间并入 Rust 收益。
+当前主任务以 docs/rust-tauri-migration.md 的 0.6 为准：M3 已冻结 21 组 Agent chat/SSE fixture，并关闭并发 approval、多进程 mailbox、父进程崩溃取消和依赖审计。剩余是有界 storyGeneration 实际执行、Python-owned WIKI/Knowledge/Git、Beta 前 release 组件长尾和生产生命周期。真实主链路仍只使用本机 Storydex OPENCODE/deepseek-v4-flash 的隔离配置副本，凭证不得输出或提交；Rust 只在隔离 Refactor 轨道运行，不接管 Stable，也未启动 Electron Rust Beta。
 ```
 
 ### Rust 重构完成后的 P2 处理（当前暂缓）

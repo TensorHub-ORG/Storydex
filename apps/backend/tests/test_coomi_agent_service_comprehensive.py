@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 
 import pytest
 
@@ -158,6 +159,15 @@ def test_persisted_session_bound_accepts_windows_extended_path(monkeypatch, tmp_
     monkeypatch.setattr(coomi, "STORYDEX_COOMI_SESSIONS", sessions)
     extended_path = "\\\\?\\" + str(session_path.resolve())
 
+    def fail_resolve(*_args, **_kwargs):
+        raise AssertionError("resolve must not re-stat an equivalent extended path")
+
+    def fail_samefile(*_args, **_kwargs):
+        raise AssertionError("samefile must not re-stat an equivalent extended path")
+
+    monkeypatch.setattr(type(tmp_path), "resolve", fail_resolve)
+    monkeypatch.setattr(type(tmp_path), "samefile", fail_samefile)
+
     assert (
         coomi._validated_persisted_session_bound(
             {
@@ -169,6 +179,139 @@ def test_persisted_session_bound_accepts_windows_extended_path(monkeypatch, tmp_
         )
         == runtime_id
     )
+
+
+def test_persisted_session_bound_avoids_resolve_and_samefile_race_for_expected_path(
+    monkeypatch, tmp_path
+) -> None:
+    event = _persisted_session_bound(monkeypatch, tmp_path)
+
+    def fail_resolve(*_args, **_kwargs):
+        raise AssertionError("resolve must not re-stat an expected session path")
+
+    def fail_samefile(*_args, **_kwargs):
+        raise AssertionError("samefile must not re-stat an expected session path")
+
+    monkeypatch.setattr(type(tmp_path), "resolve", fail_resolve)
+    monkeypatch.setattr(type(tmp_path), "samefile", fail_samefile)
+
+    assert coomi._validated_persisted_session_bound(event) == event["runtimeSessionId"]
+
+
+def test_persisted_session_bound_rejects_symlink_parent_escape(monkeypatch, tmp_path) -> None:
+    runtime_id = "11111111-1111-4111-8111-111111111111"
+    sessions = tmp_path / "coomi-home" / "sessions"
+    sessions.mkdir(parents=True)
+    expected = sessions / f"{runtime_id}.json"
+    expected.write_text("{}", encoding="utf-8")
+    outside = tmp_path / "outside"
+    linked_target = outside / "nested"
+    linked_target.mkdir(parents=True)
+    escaped = outside / f"{runtime_id}.json"
+    escaped.write_text("{}", encoding="utf-8")
+    link = sessions / "linked"
+    try:
+        link.symlink_to(linked_target, target_is_directory=True)
+    except OSError as exc:
+        if os.name != "nt":
+            pytest.skip(f"directory symlinks are unavailable: {exc}")
+        junction = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(linked_target)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if junction.returncode != 0:
+            pytest.skip(f"directory links are unavailable: {junction.stderr or junction.stdout}")
+    candidate = link / ".." / f"{runtime_id}.json"
+    if candidate.resolve() != escaped.resolve():
+        pytest.skip("this platform resolves symlink parent traversal lexically")
+    assert candidate.is_file()
+    monkeypatch.setattr(coomi, "STORYDEX_COOMI_SESSIONS", sessions)
+
+    with pytest.raises(coomi.StorydexCoomiSessionRestoreError, match="outside"):
+        coomi._validated_persisted_session_bound(
+            {
+                "runtimeSessionId": runtime_id,
+                "sessionPath": str(candidate),
+                "sessionSchemaVersion": 1,
+                "persisted": True,
+            }
+        )
+
+
+def test_persisted_session_bound_parent_segment_never_uses_fast_identity(
+    monkeypatch, tmp_path
+) -> None:
+    runtime_id = "11111111-1111-4111-8111-111111111111"
+    sessions = tmp_path / "coomi-home" / "sessions"
+    sessions.mkdir(parents=True)
+    expected = sessions / f"{runtime_id}.json"
+    expected.write_text("{}", encoding="utf-8")
+    candidate = sessions / "linked" / ".." / f"{runtime_id}.json"
+    escaped = tmp_path / "outside" / f"{runtime_id}.json"
+    monkeypatch.setattr(coomi, "STORYDEX_COOMI_SESSIONS", sessions)
+    path_type = type(tmp_path)
+    original_resolve = path_type.resolve
+
+    def resolve_path(path, *args, **kwargs):
+        if path == candidate:
+            return escaped
+        if path == expected:
+            return expected
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(path_type, "resolve", resolve_path)
+    monkeypatch.setattr(path_type, "samefile", lambda _path, _other: False)
+    monkeypatch.setattr(path_type, "is_file", lambda _path: True)
+
+    with pytest.raises(coomi.StorydexCoomiSessionRestoreError, match="outside"):
+        coomi._validated_persisted_session_bound(
+            {
+                "runtimeSessionId": runtime_id,
+                "sessionPath": str(candidate),
+                "sessionSchemaVersion": 1,
+                "persisted": True,
+            }
+        )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows UNC paths are platform-specific")
+def test_persisted_session_bound_accepts_windows_extended_unc_identity(
+    monkeypatch, tmp_path
+) -> None:
+    runtime_id = "11111111-1111-4111-8111-111111111111"
+    sessions = tmp_path.__class__(r"\\server\share\coomi\sessions")
+    expected = sessions / f"{runtime_id}.json"
+    extended_unc = rf"\\?\UNC\server\share\coomi\sessions\{runtime_id}.json"
+    monkeypatch.setattr(coomi, "STORYDEX_COOMI_SESSIONS", sessions)
+
+    def fail_resolve(*_args, **_kwargs):
+        raise AssertionError("resolve must not re-stat an equivalent extended UNC path")
+
+    def fail_samefile(*_args, **_kwargs):
+        raise AssertionError("samefile must not re-stat an equivalent extended UNC path")
+
+    def expected_is_file(path):
+        assert str(path).casefold() == extended_unc.casefold()
+        return True
+
+    monkeypatch.setattr(type(tmp_path), "resolve", fail_resolve)
+    monkeypatch.setattr(type(tmp_path), "samefile", fail_samefile)
+    monkeypatch.setattr(type(tmp_path), "is_file", expected_is_file)
+
+    assert (
+        coomi._validated_persisted_session_bound(
+            {
+                "runtimeSessionId": runtime_id,
+                "sessionPath": extended_unc,
+                "sessionSchemaVersion": 1,
+                "persisted": True,
+            }
+        )
+        == runtime_id
+    )
+    assert str(expected).casefold().endswith(f"{runtime_id}.json")
 
 
 def test_translator_reports_turn_usage_instead_of_runtime_cumulative_usage() -> None:

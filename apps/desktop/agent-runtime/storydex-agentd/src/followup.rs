@@ -1,7 +1,9 @@
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -132,6 +134,7 @@ impl FollowupStore {
         session_id: &str,
     ) -> Result<FollowupState, FollowupError> {
         let _guard = self.lock.lock().unwrap_or_else(|error| error.into_inner());
+        let _file_guard = lock_mailbox(workspace, session_id)?;
         self.load(workspace, session_id)
     }
 
@@ -661,6 +664,7 @@ impl FollowupStore {
         operation: impl FnOnce(&mut FollowupState) -> Result<T, FollowupError>,
     ) -> Result<T, FollowupError> {
         let _guard = self.lock.lock().unwrap_or_else(|error| error.into_inner());
+        let _file_guard = lock_mailbox(workspace, session_id)?;
         let mut state = self.load(workspace, session_id)?;
         let value = operation(&mut state)?;
         state.revision = state.revision.saturating_add(1);
@@ -676,6 +680,7 @@ impl FollowupStore {
         operation: impl FnOnce(&mut FollowupState) -> Result<(), FollowupError>,
     ) -> Result<FollowupState, FollowupError> {
         let _guard = self.lock.lock().unwrap_or_else(|error| error.into_inner());
+        let _file_guard = lock_mailbox(workspace, session_id)?;
         let mut state = self.load(workspace, session_id)?;
         operation(&mut state)?;
         state.revision = state.revision.saturating_add(1);
@@ -691,6 +696,7 @@ impl FollowupStore {
         operation: impl FnOnce(&mut FollowupState) -> Result<(T, bool), FollowupError>,
     ) -> Result<T, FollowupError> {
         let _guard = self.lock.lock().unwrap_or_else(|error| error.into_inner());
+        let _file_guard = lock_mailbox(workspace, session_id)?;
         let mut state = self.load(workspace, session_id)?;
         let (value, changed) = operation(&mut state)?;
         if changed {
@@ -784,6 +790,29 @@ impl FollowupStore {
     }
 }
 
+fn lock_mailbox(workspace: &Path, session_id: &str) -> Result<File, FollowupError> {
+    let workspace = workspace
+        .canonicalize()
+        .map_err(|error| FollowupError::new("invalid_workspace", error.to_string()))?;
+    let path = mailbox_path(&workspace, session_id);
+    let parent = path
+        .parent()
+        .ok_or_else(|| FollowupError::new("followup_storage_error", "mailbox has no parent"))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| FollowupError::new("followup_storage_error", error.to_string()))?;
+    let lock_path = path.with_extension("lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)
+        .map_err(|error| FollowupError::new("followup_storage_error", error.to_string()))?;
+    file.lock_exclusive()
+        .map_err(|error| FollowupError::new("followup_storage_error", error.to_string()))?;
+    Ok(file)
+}
+
 fn mailbox_path(workspace: &Path, session_id: &str) -> PathBuf {
     let digest = format!(
         "{:x}",
@@ -821,6 +850,8 @@ fn now_iso() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Barrier;
+    use std::thread;
     use tempfile::tempdir;
 
     #[test]
@@ -958,5 +989,44 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn independent_stores_serialize_mailbox_updates() {
+        let directory = tempdir().expect("tempdir");
+        let workspace = directory.path().canonicalize().expect("workspace");
+        let barrier = Arc::new(Barrier::new(3));
+        let handles = (1..=2)
+            .map(|index| {
+                let workspace = workspace.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    let store = FollowupStore::default();
+                    barrier.wait();
+                    store
+                        .enqueue(
+                            &workspace,
+                            "shared-session",
+                            &format!("message-{index}"),
+                            &format!("content-{index}"),
+                            "queued",
+                            "",
+                        )
+                        .expect("enqueue")
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        for handle in handles {
+            handle.join().expect("join concurrent enqueue");
+        }
+
+        let state = FollowupStore::default()
+            .list(&workspace, "shared-session")
+            .expect("mailbox");
+        assert_eq!(state.revision, 2);
+        assert_eq!(state.message_sequence, 2);
+        assert_eq!(state.messages.len(), 2);
+        assert_eq!(state.events.len(), 2);
     }
 }
