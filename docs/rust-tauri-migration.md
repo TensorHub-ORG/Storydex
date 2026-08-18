@@ -1,27 +1,32 @@
 # Storydex Rust 后端与 Tauri 桌面重构计划
 
-- 状态：执行中（M3 受控 Agent Refactor 切片，Stable 未切换）
+- 状态：执行中（M3 受控 parity 已完成，进入全量 Rust/Tauri 候选实现；Stable 未切换）
 - 建立日期：2026-08-05
 - 最近修订：2026-08-18
-- 适用范围：Storydex 2.x 稳定维护、Agent Rust 重构、后续 Rust 后端与 Tauri 桌面迁移
+- 适用范围：Storydex 2.x 稳定维护、完整 Rust 后端候选、Tauri 2 桌面候选与旧运行时退出准备
 
-## 0. 本轮 Agent 重构边界
+## 0. 新对话执行总目标与硬边界
 
-本轮先处理 Agent 的实现语言和运行时边界，目标是“行为不变、实现可替换”，不是一次性重写整个后端。现有 Stable 生产链路继续使用 `Electron + Python/FastAPI + Rust Coomi bridge`；Rust Agent 先以旁路/Beta 形态运行，未达到 parity 前不得接管 Stable。
+从 `e8a2e0267995b741f0b095a8b207af2a12abd42c` 起，后续新对话的单一工程目标不再是继续扩充 Agent 控制面 fixture，而是把尚未完成的迁移连续推进到“完整 Rust 后端 + Tauri 2 桌面候选可构建、可测试、可打包”的状态。实现可以跨越多个里程碑、并行处理独立工作流，不需要为每个小切片重新等待人工授权。
 
-本轮范围：
+这里的“全部完成”指目标候选的代码、契约、迁移工具、打包入口、自动化验证和文档均闭环；不表示切换 Stable 发布通道。现有 Stable 生产链路继续使用 `Electron + Python/FastAPI + Rust Coomi bridge`，直到用户在后续独立请求中明确授权激活。
 
-- Agent 的意图、权限、TurnContract、上下文装配、工具循环、Provider 适配、SSE 生命周期、取消/恢复和错误透传。
-- 复用并整理现有 `apps/desktop/agent-runtime` 的 engine、services、tools、security 和 bridge 能力，不重复实现已有稳定基础设施。
-- 以现有 `/api/v1`、SSE、`.storydex` 文件格式、Git 边界和前端可见行为为兼容边界。
+新对话已获授权的范围：
 
-本轮不做：
+- 完成 Rust `storyGeneration`、WIKI/Story Knowledge、Git 收尾及其余 Python-owned 后端能力的迁移和差分。
+- 建立完整 Rust 后端候选，迁移所有仍被前端和桌面使用的公开接口；不为无消费者的历史内部实现做逐行翻译。
+- 接入独立 Electron Rust Beta 和 Tauri Preview/候选构建，完成桌面生命周期、安装、更新、回滚和打包态验证。
+- 从目标 Rust/Tauri 候选的构建输入和运行时依赖中移除 Python/FastAPI/Uvicorn 与 Electron/Node；Stable 参考实现源码保留到正式激活获得单独授权。
+- 复用 `apps/desktop/agent-runtime` 和现有 Vue/Vite 工作台，以 `/api/v1`、SSE、`.storydex` 文件格式、Git 副作用及前端可见行为为兼容边界。
 
-- 不迁移 WIKI、Story Knowledge、普通项目服务或前端设计；这些仍由 Python/现有桌面壳负责。
-- 不同时切换 Tauri；Tauri 仍以后端稳定观察周期为前置条件。
-- 不把 123 个全后端路由或完整 Python 删除作为 Agent 首个切片的前置条件。
+仍然禁止：
 
-执行方向只规定边界，不规定每个内部模块的固定拆分。实现过程中以现有代码和测量结果决定 crate、进程和适配器的最小划分；不得为了“重构完整”增加无消费者的中间层、额外模型调用或重复上下文构建。外部技术资料在确有疑问时可用 `smartsearch` 查询，不是本计划的必需依赖。
+- 不改变 Stable 的启动命令、默认运行时、正式更新源或正式安装资产，不向 Stable 用户发布候选实现。
+- 不访问或修改真实用户项目；写入、升级和回滚验证只使用仓库 fixture、临时克隆或脱敏副本。
+- 不引入单向项目格式升级，不删除人工回滚所需的 Stable 参考分支/源码/签名产物。
+- 不用静默 fallback、吞错、宽松差分、降低覆盖率或跳过安全门禁来制造“完成”。
+
+执行方向只规定目标和兼容边界，不规定每个内部模块的固定拆分。强模型应先读取现有调用链，随后自主拆分和并行推进可独立验证的工作流；不得为了“重构完整”增加无消费者的中间层、额外模型调用或重复上下文构建。里程碑是集成与验证门禁，不是要求串行等待的任务队列。
 
 ### 0.1 2026-08-18 当前执行状态
 
@@ -36,7 +41,8 @@
 
 ### 0.2 基线、分支与生产边界
 
-- 本次续作起始基线为 `eb2805f48eed78e9a33d15ff59643e79ff6ac2d2`；开始时 `origin/main` 指向该提交，最近完整 CI 为成功基线。本轮提交仍必须先推 `dev/windows` 并等待 Development CI 成功，再推 `main` 并等待完整 CI 成功。
+- 新对话起始基线为 `e8a2e0267995b741f0b095a8b207af2a12abd42c`；该提交上的 `dev/windows` Development CI `32097308639` 与 `main` 完整 CI `32097720408` 均为成功基线。
+- 每个准备同步到 `main` 的可验证交付块都必须先推 `dev/windows` 并等待该 HEAD 的 Development CI 最终 `success`，再推 `main` 并等待同一交付内容的完整 CI 最终 `success`；不得在已知失败的远端 CI 基线上继续堆叠推送。
 - 本轮依赖审计、story 外部语义、控制面故障模型、M0 性能窗口、Windows session 路径竞态修复和文档属于同一 Refactor 收口块；不得拆出一个绕开完整契约证据的 Stable 切换提交。
 - Stable 继续固定使用 `Electron + Python/FastAPI + Rust Coomi bridge`。`storydex-agentd` 只允许 Refactor CI 的隔离 fixture workspace，不得读取真实用户项目，不得静默 fallback，也未接入当前桌面启动或打包入口。
 - 最新 live 脱敏决策报告为 `output/rust-migration-decision-live/eb2805f48eed-20260818T014444-m0-performance-gate/decision-report.json`；story 语义依据为 `output/rust-migration-decision-live/eb2805f48eed-20260817T213817-story-semantics/decision-report.json`。两者均经过正常 Python Backend HTTP/SSE + Rust bridge，而不是 `storydex-agentd`。
@@ -67,7 +73,7 @@
 | AGENT-005 | Provider 请求阶段错误会在已有 `ProviderStream` 后接受 replacement | 这是现行 Stable 边界；该错误不能冒充“启动失败恢复” | provider-error 与 replacement 报告 | 使用 bridge spawn 故障验证未接受恢复；保留两类独立 fixture |
 | AGENT-006 | Rust 源码变化后旧 bridge 会被运行时指纹门禁拒绝 | 正确的 fail-closed 构建约束，不允许绕过 | `scripts/verify_coomi_runtime.py` 与 Backend 启动检查 | 每次 Rust 改动后重建当前提交产物，CI 继续校验 |
 | AGENT-007 | Windows 扩展路径与普通盘符路径在 `resolve()`/`samefile()` 多次文件查询间遇到 session 原子替换会被误判为越界 | 原始 bound 路径先做严格的无 I/O 表示等价比较，只折叠 Windows 扩展前缀、分隔符和大小写，不折叠 `.`/`..`；表示不等价才调用 `resolve()`/`samefile()`，真实逃逸仍 fail closed | expected/扩展盘符/扩展 UNC 快路、父路径段强制慢路和 symlink 逃逸回归，以及最终 20 样本性能窗口 | 保留竞态与逃逸回归；不得用忽略 session restore 错误或创建新 session 替代 |
-| AGENT-008 | Rust debug 的 `componentInit/sessionInit` 有长尾抖动 | 最新正式窗口只读 p95 比值为 `17.9373x/21.6833x`，取消为 `2.1476x/2.3881x`；端到端 24/24 仍通过，但只读两项已进入 `investigate_before_beta`，不能以 median 或端到端收益掩盖 | M0 performance report 的 `comparisons` 与 2 个 `diagnosticInvestigations` | Beta 前用 release 构建复核组件初始化稳定性并关闭两项调查；当前不启动 P2 常驻 bridge |
+| AGENT-008 | Rust debug 的 `componentInit/sessionInit` 有长尾抖动 | 最新正式窗口只读 p95 比值为 `17.9373x/21.6833x`，取消为 `2.1476x/2.3881x`；端到端 24/24 仍通过，但只读两项已进入 `investigate_before_beta`，不能以 median 或端到端收益掩盖 | M0 performance report 的 `comparisons` 与 2 个 `diagnosticInvestigations` | Beta 集成前用 release 构建复核组件初始化稳定性并关闭两项调查；完成后可按 0.7 继续，不需重复授权 |
 | AGENT-009 | stop、snapshot 与 finalizer 并发 read-modify-replace execution intent 时，Windows 曾返回 `PermissionError [WinError 5]`，且旧状态可能覆盖取消或迟到 stop 被虚假接受 | handle 统一按 state lock → intent lock 串行状态变更与 intent 写删；finalization 建立后 stop 返回未接受，关闭 intent 后写入显式失败；活动 intent 只有缺失可新建，权限错误、损坏 JSON 或非对象均 fail closed；`os.replace` 仅做 10/25/50ms 有界重试 | 正反序 snapshot/cancel、删除窗口 late cancel、严格读取、日志、瞬时冲突和永久失败回归，以及最终 M0 窗口 | 保持 fail closed；不得吞错、无限重试、按空对象重建损坏 intent 或删除 intent 掩盖 |
 
 ### 0.5 M2 依赖审计现状
@@ -76,31 +82,38 @@
 - `apps/desktop/agent-runtime/deny.toml` 只使用官方 `https://github.com/RustSec/advisory-db`，许可证采用显式 allowlist，source 只允许 crates.io；没有 advisory ignore。本次本地数据库 revision 为 `69f93e1d081d8b6fbee010e48f0b5e0d13661415`。
 - `ratatui` 从 `0.29` 升为 `0.30.2`，依赖图中的 `lru` 从有漏洞的 `0.12.5` 收敛为 `0.18.2`。当前 advisories/licenses/sources 均通过；Development CI 与完整质量门禁均重新运行固定审计，不能以一次本地成功永久豁免后续依赖变化。
 
-### 0.6 未完成边界与下一阶段入口
+### 0.6 剩余工作流与集成顺序
 
-1. 实现有界 `storyGeneration` 的实际执行 fixture；当前只冻结输入/外部摘要并携带到 bridge，不能据此宣称 Rust 已生成章节。
-2. 迁移并差分 Python-owned WIKI/Knowledge Projection 与 Git 领域收尾，或在 Beta 范围中继续明确排除；5 个 Python-only WIKI 派生路径不得被忽略。
-3. 在 release 构建和 Beta 前环境复核 Rust `componentInit/sessionInit` 稳定性与早期 debug 抖动，并完成生产桌面生命周期、真实用户项目副本和观察期；当前隔离 debug 数据不能授权生产 workspace。
-4. 只有上述边界完成且用户另行决定后才评估 Electron Rust Beta；Stable 接管、其余 Python 后端迁移和 Tauri Preview 继续按后续里程碑独立推进。
+以下是剩余工程工作流，不是要求逐项等待人工确认的微型切片。能独立验证的部分应并行开发，在依赖点按顺序集成：
 
-在这些门禁完成前，不接管 Stable，不启动 Electron Rust Beta，不开始 Tauri 切换。
+1. **故事写入闭环：** 让 Rust 实际执行有界 `storyGeneration`，完成 Provider completion、Unicode 字数/质量门禁、路径规划、原子写入、调用计数、SSE 和唯一终态差分。
+2. **知识与 Git 闭环：** 迁移 Python-owned WIKI/Knowledge Projection、canonical checksum、领域事件、Git/ChangeSet/回滚和收尾行为；现有 5 个 Python-only WIKI 路径必须转为显式 parity，不能加入 ignore。
+3. **完整后端闭环：** 以实际前端/桌面消费者和路由 manifest 为索引，迁移配置、项目、预设、搜索、索引、诊断、文件和其余公开 API；每个写路径都保留磁盘与 Git 差分证据。
+4. **运行时闭环：** 在 release 构建调查并关闭 `componentInit/sessionInit` 长尾，补齐崩溃恢复、进程树清理、端口/认证、日志、升级和回滚。
+5. **桌面闭环：** 先完成独立 Electron Rust Beta 集成证据，再完成 Tauri 2 sidecar、窄桌面适配层、最小 capabilities、签名更新和打包候选；两者可以提前并行搭骨架，但最终集成必须使用同一完整 Rust 后端。
+6. **旧运行时退出准备：** 目标 Rust/Tauri 候选不得携带 Python/FastAPI/Uvicorn 或 Electron/Node 运行依赖；Stable 参考源码与发布资产在未获激活授权前保持隔离和可回滚。
+7. **最终验证：** 完成 Rust、Frontend、Desktop、打包、契约、故障注入、覆盖率、安全与依赖审计，更新 manifest、架构文档和完成定义，只按实际结果声明完成。
 
-### 0.7 新对话续作起点
+### 0.7 新对话直接执行规则
 
-- 本轮续作起始点为 `eb2805f48eed78e9a33d15ff59643e79ff6ac2d2`；交付提交、`dev/windows` Development CI 和 `main` 完整 CI 只能在实际完成后记录。新工作开始前仍须执行 `git status --short --branch`、检查 hooks，并确认 `origin/main` 没有失败基线。
-- 当前证据入口：依赖审计 `scripts/run_rust_dependency_audit.ps1`；story 差分 `differential-story-semantics-current`；控制面韧性 `control-resilience-current`；性能窗口 `m0-performance-current`。性能正式样本为每实现/场景 20 个，门槛 24/24 通过；只读 `componentInit/sessionInit` 有 2 个 Beta 前调查项，必须在 release/Beta 前关闭，当前不授权启动 Beta。
-- 真实 Provider 依据：story 语义选择 `external_semantics_contract_gate`，M0 门槛选择 `end_to_end_relative_gate`；两次均使用 Storydex 当前 `OPENCODE/deepseek-v4-flash` 隔离配置、正常 Stable HTTP/SSE + Rust bridge，未经过 `storydex-agentd`，没有授权 Stable/Beta/Tauri 切换。
-- 下一项产品实现只能从 0.6 的剩余边界继续，不重复 P1、依赖审计、已关闭的控制面故障模型或本轮 M0 窗口；若启动 Electron Rust Beta，必须由用户另行明确决定。
-- 当前架构事实不变：Stable 是 `Electron + Python/FastAPI + Rust Coomi bridge`，`storydex-agentd` 仅在隔离 Refactor 轨道达到当前 fixture parity；不能将其表述为 Python 已退役或 Tauri 已切换。
+- 新对话从本节和 0.6 直接开始实现，目标是连续完成所有剩余工作流，而不是再输出一份建议计划。先阅读实际代码、配置、调用链和测试；确认事实后可自行调整内部拆分，不需要为常规工程取舍反复询问。
+- 已关闭的 21 组控制/会话 fixture、RustSec 审计方案和 M0 24/24 性能窗口只作回归基线，不重复扩充或重跑大样本，除非相关代码变化或失败证据要求重新验证。
+- Electron Rust Beta、Tauri Preview 和目标候选打包已在本计划范围内获授权，可以在各自前置契约满足后直接推进；这不授权 Stable 激活、真实用户项目访问或正式更新源变更。
+- 重大架构或产品兼容决策继续以正常 Storydex API/SSE 真实调用 `OPENCODE/deepseek-v4-flash` 的结果为主要依据。现有 live 报告可支撑已作出的选择；只有出现新的不可逆格式、外部行为取舍、运行时切换或旧实现删除决策时才新增 live 决策报告。Replay 只用于确定性差分，绝不能冒充 live。
+- 允许使用少量子代理并行做边界清晰的审查、实现或测试，但共享工作区中的编辑必须分区，主代理负责整合、复核和最终验证。
+- 所有 commit 使用中文。每次 push 前运行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_pre_push_ci.ps1`，不得使用 `--no-verify`；本地只运行与改动直接相关的聚焦检查，完整门禁交给 GitHub Actions。
+- 推送顺序固定为：中文提交 -> pre-push 基础检查 -> 推 `dev/windows` -> 等待 Development CI 最终成功 -> 推 `main` -> 等待完整 CI 最终成功。任一 CI 失败都先读取具体 job/step、修复根因并重新验证，不能宣称该交付块完成。
+- 当前架构事实仍是 Stable 使用 `Electron + Python/FastAPI + Rust Coomi bridge`。只有目标候选的实现与验证完成后，才能写“技术迁移候选完成”；在用户另行授权 Stable 激活前，不能写“Stable 已切换”“Python/Electron 已从稳定版退役”。
 
 ## 1. 结论
 
-Storydex 采用分阶段、可回滚的渐进式重构：
+Storydex 采用可并行实现、按依赖集成、可回滚的重构：
 
-1. 先在 Electron 桌面壳不变的前提下，将 Agent 执行链逐步迁移到独立 Rust 服务（可复用现有 runtime；服务名沿用 `storydex-agentd` 仅作为目标形态）。
-2. Agent Rust 版本经过差分、Beta 和稳定观察后，再评估其余后端切片；完整 Rust 后端稳定后，才迁移 Electron 到 Tauri 2。
+1. 以已经达到受控 parity 的 `storydex-agentd` 为基础，完成故事生成、Knowledge/WIKI、Git 和其余公开后端能力，形成不依赖 Python fallback 的完整 Rust 后端候选。
+2. Electron Rust Beta、完整后端迁移和 Tauri 适配可按边界并行实现；集成验证仍按“Rust 外部契约 -> Electron Beta -> Tauri 候选”排序，避免同时调试多个未知边界。
+3. 新对话完成目标是可测试、可打包、可回滚的 Rust/Tauri 候选。Stable 激活是独立发布决策，不包含在本次工程授权内。
 
-在重构门禁完成前，后续 2.x 小版本继续使用当前 `Electron + Python/FastAPI + Rust Coomi bridge` 生产链路。Rust 和 Tauri 的未完成实现不得进入正式包、不得读取或写入真实用户项目，也不得通过静默 fallback 改变线上行为。
+在用户另行授权 Stable 激活前，后续 2.x 小版本继续使用当前 `Electron + Python/FastAPI + Rust Coomi bridge` 生产链路。Rust 和 Tauri 候选不得进入 Stable 正式包、不得读取或写入真实用户项目，也不得通过静默 fallback 改变线上行为。
 
 后端运行时切换应作为独立的主版本或明确的迁移版本发布，不应夹入修复型补丁版本。Tauri 切换不得与 Rust 后端首次正式切换发生在同一个版本中。
 
@@ -119,8 +132,8 @@ Storydex 采用分阶段、可回滚的渐进式重构：
 ### 2.2 非目标
 
 - 不在迁移期间重做前端设计或改变主要工作流。
-- 本轮不改变 Agent/WIKI 产品规则、提示词约束、权限含义或主要工作流；只迁移 Agent 的实现语言和运行时边界。
-- 本轮不要求一次性移除 Python/FastAPI；旧实现作为 Stable 参考和可回滚版本保留到正式切换完成。
+- 不改变 Agent/WIKI 产品规则、提示词约束、权限含义或主要工作流；迁移实现语言和运行时边界，不借重构改产品语义。
+- 不从当前 Stable 构建和源码中提前删除 Python/Electron；目标候选必须摆脱这些运行时依赖，旧实现作为 Stable 参考和人工回滚基础保留到正式激活另行获批。
 - 不把本地应用拆成网络微服务。
 - 不为迁移方便降低现有测试、覆盖率、安全或发布门禁。
 - 不以大量 `serde_json::Value` 逐句翻译 Python 动态字典；领域层应使用明确类型。
@@ -149,8 +162,8 @@ Storydex 采用分阶段、可回滚的渐进式重构：
 | --- | --- | --- | --- | --- |
 | Stable | Electron + Python + Rust bridge | 正式用户 | 正常读写 | 是 |
 | Refactor CI | Rust 后端测试进程 | CI 和开发者 | 仅临时 fixture | 否 |
-| Rust Beta | Electron + Rust `storydex-agentd` | 明确加入的测试者 | 仅备份后的测试项目 | 独立 beta 源 |
-| Tauri Preview | Tauri + Rust `storydex-agentd` | 内部和预览测试者 | 仅备份后的测试项目 | 独立 preview 源 |
+| Rust Beta | Electron + Rust `storydex-agentd` | CI 和明确隔离的开发验证 | 仅 fixture 或脱敏项目副本 | 独立 beta 源 |
+| Tauri Preview | Tauri + Rust `storydex-agentd` | CI 和内部预览验证 | 仅 fixture 或脱敏项目副本 | 独立 preview 源 |
 
 Stable 不得因其他轨道未完成而改变启动命令、依赖、安装资产或自动更新元数据。
 
@@ -158,7 +171,7 @@ Stable 不得因其他轨道未完成而改变启动命令、依赖、安装资�
 
 - `main` 始终保持可发布，稳定功能和紧急修复优先。
 - Windows 与 Android 分别在 `dev/windows`、`dev/android` 集成，两个分支只从 `main` 同步且不得互相合并；具体功能仍使用短生命周期分支。
-- 未接入生产的 Rust 代码可以合入独立目录，但不得被当前启动脚本、Electron 主进程或打包脚本引用。
+- Rust/Tauri 候选可以接入明确隔离的 beta/preview 启动和打包入口，但不得被当前 Stable 启动脚本、默认 Electron 主进程、正式打包配置或正式更新源引用。
 - 早期 Rust CI 使用独立 workflow，不加入现有 stable release 汇总；它只在重构相关路径变化时运行，且不使用 `continue-on-error` 掩盖失败。
 - 当 Rust 测试稳定且对应切片声明完成后，再将该检查升级为必需门禁。
 - 发布候选冻结后，不合入触碰当前生产启动、更新、项目写入和 Agent 执行链的重构改动。
@@ -177,7 +190,7 @@ Stable 不得因其他轨道未完成而改变启动命令、依赖、安装资�
 
 ## 5. 目标架构
 
-以下是长期完整目标；本轮只实现其中的 Agent 边界，不要求同时迁移图中的全部领域服务。
+以下是新对话需要实现并验证的完整目标；内部模块可以按实际所有权调整，但进程、安全和兼容边界保持不变。
 
 ```text
 apps/frontend (Vue 3 + Vite)
@@ -201,7 +214,7 @@ storydex-agentd (独立 Rust 进程)
 
 Rust 后端建议从一个 workspace、一个核心 library 和一个服务 binary 开始。只有当编译边界、测试隔离或所有权确有收益时才继续拆 crate，避免用 crate 数量代替模块设计。
 
-本轮的过渡边界更窄：`storydex-agentd` 首先只承载 Agent 的执行、权限、上下文、工具和 SSE 协调；WIKI、Story Knowledge、项目服务等仍留在 Python Stable。现有 `apps/desktop/agent-runtime` 已包含 engine、services、tools、security 和 bridge，优先通过复用或提取稳定接口接入，只有在所有权或测试隔离确有收益时才新建 crate。Agent 与 Python 领域服务之间使用明确的 HTTP/JSONL 或库接口，不以隐式跨进程状态作为兼容手段。
+`storydex-agentd` 当前只承载受控 Agent 切片；新对话应把 WIKI、Story Knowledge、项目服务和其余实际使用的后端能力迁入同一明确的 Rust 领域/应用/基础设施边界。现有 `apps/desktop/agent-runtime` 已包含 engine、services、tools、security 和 bridge，优先复用或提取稳定接口，只有在所有权、编译边界或测试隔离确有收益时才新建 crate。迁移期与 Python Stable 的比较通过 HTTP/SSE、fixture 和显式文件契约完成，不建立需要长期保留的隐式跨进程状态。
 
 ## 6. 兼容契约
 
@@ -308,7 +321,7 @@ Agent 重构的 parity 以外部可观察行为为准，而不是以 Python/Rust
 
 ### M3：按风险迁移业务切片
 
-迁移顺序：
+风险清单（用于安排依赖和验证，不是强制串行顺序）：
 
 | 顺序 | 切片 | 原因 |
 | --- | --- | --- |
@@ -332,57 +345,55 @@ Agent 重构的 parity 以外部可观察行为为准，而不是以 Python/Rust
 
 任何切片未达到 parity 前都不得通过“返回空数据”“捕获所有异常”“自动重试”或跳过写入来假装兼容。
 
-### 本轮 Agent 执行路径
+### 加速执行路径
 
-上表是完整 Rust 后端的长期风险顺序；本轮 Agent 重构不需要等待 WIKI 或普通项目服务迁移完成。执行时保持以下方向即可，内部拆分可随证据调整：
+上表中的第 8 项 Agent 控制面已经提前完成受控 parity，后续不应回退到从第 1 项重新串行搬运。实际执行使用以下方式：
 
-1. 先把现有 Python Agent 的意图、权限、TurnContract、上下文、工具循环和生命周期行为固化为可运行 fixture。
-2. 在现有 Rust runtime 上补齐缺失的强类型领域模型和适配器，优先复用 provider、tools、security、session 和 bridge，不重复造轮子。
-3. 让 Rust Agent 在 Refactor/Beta 轨道与 Python Stable 做同输入差分；读请求比较响应和事件，写请求比较临时项目副作用。
-4. 只有 parity 和故障注入结果稳定后，才扩大到 Electron Beta；Tauri 和非 Agent 后端继续按后续里程碑处理。
-
-这不是必须逐项打勾的流水线。若现有实现已覆盖某一层，直接保留并补契约；若某一层尚无真实消费者，不为满足目录结构而新增实现。
+1. 以 0.6 的七个剩余工作流为主线，先关闭 `storyGeneration -> Knowledge/WIKI -> Git` 的真实写入链，同时并行盘点公开路由消费者、Rust 模块边界和 Tauri 窄适配层。
+2. 领域规则、文件事务、API 适配、桌面生命周期和打包可以由边界清晰的并行任务推进；共享 schema、磁盘格式和 SSE 状态机由主集成线统一裁决。
+3. 每个工作流达到可验证边界就更新 manifest 和差分证据，不要求每个函数或路由单独提交，也不等待重复人工批准。
+4. 已有实现直接复用并补契约；无实际消费者的内部接口可以记录后删除，不为达到文件数量或 crate 数量制造空壳。
 
 ### M4：Electron + Rust Beta
 
-本轮 M4 只验证 Agent Rust 服务；未迁移的 WIKI、Story Knowledge 和普通项目接口继续由 Python 提供。
+M4 验证完整 Rust 后端候选在隔离 Electron Beta 中的桌面生命周期；Stable Electron 继续使用 Python 后端，不受影响。
 
 工作项：
 
-- 让 Electron 在独立 beta 构建中同时管理现有 Python 后端和 `storydex-agentd`，只将 Agent 表面切到 Rust；Stable 仍固定使用 Python Agent 链路。
+- 让 Electron 在独立 beta 构建中管理完整 `storydex-agentd`；不得在同一 beta 请求中按失败情况静默回落到 Python。Stable 仍固定使用原链路。
 - 复用现有 `/api/v1` 和 SSE，首轮不改为 Tauri IPC 或自定义事件协议。
 - 验证端口避让、启动超时、日志轮换、进程树清理、崩溃提示和执行恢复。
-- 使用复制后的大型真实项目样本做长会话、中文路径、断网、Provider 错误和强制退出测试。
+- 使用大型合成 fixture 或脱敏项目副本做长会话、中文路径、断网、Provider 错误和强制退出测试。
 - beta 失败必须明确报告 Rust 后端错误，不得静默启动 Python。
 
 退出条件：
 
-- Agent manifest 项达到 parity；未迁移的全后端 manifest 不计入本轮 Beta 门禁。
+- 当前前端和桌面实际使用的后端 manifest 项达到 parity；无消费者的历史内部接口有明确处置记录。
 - Python/Rust 黑盒差分无未解释差异。
 - 完整前端、桌面和封装 E2E 在 Rust beta 包上通过。
-- 至少两个连续发布候选周期没有 P0/P1 数据损坏、执行丢失或更新阻断问题。
+- 同一候选内容至少两次连续完成独立打包态验证，没有 P0/P1 数据损坏、执行丢失或更新阻断问题；基于真实测试者的时间观察仍属于未来 Stable 激活门禁，不阻塞本次候选实现完成。
 
-### M5：Rust 后端正式切换
+### M5：完整 Rust 后端候选收口
 
-M5 的完整版本仍属于后续全后端迁移。本轮只有在 Agent 的 Beta 和稳定观察完成后，才允许讨论将 Electron 默认 Agent 执行链切换到 Rust；不得借此同时切换其他后端或 Tauri。
+M5 在开发/beta 轨道收口完整 Rust 后端，不切换 Stable 默认执行链。后端候选必须可以独立承担当前产品能力，但正式激活、Stable 更新和真实用户灰度仍需用户另行授权。
 
 工作项：
 
-- 在独立的主版本或迁移版本中，将 Electron 默认 Agent 执行链切换为 `storydex-agentd`；未迁移的后端接口继续由 Python 提供。
-- 正式包不同时捆绑 Python 后端作为静默 fallback。
-- 保留上一个 Python 稳定版本的签名安装包、源码分支和更新元数据，以支持人工回滚。
-- 因为磁盘格式保持向后兼容，用户回滚旧版本时不需要数据降级。
-- 更新 README、架构文档、依赖清单、许可证清单和故障诊断指南。
+- 关闭公开 HTTP/SSE manifest、磁盘格式、Git 副作用、故事生成、Knowledge/WIKI、执行恢复和项目服务的全部已知差异。
+- 生成不携带 Python 后端、不提供静默 fallback 的独立 Rust beta/候选包。
+- 验证旧 Python Stable 与 Rust 候选双向读取同一 fixture，无需数据降级。
+- 保留 Python Stable 的源码、签名安装包和更新元数据，以支持未来激活后的人工回滚。
+- 更新 README、架构文档、依赖/许可证清单、诊断指南和删除清单。
 
 退出条件：
 
-- Rust 后端至少经过一个稳定发布观察周期。
-- 没有需要回退 Python 才能完成的正式功能。
-- Python runtime 可以从下一阶段的构建输入中删除。
+- 当前产品消费者不存在需要回退 Python 才能完成的功能。
+- Rust 候选包、契约、覆盖率、安全审计、故障注入和性能门禁全部通过。
+- Python runtime 已从目标候选构建输入中删除，但 Stable 构建保持不变。
 
 ### M6：Tauri Preview 与桌面切换
 
-前置条件：M5 已完成，不与 Rust 后端首次切换并行。
+最终集成前置条件：M5 的公开接口和 sidecar 生命周期已稳定。Tauri 骨架、前端适配和 CI 可以与 M3-M5 并行开发，但不得用未闭环的后端行为完成最终验收。
 
 工作项：
 
@@ -397,17 +408,18 @@ M5 的完整版本仍属于后续全后端迁移。本轮只有在 Agent 的 Bet
 退出条件：
 
 - 同一 Rust 后端在 Electron 和 Tauri 壳下通过相同应用 E2E。
-- Tauri preview 至少经过两个连续发布候选周期。
+- 同一内容的 Tauri preview 至少两次连续完成独立打包态候选验证；真实发布周期观察留给未来 Stable 激活决策。
 - 更新、安装、签名和回滚均有打包态自动化证据。
 - Electron 稳定版仍可读取 Tauri preview 写入的项目数据。
 
 ### M7：清理旧运行时
 
-- 删除嵌入式 Python、requirements、FastAPI 入口和 Python 打包校验。
-- 删除 Electron 主进程、preload、electron-builder 和旧 update helper。
+- 从目标 Rust/Tauri 候选构建、安装目录和运行进程中删除嵌入式 Python、requirements、FastAPI/Uvicorn 入口及其打包校验。
+- 从目标 Tauri 候选构建中删除 Electron 主进程、preload、electron-builder 和旧 update helper 依赖。
 - 删除只为双实现服务的临时适配层和迁移开关。
 - 保留必要的历史契约 fixture，防止以后破坏旧项目兼容性。
 - 更新覆盖率基线时分别记录旧口径、新口径和变化原因，禁止直接降低门槛。
+- 当前 Stable 源码和发布配置在未获激活授权前不得删除；应与目标候选路径明确隔离，并形成未来正式删除清单。
 
 ## 8. 测试与门禁
 
@@ -527,6 +539,17 @@ Storydex Stable live 决策报告 `output/rust-migration-decision-live/eb2805f48
 
 ## 12. 完成定义
 
+### 12.0 新对话工程完成定义
+
+新对话只有在以下结果全部具备时，才可以声明“剩余重构工程已完成”：
+
+- `storyGeneration`、Knowledge/WIKI、Git、其余公开后端 API 和桌面生命周期都由目标 Rust 后端承担，不依赖 Python fallback，并通过契约、磁盘副作用和故障注入验证。
+- Electron Rust Beta 与 Tauri 2 候选均可从干净环境构建、启动、运行主要工作流、退出和打包；目标 Tauri 候选的安装/运行资产不包含 Python 或 Electron/Node 运行时。
+- Vue 工作台保持现有主要功能和数据语义；项目 fixture 可在 Python Stable、Electron Rust Beta 和 Tauri 候选之间双向读取，不发生单向升级。
+- 所有新增或迁移代码经过与风险相称的聚焦测试，相关 manifest、覆盖率、安全/依赖审计、打包证据和文档已更新；无法运行的外部验证必须明确记录，不能按意图推定成功。
+- 最后一个交付 HEAD 已按 0.7 的顺序通过 `dev/windows` Development CI 和 `main` 完整 CI。
+- Stable 的默认运行时、正式包和更新源仍未改变。工程完成后应把“Stable 激活与真实用户灰度”列为唯一独立发布决策，不把它伪装成尚未完成的代码迁移。
+
 ### 12.1 Agent Rust 重构完成定义
 
 只有同时满足以下条件，才可把本轮 Agent 重构标为完成：
@@ -550,18 +573,17 @@ Tauri 迁移完成需要同时满足：
 - Vue 工作台功能和视觉回归通过。
 - sidecar 生命周期、更新、签名、安装和恢复通过打包态验证。
 - Tauri 和上一个 Electron 稳定版可以互相读取项目数据。
-- Electron 和 Python 旧运行时被从正式构建、依赖和文档中完整移除。
+- Electron 和 Python 旧运行时被从目标 Tauri 候选的构建、依赖和运行资产中完整移除；Stable 参考实现及其文档在正式激活前保持隔离。
 
-## 13. 第一批可执行工作
+## 13. 新对话首个执行批次
 
-第一批工作只增加 Agent 证据和旁路基础设施，不改变 Stable 生产运行时：
+新对话不要重新做规划盘点或扩充已关闭的控制面场景，直接从以下交付批次开始：
 
-1. 记录 Agent 外部行为和已知不稳定点，形成最小可运行的读/写/取消/恢复 fixture。
-2. 盘点并复用现有 Rust runtime，确定 Agent 服务与 Python 领域服务的最小边界。
-3. 建立 Python/Rust 黑盒差分和 provider replay；随后实现 Rust Agent 的第一条无副作用切片。
-4. 用完整主链路、故障注入和资源基线决定是否扩大切片；达到 parity 后再进入 Electron Beta。
-
-不要求先完成全后端 123 路由 manifest，也不要求先改 Tauri；这些工作在 Agent 稳定后按需要推进。
+1. 先补 bridge `complete` 的显式 replay 透传和聚焦测试，再实现 Rust 单片段 `create_new` 短章节纵向切片：一次 Provider completion、机械质量/Unicode 字数门禁、程序化安全路径、原子写入、`StoryGenerationValidation`、`StoryCallAccounting`、`TextChunk` 和唯一终态。
+2. 使用同一临时项目和 Provider replay 冻结 Python Stable 真实契约，再让 Rust 差分到章节文件 SHA、Git status、SSE、调用次数和失败时零写入一致；Python-only WIKI/Git 派生行为保持显式，不得忽略。
+3. 纵向切片通过后立即扩大到 Knowledge/WIKI 与 Git 闭环，同时并行生成“实际前端/桌面消费者 -> Python 路由/服务 -> Rust 目标模块 -> 契约测试”的剩余接口清单，并按所有权成组迁移。
+4. 后端迁移进行时可以并行建立 Tauri 2 壳、`window.storydexDesktop` 窄适配层、sidecar 生命周期和隔离 preview 打包；不得提前接入 Stable 配置。
+5. 每个可集成交付块执行相关聚焦测试、中文提交并按 0.7 推送；不要积累一个无法定位失败原因的超大最终提交，也不要把完整目标重新拆成需要用户逐项批准的小计划。
 
 ## 14. 参考边界
 
