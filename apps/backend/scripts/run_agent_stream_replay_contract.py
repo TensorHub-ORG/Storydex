@@ -89,6 +89,81 @@ def _write_json(path: Path, value: Mapping[str, Any]) -> None:
     )
 
 
+def _length_tier_calibration_facts(value: Mapping[str, Any]) -> dict[str, Any] | None:
+    if str(value.get("_type") or "") != "StoryLengthTierCalibration":
+        return None
+
+    def present_text(raw: Any) -> bool:
+        return isinstance(raw, str) and bool(raw.strip())
+
+    def present_non_negative_int(raw: Any) -> bool:
+        return type(raw) is int and raw >= 0
+
+    samples: list[dict[str, Any]] = []
+    for raw in value.get("samples") or []:
+        if not isinstance(raw, Mapping):
+            continue
+        samples.append(
+            {
+                key: raw.get(key)
+                for key in (
+                    "provider",
+                    "model",
+                    "tier",
+                    "promptVersion",
+                    "wordCountScope",
+                    "actualWordCount",
+                    "tierHit",
+                    "structurePassed",
+                    "machineQualityPassed",
+                    "attemptKind",
+                    "logicalProseCalls",
+                    "completionTokens",
+                )
+            }
+            | {
+                "sampleIdPresent": present_text(raw.get("sampleId")),
+                "traceIdPresent": present_text(raw.get("traceId")),
+                "timestampPresent": present_text(raw.get("timestamp")),
+                "durationMsPresent": present_non_negative_int(raw.get("durationMs")),
+            }
+        )
+    samples.sort(key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True))
+
+    observations: list[dict[str, Any]] = []
+    for raw in value.get("observations") or []:
+        if not isinstance(raw, Mapping):
+            continue
+        observations.append(
+            {
+                key: raw.get(key)
+                for key in (
+                    "provider",
+                    "model",
+                    "promptVersion",
+                    "wordCountScope",
+                    "calibrationVersion",
+                    "status",
+                    "reason",
+                    "sampleCounts",
+                    "medians",
+                    "bands",
+                )
+            }
+            | {"updatedAtPresent": present_text(raw.get("updatedAt"))}
+        )
+    observations.sort(
+        key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True)
+    )
+    return {
+        "sampleCount": len(samples),
+        "observationCount": len(observations),
+        "updatedAtPresent": present_text(value.get("updatedAt")),
+        "samples": samples,
+        "observations": observations,
+    }
+
+
 def _workspace_effect_snapshot(workspace: Path) -> dict[str, Any]:
     root = workspace.resolve()
     files: dict[str, dict[str, Any]] = {}
@@ -112,12 +187,21 @@ def _workspace_effect_snapshot(workspace: Path) -> dict[str, Any]:
             if isinstance(value, Mapping):
                 metadata = {
                     key: value[key]
-                    for key in ("revision", "schemaVersion", "schema_version")
+                    for key in (
+                        "_type",
+                        "_version",
+                        "revision",
+                        "schemaVersion",
+                        "schema_version",
+                    )
                     if key in value
                     and isinstance(value[key], (str, int, float, bool, type(None)))
                 }
                 if metadata:
                     snapshot["jsonMetadata"] = metadata
+                calibration_facts = _length_tier_calibration_facts(value)
+                if calibration_facts is not None:
+                    snapshot["jsonFacts"] = calibration_facts
         files[relative] = snapshot
 
     git_head = ""

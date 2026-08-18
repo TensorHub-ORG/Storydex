@@ -590,16 +590,28 @@ def compare_reports(
     if isinstance(expected_effects, Mapping):
         expected_files = expected_effects.get("files")
         expected_files = expected_files if isinstance(expected_files, Mapping) else {}
-        expected_derived_files = expected_effects.get("pythonStableDerivedFiles")
-        expected_derived_files = (
-            expected_derived_files
-            if isinstance(expected_derived_files, Mapping)
+        expected_python_derived_files = expected_effects.get(
+            "pythonStableDerivedFiles"
+        )
+        expected_python_derived_files = (
+            expected_python_derived_files
+            if isinstance(expected_python_derived_files, Mapping)
             else {}
         )
         python_derived_paths = sorted(
             str(path)
             for path in expected_effects.get("pythonStableDerivedPaths") or []
         )
+        expected_shared_derived_files = expected_effects.get("sharedDerivedFiles")
+        expected_shared_derived_files = (
+            expected_shared_derived_files
+            if isinstance(expected_shared_derived_files, Mapping)
+            else {}
+        )
+        shared_derived_paths = sorted(
+            str(path) for path in expected_effects.get("sharedDerivedPaths") or []
+        )
+        all_derived_paths = sorted(set(python_derived_paths) | set(shared_derived_paths))
         target_paths = {
             str(path)
             for path in expected_effects.get("changedPaths") or []
@@ -711,19 +723,25 @@ def compare_reports(
                         )
             return mismatches
 
-        def derived_mismatches(actual: Mapping[str, Any]) -> list[dict[str, Any]]:
+        def derived_mismatches(
+            actual: Mapping[str, Any],
+            *,
+            expected_paths: list[str],
+            expected_files: Mapping[str, Any],
+            field_prefix: str,
+        ) -> list[dict[str, Any]]:
             mismatches: list[dict[str, Any]] = []
-            if actual.get("derivedChangedPaths") != python_derived_paths:
+            if actual.get("derivedChangedPaths") != expected_paths:
                 mismatches.append(
                     {
-                        "field": "pythonStableDerivedPaths",
-                        "expected": python_derived_paths,
+                        "field": f"{field_prefix}Paths",
+                        "expected": expected_paths,
                         "actual": actual.get("derivedChangedPaths"),
                     }
                 )
             actual_files = actual.get("derivedFiles")
             actual_files = actual_files if isinstance(actual_files, Mapping) else {}
-            for path, expected_file in expected_derived_files.items():
+            for path, expected_file in expected_files.items():
                 if not isinstance(expected_file, Mapping):
                     continue
                 actual_file = actual_files.get(str(path))
@@ -732,7 +750,7 @@ def compare_reports(
                     if actual_file.get(str(key)) != expected_value:
                         mismatches.append(
                             {
-                                "field": f"pythonStableDerivedFiles.{path}.{key}",
+                                "field": f"{field_prefix}Files.{path}.{key}",
                                 "expected": expected_value,
                                 "actual": actual_file.get(str(key)),
                             }
@@ -740,22 +758,29 @@ def compare_reports(
             return mismatches
 
         python_values, python_raw = effect_values(
-            python_report, python_derived_paths
+            python_report, all_derived_paths
         )
-        rust_values, rust_raw = effect_values(rust_report, python_derived_paths)
+        rust_values, rust_raw = effect_values(rust_report, all_derived_paths)
         python_mismatches = expected_mismatches(python_values)
         rust_mismatches = expected_mismatches(rust_values)
-        python_derived_mismatches = derived_mismatches(python_raw)
-        rust_derived_mismatches = (
-            []
-            if rust_raw.get("derivedChangedPaths") == []
-            else [
-                {
-                    "field": "rustRefactorDerivedPaths",
-                    "expected": [],
-                    "actual": rust_raw.get("derivedChangedPaths"),
-                }
-            ]
+        python_expected_derived_paths = sorted(
+            set(python_derived_paths) | set(shared_derived_paths)
+        )
+        python_expected_derived_files = {
+            **dict(expected_python_derived_files),
+            **dict(expected_shared_derived_files),
+        }
+        python_derived_mismatches = derived_mismatches(
+            python_raw,
+            expected_paths=python_expected_derived_paths,
+            expected_files=python_expected_derived_files,
+            field_prefix="pythonStableDerived",
+        )
+        rust_derived_mismatches = derived_mismatches(
+            rust_raw,
+            expected_paths=shared_derived_paths,
+            expected_files=expected_shared_derived_files,
+            field_prefix="rustRefactorSharedDerived",
         )
         compared["workspaceEffects"] = {
             "expected": dict(expected_effects),

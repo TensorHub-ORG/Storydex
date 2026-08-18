@@ -254,7 +254,6 @@
         }
       },
       "pythonStableDerivedPaths": [
-        ".storydex/memory/length_tier_calibration.json",
         ".storydex/wiki/WIKI.md",
         ".storydex/wiki/index.json",
         ".storydex/wiki/knowledge_graph.json",
@@ -262,12 +261,67 @@
         ".storydex/wiki/source_snapshot.json"
       ],
       "pythonStableDerivedFiles": {
-        ".storydex/memory/length_tier_calibration.json": {"exists": true},
         ".storydex/wiki/WIKI.md": {"exists": true},
         ".storydex/wiki/index.json": {"exists": true, "jsonMetadata": {"schemaVersion": 3}},
         ".storydex/wiki/knowledge_graph.json": {"exists": true, "jsonMetadata": {"schemaVersion": 3}},
         ".storydex/wiki/projection_status.json": {"exists": true, "jsonMetadata": {"schemaVersion": 3}},
         ".storydex/wiki/source_snapshot.json": {"exists": true}
+      },
+      "sharedDerivedPaths": [
+        ".storydex/memory/length_tier_calibration.json"
+      ],
+      "sharedDerivedFiles": {
+        ".storydex/memory/length_tier_calibration.json": {
+          "exists": true,
+          "jsonMetadata": {
+            "_type": "StoryLengthTierCalibration",
+            "_version": 2
+          },
+          "jsonFacts": {
+            "sampleCount": 1,
+            "observationCount": 1,
+            "updatedAtPresent": true,
+            "samples": [
+              {
+                "provider": "OPENCODE",
+                "model": "deepseek-v4-flash",
+                "tier": "short",
+                "promptVersion": "story_length_tier_v1",
+                "wordCountScope": "candidate",
+                "actualWordCount": 1519,
+                "tierHit": true,
+                "structurePassed": true,
+                "machineQualityPassed": true,
+                "attemptKind": "initial",
+                "logicalProseCalls": 1,
+                "completionTokens": 980,
+                "sampleIdPresent": true,
+                "traceIdPresent": true,
+                "timestampPresent": true,
+                "durationMsPresent": true
+              }
+            ],
+            "observations": [
+              {
+                "provider": "OPENCODE",
+                "model": "deepseek-v4-flash",
+                "promptVersion": "story_length_tier_v1",
+                "wordCountScope": "candidate",
+                "calibrationVersion": 1,
+                "status": "cold_start",
+                "reason": "insufficient_samples",
+                "sampleCounts": {"short": 1, "medium": 0, "long": 0},
+                "medians": {"short": 1519, "medium": null, "long": null},
+                "bands": {
+                  "short": [1000, 3000],
+                  "medium": [2200, 5000],
+                  "long": [3000, 6000]
+                },
+                "updatedAtPresent": true
+              }
+            ]
+          }
+        }
       }
     }
   }

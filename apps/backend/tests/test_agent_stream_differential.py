@@ -163,6 +163,12 @@ def test_workspace_effect_snapshot_tracks_project_changes_and_excludes_runtime(
 def test_compare_reports_requires_matching_workspace_effects() -> None:
     target = ".storydex/characters/fixture.md"
     derived = ".storydex/wiki/index.json"
+    shared = ".storydex/memory/length_tier_calibration.json"
+    shared_facts = {
+        "sampleCount": 1,
+        "observationCount": 1,
+        "updatedAtPresent": True,
+    }
     effects = {
         "changedPaths": [target],
         "createdPaths": [],
@@ -183,9 +189,10 @@ def test_compare_reports_requires_matching_workspace_effects() -> None:
     rust = _report(tools=["write_file"])
     python["workspaceEffects"] = {
         **effects,
-        "changedPaths": [target, derived],
+        "changedPaths": [target, derived, shared],
+        "createdPaths": [shared],
         "modifiedPaths": [target, derived],
-        "gitStatusAfter": [f" M {target}", f" M {derived}"],
+        "gitStatusAfter": [f" M {target}", f" M {derived}", f"?? {shared}"],
         "after": {
             **effects["after"],
             "files": {
@@ -196,10 +203,41 @@ def test_compare_reports_requires_matching_workspace_effects() -> None:
                     "sha256": "derived",
                     "jsonMetadata": {"schemaVersion": 3},
                 },
+                shared: {
+                    "exists": True,
+                    "size": 100,
+                    "sha256": "dynamic-python",
+                    "jsonMetadata": {
+                        "_type": "StoryLengthTierCalibration",
+                        "_version": 2,
+                    },
+                    "jsonFacts": shared_facts,
+                },
             },
         },
     }
-    rust["workspaceEffects"] = effects
+    rust["workspaceEffects"] = {
+        **effects,
+        "changedPaths": [target, shared],
+        "createdPaths": [shared],
+        "gitStatusAfter": [f" M {target}", f"?? {shared}"],
+        "after": {
+            **effects["after"],
+            "files": {
+                **effects["after"]["files"],
+                shared: {
+                    "exists": True,
+                    "size": 110,
+                    "sha256": "dynamic-rust",
+                    "jsonMetadata": {
+                        "_type": "StoryLengthTierCalibration",
+                        "_version": 2,
+                    },
+                    "jsonFacts": shared_facts,
+                },
+            },
+        },
+    }
 
     parity = compare_reports(
         python,
@@ -214,6 +252,16 @@ def test_compare_reports_requires_matching_workspace_effects() -> None:
                     "pythonStableDerivedPaths": [derived],
                     "pythonStableDerivedFiles": {
                         derived: {"jsonMetadata": {"schemaVersion": 3}}
+                    },
+                    "sharedDerivedPaths": [shared],
+                    "sharedDerivedFiles": {
+                        shared: {
+                            "jsonMetadata": {
+                                "_type": "StoryLengthTierCalibration",
+                                "_version": 2,
+                            },
+                            "jsonFacts": shared_facts,
+                        }
                     },
                 },
             }

@@ -42,6 +42,7 @@ use uuid::Uuid;
 pub(crate) mod chat;
 mod execution;
 mod followup;
+mod length_tier_calibration;
 mod replacement;
 mod story_generation;
 

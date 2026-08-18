@@ -3,12 +3,16 @@ use crate::chat::ChatStreamRequest;
 use crate::chat::ProviderIdentity;
 use crate::chat::StoryGenerationOptions;
 use crate::chat::with_event_identity;
+use crate::length_tier_calibration::{
+    CalibrationSampleInput, ShortCalibrationSummary, read_short_summary, record_short_sample,
+};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Instant;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
@@ -17,8 +21,6 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 const SHORT_HARD_MINIMUM: usize = 700;
-const SHORT_PREFERRED_MINIMUM: usize = 1_000;
-const SHORT_PREFERRED_MAXIMUM: usize = 3_000;
 const SHORT_RUNTIME_MAXIMUM: usize = 4_000;
 const STORY_COUNTING_RULE: &str = "count every non-whitespace Unicode character in the prose itself; summary/details/thinking wrapper blocks are excluded";
 
@@ -58,6 +60,7 @@ pub(crate) async fn run_create_new_short(
     );
 
     let target = plan_create_new_target(workspace, &options.chapter_template_id)?;
+    let calibration = read_short_summary(workspace, &identity.id, &identity.model)?;
     let mut provider_request = json!({
         "action": "complete",
         "home": state.coomi_home(),
@@ -100,6 +103,7 @@ pub(crate) async fn run_create_new_short(
     )
     .await?;
 
+    let provider_started = Instant::now();
     let completion = match complete_once(state, provider_request, cancellation).await {
         Ok(value) => {
             emit_story_provider_attempt(sender, trace_events, trace_id, session_id, "success", "")
@@ -161,6 +165,7 @@ pub(crate) async fn run_create_new_short(
             });
         }
     };
+    let draft_duration_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let content = completion
         .get("content")
         .and_then(Value::as_str)
@@ -175,7 +180,7 @@ pub(crate) async fn run_create_new_short(
         .and_then(Value::as_object)
         .and_then(|usage| usage.get("output_tokens"))
         .and_then(Value::as_u64);
-    let mut validation = validate_candidate(&content, &target, provider_mode);
+    let mut validation = validate_candidate(&content, &target, provider_mode, &calibration);
     if !validation
         .get("passed")
         .and_then(Value::as_bool)
@@ -188,6 +193,7 @@ pub(crate) async fn run_create_new_short(
             session_id,
             visible_character_count(&content),
             completion_tokens,
+            &calibration,
         )
         .await?;
         emit(
@@ -294,7 +300,8 @@ pub(crate) async fn run_create_new_short(
         );
     }
     let actual_word_count = visible_character_count(&content);
-    let tier_hit = (SHORT_PREFERRED_MINIMUM..=SHORT_PREFERRED_MAXIMUM).contains(&actual_word_count);
+    let tier_hit = (calibration.preferred_minimum..=calibration.preferred_maximum)
+        .contains(&actual_word_count);
     emit_story_draft_measured(
         sender,
         trace_events,
@@ -302,8 +309,24 @@ pub(crate) async fn run_create_new_short(
         session_id,
         actual_word_count,
         completion_tokens,
+        &calibration,
     )
     .await?;
+    record_short_sample(
+        workspace,
+        CalibrationSampleInput {
+            provider: &identity.id,
+            model: &identity.model,
+            actual_word_count,
+            tier_hit,
+            structure_passed: true,
+            machine_quality_passed: true,
+            logical_prose_calls: 1,
+            completion_tokens,
+            duration_ms: Some(draft_duration_ms),
+            trace_id,
+        },
+    )?;
     emit(
         sender,
         trace_events,
@@ -467,8 +490,10 @@ async fn emit_story_draft_measured(
     session_id: &str,
     word_count: usize,
     completion_tokens: Option<u64>,
+    calibration: &ShortCalibrationSummary,
 ) -> Result<()> {
-    let tier_hit = (SHORT_PREFERRED_MINIMUM..=SHORT_PREFERRED_MAXIMUM).contains(&word_count);
+    let tier_hit =
+        (calibration.preferred_minimum..=calibration.preferred_maximum).contains(&word_count);
     emit(
         sender,
         trace_events,
@@ -484,9 +509,9 @@ async fn emit_story_draft_measured(
             "resultingWordCount": word_count,
             "chapterLengthTier": "short",
             "tierHit": tier_hit,
-            "tierDeviation": tier_deviation(word_count),
+            "tierDeviation": tier_deviation(word_count, calibration),
             "machineQualityPassed": true,
-            "calibrationStatus": "cold_start",
+            "calibrationStatus": calibration.status,
         }),
         trace_id,
         session_id,
@@ -588,7 +613,12 @@ pub(crate) fn plan_create_new_target(workspace: &Path, template_id: &str) -> Res
     Ok(target)
 }
 
-fn validate_candidate(content: &str, target: &Path, provider_mode: &str) -> Value {
+fn validate_candidate(
+    content: &str,
+    target: &Path,
+    provider_mode: &str,
+    calibration: &ShortCalibrationSummary,
+) -> Value {
     let count = visible_character_count(content);
     let quality_issues = [
         (content.trim().is_empty(), "empty_prose"),
@@ -604,7 +634,7 @@ fn validate_candidate(content: &str, target: &Path, provider_mode: &str) -> Valu
     let passed = target.extension().is_some()
         && (SHORT_HARD_MINIMUM..=SHORT_RUNTIME_MAXIMUM).contains(&count)
         && quality_issues.is_empty();
-    let tier_hit = (SHORT_PREFERRED_MINIMUM..=SHORT_PREFERRED_MAXIMUM).contains(&count);
+    let tier_hit = (calibration.preferred_minimum..=calibration.preferred_maximum).contains(&count);
     json!({
         "_type": "StoryGenerationValidation",
         "_version": 1,
@@ -621,10 +651,10 @@ fn validate_candidate(content: &str, target: &Path, provider_mode: &str) -> Valu
         "resultingWordCount": count,
         "chapterLengthTier": "short",
         "tierHit": tier_hit,
-        "tierDeviation": tier_deviation(count),
+        "tierDeviation": tier_deviation(count, calibration),
         "wordCountScope": "candidate",
-        "preferredMinimum": SHORT_PREFERRED_MINIMUM,
-        "preferredMaximum": SHORT_PREFERRED_MAXIMUM,
+        "preferredMinimum": calibration.preferred_minimum,
+        "preferredMaximum": calibration.preferred_maximum,
         "hardMinimum": SHORT_HARD_MINIMUM,
         "hardMinimumPassed": count >= SHORT_HARD_MINIMUM,
         "runtimeSafetyMaximum": SHORT_RUNTIME_MAXIMUM,
@@ -654,10 +684,10 @@ fn visible_character_count(content: &str) -> usize {
         .count()
 }
 
-fn tier_deviation(count: usize) -> &'static str {
-    if count < SHORT_PREFERRED_MINIMUM {
+fn tier_deviation(count: usize, calibration: &ShortCalibrationSummary) -> &'static str {
+    if count < calibration.preferred_minimum {
         "below_preferred"
-    } else if count > SHORT_PREFERRED_MAXIMUM {
+    } else if count > calibration.preferred_maximum {
         "above_preferred"
     } else {
         "in_preferred"
@@ -721,6 +751,14 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn cold_start_calibration() -> ShortCalibrationSummary {
+        ShortCalibrationSummary {
+            status: "cold_start".to_owned(),
+            preferred_minimum: 1_000,
+            preferred_maximum: 3_000,
+        }
+    }
+
     #[test]
     fn short_validation_counts_non_whitespace_unicode_characters() {
         let directory = tempdir().expect("tempdir");
@@ -730,7 +768,7 @@ mod tests {
             .join("第1章 未命名")
             .join("001.md");
         let prose = "界".repeat(SHORT_HARD_MINIMUM);
-        let validation = validate_candidate(&prose, &target, "replay");
+        let validation = validate_candidate(&prose, &target, "replay", &cold_start_calibration());
         assert_eq!(validation["actualWordCount"], SHORT_HARD_MINIMUM);
         assert_eq!(validation["passed"], true);
         assert_eq!(validation["providerMode"], "replay");
@@ -746,12 +784,12 @@ mod tests {
             .join("001.md");
         let wrapped = format!("```\n{}\n```", "a".repeat(SHORT_HARD_MINIMUM));
         assert_eq!(
-            validate_candidate(&wrapped, &target, "replay")["passed"],
+            validate_candidate(&wrapped, &target, "replay", &cold_start_calibration())["passed"],
             false
         );
         let runaway = "a".repeat(SHORT_RUNTIME_MAXIMUM + 1);
         assert_eq!(
-            validate_candidate(&runaway, &target, "replay")["passed"],
+            validate_candidate(&runaway, &target, "replay", &cold_start_calibration())["passed"],
             false
         );
     }

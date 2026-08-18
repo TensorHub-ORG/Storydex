@@ -59,6 +59,7 @@
       "rustEvidence": [
         "apps/desktop/agent-runtime/storydex-agentd/src/chat.rs::chat_stream",
         "apps/desktop/agent-runtime/storydex-agentd/src/story_generation.rs::run_create_new_short",
+        "apps/desktop/agent-runtime/storydex-agentd/src/length_tier_calibration.rs",
         "apps/desktop/agent-runtime/storydex-bridge/src/main.rs::run_agent"
       ],
       "contractDocument": "apps/backend/contracts/agent-chat-stream-v1.json",
@@ -115,7 +116,7 @@
       "performanceRunner": "apps/backend/scripts/run_agent_refactor_performance.py",
       "performanceEvidence": "output/agent-runtime-contract/m0-performance-current/performance-report.json",
       "performanceDecisionEvidence": "output/rust-migration-decision-live/eb2805f48eed-20260818T014444-m0-performance-gate/decision-report.json",
-      "remaining": "The checked-in Refactor slice has parity evidence for read-only, scoped write, provider failure, stop/timeout/disconnect including preflight and repeated stop, concurrent approval, durable multi-process follow-up storage, interrupted steer recovery, corrupt/missing/mismatched session state, process-crash bridge cancellation, latest-trace replacement, the externally visible story intent/context/permission contract, and the single-fragment create-new short story slice. Python-owned Knowledge/WIKI projection, length-tier calibration, Git finalization and prompt events remain explicit differences. Other story modes, production workspace access, Electron Beta and Stable takeover remain out of scope."
+      "remaining": "The checked-in Refactor slice has parity evidence for read-only, scoped write, provider failure, stop/timeout/disconnect including preflight and repeated stop, concurrent approval, durable multi-process follow-up storage, interrupted steer recovery, corrupt/missing/mismatched session state, process-crash bridge cancellation, latest-trace replacement, the externally visible story intent/context/permission contract, and the single-fragment create-new short story slice. The create-new short path also reads and records v2 candidate length-tier calibration with strict shared JSON-fact differential coverage. Python-owned Knowledge/WIKI projection, Git finalization and prompt events remain explicit differences. Other story modes, medium/long calibration integration, production workspace access, Electron Beta and Stable takeover remain out of scope."
     },
     {
       "id": "agent.approval.v1",
