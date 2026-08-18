@@ -94,6 +94,7 @@ test("Rust Beta ready packet requires a dynamic loopback port and random token",
 
 test("Rust Beta workspace and profile are restricted to temporary directories", () => {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "storydex-rust-beta-boundary-"));
+  const aliasRoot = path.join(os.tmpdir(), `storydex-rust-beta-alias-${process.pid}-${Date.now()}`);
   try {
     const paths = createIsolatedBetaPaths({
       temporaryRoot,
@@ -101,11 +102,25 @@ test("Rust Beta workspace and profile are restricted to temporary directories", 
       workspaceRoot: path.join(temporaryRoot, "fixture-workspace")
     });
     assert.equal(paths.workspaceRoot, fs.realpathSync.native(path.join(temporaryRoot, "fixture-workspace")));
+    fs.symlinkSync(temporaryRoot, aliasRoot, process.platform === "win32" ? "junction" : "dir");
+    const aliasedPaths = createIsolatedBetaPaths({
+      temporaryRoot,
+      profileRoot: path.join(aliasRoot, "aliased-profile")
+    });
+    assert.equal(
+      aliasedPaths.profileRoot,
+      fs.realpathSync.native(path.join(temporaryRoot, "aliased-profile"))
+    );
     assert.throws(
       () => createIsolatedBetaPaths({ temporaryRoot, workspaceRoot: path.resolve(temporaryRoot, "..", "real-user-project") }),
       /must stay inside/
     );
   } finally {
+    try {
+      fs.unlinkSync(aliasRoot);
+    } catch {
+      // Alias was not created or was already removed.
+    }
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }
 });

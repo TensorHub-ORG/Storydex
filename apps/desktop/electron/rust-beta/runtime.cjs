@@ -27,13 +27,27 @@ function resolveRealPath(targetPath) {
   return fs.realpathSync.native ? fs.realpathSync.native(targetPath) : fs.realpathSync(targetPath);
 }
 
+function resolveThroughExistingAncestor(targetPath) {
+  let ancestor = path.resolve(targetPath);
+  const missingSegments = [];
+  while (!fs.existsSync(ancestor)) {
+    const parent = path.dirname(ancestor);
+    if (parent === ancestor) {
+      throw new Error(`Unable to resolve an existing ancestor for ${targetPath}`);
+    }
+    missingSegments.unshift(path.basename(ancestor));
+    ancestor = parent;
+  }
+  return path.join(resolveRealPath(ancestor), ...missingSegments);
+}
+
 function ensureTemporaryDirectory(targetPath, temporaryRoot, label) {
-  const resolved = path.resolve(targetPath);
-  if (!isPathInside(resolved, temporaryRoot)) {
+  const realTemporaryRoot = resolveRealPath(temporaryRoot);
+  const resolved = resolveThroughExistingAncestor(targetPath);
+  if (!isPathInside(resolved, realTemporaryRoot)) {
     throw new Error(`${label} must stay inside the operating-system temporary directory: ${temporaryRoot}`);
   }
   fs.mkdirSync(resolved, { recursive: true });
-  const realTemporaryRoot = resolveRealPath(temporaryRoot);
   const realTarget = resolveRealPath(resolved);
   if (!isPathInside(realTarget, realTemporaryRoot)) {
     throw new Error(`${label} resolves outside the operating-system temporary directory`);
