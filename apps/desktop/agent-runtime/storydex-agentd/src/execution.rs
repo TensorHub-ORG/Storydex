@@ -70,6 +70,13 @@ pub(crate) struct ExecutionBusy {
     pub(crate) active_session_id: String,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ActiveExecution {
+    pub(crate) trace_id: String,
+    pub(crate) session_id: String,
+    pub(crate) workspace_root: PathBuf,
+}
+
 pub(crate) struct ExecutionGuard {
     registry: ExecutionRegistry,
     trace_id: String,
@@ -103,6 +110,18 @@ pub(crate) struct ResolveResult {
 }
 
 impl ExecutionRegistry {
+    pub(crate) fn active(&self) -> Option<ActiveExecution> {
+        self.active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(|entry| ActiveExecution {
+                trace_id: entry.trace_id.clone(),
+                session_id: entry.session_id.clone(),
+                workspace_root: entry.workspace_root.clone(),
+            })
+    }
+
     pub(crate) fn register(
         &self,
         trace_id: String,

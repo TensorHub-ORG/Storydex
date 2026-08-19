@@ -128,6 +128,36 @@ impl FollowupState {
 }
 
 impl FollowupStore {
+    pub(crate) fn storage_path(&self, workspace: &Path, session_id: &str) -> PathBuf {
+        mailbox_path(workspace, session_id)
+    }
+
+    pub(crate) fn delete(&self, workspace: &Path, session_id: &str) -> Result<bool, FollowupError> {
+        let _guard = self.lock.lock().unwrap_or_else(|error| error.into_inner());
+        let file_guard = lock_mailbox(workspace, session_id)?;
+        let path = mailbox_path(workspace, session_id);
+        if !path.exists() {
+            drop(file_guard);
+            return Ok(false);
+        }
+        self.load(workspace, session_id)?;
+        fs::remove_file(&path)
+            .map_err(|error| FollowupError::new("followup_storage_error", error.to_string()))?;
+        drop(file_guard);
+        let lock_path = path.with_extension("lock");
+        match fs::remove_file(lock_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(FollowupError::new(
+                    "followup_storage_error",
+                    error.to_string(),
+                ));
+            }
+        }
+        Ok(true)
+    }
+
     pub(crate) fn list(
         &self,
         workspace: &Path,

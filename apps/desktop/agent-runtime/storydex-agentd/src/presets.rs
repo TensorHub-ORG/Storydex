@@ -33,6 +33,21 @@ const IMPORTED_SOURCE_FORMATS: &[&str] = &["sillytavern", "generic"];
 
 static PRESET_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
+#[derive(Debug)]
+pub(crate) struct ActivePresetError {
+    pub(crate) code: &'static str,
+    pub(crate) message: String,
+}
+
+impl ActivePresetError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PresetImportRequest {
@@ -1428,6 +1443,154 @@ fn compile_document(document: &Value, payload: &Value) -> Value {
         "risks": risks,
         "warnings": warnings,
     })
+}
+
+pub(crate) fn compile_active_for_agent(
+    workspace: &Path,
+) -> Result<Option<String>, ActivePresetError> {
+    let workspace = workspace.canonicalize().map_err(|error| {
+        ActivePresetError::new(
+            "preset_workspace_invalid",
+            format!("Unable to resolve the preset workspace: {error}"),
+        )
+    })?;
+    let pointer = workspace
+        .join(".storydex")
+        .join("presets")
+        .join("active.json");
+    if !pointer.exists() {
+        return Ok(None);
+    }
+    let pointer_metadata = fs::symlink_metadata(&pointer).map_err(|error| {
+        ActivePresetError::new(
+            "preset_pointer_invalid",
+            format!("Unable to inspect the active preset pointer: {error}"),
+        )
+    })?;
+    if pointer_metadata.file_type().is_symlink() || !pointer_metadata.is_file() {
+        return Err(ActivePresetError::new(
+            "preset_pointer_invalid",
+            "Active preset pointer must be a regular file inside the workspace.",
+        ));
+    }
+    let pointer_value: Value = serde_json::from_slice(&fs::read(&pointer).map_err(|error| {
+        ActivePresetError::new(
+            "preset_pointer_invalid",
+            format!("Unable to read the active preset pointer: {error}"),
+        )
+    })?)
+    .map_err(|error| {
+        ActivePresetError::new(
+            "preset_pointer_invalid",
+            format!("Active preset pointer is invalid JSON: {error}"),
+        )
+    })?;
+    let pointer_object = pointer_value.as_object().ok_or_else(|| {
+        ActivePresetError::new(
+            "preset_pointer_invalid",
+            "Active preset pointer must be a JSON object.",
+        )
+    })?;
+    let Some(relative) = pointer_object.get("activeMainPreset") else {
+        return Ok(None);
+    };
+    let relative = relative.as_str().ok_or_else(|| {
+        ActivePresetError::new(
+            "preset_pointer_invalid",
+            "activeMainPreset must be a string.",
+        )
+    })?;
+    let relative = relative.trim().replace('\\', "/");
+    if relative.is_empty() {
+        return Ok(None);
+    }
+    let relative_path = Path::new(&relative);
+    if relative_path.is_absolute()
+        || relative_path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+        || !relative.starts_with(".storydex/presets/")
+        || !relative.to_ascii_lowercase().ends_with(".md")
+    {
+        return Err(ActivePresetError::new(
+            "preset_path_invalid",
+            "Active preset path must be a Markdown file under .storydex/presets/.",
+        ));
+    }
+    let mut inspected = workspace.clone();
+    for component in relative_path.components() {
+        if let std::path::Component::Normal(part) = component {
+            inspected.push(part);
+            let metadata = fs::symlink_metadata(&inspected).map_err(|error| {
+                ActivePresetError::new(
+                    "preset_not_found",
+                    format!("Active preset path is unavailable: {error}"),
+                )
+            })?;
+            if metadata.file_type().is_symlink() {
+                return Err(ActivePresetError::new(
+                    "preset_symlink_forbidden",
+                    "Active preset paths cannot contain symbolic links.",
+                ));
+            }
+        }
+    }
+    let markdown = inspected.canonicalize().map_err(|error| {
+        ActivePresetError::new(
+            "preset_not_found",
+            format!("Unable to resolve the active preset: {error}"),
+        )
+    })?;
+    if !markdown.starts_with(&workspace) || !markdown.is_file() {
+        return Err(ActivePresetError::new(
+            "preset_path_invalid",
+            "Active preset escapes the workspace or is not a file.",
+        ));
+    }
+    let sidecar = sidecar_path(&markdown);
+    let sidecar_metadata = fs::symlink_metadata(&sidecar).map_err(|error| {
+        ActivePresetError::new(
+            "preset_sidecar_invalid",
+            format!("Active preset sidecar is unavailable: {error}"),
+        )
+    })?;
+    if sidecar_metadata.file_type().is_symlink() || !sidecar_metadata.is_file() {
+        return Err(ActivePresetError::new(
+            "preset_sidecar_invalid",
+            "Active preset sidecar must be a regular JSON file.",
+        ));
+    }
+    let parsed: Value = serde_json::from_slice(&fs::read(&sidecar).map_err(|error| {
+        ActivePresetError::new(
+            "preset_sidecar_invalid",
+            format!("Unable to read the active preset sidecar: {error}"),
+        )
+    })?)
+    .map_err(|error| {
+        ActivePresetError::new(
+            "preset_sidecar_invalid",
+            format!("Active preset sidecar is invalid JSON: {error}"),
+        )
+    })?;
+    let (document, _) = normalize_document(parsed, false).map_err(|error| {
+        ActivePresetError::new(
+            "preset_sidecar_invalid",
+            format!("Active preset sidecar failed validation: {error}"),
+        )
+    })?;
+    let compiled = compile_document(&document, &json!({}));
+    Ok(Some(
+        compiled
+            .get("compiledText")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+    ))
 }
 
 fn build_injections(sections: &[CompiledSection]) -> Vec<CompiledInjection> {
@@ -3479,6 +3642,7 @@ pub(crate) async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn stable_sidecar_keys_round_trip_through_the_frontend_shape() {
@@ -3540,5 +3704,69 @@ mod tests {
                 .as_str()
                 .is_some_and(|text| text.contains("alpha"))
         );
+    }
+
+    #[test]
+    fn active_preset_compiles_for_agent_and_corruption_fails_closed() {
+        let workspace = tempdir().expect("workspace");
+        let preset_dir = workspace.path().join(".storydex/presets/active");
+        fs::create_dir_all(&preset_dir).expect("preset directory");
+        let markdown = preset_dir.join("focus.md");
+        fs::write(&markdown, "# Focus\n").expect("markdown");
+        let mut document = default_document();
+        document["style"]["freeTextSlotPre"] = json!("ACTIVE PRESET RULE");
+        fs::write(
+            sidecar_path(&markdown),
+            serde_json::to_vec_pretty(&document).expect("sidecar bytes"),
+        )
+        .expect("sidecar");
+        fs::write(
+            workspace.path().join(".storydex/presets/active.json"),
+            serde_json::to_vec_pretty(&json!({
+                "activeMainPreset": ".storydex/presets/active/focus.md"
+            }))
+            .expect("pointer bytes"),
+        )
+        .expect("pointer");
+
+        let compiled = compile_active_for_agent(workspace.path())
+            .expect("compile active preset")
+            .expect("active preset");
+        assert!(compiled.contains("ACTIVE PRESET RULE"));
+
+        fs::write(sidecar_path(&markdown), "{").expect("corrupt sidecar");
+        let error = compile_active_for_agent(workspace.path()).expect_err("corrupt sidecar");
+        assert_eq!(error.code, "preset_sidecar_invalid");
+
+        fs::write(
+            workspace.path().join(".storydex/presets/active.json"),
+            r#"{"activeMainPreset":"../outside.md"}"#,
+        )
+        .expect("unsafe pointer");
+        let error = compile_active_for_agent(workspace.path()).expect_err("unsafe pointer");
+        assert_eq!(error.code, "preset_path_invalid");
+    }
+
+    #[test]
+    fn active_preset_rejects_symlink_components() {
+        let workspace = tempdir().expect("workspace");
+        let outside = tempdir().expect("outside");
+        let presets = workspace.path().join(".storydex/presets");
+        fs::create_dir_all(&presets).expect("presets");
+        fs::write(outside.path().join("focus.md"), "# outside\n").expect("outside markdown");
+        #[cfg(windows)]
+        if std::os::windows::fs::symlink_dir(outside.path(), presets.join("linked")).is_err() {
+            return;
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), presets.join("linked"))
+            .expect("directory symlink");
+        fs::write(
+            presets.join("active.json"),
+            r#"{"activeMainPreset":".storydex/presets/linked/focus.md"}"#,
+        )
+        .expect("pointer");
+        let error = compile_active_for_agent(workspace.path()).expect_err("symlink rejection");
+        assert_eq!(error.code, "preset_symlink_forbidden");
     }
 }

@@ -1918,6 +1918,59 @@ impl StorydexGit {
         self.commit_staged(&root, message)
     }
 
+    /// Undo exactly the commit just created by a transactional caller while
+    /// preserving its file changes in the working tree. The operation refuses
+    /// to move HEAD if another commit has appeared in the meantime.
+    pub fn rollback_commit_keep_changes(
+        &self,
+        project_root: impl AsRef<Path>,
+        expected_commit: &str,
+    ) -> Result<GitSummary> {
+        let root = canonical_existing_dir(project_root.as_ref())?;
+        self.assert_project_repository(&root)?;
+        let expected_commit = expected_commit.trim();
+        ensure!(
+            !expected_commit.is_empty(),
+            "expected commit id is required"
+        );
+        let head = self
+            .read_head_commit(&root)?
+            .context("repository head is unavailable for commit rollback")?;
+        ensure!(
+            head.id == expected_commit,
+            "refusing commit rollback because repository HEAD changed"
+        );
+        let parents = run_git(
+            &root,
+            &["rev-list", "--parents", "-n", "1", expected_commit],
+        )?;
+        let mut parts = parents.split_whitespace();
+        ensure!(
+            parts.next() == Some(expected_commit),
+            "unable to resolve the expected commit ancestry"
+        );
+        if let Some(parent) = parts.next() {
+            run_git(&root, &["reset", "--mixed", parent])?;
+        } else {
+            let branch = self.current_branch(&root)?;
+            ensure!(
+                !branch.is_empty(),
+                "initial commit rollback requires a branch"
+            );
+            run_git_owned(
+                &root,
+                &[
+                    "update-ref".to_owned(),
+                    "-d".to_owned(),
+                    format!("refs/heads/{branch}"),
+                    expected_commit.to_owned(),
+                ],
+            )?;
+            run_git(&root, &["read-tree", "--empty"])?;
+        }
+        self.summary(&root)
+    }
+
     /// Restore a commit while keeping an optional local backup ref.
     /// Callers must opt into this operation explicitly; it never targets a
     /// parent repository because `assert_project_repository` is mandatory.
@@ -3884,6 +3937,61 @@ mod tests {
             .expect("stale path should be a no-op");
         assert!(!result.created);
         assert!(result.summary.clean);
+    }
+
+    #[test]
+    fn git_commit_rollback_preserves_changes_for_root_and_non_root_commits() {
+        if !git_available() {
+            return;
+        }
+        let root_commit = tempdir().expect("root commit project");
+        let git = StorydexGit;
+        git.initialize(root_commit.path())
+            .expect("initialize root project");
+        fs::write(root_commit.path().join("first.md"), "first\n").expect("first file");
+        let first = git
+            .commit_paths(root_commit.path(), ["first.md"], "first commit")
+            .expect("first commit");
+        let first_id = first.commit.expect("first commit object").id;
+        let rolled = git
+            .rollback_commit_keep_changes(root_commit.path(), &first_id)
+            .expect("rollback root commit");
+        assert!(rolled.head.is_none());
+        assert!(rolled.changed_paths.iter().any(|path| path == "first.md"));
+        assert_eq!(
+            fs::read_to_string(root_commit.path().join("first.md")).expect("first content"),
+            "first\n"
+        );
+
+        let later_commit = tempdir().expect("later commit project");
+        git.initialize(later_commit.path())
+            .expect("initialize later project");
+        fs::write(later_commit.path().join("base.md"), "base\n").expect("base file");
+        let base = git
+            .commit_paths(later_commit.path(), ["base.md"], "base commit")
+            .expect("base commit")
+            .commit
+            .expect("base commit object")
+            .id;
+        fs::write(later_commit.path().join("next.md"), "next\n").expect("next file");
+        let next = git
+            .commit_paths(later_commit.path(), ["next.md"], "next commit")
+            .expect("next commit")
+            .commit
+            .expect("next commit object")
+            .id;
+        let rolled = git
+            .rollback_commit_keep_changes(later_commit.path(), &next)
+            .expect("rollback later commit");
+        assert_eq!(
+            rolled.head.as_ref().map(|commit| commit.id.as_str()),
+            Some(base.as_str())
+        );
+        assert!(rolled.changed_paths.iter().any(|path| path == "next.md"));
+        assert_eq!(
+            fs::read_to_string(later_commit.path().join("next.md")).expect("next content"),
+            "next\n"
+        );
     }
 
     #[test]

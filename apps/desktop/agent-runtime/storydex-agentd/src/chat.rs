@@ -3,7 +3,7 @@ use crate::AppState;
 use crate::error_response;
 use crate::execution::{ExecutionCancellation, ExecutionControl};
 use crate::replacement::{
-    ExecutionRecordInput, ReplacementError, ReplacementTransaction,
+    ExecutionRecordInput, ReplacementError, ReplacementTransaction, change_ledger_from_events,
     persist_execution_record_with_events,
 };
 use anyhow::Context;
@@ -73,6 +73,8 @@ pub(crate) struct ChatStreamRequest {
     pub core_writes_allowed: Option<bool>,
     #[serde(default)]
     pub allowed_write_roots: Vec<String>,
+    #[serde(skip)]
+    pub compiled_preset: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -249,6 +251,18 @@ pub async fn chat_stream(
         Ok(path) => path,
         Err((status, code, message)) => {
             return error_response(status, code, message).into_response();
+        }
+    };
+    if let Err(error) =
+        crate::agent_control::apply_chat_policy(&state, &workspace, &session_id, &mut payload)
+    {
+        return error_response(error.status, error.code, &error.message).into_response();
+    }
+    payload.compiled_preset = match crate::presets::compile_active_for_agent(&workspace) {
+        Ok(value) => value,
+        Err(error) => {
+            return error_response(StatusCode::UNPROCESSABLE_ENTITY, error.code, &error.message)
+                .into_response();
         }
     };
     if let Err((code, message)) = validate_refactor_request(&payload, &workspace) {
@@ -940,11 +954,22 @@ fn validate_refactor_request(
     let permission = payload.permission_mode.trim().to_ascii_lowercase();
     if !matches!(
         permission.as_str(),
-        "ask_approval" | "approve_for_me" | "full_access"
+        "ask_approval" | "approve_for_me" | "full_access" | "plan_mode"
     ) {
         return Err((
             "invalid_request",
             "Agent permissionMode is not supported by the Refactor contract.",
+        ));
+    }
+    if permission == "plan_mode"
+        && (capability != "read_only"
+            || payload.writes_allowed
+            || payload.core_writes_allowed == Some(true)
+            || !payload.allowed_write_roots.is_empty())
+    {
+        return Err((
+            "invalid_request",
+            "Plan-mode Refactor turns must remain read-only and cannot authorize writes.",
         ));
     }
     if capability == "read_only"
@@ -1049,11 +1074,93 @@ fn parse_story_generation(
     }))
 }
 
-fn story_operation_type(payload: &ChatStreamRequest, active_file_exists: bool) -> &'static str {
-    if payload.active_file.trim().is_empty() || !active_file_exists {
-        return "create_new";
+fn story_operation_type(
+    payload: &ChatStreamRequest,
+    active_file_exists: bool,
+) -> Option<&'static str> {
+    if !payload.writes_allowed || payload.capability_mode == "read_only" {
+        return None;
     }
     let prompt = payload.prompt.to_ascii_lowercase();
+    let advisory_signal = [
+        "如何",
+        "怎样",
+        "为什么",
+        "建议",
+        "意见",
+        "评价",
+        "点评",
+        "评估",
+        "分析",
+        "怎么看",
+        "怎么样",
+        "怎么理解",
+        "说明",
+        "讲解",
+        "how to",
+        "why ",
+        "explain",
+        "advice",
+        "suggest",
+        "review",
+        "evaluate",
+        "assessment",
+        "opinion",
+        "what do you think",
+    ]
+    .iter()
+    .any(|signal| prompt.contains(signal));
+    if advisory_signal && !crate::agent_control::inferred_write_intent(&payload.prompt) {
+        return None;
+    }
+    let active_story_file = active_file_exists
+        && payload
+            .active_file
+            .trim()
+            .replace('\\', "/")
+            .starts_with("chapters/");
+    let non_prose_signal = [
+        "目录",
+        "文件结构",
+        "项目结构",
+        "大纲",
+        "剧本",
+        "分镜",
+        "角色卡",
+        "人物设定",
+        "世界观",
+        "世界书",
+        "知识图谱",
+        "wiki",
+        "directory",
+        "folder",
+        "outline",
+        "screenplay",
+        "character card",
+        "worldbook",
+    ]
+    .iter()
+    .any(|signal| prompt.contains(signal));
+    let story_signal = active_story_file
+        || [
+            "续写",
+            "扩写",
+            "正文",
+            "剧情",
+            "故事",
+            "章节",
+            "下一章",
+            "片段",
+            "场景",
+            "小说",
+            "story",
+            "chapter",
+            "scene",
+            "prose",
+            "novel",
+        ]
+        .iter()
+        .any(|signal| prompt.contains(signal));
     let modify_signal = [
         "重写",
         "改写",
@@ -1066,11 +1173,46 @@ fn story_operation_type(payload: &ChatStreamRequest, active_file_exists: bool) -
     ]
     .iter()
     .any(|signal| prompt.contains(signal));
-    if modify_signal {
-        "modify_existing"
-    } else {
-        "create_new"
+    let prose_signal = active_story_file
+        || [
+            "正文", "剧情", "故事", "片段", "场景", "小说", "story", "scene", "prose", "novel",
+        ]
+        .iter()
+        .any(|signal| prompt.contains(signal))
+        || (["重写", "改写", "rewrite"]
+            .iter()
+            .any(|signal| prompt.contains(signal))
+            && ["章节", "chapter"]
+                .iter()
+                .any(|signal| prompt.contains(signal)));
+    if modify_signal && prose_signal && !non_prose_signal {
+        return Some("modify_existing");
     }
+    let create_signal = [
+        "续写",
+        "扩写",
+        "新写",
+        "新增",
+        "新建",
+        "创建",
+        "生成",
+        "创作",
+        "写第",
+        "写一段",
+        "写下一章",
+        "continue writing",
+        "write a new",
+        "write new",
+        "create the next",
+        "add a new",
+        "generate a new",
+        "create a new",
+        "create one",
+        "create a ",
+    ]
+    .iter()
+    .any(|signal| prompt.contains(signal));
+    (create_signal && story_signal && !non_prose_signal).then_some("create_new")
 }
 
 fn should_use_rust_modify_existing(payload: &ChatStreamRequest) -> bool {
@@ -1383,9 +1525,9 @@ async fn run_chat(execution: ChatExecution) {
 
     let story_options = parse_story_generation(&payload.story_generation)
         .expect("validated storyGeneration request");
-    let story_operation = story_options
-        .as_ref()
-        .map(|_| story_operation_type(&payload, workspace.join(&payload.active_file).is_file()));
+    let story_operation = story_options.as_ref().and_then(|_| {
+        story_operation_type(&payload, workspace.join(&payload.active_file).is_file())
+    });
     let story_create_new = story_operation == Some("create_new");
     let story_modify_existing =
         story_operation == Some("modify_existing") && should_use_rust_modify_existing(&payload);
@@ -1628,9 +1770,20 @@ async fn run_chat(execution: ChatExecution) {
 }
 
 fn build_turn_contract(payload: &ChatStreamRequest, workspace: &Path) -> anyhow::Result<Value> {
+    let preset_chars = payload
+        .compiled_preset
+        .as_deref()
+        .map(str::trim)
+        .map(str::len)
+        .unwrap_or_default();
+    let preset_included = preset_chars > 0;
     let story_generation = parse_story_generation(&payload.story_generation)
         .expect("validated storyGeneration request");
-    let Some(story_generation) = story_generation else {
+    let active_file_exists = workspace.join(&payload.active_file).is_file();
+    let story_operation = story_generation
+        .as_ref()
+        .and_then(|_| story_operation_type(payload, active_file_exists));
+    let Some(story_operation) = story_operation else {
         return Ok(json!({
             "status": "ready",
             "reasoningEffort": payload.reasoning_effort,
@@ -1654,18 +1807,24 @@ fn build_turn_contract(payload: &ChatStreamRequest, workspace: &Path) -> anyhow:
                 }
             },
             "contextAssembly": {
-                "budget": {"maxTotalChars": 10000, "totalChars": 0, "blockCount": 0},
-                "contextTrace": {"sources": [], "totals": {"assembleMs": 0}},
+                "budget": {"maxTotalChars": 10000, "totalChars": preset_chars, "blockCount": if preset_included { 1 } else { 0 }},
+                "contextTrace": {"sources": [{
+                    "kind": "runtime_presets",
+                    "policy": "active_or_compiled_safe_only",
+                    "included": preset_included,
+                    "truncated": false,
+                    "dropReason": if preset_included { "" } else { "empty" },
+                }], "totals": {"assembleMs": 0}},
                 "promptBlocks": [],
                 "activeFile": payload.active_file,
             },
         }));
     };
+    let story_generation = story_generation.expect("story operation requires generation options");
 
     let chapter_count = count_story_chapters(workspace);
     let chapter_word_count_target = story_chapter_word_count_target(workspace);
-    let active_file_exists = workspace.join(&payload.active_file).is_file();
-    let story_create_new = story_operation_type(payload, active_file_exists) == "create_new";
+    let story_create_new = story_operation == "create_new";
     let bounded_modify_existing = !story_create_new && should_use_rust_modify_existing(payload);
     let chapter_content_mode = if story_generation.chapter_template_id.contains("single_file") {
         "single_file"
@@ -1883,6 +2042,16 @@ fn build_turn_contract(payload: &ChatStreamRequest, workspace: &Path) -> anyhow:
             "dropReason": "",
         }));
     }
+    if preset_included {
+        prompt_blocks.push(json!({
+            "id": "runtime_presets",
+            "title": "Active Storydex preset",
+            "sourcePaths": [".storydex/presets/active.json"],
+            "truncated": false,
+            "omitted": false,
+            "dropReason": "",
+        }));
+    }
     let context_source = |kind: &str, policy: &str, included: bool| {
         json!({
             "kind": kind,
@@ -1970,7 +2139,7 @@ fn build_turn_contract(payload: &ChatStreamRequest, workspace: &Path) -> anyhow:
         "contextAssembly": {
             "budget": {"maxTotalChars": 10000, "blockCount": prompt_blocks.len()},
             "contextTrace": {"sources": [
-                context_source("runtime_presets", "active_or_compiled_safe_only", false),
+                context_source("runtime_presets", "active_or_compiled_safe_only", preset_included),
                 context_source("recent_segments", "compact_recent_only", active_file_exists),
                 context_source("rolling_summaries", "latest_chapters_only", false),
                 context_source("active_characters", "structure_map_matched_spans_jit_read", false),
@@ -2325,6 +2494,18 @@ async fn run_bridge(context: BridgeRunContext<'_>) -> anyhow::Result<()> {
                     {
                         transaction.accept()?;
                     }
+                    if event_name == "AgentCompleted" {
+                        emit_git_commit_prompt(
+                            state,
+                            workspace,
+                            sender,
+                            trace_events,
+                            trace_id,
+                            session_id,
+                            Some((&event_name, &data)),
+                        )
+                        .await?;
+                    }
                     if event_name == "AgentCompleted" || event_name == "AgentError" || event_name == "AgentCancelled" {
                         child_terminal = true;
                         *terminal_sent = true;
@@ -2374,7 +2555,14 @@ fn replacement_accepts_event(event_name: &str) -> bool {
     )
 }
 
-fn session_binding_path(workspace: &Path, session_id: &str) -> PathBuf {
+#[derive(Clone, Debug)]
+pub(crate) struct RuntimeSessionBinding {
+    pub(crate) runtime_id: Uuid,
+    pub(crate) session_path: PathBuf,
+    pub(crate) binding_path: PathBuf,
+}
+
+pub(crate) fn session_binding_path(workspace: &Path, session_id: &str) -> PathBuf {
     let normalized = if session_id.trim().is_empty() {
         "default"
     } else {
@@ -2389,25 +2577,48 @@ fn session_binding_path(workspace: &Path, session_id: &str) -> PathBuf {
         .join(format!("{}.json", &digest[..24]))
 }
 
+fn expected_runtime_session_path(state: &AppState, runtime_id: Uuid) -> PathBuf {
+    state
+        .coomi_home()
+        .join("sessions")
+        .join(format!("{runtime_id}.json"))
+}
+
 fn validate_runtime_session_path(
     state: &AppState,
     runtime_id: Uuid,
     raw_path: &str,
+    must_exist: bool,
 ) -> anyhow::Result<PathBuf> {
-    let expected = state
-        .coomi_home()
-        .join("sessions")
-        .join(format!("{runtime_id}.json"))
-        .canonicalize()
-        .map_err(|error| {
+    let expected = expected_runtime_session_path(state, runtime_id);
+    let candidate = PathBuf::from(raw_path);
+    let expected_contract = contract_path(&expected);
+    let candidate_contract = contract_path(&candidate);
+    let same_contract = if cfg!(windows) {
+        candidate_contract.eq_ignore_ascii_case(&expected_contract)
+    } else {
+        candidate_contract == expected_contract
+    };
+    anyhow::ensure!(
+        same_contract,
+        "Refactor Agent session binding points outside the configured runtime home"
+    );
+    if expected.exists() {
+        let expected_canonical = expected.canonicalize().map_err(|error| {
             anyhow::anyhow!("bound Refactor Agent session {runtime_id} is unavailable: {error}")
         })?;
-    let candidate = PathBuf::from(raw_path)
-        .canonicalize()
-        .map_err(|error| anyhow::anyhow!("invalid Refactor Agent session path: {error}"))?;
+        let candidate_canonical = candidate
+            .canonicalize()
+            .map_err(|error| anyhow::anyhow!("invalid Refactor Agent session path: {error}"))?;
+        anyhow::ensure!(
+            candidate_canonical == expected_canonical,
+            "Refactor Agent session binding points outside the configured runtime home"
+        );
+        return Ok(expected_canonical);
+    }
     anyhow::ensure!(
-        candidate == expected,
-        "Refactor Agent session binding points outside the configured runtime home"
+        !must_exist,
+        "bound Refactor Agent session {runtime_id} is unavailable"
     );
     Ok(expected)
 }
@@ -2421,15 +2632,25 @@ fn contract_path(path: &Path) -> String {
         .unwrap_or_else(|| value.into_owned())
 }
 
-fn load_runtime_session_id(
+pub(crate) fn load_runtime_session_binding(
     state: &AppState,
     workspace: &Path,
     session_id: &str,
-) -> anyhow::Result<Option<Uuid>> {
+) -> anyhow::Result<Option<RuntimeSessionBinding>> {
     let path = session_binding_path(workspace, session_id);
-    if !path.exists() {
-        return Ok(None);
-    }
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "unable to inspect Refactor Agent session binding: {error}"
+            ));
+        }
+    };
+    anyhow::ensure!(
+        !metadata.file_type().is_symlink() && metadata.is_file(),
+        "Refactor Agent session binding must be a regular file"
+    );
     let raw = fs::read_to_string(&path).map_err(|error| {
         anyhow::anyhow!("unable to read Refactor Agent session binding: {error}")
     })?;
@@ -2459,8 +2680,29 @@ fn load_runtime_session_id(
         .or_else(|| binding.get("historyPath"))
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("Refactor Agent session binding has no session path"))?;
-    validate_runtime_session_path(state, runtime_id, raw_path)?;
-    Ok(Some(runtime_id))
+    let session_path = validate_runtime_session_path(state, runtime_id, raw_path, false)?;
+    Ok(Some(RuntimeSessionBinding {
+        runtime_id,
+        session_path,
+        binding_path: path,
+    }))
+}
+
+pub(crate) fn load_runtime_session_id(
+    state: &AppState,
+    workspace: &Path,
+    session_id: &str,
+) -> anyhow::Result<Option<Uuid>> {
+    let Some(binding) = load_runtime_session_binding(state, workspace, session_id)? else {
+        return Ok(None);
+    };
+    validate_runtime_session_path(
+        state,
+        binding.runtime_id,
+        &contract_path(&binding.session_path),
+        true,
+    )?;
+    Ok(Some(binding.runtime_id))
 }
 
 fn persist_session_binding(
@@ -2490,7 +2732,7 @@ fn persist_session_binding(
         .get("sessionPath")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("session_bound has no session path"))?;
-    let session_path = validate_runtime_session_path(state, runtime_id, raw_path)?;
+    let session_path = validate_runtime_session_path(state, runtime_id, raw_path, true)?;
     let binding = json!({
         "version": 2,
         "runtime": "storydex-coomi-rs",
@@ -2559,16 +2801,28 @@ fn bridge_request(
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     let read_only = payload.capability_mode == "read_only";
+    let base_system_prompt = if read_only {
+        "You are the read-only Refactor Agent for Storydex. Use only read-only tools and do not modify project files."
+    } else {
+        "You are the fixture-scoped Refactor Agent for Storydex. Modify only paths authorized by the compiled turn capability."
+    };
+    let system_prompt = payload
+        .compiled_preset
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|preset| {
+            format!(
+                "{base_system_prompt}\n\n<storydex_active_preset>\n{preset}\n</storydex_active_preset>"
+            )
+        })
+        .unwrap_or_else(|| base_system_prompt.to_owned());
     let mut request = json!({
         "action": "run",
         "cwd": workspace,
         "home": state.coomi_home(),
         "prompt": payload.prompt,
-        "systemPrompt": if read_only {
-            "You are the read-only Refactor Agent for Storydex. Use only read-only tools and do not modify project files."
-        } else {
-            "You are the fixture-scoped Refactor Agent for Storydex. Modify only paths authorized by the compiled turn capability."
-        },
+        "systemPrompt": system_prompt,
         "storydexSessionId": session_id,
         "permissionMode": payload.permission_mode,
         "basePermissionMode": payload.permission_mode,
@@ -2837,6 +3091,69 @@ pub(crate) fn with_event_identity(
     Value::Object(object)
 }
 
+pub(crate) async fn emit_git_commit_prompt(
+    state: &AppState,
+    workspace: &Path,
+    sender: &mpsc::Sender<String>,
+    trace_events: &mut Vec<(String, Value)>,
+    trace_id: &str,
+    session_id: &str,
+    pending_terminal: Option<(&str, &Value)>,
+) -> anyhow::Result<bool> {
+    if trace_events
+        .iter()
+        .any(|(name, _)| name == "GitCommitPrompt")
+    {
+        return Ok(false);
+    }
+    let mut observed = trace_events.clone();
+    if let Some((name, data)) = pending_terminal {
+        observed.push((name.to_owned(), data.clone()));
+    }
+    let ledger = change_ledger_from_events(workspace, session_id, trace_id, &observed);
+    let changed_files = ledger
+        .get("changedFiles")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let commit_hash = ledger
+        .get("commitHash")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if changed_files.is_empty() || !commit_hash.is_empty() {
+        return Ok(false);
+    }
+    state
+        .followup_store()
+        .pause(workspace, session_id, "git_commit_prompt")
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    let payload = with_event_identity(
+        "GitCommitPrompt",
+        json!({
+            "created": false,
+            "status": "pending",
+            "reason": "pending_commit",
+            "message": "检测到未提交修改，请选择创建本地版本或保留工作区修改。",
+            "workspaceRoot": workspace,
+            "changedFiles": changed_files,
+            "changedFileCount": changed_files.len(),
+            "added": 0,
+            "removed": 0,
+            "diffSource": "working_tree",
+            "commitHash": "",
+            "shortHash": "",
+        }),
+        trace_id,
+        session_id,
+    );
+    anyhow::ensure!(
+        send_event_value(sender, "GitCommitPrompt", payload.clone()).await,
+        "Agent SSE sender closed before Git commit prompt"
+    );
+    trace_events.push(("GitCommitPrompt".to_owned(), payload));
+    Ok(true)
+}
+
 async fn send_terminal_error(
     sender: &mpsc::Sender<String>,
     terminal_sent: &mut bool,
@@ -3014,31 +3331,106 @@ mod tests {
         let create: ChatStreamRequest = serde_json::from_value(json!({
             "prompt": "生成故事的下一章",
             "activeFile": "chapters/第1章 既有/001.md",
-            "storyGeneration": {"fragmentCount": 2}
+            "storyGeneration": {"fragmentCount": 2},
+            "capabilityMode": "workspace_write",
+            "writesAllowed": true
         }))
         .expect("create request");
-        assert_eq!(story_operation_type(&create, true), "create_new");
+        assert_eq!(story_operation_type(&create, true), Some("create_new"));
 
         let rewrite: ChatStreamRequest = serde_json::from_value(json!({
             "prompt": "请重写当前章节，保留既有事实",
             "activeFile": "chapters/第1章 既有/001.md",
-            "storyGeneration": {"fragmentCount": 2}
+            "storyGeneration": {"fragmentCount": 2},
+            "capabilityMode": "workspace_write",
+            "writesAllowed": true
         }))
         .expect("rewrite request");
-        assert_eq!(story_operation_type(&rewrite, true), "modify_existing");
+        assert_eq!(
+            story_operation_type(&rewrite, true),
+            Some("modify_existing")
+        );
         assert!(should_use_rust_modify_existing(&rewrite));
 
         let tool_contract: ChatStreamRequest = serde_json::from_value(json!({
             "prompt": "请重写当前章节，只调用一次 write_file",
             "activeFile": "chapters/fixture-story.md",
-            "storyGeneration": {"fragmentCount": 1}
+            "storyGeneration": {"fragmentCount": 1},
+            "capabilityMode": "workspace_write",
+            "writesAllowed": true
         }))
         .expect("tool request");
         assert_eq!(
             story_operation_type(&tool_contract, true),
-            "modify_existing"
+            Some("modify_existing")
         );
         assert!(!should_use_rust_modify_existing(&tool_contract));
+    }
+
+    #[test]
+    fn story_preferences_do_not_reclassify_general_or_read_only_turns() {
+        let directory = tempdir().expect("tempdir");
+        let workspace = directory.path();
+        let ordinary: ChatStreamRequest = serde_json::from_value(json!({
+            "prompt": "请解释这个错误的原因",
+            "storyGeneration": {"fragmentCount": 1, "chapterLengthTier": "short"}
+        }))
+        .expect("ordinary request");
+        assert_eq!(story_operation_type(&ordinary, false), None);
+        let contract = build_turn_contract(&ordinary, workspace).expect("general contract");
+        assert_eq!(contract["intentFrame"]["primary"], "general");
+        assert_eq!(contract["intentFrame"]["operationType"], "inquiry");
+
+        let generic_write: ChatStreamRequest = serde_json::from_value(json!({
+            "prompt": "请修改 src/lib.rs 中的错误处理",
+            "storyGeneration": {"fragmentCount": 1, "chapterLengthTier": "short"},
+            "capabilityMode": "workspace_write",
+            "writesAllowed": true
+        }))
+        .expect("generic write request");
+        assert_eq!(story_operation_type(&generic_write, false), None);
+        let contract =
+            build_turn_contract(&generic_write, workspace).expect("general write contract");
+        assert_eq!(contract["intentFrame"]["primary"], "general");
+        assert_eq!(contract["intentFrame"]["operationType"], "modify_existing");
+
+        let read_only_story: ChatStreamRequest = serde_json::from_value(json!({
+            "prompt": "只读分析，不要修改任何文件：请重写当前章节",
+            "activeFile": "chapters/fixture.md",
+            "storyGeneration": {"fragmentCount": 1},
+            "capabilityMode": "read_only",
+            "writesAllowed": false
+        }))
+        .expect("read-only story request");
+        assert_eq!(story_operation_type(&read_only_story, true), None);
+
+        for prompt in ["请整理章节目录", "请生成故事大纲"] {
+            let non_prose: ChatStreamRequest = serde_json::from_value(json!({
+                "prompt": prompt,
+                "activeFile": "chapters/fixture.md",
+                "storyGeneration": {"fragmentCount": 1},
+                "capabilityMode": "workspace_write",
+                "writesAllowed": true
+            }))
+            .expect("non-prose story asset request");
+            assert_eq!(story_operation_type(&non_prose, true), None, "{prompt}");
+        }
+
+        for prompt in [
+            "请解释如何修改当前章节",
+            "请说明怎样更新这段故事",
+            "帮我分析如何重写这一幕",
+        ] {
+            let advisory: ChatStreamRequest = serde_json::from_value(json!({
+                "prompt": prompt,
+                "activeFile": "chapters/fixture.md",
+                "storyGeneration": {"fragmentCount": 1},
+                "capabilityMode": "workspace_write",
+                "writesAllowed": true
+            }))
+            .expect("advisory story request");
+            assert_eq!(story_operation_type(&advisory, true), None, "{prompt}");
+        }
     }
 
     #[test]

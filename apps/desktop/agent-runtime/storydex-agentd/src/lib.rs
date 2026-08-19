@@ -44,6 +44,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
+mod agent_control;
 mod auth;
 pub(crate) mod chat;
 mod execution;
@@ -706,30 +707,6 @@ async fn shutdown(State(state): State<AppState>) -> Json<ApiEnvelope<ShutdownDat
     ))
 }
 
-async fn coomi_status(State(state): State<AppState>) -> Response {
-    let started_at = Instant::now();
-    let _task = state.tasks.begin();
-    match read_coomi_status(state.coomi_home()) {
-        Ok(data) => {
-            Json(
-                ApiEnvelope::success(data, started_at).with_audit(vec![serde_json::json!({
-                    "action": "read_coomi_status",
-                    "toolCount": 0,
-                })]),
-            )
-            .into_response()
-        }
-        Err(error) => {
-            tracing::error!(error = %error, "Storydex Coomi status could not be read");
-            error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "provider_config_unavailable",
-                "Storydex Coomi provider configuration is unavailable.",
-            )
-        }
-    }
-}
-
 async fn not_found() -> Response {
     error_response(StatusCode::NOT_FOUND, "not_found", "Route not found.")
 }
@@ -765,7 +742,53 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/auth/check-username/{username}",
             get(auth::check_username),
         )
-        .route("/api/v1/agent/coomi/status", get(coomi_status))
+        .route(
+            "/api/v1/agent/coomi/status",
+            get(agent_control::coomi_status),
+        )
+        .route("/api/v1/agent/chat", post(agent_control::chat))
+        .route(
+            "/api/v1/agent/clear-conversation",
+            post(agent_control::clear_conversation),
+        )
+        .route(
+            "/api/v1/agent/coomi/config",
+            get(agent_control::read_config).put(agent_control::update_config),
+        )
+        .route(
+            "/api/v1/agent/coomi/models",
+            post(agent_control::list_models),
+        )
+        .route(
+            "/api/v1/agent/coomi/permission/cycle",
+            post(agent_control::cycle_permission),
+        )
+        .route(
+            "/api/v1/agent/coomi/permission",
+            post(agent_control::set_permission),
+        )
+        .route(
+            "/api/v1/agent/coomi/plan-mode",
+            post(agent_control::set_plan_mode),
+        )
+        .route(
+            "/api/v1/agent/executions/rollback-latest",
+            post(agent_control::rollback_latest),
+        )
+        .route("/api/v1/agent/history", get(agent_control::history))
+        .route(
+            "/api/v1/agent/runs/{trace_id}/commit",
+            post(agent_control::commit_run),
+        )
+        .route(
+            "/api/v1/agent/runs/{trace_id}/diff",
+            get(agent_control::diff_run),
+        )
+        .route(
+            "/api/v1/agent/sessions/delete",
+            post(agent_control::delete_session),
+        )
+        .route("/api/v1/agent/sessions", get(agent_control::sessions))
         .route("/api/v1/sys/bootstrap", get(system::bootstrap))
         .route(
             "/api/v1/sys/ui-preferences",
@@ -1016,6 +1039,15 @@ mod tests {
             .replace(' ', "%20")
     }
 
+    fn test_contract_path(path: &Path) -> String {
+        let value = path.to_string_lossy();
+        value
+            .strip_prefix("\\\\?\\UNC\\")
+            .map(|rest| format!("\\\\{rest}"))
+            .or_else(|| value.strip_prefix("\\\\?\\").map(ToOwned::to_owned))
+            .unwrap_or_else(|| value.into_owned())
+    }
+
     fn followup_test_state(root: &Path) -> (AppState, PathBuf) {
         let workspace = root.join("workspace");
         let home = root.join("coomi-home");
@@ -1179,8 +1211,11 @@ mod tests {
 
     #[tokio::test]
     async fn coomi_status_reads_storydex_provider_config_without_exposing_key() {
-        let home = tempdir().expect("home");
-        let config = home.path().join("config").join("providers.json");
+        let root = tempdir().expect("root");
+        let workspace = root.path().join("workspace");
+        let home = root.path().join("home");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let config = home.join("config").join("providers.json");
         std::fs::create_dir_all(config.parent().expect("config parent")).expect("config dir");
         std::fs::write(
             &config,
@@ -1199,7 +1234,15 @@ mod tests {
             }"#,
         )
         .expect("provider config");
-        let app = router(AppState::with_home("test-token", home.path()).expect("state"));
+        let state = AppState::with_paths(
+            "test-token",
+            &home,
+            root.path().join("bridge"),
+            Some(workspace),
+            None,
+        )
+        .expect("state");
+        let app = router(state);
         let response = app
             .oneshot(
                 Request::builder()
@@ -1215,6 +1258,9 @@ mod tests {
         assert_eq!(body["data"]["providerId"], "OPENCODE");
         assert_eq!(body["data"]["model"], "deepseek-v4-flash");
         assert_eq!(body["data"]["providerType"], "openai_compatible");
+        assert_eq!(body["data"]["permissionMode"], "ask_approval");
+        assert_eq!(body["data"]["planMode"], false);
+        assert_eq!(body["data"]["usedTokens"], 0);
         assert_eq!(body["data"]["reasoningCapability"]["fallbackReason"], "");
         assert_eq!(body["data"]["reasoningRequestPlan"]["fallbackReason"], "");
         assert!(!body.to_string().contains("must-not-leak"));
@@ -1223,8 +1269,20 @@ mod tests {
 
     #[tokio::test]
     async fn coomi_status_reports_missing_config_without_fallback() {
-        let home = tempdir().expect("home");
-        let app = router(AppState::with_home("test-token", home.path()).expect("state"));
+        let root = tempdir().expect("root");
+        let workspace = root.path().join("workspace");
+        let home = root.path().join("home");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::create_dir_all(&home).expect("home");
+        let state = AppState::with_paths(
+            "test-token",
+            home,
+            root.path().join("bridge"),
+            Some(workspace),
+            None,
+        )
+        .expect("state");
+        let app = router(state);
         let response = app
             .oneshot(
                 Request::builder()
@@ -1239,6 +1297,115 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(body["ok"], false);
         assert_eq!(body["error"]["code"], "provider_config_unavailable");
+    }
+
+    #[tokio::test]
+    async fn coomi_status_overlays_session_plan_and_context_without_fallback() {
+        let root = tempdir().expect("root");
+        let workspace = root.path().join("workspace");
+        let home = root.path().join("home");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::create_dir_all(home.join("config")).expect("provider config directory");
+        std::fs::write(
+            home.join("config/providers.json"),
+            r#"{
+                "version": 1,
+                "active": "OPENCODE",
+                "providers": {
+                    "OPENCODE": {
+                        "type": "openai_compatible",
+                        "display": "OpenCode",
+                        "api_key": "secret",
+                        "base_url": "https://example.invalid/v1",
+                        "model": "deepseek-v4-flash",
+                        "context_window": 100000,
+                        "auto_compact_token_limit": 80000
+                    }
+                }
+            }"#,
+        )
+        .expect("provider config");
+        let workspace = workspace.canonicalize().expect("canonical workspace");
+        let state = AppState::with_paths(
+            "test-token",
+            &home,
+            root.path().join("bridge"),
+            Some(workspace.clone()),
+            None,
+        )
+        .expect("state");
+        let session_id = "status-session";
+        let mut runtime_session =
+            coomi_engine::Session::new("OPENCODE", "deepseek-v4-flash", workspace.clone());
+        runtime_session.context.estimated_active_tokens = 25_000;
+        runtime_session.usage.input_tokens = 1_000;
+        runtime_session.usage.output_tokens = 200;
+        let runtime_path = home
+            .join("sessions")
+            .join(format!("{}.json", runtime_session.id));
+        std::fs::create_dir_all(runtime_path.parent().expect("session parent")).expect("sessions");
+        std::fs::write(
+            &runtime_path,
+            serde_json::to_vec_pretty(&runtime_session).expect("session bytes"),
+        )
+        .expect("session");
+        let binding_path = chat::session_binding_path(&workspace, session_id);
+        std::fs::create_dir_all(binding_path.parent().expect("binding parent"))
+            .expect("binding directory");
+        std::fs::write(
+            binding_path,
+            serde_json::to_vec_pretty(&json!({
+                "workspaceRoot": test_contract_path(&workspace),
+                "storydexSessionId": session_id,
+                "runtimeSessionId": runtime_session.id,
+                "sessionPath": test_contract_path(&runtime_path),
+            }))
+            .expect("binding bytes"),
+        )
+        .expect("binding");
+        std::fs::create_dir_all(root.path().join("config")).expect("control config directory");
+        std::fs::write(
+            root.path().join("config/coomi-runtime.json"),
+            serde_json::to_vec_pretty(&json!({
+                "permissionMode": "full_access",
+                "planModes": {
+                    format!("{}::{session_id}", workspace.display()): true
+                }
+            }))
+            .expect("control bytes"),
+        )
+        .expect("control config");
+
+        let response = router(state.clone())
+            .oneshot(protected_get_request(&format!(
+                "/api/v1/agent/coomi/status?sessionId={session_id}"
+            )))
+            .await
+            .expect("status response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["data"]["permissionMode"], "plan_mode");
+        assert_eq!(body["data"]["permissionLabel"], "Plan mode");
+        assert_eq!(body["data"]["planMode"], true);
+        assert_eq!(body["data"]["contextWindow"], 100000);
+        assert_eq!(body["data"]["usedTokens"], 25000);
+        assert_eq!(body["data"]["usageRatio"], 0.25);
+        assert_eq!(body["data"]["cumulativeTokens"], 1200);
+        assert_eq!(body["data"]["compactThreshold"], 80000);
+        assert_eq!(body["data"]["warningThreshold"], 60000);
+
+        std::fs::write(&runtime_path, "{").expect("corrupt session");
+        let response = router(state)
+            .oneshot(protected_get_request(&format!(
+                "/api/v1/agent/coomi/status?sessionId={session_id}"
+            )))
+            .await
+            .expect("corrupt status response");
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            response_json(response).await["error"]["code"],
+            "session_unavailable"
+        );
     }
 
     #[tokio::test]
@@ -2650,6 +2817,222 @@ mod tests {
         assert_eq!(
             response_json(response).await["error"]["code"],
             "workspace_outside_refactor_root"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_run_diff_and_commit_trust_only_record_workspace_and_change_ledger() {
+        let root = tempdir().expect("root");
+        let workspace = root.path().join("workspace");
+        let other_workspace = root.path().join("other-workspace");
+        let home = root.path().join("home");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::create_dir_all(&other_workspace).expect("other workspace");
+        std::fs::create_dir_all(&home).expect("home");
+        let workspace = workspace.canonicalize().expect("canonical workspace");
+        let other_workspace = other_workspace
+            .canonicalize()
+            .expect("canonical other workspace");
+        let state = AppState::with_paths(
+            "test-token",
+            home,
+            root.path().join("bridge"),
+            Some(root.path().to_path_buf()),
+            None,
+        )
+        .expect("state");
+        state
+            .select_workspace(workspace.clone())
+            .expect("select workspace");
+        let git = coomi_services::StorydexGit;
+        git.initialize(&workspace).expect("initialize git");
+        std::fs::write(workspace.join("initial.md"), "initial\n").expect("initial file");
+        git.commit_paths(&workspace, ["initial.md"], "初始版本")
+            .expect("initial commit");
+        std::fs::write(workspace.join("ledger.md"), "ledger change\n").expect("ledger file");
+        std::fs::write(workspace.join("unrelated.md"), "unrelated change\n")
+            .expect("unrelated file");
+        replacement::persist_execution_record_with_events(replacement::ExecutionRecordInput {
+            workspace: &workspace,
+            session_id: "session",
+            trace_id: "trace-ledger",
+            prompt: "update ledger",
+            status: "completed",
+            events: &[
+                (
+                    "ToolDone".to_owned(),
+                    json!({
+                        "tool_name": "write_file",
+                        "tool_call_id": "call-1",
+                        "is_error": false,
+                        "arguments": {"path": "ledger.md"}
+                    }),
+                ),
+                ("AgentCompleted".to_owned(), json!({"status": "success"})),
+            ],
+            reply: "done",
+            provider_id: "provider",
+            model: "model",
+        })
+        .expect("persist run");
+
+        let response = router(state.clone())
+            .oneshot(protected_get_request(
+                "/api/v1/agent/runs/trace-ledger/diff?sessionId=session&changedFiles=unrelated.md&commitHash=deadbeef",
+            ))
+            .await
+            .expect("diff response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["data"]["changedFiles"], json!(["ledger.md"]));
+        assert_eq!(body["data"]["changedFileCount"], 1);
+        assert_eq!(body["data"]["diffSource"], "working_tree");
+        assert_eq!(body["data"]["files"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["data"]["files"][0]["relativePath"], "ledger.md");
+
+        assert!(
+            std::process::Command::new("git")
+                .args(["add", "--", "unrelated.md"])
+                .current_dir(&workspace)
+                .status()
+                .expect("stage unrelated file")
+                .success()
+        );
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/agent/runs/trace-ledger/commit?sessionId=session",
+                json!({"mode": "manual", "message": "提交账本文件", "sessionId": "session"}),
+            ))
+            .await
+            .expect("staged conflict response");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(response).await["error"]["code"],
+            "staged_changes_outside_run"
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args(["reset", "--", "unrelated.md"])
+                .current_dir(&workspace)
+                .status()
+                .expect("unstage unrelated file")
+                .success()
+        );
+
+        let (control_sender, _control_receiver) = tokio::sync::mpsc::channel(1);
+        let active_guard = state
+            .execution_registry()
+            .register(
+                "active-trace".to_owned(),
+                "session".to_owned(),
+                workspace.clone(),
+                execution::ExecutionCancellation::default(),
+                control_sender,
+            )
+            .expect("active execution");
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/agent/runs/trace-ledger/commit?sessionId=session",
+                json!({"mode": "manual", "message": "提交账本文件", "sessionId": "session"}),
+            ))
+            .await
+            .expect("active commit response");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(response).await["error"]["code"],
+            "execution_running"
+        );
+        drop(active_guard);
+
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/agent/runs/trace-ledger/commit?sessionId=session",
+                json!({"mode": "manual", "message": "提交账本文件", "sessionId": "session"}),
+            ))
+            .await
+            .expect("commit response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let committed = response_json(response).await;
+        assert_eq!(committed["data"]["created"], true);
+        assert_eq!(committed["data"]["changedFiles"], json!(["ledger.md"]));
+        let commit_hash = committed["data"]["commitHash"]
+            .as_str()
+            .expect("commit hash")
+            .to_owned();
+        assert!(!commit_hash.is_empty());
+        let summary = git.summary(&workspace).expect("git summary");
+        assert!(
+            summary
+                .changed_paths
+                .iter()
+                .any(|path| path == "unrelated.md")
+        );
+        assert!(!summary.changed_paths.iter().any(|path| path == "ledger.md"));
+        let record = replacement::read_record(&workspace, "session", "trace-ledger")
+            .expect("read committed run")
+            .expect("committed run");
+        assert_eq!(record["changeLedger"]["commitHash"], commit_hash);
+        assert_eq!(record["changeLedger"]["diffSource"], "commit");
+
+        let response = router(state.clone())
+            .oneshot(protected_get_request(
+                "/api/v1/agent/runs/missing/diff?sessionId=session&changedFiles=unrelated.md",
+            ))
+            .await
+            .expect("missing diff response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response_json(response).await["error"]["code"],
+            "run_not_found"
+        );
+
+        replacement::persist_trace_record(
+            &workspace,
+            "session",
+            &json!({
+                "traceId": "workspace-mismatch",
+                "sessionId": "session",
+                "workspaceRoot": other_workspace,
+                "status": "completed",
+                "events": [],
+                "changeLedger": {
+                    "traceId": "workspace-mismatch",
+                    "sessionId": "session",
+                    "workspaceRoot": other_workspace,
+                    "changedFiles": [],
+                    "changedFileCount": 0,
+                    "commitHash": ""
+                },
+                "createdAt": "2026-01-01T00:00:00Z",
+                "updatedAt": "2026-01-01T00:00:00Z"
+            }),
+        )
+        .expect("mismatch record");
+        let response = router(state.clone())
+            .oneshot(protected_get_request(
+                "/api/v1/agent/runs/workspace-mismatch/diff?sessionId=session",
+            ))
+            .await
+            .expect("mismatch response");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(response).await["error"]["code"],
+            "run_workspace_mismatch"
+        );
+
+        let corrupt_directory = replacement::session_directory(&workspace, "corrupt");
+        std::fs::create_dir_all(&corrupt_directory).expect("corrupt directory");
+        std::fs::write(corrupt_directory.join("bad.json"), "{").expect("corrupt record");
+        let response = router(state)
+            .oneshot(protected_get_request(
+                "/api/v1/agent/runs/anything/diff?sessionId=corrupt",
+            ))
+            .await
+            .expect("corrupt history response");
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            response_json(response).await["error"]["code"],
+            "history_unavailable"
         );
     }
 

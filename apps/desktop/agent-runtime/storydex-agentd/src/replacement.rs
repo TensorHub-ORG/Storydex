@@ -1,7 +1,8 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -58,12 +59,19 @@ impl ReplacementTransaction {
         let session_id = normalized_session_id(session_id);
         let expected_trace_id = expected_trace_id.trim().to_owned();
         let replacement_trace_id = replacement_trace_id.trim().to_owned();
-        let latest = latest_record(&workspace, &session_id).ok_or_else(|| {
-            ReplacementError::new(
-                "replacement_target_missing",
-                "There is no completed execution to replace.",
-            )
-        })?;
+        let latest = latest_record(&workspace, &session_id)
+            .map_err(|error| {
+                ReplacementError::new(
+                    "replacement_context_unavailable",
+                    format!("Unable to read the latest execution: {error:#}"),
+                )
+            })?
+            .ok_or_else(|| {
+                ReplacementError::new(
+                    "replacement_target_missing",
+                    "There is no completed execution to replace.",
+                )
+            })?;
         let latest_trace_id = latest
             .get("traceId")
             .and_then(Value::as_str)
@@ -355,6 +363,7 @@ pub fn persist_execution_record_with_events(input: ExecutionRecordInput<'_>) -> 
             })
         })
         .collect::<Vec<_>>();
+    let change_ledger = change_ledger_from_events(workspace, session_id, trace_id, events);
     let record = json!({
         "traceId": trace_id,
         "sessionId": normalized_session_id(session_id),
@@ -367,6 +376,7 @@ pub fn persist_execution_record_with_events(input: ExecutionRecordInput<'_>) -> 
         "llmProvider": provider_id,
         "llmModel": model,
         "events": trace_events,
+        "changeLedger": change_ledger,
         "tasks": [],
         "audit": [],
         "createdAt": now,
@@ -375,7 +385,191 @@ pub fn persist_execution_record_with_events(input: ExecutionRecordInput<'_>) -> 
     persist_trace_record(workspace, session_id, &record)
 }
 
-fn normalized_session_id(value: &str) -> String {
+pub(crate) fn change_ledger_from_events(
+    workspace: &Path,
+    session_id: &str,
+    trace_id: &str,
+    events: &[(String, Value)],
+) -> Value {
+    let mut changed_files = BTreeSet::new();
+    let mut commit_hash = String::new();
+    for (event_name, data) in events {
+        collect_string_array_paths(workspace, data.get("writtenPaths"), &mut changed_files);
+        collect_string_array_paths(
+            workspace,
+            data.get("authoritativeFragmentPaths"),
+            &mut changed_files,
+        );
+        if event_name == "ToolDone"
+            && data.get("is_error").and_then(Value::as_bool) != Some(true)
+            && is_write_tool(
+                data.get("tool_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            )
+            && let Some(arguments) = data.get("arguments")
+        {
+            collect_argument_paths(workspace, arguments, "", 0, &mut changed_files);
+        }
+        if matches!(
+            event_name.as_str(),
+            "GitAutoCommit" | "GitCommitPrompt" | "GitCommitResult"
+        ) {
+            collect_string_array_paths(workspace, data.get("changedFiles"), &mut changed_files);
+            if let Some(value) = data
+                .get("commitHash")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                commit_hash = value.to_owned();
+            }
+        }
+    }
+    let changed_files = changed_files.into_iter().collect::<Vec<_>>();
+    json!({
+        "traceId": trace_id,
+        "sessionId": normalized_session_id(session_id),
+        "workspaceRoot": workspace.to_string_lossy(),
+        "changedFiles": changed_files,
+        "changedFileCount": changed_files.len(),
+        "added": 0,
+        "removed": 0,
+        "diffSource": if commit_hash.is_empty() {
+            if changed_files.is_empty() { "" } else { "working_tree" }
+        } else {
+            "commit"
+        },
+        "commitHash": commit_hash,
+        "shortHash": commit_hash.chars().take(12).collect::<String>(),
+        "updatedAt": Utc::now().to_rfc3339(),
+    })
+}
+
+fn collect_string_array_paths(
+    workspace: &Path,
+    value: Option<&Value>,
+    output: &mut BTreeSet<String>,
+) {
+    for raw in value.and_then(Value::as_array).into_iter().flatten() {
+        if let Some(path) = raw
+            .as_str()
+            .and_then(|value| normalize_ledger_path(workspace, value))
+        {
+            output.insert(path);
+        }
+    }
+}
+
+fn collect_argument_paths(
+    workspace: &Path,
+    value: &Value,
+    key: &str,
+    depth: usize,
+    output: &mut BTreeSet<String>,
+) {
+    if depth > 6 {
+        return;
+    }
+    match value {
+        Value::String(raw) if is_path_key(key) => {
+            if let Some(path) = normalize_ledger_path(workspace, raw) {
+                output.insert(path);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_argument_paths(workspace, item, key, depth + 1, output);
+            }
+        }
+        Value::Object(object) => {
+            for (child_key, child_value) in object {
+                collect_argument_paths(workspace, child_value, child_key, depth + 1, output);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_path_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|character| !matches!(character, '_' | '-' | ' '))
+        .collect::<String>()
+        .to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "path"
+            | "paths"
+            | "file"
+            | "files"
+            | "filename"
+            | "filepath"
+            | "relativepath"
+            | "target"
+            | "targetfile"
+            | "segmentpath"
+            | "sourcepath"
+            | "outputpath"
+    ) || normalized.ends_with("path")
+        || normalized.ends_with("paths")
+}
+
+fn is_write_tool(name: &str) -> bool {
+    let normalized = name
+        .chars()
+        .filter(|character| !matches!(character, '_' | '-' | ' '))
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if normalized.contains("versionstatus") || normalized.contains("runtimepresetstatus") {
+        return false;
+    }
+    [
+        "write",
+        "edit",
+        "patch",
+        "save",
+        "create",
+        "delete",
+        "move",
+        "rename",
+        "mkdir",
+        "applystoryincrement",
+        "syncwiki",
+    ]
+    .iter()
+    .any(|signal| normalized.contains(signal))
+}
+
+pub(crate) fn normalize_ledger_path(workspace: &Path, raw: &str) -> Option<String> {
+    let raw = raw.trim().trim_matches(['\'', '"', '`']);
+    if raw.is_empty() || raw.contains(['\r', '\n', '\0']) {
+        return None;
+    }
+    let mut candidate = PathBuf::from(raw);
+    if candidate.is_absolute() {
+        candidate = candidate.strip_prefix(workspace).ok()?.to_path_buf();
+    }
+    let mut parts = Vec::new();
+    for component in candidate.components() {
+        match component {
+            std::path::Component::Normal(part) => {
+                let part = part.to_str()?;
+                if part.is_empty() {
+                    return None;
+                }
+                parts.push(part.to_owned());
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir
+            | std::path::Component::RootDir
+            | std::path::Component::Prefix(_) => return None,
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+pub(crate) fn normalized_session_id(value: &str) -> String {
     let value = value.trim();
     if value.is_empty() {
         "default".to_owned()
@@ -384,98 +578,332 @@ fn normalized_session_id(value: &str) -> String {
     }
 }
 
-fn session_directory(workspace: &Path, session_id: &str) -> PathBuf {
-    let normalized = normalized_session_id(session_id);
-    let safe = normalized
-        .chars()
-        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-'));
-    let directory = if safe {
-        normalized
+fn safe_component(value: &str) -> String {
+    let safe = !matches!(value, "." | "..")
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+        });
+    if safe {
+        value.to_owned()
     } else {
-        format!("sha256-{:x}", Sha256::digest(normalized.as_bytes()))
+        format!("sha256-{:x}", Sha256::digest(value.as_bytes()))
+    }
+}
+
+fn sessions_root(workspace: &Path) -> PathBuf {
+    workspace.join(".storydex").join(".agent").join("sessions")
+}
+
+pub(crate) fn session_directory(workspace: &Path, session_id: &str) -> PathBuf {
+    let normalized = normalized_session_id(session_id);
+    sessions_root(workspace).join(safe_component(&normalized))
+}
+
+pub(crate) fn trace_path(workspace: &Path, session_id: &str, trace_id: &str) -> PathBuf {
+    session_directory(workspace, session_id).join(format!("{}.json", safe_component(trace_id)))
+}
+
+fn record_sort_key(record: &Value) -> (&str, &str, &str) {
+    (
+        record
+            .get("updatedAt")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        record
+            .get("createdAt")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        record
+            .get("traceId")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    )
+}
+
+fn read_record_file(path: &Path, expected_session_id: Option<&str>) -> Result<Value> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("unable to inspect trace record {}", path.display()))?;
+    anyhow::ensure!(
+        !metadata.file_type().is_symlink(),
+        "trace record cannot be a symbolic link: {}",
+        path.display()
+    );
+    anyhow::ensure!(
+        metadata.is_file(),
+        "trace record is not a file: {}",
+        path.display()
+    );
+    let bytes = fs::read(path)
+        .with_context(|| format!("unable to read trace record {}", path.display()))?;
+    let value: Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("invalid trace record JSON {}", path.display()))?;
+    anyhow::ensure!(
+        value.is_object(),
+        "trace record must be a JSON object: {}",
+        path.display()
+    );
+    let trace_id = value
+        .get("traceId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    anyhow::ensure!(
+        !trace_id.is_empty(),
+        "trace record has no traceId: {}",
+        path.display()
+    );
+    let session_id = value
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    anyhow::ensure!(
+        !session_id.is_empty(),
+        "trace record has no sessionId: {}",
+        path.display()
+    );
+    if let Some(expected) = expected_session_id {
+        anyhow::ensure!(
+            session_id == normalized_session_id(expected),
+            "trace record session mismatch in {}",
+            path.display()
+        );
+    }
+    Ok(value)
+}
+
+fn list_records_in_directory(
+    directory: &Path,
+    expected_session_id: Option<&str>,
+) -> Result<Vec<Value>> {
+    if !directory.exists() {
+        return Ok(Vec::new());
+    }
+    let metadata = fs::symlink_metadata(directory).with_context(|| {
+        format!(
+            "unable to inspect session directory {}",
+            directory.display()
+        )
+    })?;
+    anyhow::ensure!(
+        !metadata.file_type().is_symlink() && metadata.is_dir(),
+        "session history path is not a regular directory: {}",
+        directory.display()
+    );
+    let mut records = Vec::new();
+    for entry in fs::read_dir(directory)
+        .with_context(|| format!("unable to read session directory {}", directory.display()))?
+    {
+        let entry = entry.with_context(|| {
+            format!(
+                "unable to enumerate session directory {}",
+                directory.display()
+            )
+        })?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json")
+            || path.file_name().and_then(|value| value.to_str()) == Some("_session.json")
+        {
+            continue;
+        }
+        records.push(read_record_file(&path, expected_session_id)?);
+    }
+    records.sort_by(|left, right| record_sort_key(right).cmp(&record_sort_key(left)));
+    Ok(records)
+}
+
+pub(crate) fn list_records(workspace: &Path, session_id: &str) -> Result<Vec<Value>> {
+    list_records_in_directory(&session_directory(workspace, session_id), Some(session_id))
+}
+
+pub(crate) fn latest_record(workspace: &Path, session_id: &str) -> Result<Option<Value>> {
+    Ok(list_records(workspace, session_id)?.into_iter().next())
+}
+
+pub(crate) fn read_record(
+    workspace: &Path,
+    session_id: &str,
+    trace_id: &str,
+) -> Result<Option<Value>> {
+    let trace_id = trace_id.trim();
+    if trace_id.is_empty() {
+        return Ok(None);
+    }
+    Ok(list_records(workspace, session_id)?
+        .into_iter()
+        .find(|record| record.get("traceId").and_then(Value::as_str) == Some(trace_id)))
+}
+
+pub(crate) fn delete_record(workspace: &Path, session_id: &str, trace_id: &str) -> Result<bool> {
+    let Some(path) = existing_trace_path(workspace, session_id, trace_id)? else {
+        return Ok(false);
     };
-    workspace
-        .join(".storydex")
-        .join(".agent")
-        .join("sessions")
-        .join(directory)
+    fs::remove_file(&path)
+        .with_context(|| format!("unable to remove trace record {}", path.display()))?;
+    Ok(true)
 }
 
-fn trace_path(workspace: &Path, session_id: &str, trace_id: &str) -> PathBuf {
-    session_directory(workspace, session_id).join(format!("{trace_id}.json"))
-}
-
-fn latest_record(workspace: &Path, session_id: &str) -> Option<Value> {
+pub(crate) fn clear_records(workspace: &Path, session_id: &str) -> Result<usize> {
     let directory = session_directory(workspace, session_id);
-    let entries = fs::read_dir(directory).ok()?;
-    let mut records = entries
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.path().extension().and_then(|value| value.to_str()) == Some("json"))
-        .filter_map(|entry| {
-            let value: Value = serde_json::from_slice(&fs::read(entry.path()).ok()?).ok()?;
-            if value.get("sessionId").and_then(Value::as_str)
-                == Some(normalized_session_id(session_id).as_str())
-            {
-                Some(value)
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
-    records.sort_by(|left, right| {
-        let left_key = (
-            left.get("updatedAt")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-            left.get("createdAt")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
+    let records = list_records(workspace, session_id)?;
+    for record in &records {
+        let trace_id = record
+            .get("traceId")
+            .and_then(Value::as_str)
+            .context("validated trace record lost traceId")?;
+        anyhow::ensure!(
+            delete_record(workspace, session_id, trace_id)?,
+            "trace record disappeared while clearing session"
         );
-        let right_key = (
-            right
-                .get("updatedAt")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-            right
-                .get("createdAt")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-        );
-        left_key.cmp(&right_key)
-    });
-    records.pop()
+    }
+    if directory.exists() {
+        let marker = directory.join("_session.json");
+        let now = Utc::now().to_rfc3339();
+        atomic_write(
+            &marker,
+            &serde_json::to_vec_pretty(&json!({
+                "sessionId": normalized_session_id(session_id),
+                "firstPrompt": "",
+                "createdAt": now,
+                "updatedAt": now,
+                "traceCount": 0,
+                "clearedAt": now,
+            }))?,
+        )?;
+    }
+    Ok(records.len())
 }
 
-fn persist_trace_record(workspace: &Path, session_id: &str, record: &Value) -> Result<()> {
+pub(crate) fn delete_session(workspace: &Path, session_id: &str) -> Result<usize> {
+    let directory = session_directory(workspace, session_id);
+    if !directory.exists() {
+        return Ok(0);
+    }
+    let root = sessions_root(workspace);
+    anyhow::ensure!(
+        directory.starts_with(&root) && directory != root,
+        "unsafe session delete target"
+    );
+    let record_count = list_records(workspace, session_id)?.len();
+    fs::remove_dir_all(&directory)
+        .with_context(|| format!("unable to remove session directory {}", directory.display()))?;
+    Ok(record_count.max(1))
+}
+
+pub(crate) fn list_session_summaries(workspace: &Path) -> Result<Vec<Value>> {
+    let root = sessions_root(workspace);
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut summaries = Vec::new();
+    for entry in fs::read_dir(&root)
+        .with_context(|| format!("unable to read sessions root {}", root.display()))?
+    {
+        let entry = entry
+            .with_context(|| format!("unable to enumerate sessions root {}", root.display()))?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("unable to inspect session entry {}", path.display()))?;
+        anyhow::ensure!(
+            !metadata.file_type().is_symlink(),
+            "session entry cannot be a symbolic link: {}",
+            path.display()
+        );
+        if !metadata.is_dir() {
+            continue;
+        }
+        let records = list_records_in_directory(&path, None)?;
+        if let Some(first) = records.first() {
+            let session_id = first
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .context("validated session record lost sessionId")?;
+            anyhow::ensure!(
+                records
+                    .iter()
+                    .all(|record| record.get("sessionId").and_then(Value::as_str)
+                        == Some(session_id)),
+                "session directory contains records for multiple sessions: {}",
+                path.display()
+            );
+            let oldest = records
+                .last()
+                .context("non-empty records have an oldest entry")?;
+            summaries.push(json!({
+                "sessionId": session_id,
+                "firstPrompt": oldest.get("prompt").and_then(Value::as_str).unwrap_or_default(),
+                "createdAt": oldest.get("createdAt").and_then(Value::as_str).unwrap_or_default(),
+                "updatedAt": first.get("updatedAt").and_then(Value::as_str).unwrap_or_default(),
+                "traceCount": records.len(),
+            }));
+            continue;
+        }
+        let marker = path.join("_session.json");
+        if marker.exists() {
+            let value: Value =
+                serde_json::from_slice(&fs::read(&marker).with_context(|| {
+                    format!("unable to read session marker {}", marker.display())
+                })?)
+                .with_context(|| format!("invalid session marker JSON {}", marker.display()))?;
+            anyhow::ensure!(
+                value.is_object(),
+                "session marker must be an object: {}",
+                marker.display()
+            );
+            summaries.push(value);
+        }
+    }
+    summaries.sort_by(|left, right| record_sort_key(right).cmp(&record_sort_key(left)));
+    Ok(summaries)
+}
+
+pub(crate) fn persist_trace_record(
+    workspace: &Path,
+    session_id: &str,
+    record: &Value,
+) -> Result<()> {
     let trace_id = record
         .get("traceId")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| anyhow::anyhow!("trace record has no traceId"))?;
-    let path = existing_trace_path(workspace, session_id, trace_id)
+    let path = existing_trace_path(workspace, session_id, trace_id)?
         .unwrap_or_else(|| trace_path(workspace, session_id, trace_id));
     let bytes = serde_json::to_vec_pretty(record)?;
     atomic_write(&path, &bytes)
 }
 
-fn existing_trace_path(workspace: &Path, session_id: &str, trace_id: &str) -> Option<PathBuf> {
+fn existing_trace_path(
+    workspace: &Path,
+    session_id: &str,
+    trace_id: &str,
+) -> Result<Option<PathBuf>> {
     let directory = session_directory(workspace, session_id);
-    let entries = fs::read_dir(directory).ok()?;
-    entries
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
-        .find(|path| {
-            fs::read(path)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-                .and_then(|value| {
-                    value
-                        .get("traceId")
-                        .and_then(Value::as_str)
-                        .map(|value| value == trace_id)
-                })
-                .unwrap_or(false)
-        })
+    if !directory.exists() {
+        return Ok(None);
+    }
+    for entry in fs::read_dir(&directory)
+        .with_context(|| format!("unable to read session directory {}", directory.display()))?
+    {
+        let path = entry
+            .with_context(|| {
+                format!(
+                    "unable to enumerate session directory {}",
+                    directory.display()
+                )
+            })?
+            .path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json")
+            || path.file_name().and_then(|value| value.to_str()) == Some("_session.json")
+        {
+            continue;
+        }
+        let value = read_record_file(&path, Some(session_id))?;
+        if value.get("traceId").and_then(Value::as_str) == Some(trace_id) {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -609,5 +1037,75 @@ mod tests {
         .expect("restored record");
         assert_eq!(restored["status"], "completed");
         assert_eq!(restored["replacement"]["status"], "restored");
+    }
+
+    #[test]
+    fn persisted_change_ledger_uses_only_server_observed_safe_write_paths() {
+        let root = tempfile::tempdir().expect("workspace");
+        let workspace = root.path().canonicalize().expect("canonical workspace");
+        let absolute = workspace.join("chapters/002.md");
+        let events = vec![
+            (
+                "ToolDone".to_owned(),
+                json!({
+                    "tool_name": "write_file",
+                    "is_error": false,
+                    "arguments": {
+                        "path": "chapters/001.md",
+                        "backupPath": "../escape.md",
+                        "nested": {"output_path": absolute},
+                    }
+                }),
+            ),
+            (
+                "ToolDone".to_owned(),
+                json!({
+                    "tool_name": "read_file",
+                    "is_error": false,
+                    "arguments": {"path": "private/read-only.md"}
+                }),
+            ),
+            (
+                "ToolDone".to_owned(),
+                json!({
+                    "tool_name": "edit_file",
+                    "is_error": true,
+                    "arguments": {"path": "failed.md"}
+                }),
+            ),
+            (
+                "AgentCompleted".to_owned(),
+                json!({"writtenPaths": ["chapters/003.md", "../../outside.md"]}),
+            ),
+            (
+                "GitCommitResult".to_owned(),
+                json!({
+                    "changedFiles": ["chapters/001.md", "chapters/003.md"],
+                    "commitHash": "abcdef1234567890"
+                }),
+            ),
+        ];
+        persist_execution_record_with_events(ExecutionRecordInput {
+            workspace: &workspace,
+            session_id: "session",
+            trace_id: "trace",
+            prompt: "write",
+            status: "completed",
+            events: &events,
+            reply: "done",
+            provider_id: "provider",
+            model: "model",
+        })
+        .expect("persist record");
+        let record = read_record(&workspace, "session", "trace")
+            .expect("read record")
+            .expect("record");
+        assert_eq!(
+            record["changeLedger"]["changedFiles"],
+            json!(["chapters/001.md", "chapters/002.md", "chapters/003.md"])
+        );
+        assert_eq!(record["changeLedger"]["changedFileCount"], 3);
+        assert_eq!(record["changeLedger"]["commitHash"], "abcdef1234567890");
+        assert_eq!(record["changeLedger"]["diffSource"], "commit");
     }
 }
