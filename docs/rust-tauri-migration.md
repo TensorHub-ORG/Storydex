@@ -102,23 +102,26 @@
 - `apps/desktop/agent-runtime/deny.toml` 只使用官方 `https://github.com/RustSec/advisory-db`，许可证采用显式 allowlist，source 只允许 crates.io；没有 advisory ignore。本次本地数据库 revision 为 `69f93e1d081d8b6fbee010e48f0b5e0d13661415`。
 - `ratatui` 从 `0.29` 升为 `0.30.2`，依赖图中的 `lru` 从有漏洞的 `0.12.5` 收敛为 `0.18.2`。当前 advisories/licenses/sources 均通过；Development CI 与完整质量门禁均重新运行固定审计，不能以一次本地成功永久豁免后续依赖变化。
 
-### 0.6 剩余工作流与集成顺序
+### 0.6 剩余工作流与加速集成边界
 
-以下是剩余工程工作流，不是要求逐项等待人工确认的微型切片。能独立验证的部分应并行开发，在依赖点按顺序集成。完成其中一个切片、一次提交或一次 CI 只表示该交付块关闭，不是暂停整个重构的理由；同一对话应继续领取下一块，直到满足 12.0 的全部完成定义或出现无法自行消除的真实外部阻塞：
+剩余范围必须由当前代码、真实消费者和已有证据共同决定，不能直接把历史计划中的缺口描述展开成任务数量。当前盘点出的 130 个 Python 路由和 78 个前端消费签名只是发现索引与上界，不表示还需要逐项迁移 208 个实现：无消费者的历史接口、重复语义、仅供 Python 内部调用的入口和已由 Rust 共享服务覆盖的签名，均不得被重复计为待办。
 
-1. **故事写入闭环：** Rust 单片段 `create_new` short/medium/long 以及 `modify_existing` 单/多片段已完成隔离 Replay 的 Provider completion、Unicode 字数/质量门禁、路径规划、baseline、原子写入、调用计数、故事事件顺序、唯一终态和磁盘差分；继续收紧跨端 Provider 失败/取消/写入故障矩阵、baseline TOCTOU 窗口和 live 主链路证据，并接入后续 Knowledge/WIKI/Git 闭环。
-2. **知识与 Git 闭环：** 迁移 Python-owned WIKI/Knowledge Projection、canonical checksum、领域事件、Git/ChangeSet/回滚和收尾行为；现有 5 个 Python-only WIKI 路径必须转为显式 parity，不能加入 ignore。
-3. **完整后端闭环：** 以实际前端/桌面消费者和路由 manifest 为索引，迁移配置、项目、预设、搜索、索引、诊断、文件和其余公开 API；每个写路径都保留磁盘与 Git 差分证据。
-4. **运行时闭环：** 在 release 构建调查并关闭 `componentInit/sessionInit` 长尾，补齐崩溃恢复、进程树清理、端口/认证、日志、升级和回滚。
-5. **桌面闭环：** 先完成独立 Electron Rust Beta 集成证据，再完成 Tauri 2 sidecar、窄桌面适配层、最小 capabilities、签名更新和打包候选；两者可以提前并行搭骨架，但最终集成必须使用同一完整 Rust 后端。
-6. **旧运行时退出准备：** 目标 Rust/Tauri 候选不得携带 Python/FastAPI/Uvicorn 或 Electron/Node 运行依赖；Stable 参考源码与发布资产在未获激活授权前保持隔离和可回滚。
-7. **最终验证：** 完成 Rust、Frontend、Desktop、打包、契约、故障注入、覆盖率、安全与依赖审计，更新 manifest、架构文档和完成定义，只按实际结果声明完成。
+默认采用“完成度审计后集中收口”，优先形成少量完整交付块，不为每个路由、fixture 或测试单独切片：
+
+1. **真实缺口审计与后端集中闭环：** 对照 Vue、Electron Rust Beta、Tauri 候选的实际调用与 Rust 当前路由注册，按配置、项目、预设、搜索、索引、诊断、文件、故事、Knowledge/WIKI 和 Git 服务族归并缺口。只迁移仍有消费者或被目标主链路依赖的公开能力；确认无消费者的 Python 路由应在 manifest 中显式排除并说明依据，不做逐行翻译。已由同一共享实现覆盖的读写路径，可用代表性成功、失败和磁盘副作用证据覆盖整个服务族，不要求逐路由复制同构测试。
+2. **高风险语义收尾：** 只补齐仍会阻断主链路或 parity 的故事 Provider 失败/取消/写入失败、baseline 竞态、Knowledge 关系投影、Git 收尾与回滚边界。复用既有 Replay、Python 回归和 Rust 聚焦测试；仅在新增分支、共享实现无法覆盖或发现真实失败时增加 fixture。live 证据聚焦一个或少量代表性主要工作流，不重复扩充已经关闭的控制面矩阵和 M0 大样本窗口。
+3. **桌面候选集中闭环：** 复用现有 Electron updater、Tauri sidecar/NSIS、生命周期 smoke 和资产门禁，在隔离临时项目、本地候选 feed 与候选安装资产中验证构建、启动、主要工作流、退出、升级失败可见和人工回滚。目标是证明候选交付链路成立，不要求建设正式更新服务、接入 Stable 更新源或取得生产签名凭证；但更新签名/完整性校验及其失败路径必须有可重复证据。
+4. **最终集成与退出准备：** 用同一完整 Rust 后端验证 Python Stable、Electron Rust Beta 和 Tauri 候选对项目 fixture 的双向读取，审计 Tauri 候选安装/运行资产不含 Python/FastAPI/Uvicorn 与 Electron/Node 运行依赖，更新 manifest、架构和完成证据，并只运行与实际改动和剩余风险直接相关的检查。
+
+已经通过的 21 组控制/会话 fixture、RustSec 审计方案、M0 24/24 性能窗口、故事成功路径、Knowledge 冷构建/增量同步和桌面首轮生命周期证据默认作为回归基线复用。相关代码未变化且没有失败迹象时，不重复制造等价报告；最终门禁关注真实功能缺口、数据安全、候选资产纯净和可回滚性，而不是测试数量。
 
 ### 0.7 新对话直接执行规则
 
-- 新对话以本节、0.6、12.0 和 13 的目标与证据边界为事实窗口，先阅读实际代码、配置、调用链和测试，再自主决定实现顺序、切片边界与验证方式；无需先输出一份脱离代码的建议计划，也不需要为常规工程取舍反复询问。
-- 一个新对话可以并且应当按风险边界形成多次中文提交和多轮 `dev/windows -> Development CI success -> main -> 完整 CI success`。每轮成功后立即从最新成功 HEAD 继续下一交付块；不得因为已经完成一次 push、一次纵向切片或一次 CI 就提前结束仍可安全推进的迁移工作。
-- 已关闭的 21 组控制/会话 fixture、RustSec 审计方案和 M0 24/24 性能窗口只作回归基线，不重复扩充或重跑大样本，除非相关代码变化或失败证据要求重新验证。
+- 新对话以本节、0.6、12.0 和 13 的目标与证据边界为事实窗口，先阅读实际代码、配置、调用链、生成清单和测试，再自主决定实现顺序与验证方式。文档中的历史缺口不能直接视为当前待办；代码已经满足目标时，应记录并复用证据，不为匹配旧计划而重写。
+- 启动阶段先完成一次短促的真实缺口审计，随后直接进入实现。默认按服务族和端到端主链路形成少量较大的中文提交；只有风险隔离、失败定位或 CI 修复确有需要时才继续拆分，不为每个路由、测试或报告单独提交。
+- 130 个 Python 路由、78 个前端消费签名和第 13 节的批次均不是完成配额。完成判断以当前 Vue/桌面真实消费者、共享服务覆盖、项目磁盘语义和候选打包结果为准；无消费者接口允许在 manifest 中有证据地排除。
+- 已关闭的 21 组控制/会话 fixture、RustSec 审计方案和 M0 24/24 性能窗口只作回归基线，不重复扩充或重跑大样本，除非相关代码变化或失败证据要求重新验证。优先复用现有 Python/Rust 测试和差分工具，只为新的高风险分支补最小必要证据。
+- 一个新对话可以按风险边界形成一轮或少量多轮 `dev/windows -> Development CI success -> main -> 完整 CI success`。不得在微型切片后机械推送和等待；但每个准备同步到 `main` 的完整交付块仍必须先通过同 HEAD 的 Development CI，失败时先修复根因。
 - Electron Rust Beta、Tauri Preview 和目标候选打包已在本计划范围内获授权，可以在各自前置契约满足后直接推进；这不授权 Stable 激活、真实用户项目访问或正式更新源变更。
 - 真实主链路验收、性能测量和兼容验证已获直接执行授权：可以在仓库 fixture、临时克隆或脱敏副本中通过正常 Storydex API/SSE 调用 `OPENCODE/deepseek-v4-flash`，不需要为每次实测再次请求授权；仍禁止接触真实用户项目。重大架构或产品兼容决策以这些 live 结果为主要依据，只有出现新的不可逆格式、外部行为取舍、运行时切换或旧实现删除决策时才新增 live 决策报告。Replay 只用于确定性差分，绝不能冒充 live。
 - 默认由主代理连续推进；是否使用子代理由用户明确决定，本轮不启用子代理。共享工作区中的编辑仍须保留并审查既有改动，主代理负责整合、复核和最终验证。
@@ -564,16 +567,20 @@ Storydex Stable live 决策报告 `output/rust-migration-decision-live/eb2805f48
 
 新对话只有在以下结果全部具备时，才可以声明“剩余重构工程已完成”：
 
-- `storyGeneration`、Knowledge/WIKI、Git、其余公开后端 API 和桌面生命周期都由目标 Rust 后端承担，不依赖 Python fallback，并通过契约、磁盘副作用和故障注入验证。
-- Electron Rust Beta 与 Tauri 2 候选均可从干净环境构建、启动、运行主要工作流、退出和打包；目标 Tauri 候选的安装/运行资产不包含 Python 或 Electron/Node 运行时。
+- 当前 Vue、Electron Rust Beta 和 Tauri 候选实际调用的 `storyGeneration`、Knowledge/WIKI、Git 及其余公开后端 API 均由目标 Rust 后端承担，不依赖 Python fallback。无消费者的 Python 历史接口可以不迁移，但必须由生成清单或调用搜索留下可复核的排除依据。
+- 故事写入、Knowledge/WIKI、Git 和项目文件的代表性成功路径，以及 Provider 失败/取消、写入失败、路径越界、baseline 变化、投影恢复和回滚等关键风险边界有可重复证据。共享实现能够证明同类路由语义时，不要求构造每个接口与每种故障的笛卡尔积测试。
+- Electron Rust Beta 与 Tauri 2 候选均可从干净环境构建、启动、运行主要工作流、退出和打包；隔离候选资产能够验证更新完整性/签名失败可见、升级失败恢复与人工回滚。该要求不包含建设正式更新服务、修改 Stable 更新源或使用生产签名凭证。
+- 目标 Tauri 候选的安装和运行资产不包含 Python/FastAPI/Uvicorn 或 Electron/Node 运行时；Stable 参考源码存在于仓库中不等于候选资产携带旧运行时。
 - Vue 工作台保持现有主要功能和数据语义；项目 fixture 可在 Python Stable、Electron Rust Beta 和 Tauri 候选之间双向读取，不发生单向升级。
-- 所有新增或迁移代码经过与风险相称的聚焦测试，相关 manifest、覆盖率、安全/依赖审计、打包证据和文档已更新；无法运行的外部验证必须明确记录，不能按意图推定成功。
+- 所有新增或迁移代码经过与风险相称的聚焦测试，相关 manifest、安全/依赖审计、打包证据和文档已更新；覆盖率沿用仓库既有门禁，不以新增低价值测试追求机械数量。无法运行的外部验证必须明确记录，不能按意图推定成功。
 - 最后一个交付 HEAD 已按 0.7 的顺序通过 `dev/windows` Development CI 和 `main` 完整 CI。
 - Stable 的默认运行时、正式包和更新源仍未改变。工程完成后应把“Stable 激活与真实用户灰度”列为唯一独立发布决策，不把它伪装成尚未完成的代码迁移。
 
-单个 Rust 切片、局部 parity、一次 Development CI 或一次 `main` 完整 CI 成功都不能单独满足本节。只要上列任一工程项仍未完成且没有真实外部阻塞，新对话就应继续实现、验证并进入下一轮提交和推送；不得把“本轮切片完成”回答成“剩余任务需要以后另开计划”。
+本节要求的是目标候选的完整可用证据，不要求完整翻译 Python、逐路由测试、重复已经关闭的 fixture 或建设正式发布基础设施。单个 Rust 切片、局部 parity、一次 Development CI 或一次 `main` 完整 CI 成功仍不能单独满足本节；但如果审计证明历史描述中的某项已由当前共享实现和现有证据覆盖，应直接计为完成，不再制造重复工作。
 
 ### 12.1 Agent Rust 重构完成定义
+
+本节同样按实际消费者和共享风险边界解释：已有契约能够覆盖同类行为时，不要求对每个路由、每种 Provider 和每个桌面入口重复建立等价 fixture。
 
 只有同时满足以下条件，才可把本轮 Agent 重构标为完成：
 
@@ -598,20 +605,17 @@ Tauri 迁移完成需要同时满足：
 - Tauri 和上一个 Electron 稳定版可以互相读取项目数据。
 - Electron 和 Python 旧运行时被从目标 Tauri 候选的构建、依赖和运行资产中完整移除；Stable 参考实现及其文档在正式激活前保持隔离。
 
-## 13. 新对话连续执行批次
+## 13. 新对话加速收口批次
 
-新对话从最新成功 HEAD 继续，以下批次是当前证据窗口和依赖关系的参考，不是要求机械照做的固定任务清单；已关闭的控制面场景无需无故扩充，实际代码、失败证据和依赖关系可以调整后续顺序：
+新对话从最新成功 HEAD 继续。当前已经具备的基础包括：Agent 控制面与 M0 性能基线、故事 `create_new` 三档和 `modify_existing` 单/多片段差分、Knowledge/WIKI revision/last-good/ChangeSet/冷构建/增量同步/查询分页、Git 候选 primitives、Electron Rust Beta 生命周期，以及 Tauri sidecar、NSIS、两文件 staging 和 release smoke。除非相关代码变化或出现失败，不重复拆解这些已完成事实。
 
-本轮已将第 3 项中的 Rust WIKI/Knowledge 候选证据型投影切片推进到可提交状态：revision/last-good、ChangeSet、领域事件、冷构建、增量/无变更同步、故障恢复、公开 WIKI 路由、查询筛选和分页均有聚焦回归；故事 `modify_existing` 单/多片段 Replay 差分也已形成可复核报告。第 3 项仍未整体完成；关系领域完整 parity、所有实际前端消费者 API、配置/项目/Preset/搜索/索引/诊断/文件迁移、跨端故事故障矩阵以及桌面发布链路仍须继续推进。
+后续默认压缩为三个可合并的完成批次，实际代码显示依赖更简单时可以在同一交付块内连续完成：
 
-1. **已完成：** bridge `complete` 的显式 replay 透传和聚焦测试，以及 Rust 单片段 `create_new` 短章节纵向切片：一次 Provider completion、机械质量/Unicode 字数门禁、程序化安全路径、原子写入、`StoryGenerationValidation`、`StoryCallAccounting`、`TextChunk` 和唯一终态。
-2. **已完成：** 使用同一临时项目和 Provider replay 冻结 Python Stable 真实契约，Rust 已差分到章节文件 SHA、Git status、SSE、调用次数和 v2 short candidate 长度档校准一致；Python-only WIKI/Git 派生行为保持显式，未被忽略。
-3. **当前执行：** Knowledge/WIKI 与 Git 子批已建立 canonical checksum、原子 bundle、安全路径、本地 Git init/status/commit/restore primitives，并把 Git 候选扩展到 diff、branch/checkout、timeline/jump、commit-diff 与 worldline 管理；Rust WIKI 候选的 revision/last-good、领域事件、ChangeSet、冷构建、增量/无变更同步和故障恢复也已有聚焦证据。130 个 Python 路由和 78 个前端消费签名的接口清单已经生成；继续关闭关系领域完整 parity、Git/Knowledge 与故事写入的收尾集成和全部实际消费者路由，现有局部 parity 不得表述为完整后端。
-4. **已完成当前故事子批、继续执行：** 单片段 `create_new` short/medium/long 与 `modify_existing` 单/多片段已完成 Python/Rust Replay 的章节 SHA、故事事件顺序、调用次数和对应写入/基线差分；Provider 失败、预取消、baseline 变化和原子写入保护已有 Rust 聚焦契约。跨端 Provider 失败/取消/写入失败完整矩阵仍需补齐和复核，随后继续迁移配置、项目、预设、搜索、索引、诊断、文件和其余仍有消费者的公开后端 API。
-5. **生命周期子批已完成、继续执行：** 独立 Electron Rust Beta 已闭合启动、动态端口、runtime token、临时 profile/workspace、日志脱敏、崩溃可见、进程树清理和真实 agentd shutdown smoke，且不静默回退 Python、Stable 配置保持不变；继续完成独立 Beta 安装包、候选更新源和安装/更新/回滚 E2E。
-6. **首轮候选打包与生命周期已完成、继续执行：** 隔离 Tauri 2 Core 已接通 `window.storydexDesktop` 窄适配层、动态端口/token、sidecar 监控与 Windows Job Object，真实 NSIS、两文件 staging 资产门禁和 release lifecycle smoke 已通过；继续用同一完整 Rust 后端完成主要工作流、updater、签名、安装/升级/失败恢复、双向项目兼容和第二次独立打包态验证。当前候选不得接入 Stable 配置或正式更新源，也不得冒充 12.0 完成。
-7. 完成旧运行时退出准备和 12.0 最终验证，确认目标候选资产不含 Python/FastAPI/Uvicorn 与 Electron/Node 运行依赖，同时保留 Stable 参考实现和人工回滚资产。
-8. 每个可集成交付块执行相关聚焦测试、中文提交并按 0.7 推送；一轮远端门禁成功后继续下一块，可以在同一新对话中多次提交和推送。不要积累一个无法定位失败原因的超大最终提交，也不要把完整目标重新拆成需要用户逐项批准的小计划。
+1. **完成度审计与完整 Rust 后端收口：** 运行或读取接口清单生成器，比较实际 Vue/桌面调用与 Rust 路由，按服务族一次性关闭真实缺口；同时确认故事、Knowledge/WIKI 和 Git 的既有共享实现是否已经覆盖文档所述剩余语义。只对确认存在的主链路缺口或高风险失败边界编码和补测，无消费者 Python 路由进入有依据的排除清单。
+2. **桌面候选与兼容收口：** 让 Electron Rust Beta 和 Tauri 候选使用同一完整 Rust 后端，在临时项目和隔离本地候选 feed 中验证主要工作流、安装资产、更新完整性失败、升级失败恢复、人工回滚和三端双向项目读取；复用现有 updater、NSIS、sidecar 与 smoke，不另建正式发布服务。
+3. **最终证据与交付：** 审计 Tauri 候选资产不含旧运行时，更新 manifest、架构与本文件，只运行相关聚焦检查和仓库规定的 pre-push 基础检查；使用中文提交，先推 `dev/windows` 并等待 Development CI 成功，再同步 `main` 并等待完整 CI 成功。
+
+执行中不得把 130 个 Python 路由、78 个消费签名、历史段落数量或测试数量当作工作量指标。若一次审计证明大部分能力已经存在，直接验证剩余少数阻断项并进入最终集成；若发现共享根因，优先一次修复服务层并用代表性证据覆盖所有调用者。只有新的不可逆格式、Stable 激活、生产更新源或真实用户项目访问需要再次请求决策。
 
 ## 14. 参考边界
 
