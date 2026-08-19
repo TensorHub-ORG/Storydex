@@ -42,6 +42,26 @@ const EXPLICIT_FRONTEND_ROUTES = [
   }
 ];
 
+// Axum requires catch-all parameters to be final. Preset names may contain
+// nested directories, so storydex-agentd registers one bounded catch-all and
+// dispatches only these suffix/method combinations.
+const EXPLICIT_RUST_DISPATCH_ROUTES = [
+  ["GET", "/presets/{name}/document"],
+  ["PUT", "/presets/{name}/document"],
+  ["POST", "/presets/{name}/compile"],
+  ["POST", "/presets/{name}/risk-check"],
+  ["PATCH", "/presets/{name}/params"],
+  ["POST", "/presets/{name}/activate"],
+  ["POST", "/presets/{name}/deactivate"]
+].map(([method, path]) => ({
+  method,
+  path,
+  owner: "storydex-agentd",
+  source: "apps/desktop/agent-runtime/storydex-agentd/src/presets.rs",
+  line: 1,
+  evidence: "bounded presets catch-all dispatcher"
+}));
+
 function lineNumberAt(source, index) {
   return source.slice(0, index).split("\n").length;
 }
@@ -279,6 +299,7 @@ function readRustRoutes() {
     const registeredPath = routeFromExpression(call.arguments[0]);
     if (!registeredPath || !call.arguments[1]) continue;
     const routePath = registeredPath.replace(/^\/api\/v1(?=\/)/, "");
+    if (routePath === "/presets/{*path}") continue;
     const methods = [...call.arguments[1].matchAll(/\b(get|post|put|patch|delete)\s*\(/g)];
     for (const method of methods) {
       routes.push({
@@ -290,6 +311,7 @@ function readRustRoutes() {
       });
     }
   }
+  routes.push(...EXPLICIT_RUST_DISPATCH_ROUTES);
   return dedupeRoutes(routes, ["method", "path", "owner"]);
 }
 

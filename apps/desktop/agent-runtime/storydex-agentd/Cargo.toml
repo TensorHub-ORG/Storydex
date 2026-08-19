@@ -20,6 +20,7 @@ clap.workspace = true
 coomi-engine = { path = "../engine" }
 coomi-services = { path = "../services" }
 dirs.workspace = true
+encoding_rs.workspace = true
 futures-util.workspace = true
 fs2.workspace = true
 serde.workspace = true

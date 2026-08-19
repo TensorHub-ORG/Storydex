@@ -47,7 +47,9 @@ use uuid::Uuid;
 pub(crate) mod chat;
 mod execution;
 mod followup;
+mod help;
 mod length_tier_calibration;
+mod presets;
 mod project;
 mod replacement;
 mod story;
@@ -690,6 +692,31 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/sys/agent-settings",
             get(system::agent_settings).put(system::update_agent_settings),
         )
+        .route("/api/v1/help/guide", get(help::guide))
+        .route("/api/v1/help/prompts", get(help::prompts))
+        .route(
+            "/api/v1/help/prompts/custom",
+            post(help::create_custom_prompt),
+        )
+        .route(
+            "/api/v1/help/prompts/custom/{prompt_id}",
+            axum::routing::put(help::update_custom_prompt),
+        )
+        .route("/api/v1/presets/list", get(presets::list))
+        .route("/api/v1/presets/_schema", get(presets::schema))
+        .route("/api/v1/presets/import/sillytavern", post(presets::import))
+        .route(
+            "/api/v1/presets/import/preview",
+            post(presets::preview_import),
+        )
+        .route("/api/v1/presets/active", get(presets::active))
+        .route(
+            "/api/v1/presets/{*path}",
+            get(presets::dispatch)
+                .post(presets::dispatch)
+                .put(presets::dispatch)
+                .patch(presets::dispatch),
+        )
         .route("/api/v1/workspace/tree", get(workspace::workspace_tree))
         .route("/api/v1/workspace/project", get(workspace::current_project))
         .route(
@@ -1290,6 +1317,193 @@ mod tests {
         assert_eq!(
             response_json(response).await["error"]["code"],
             "workspace_outside_refactor_root"
+        );
+    }
+
+    #[tokio::test]
+    async fn help_and_preset_routes_persist_stable_compatible_candidate_state() {
+        use base64::Engine;
+
+        let root = tempdir().expect("root");
+        let (state, workspace) = workspace_test_state(root.path());
+        let nested = workspace.join(".storydex/presets/library/nested");
+        std::fs::create_dir_all(&nested).expect("preset directory");
+        std::fs::write(
+            nested.join("demo.md"),
+            "# Demo\n\n## Modules\n- [on] First (advanced)\n- [off] Second (advanced)\n",
+        )
+        .expect("preset markdown");
+        std::fs::write(
+            nested.join("demo.preset.json"),
+            serde_json::to_vec_pretty(&json!({
+                "version": 1,
+                "meta": {"name": "Demo", "description": "", "compatible_providers": [], "updated_at": ""},
+                "sampling": {"default": {"top_p": 0.8}, "per_purpose": {}},
+                "length_contract": {"body_min_chars": 100, "body_target_chars": 200, "body_max_chars": 300, "paragraph_min": 1, "paragraph_max": 3, "required_tags": [], "forbidden_tags": []},
+                "thinking": {"enabled": false, "mode": "stage_list", "stages": [], "inject_position": "system_suffix", "visible_in_output": false},
+                "style": {"pov": "", "narrator": "", "forbidden_words": [], "forbidden_patterns": [], "style_rules": [], "max_consecutive_repeat": 2},
+                "memory": {"summary_format": "scene_outline", "summary_min_chars": 1, "summary_max_chars": 2, "big_summary_trigger_chapters": 3},
+                "terms": {"name_alias_map": {}, "term_replace_map": {}, "enforce_at_generation": true},
+                "character_voices": {},
+                "modules": [
+                    {"id": "first", "title": "First", "slot": "advanced", "enabledByDefault": true, "priority": 50, "content": "first rule"},
+                    {"id": "second", "title": "Second", "slot": "advanced", "enabledByDefault": false, "priority": 40, "content": "second rule"}
+                ]
+            }))
+            .expect("sidecar JSON"),
+        )
+        .expect("preset sidecar");
+
+        let response = router(state.clone())
+            .oneshot(protected_get_request("/api/v1/presets/list"))
+            .await
+            .expect("preset list");
+        assert_eq!(response.status(), StatusCode::OK);
+        let listed = response_json(response).await;
+        assert_eq!(
+            listed["data"]["library"][0]["path"],
+            ".storydex/presets/library/nested/demo.md"
+        );
+        assert_eq!(listed["data"]["library"][0]["hasSidecar"], true);
+
+        let preset_path = ".storydex/presets/library/nested/demo.md";
+        let response = router(state.clone())
+            .oneshot(protected_get_request(&format!(
+                "/api/v1/presets/{preset_path}/document"
+            )))
+            .await
+            .expect("preset document");
+        assert_eq!(response.status(), StatusCode::OK);
+        let document = response_json(response).await;
+        assert_eq!(
+            document["data"]["document"]["sampling"]["default"]["topP"],
+            0.8
+        );
+        assert_eq!(
+            document["data"]["document"]["lengthContract"]["bodyMinChars"],
+            100
+        );
+
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                &format!("/api/v1/presets/{preset_path}/compile"),
+                json!({"presetOverrides": {"temporaryRules": ["turn rule"]}}),
+            ))
+            .await
+            .expect("preset compile");
+        assert_eq!(response.status(), StatusCode::OK);
+        let compiled = response_json(response).await;
+        assert!(
+            compiled["data"]["compiledText"]
+                .as_str()
+                .is_some_and(|text| text.contains("first rule")
+                    && text.contains("turn rule")
+                    && !text.contains("second rule"))
+        );
+
+        let response = router(state.clone())
+            .oneshot(protected_json_request_with_method(
+                "PATCH",
+                &format!("/api/v1/presets/{preset_path}/params"),
+                json!({"sampling": {"default": {"topP": 0.65}}}),
+            ))
+            .await
+            .expect("preset patch");
+        assert_eq!(response.status(), StatusCode::OK);
+        let persisted: Value = serde_json::from_slice(
+            &std::fs::read(nested.join("demo.preset.json")).expect("persisted sidecar"),
+        )
+        .expect("persisted JSON");
+        assert_eq!(persisted["sampling"]["default"]["top_p"], 0.65);
+        assert!(persisted.get("length_contract").is_some());
+
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                &format!("/api/v1/presets/{preset_path}/activate"),
+                json!({}),
+            ))
+            .await
+            .expect("activate preset");
+        assert_eq!(response.status(), StatusCode::OK);
+        let activated = response_json(response).await;
+        assert_eq!(
+            activated["data"]["activeMainPreset"],
+            ".storydex/presets/active/demo.md"
+        );
+        assert!(workspace.join(".storydex/presets/active/demo.md").exists());
+        assert!(
+            workspace
+                .join(".storydex/presets/active/demo.preset.json")
+                .exists()
+        );
+        assert!(!nested.join("demo.md").exists());
+
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/presets/.storydex/presets/active/demo.md/deactivate",
+                json!({}),
+            ))
+            .await
+            .expect("deactivate preset");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await["data"]["activeMainPreset"],
+            ""
+        );
+        assert!(workspace.join(".storydex/presets/library/demo.md").exists());
+
+        let import_body = serde_json::to_vec(&json!({
+            "alpha": 1,
+            "beta": [1, 2, 3]
+        }))
+        .expect("import source");
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/presets/import/preview",
+                json!({"files": [{
+                    "name": "opaque.json",
+                    "contentBase64": base64::engine::general_purpose::STANDARD.encode(import_body)
+                }]}),
+            ))
+            .await
+            .expect("import preview");
+        assert_eq!(response.status(), StatusCode::OK);
+        let preview = response_json(response).await;
+        assert_eq!(preview["data"]["items"][0]["moduleCount"], 1);
+        assert_eq!(preview["data"]["items"][0]["relativePath"], "");
+        assert!(
+            !workspace
+                .join(".storydex/presets/library/opaque.md")
+                .exists()
+        );
+
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/help/prompts/custom",
+                json!({"title": "检查节奏", "promptText": "检查[章节]的节奏。"}),
+            ))
+            .await
+            .expect("create custom prompt");
+        assert_eq!(response.status(), StatusCode::OK);
+        let created = response_json(response).await;
+        let prompt_id = created["data"]["item"]["id"]
+            .as_str()
+            .expect("custom prompt id");
+        assert!(prompt_id.starts_with("custom/"));
+        assert_eq!(prompt_id.trim_start_matches("custom/").len(), 32);
+
+        let response = router(state)
+            .oneshot(protected_get_request(
+                "/api/v1/help/prompts?category=%E8%87%AA%E5%AE%9A%E4%B9%89",
+            ))
+            .await
+            .expect("read custom prompts");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await["data"]["items"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
         );
     }
 
