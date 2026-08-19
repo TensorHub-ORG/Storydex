@@ -16,6 +16,7 @@ from services.performance_trace_service import record_counter, trace_turn_contra
 from services.story_chapter_action_service import (
     CHAPTER_ACTION_CONTINUE_CHAPTER,
     CHAPTER_ACTION_CONTINUE_FRAGMENT,
+    chapter_number_from_path,
     validate_chapter_plan,
 )
 from services.storydex_context_assembler_service import StorydexContextAssemblerService, get_storydex_context_assembler_service
@@ -34,6 +35,7 @@ from services.story_project_service import (
     DEFAULT_CHAPTER_TEMPLATE_ID,
     SINGLE_FILE_CONTENT_MODE,
     StoryProjectService,
+    StoryProjectServiceError,
     get_story_project_service,
 )
 from services.story_length_calibration_service import (
@@ -146,6 +148,12 @@ class StorydexOrchestrationService:
             intent["primary"] == "story_generation"
             and operation_type == "create_new"
             and can_write
+        )
+        bounded_modify_existing = bool(
+            intent["primary"] == "story_generation"
+            and operation_type == "modify_existing"
+            and can_write
+            and not self._explicit_generic_file_tool_request(prompt)
         )
         is_new_story = is_story_creation and len(chapters) == 0
         invalid_template = bool(requested_template and selected_template is None)
@@ -401,6 +409,61 @@ class StorydexOrchestrationService:
                 target["referenceWordCount"] = reference
                 target["referenceWordCountIsHardLimit"] = False
                 assumed_written += reference
+        elif bounded_modify_existing:
+            try:
+                fragment_targets = self.story_project_service.plan_modify_existing_targets(
+                    root,
+                    active_file=active_file,
+                    fragment_count=requested_fragment_count,
+                )
+            except StoryProjectServiceError as exc:
+                fragment_targets = []
+                chapter_plan_validation = {
+                    "_type": "ModifyExistingPlanValidation",
+                    "_version": 1,
+                    "passed": False,
+                    "action": "modify_existing",
+                    "targetChapterNumber": chapter_number_from_path(active_file),
+                    "authoritativeChapterPath": "",
+                    "authoritativeFragmentPaths": [],
+                    "issues": [str(exc)],
+                }
+            else:
+                authoritative_fragment_paths = [
+                    str(target.get("path") or "")
+                    for target in fragment_targets
+                    if target.get("path")
+                ]
+                authoritative_chapter_path = (
+                    PurePosixPath(authoritative_fragment_paths[0]).parent.as_posix()
+                    if authoritative_fragment_paths
+                    else ""
+                )
+                target_chapter_number = chapter_number_from_path(active_file)
+                chapter_action = {
+                    "action": "modify_existing",
+                    "targetChapterNumber": target_chapter_number,
+                    "reason": "active_existing_file",
+                    "isNewChapter": False,
+                }
+                chapter_plan_validation = {
+                    "_type": "ModifyExistingPlanValidation",
+                    "_version": 1,
+                    "passed": True,
+                    "action": "modify_existing",
+                    "targetChapterNumber": target_chapter_number,
+                    "authoritativeChapterPath": authoritative_chapter_path,
+                    "authoritativeFragmentPaths": list(authoritative_fragment_paths),
+                    "issues": [],
+                }
+            fragment_count = len(fragment_targets) or requested_fragment_count
+            next_segment_path = (
+                str(fragment_targets[0].get("path") or "") if fragment_targets else ""
+            )
+            if authoritative_fragment_paths:
+                authoritative_chapter_path = (
+                    PurePosixPath(authoritative_fragment_paths[0]).parent.as_posix()
+                )
 
         paragraph_calibration = dict(paragraph_quota.get("calibration") or {})
         # 全局冷启动密度会因 Provider/模型/预设差异产生很大偏差。实验开关只允许
@@ -493,6 +556,7 @@ class StorydexOrchestrationService:
             "selectedChapterTemplateDetail": self._template_detail(selected_template),
             "chapterContentMode": chapter_content_mode,
             "fragmentTargets": fragment_targets,
+            "boundedStoryGeneration": bounded_modify_existing or is_story_creation,
             # The chapter decision travels with the contract so the execution
             # path gates on the same target the planner chose, and an audit can
             # answer "which chapter was this turn for" without re-parsing prompt
@@ -647,6 +711,24 @@ class StorydexOrchestrationService:
             return override
         global_config = self.global_config_service or get_global_config_service()
         return ContextPolicy.from_agent_settings(global_config.read_agent_settings())
+
+    @staticmethod
+    def _explicit_generic_file_tool_request(prompt: str) -> bool:
+        """Keep explicit generic-tool contracts on the historical Agent bridge."""
+
+        normalized = str(prompt or "").strip().lower()
+        return any(
+            marker in normalized
+            for marker in (
+                "write_file",
+                "edit_file",
+                "read_file",
+                "tool call",
+                "tool_call",
+                "只调用",
+                "不要调用其他工具",
+            )
+        )
 
     def _intent_frame(
         self,

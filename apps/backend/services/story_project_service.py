@@ -1384,6 +1384,81 @@ class StoryProjectService:
             for index, relative_path in enumerate(paths, start=1)
         ]
 
+    def plan_modify_existing_targets(
+        self,
+        workspace_root: Path,
+        *,
+        active_file: str,
+        fragment_count: int = 1,
+    ) -> List[Dict[str, Any]]:
+        """Plan an in-place edit using only files that already exist.
+
+        This is intentionally separate from ``plan_story_generation_targets``:
+        a rewrite must never fall through to the create/continue chapter planner
+        and accidentally create a parallel fragment.  The active file is the
+        first authoritative target; additional targets, when requested, must be
+        existing numeric segments immediately following it in the same chapter.
+        """
+
+        root = Path(workspace_root).resolve()
+        normalized = self._normalize_relative_path(active_file)
+        active = (root / normalized).resolve() if normalized else root
+        try:
+            active.relative_to(root)
+        except ValueError as exc:
+            raise StoryProjectServiceError(
+                "existing story active file escapes the workspace"
+            ) from exc
+        if (
+            not normalized.startswith("chapters/")
+            or not active.is_file()
+            or active.suffix.lower() not in _TEXT_SEGMENT_SUFFIXES
+            or active.name.lower() == "readme.md"
+        ):
+            raise StoryProjectServiceError(
+                "existing story active file must be an existing chapter text file"
+            )
+
+        requested = self._normalize_story_fragment_count(fragment_count)
+        parent = active.parent
+        siblings = [
+            path
+            for path in self._sorted_segment_files(parent)
+            if path.is_file() and path.suffix.lower() in _TEXT_SEGMENT_SUFFIXES
+        ]
+        try:
+            active_index = siblings.index(active)
+        except ValueError as exc:
+            raise StoryProjectServiceError(
+                "existing story active file is not a supported chapter segment"
+            ) from exc
+        selected = siblings[active_index : active_index + requested]
+        if len(selected) != requested:
+            raise StoryProjectServiceError(
+                "existing story does not contain enough contiguous fragments"
+            )
+
+        if requested > 1:
+            numbers = [self._extract_segment_number(path.stem) for path in selected]
+            if not all(number > 0 for number in numbers) or any(
+                right != left + 1 for left, right in zip(numbers, numbers[1:])
+            ):
+                raise StoryProjectServiceError(
+                    "existing story fragments are not contiguous"
+                )
+
+        return [
+            {
+                "order": index,
+                "path": path.relative_to(root).as_posix(),
+                "writeMode": "replace",
+                "baselineWordCount": self.count_story_file_words(path),
+                "baselineSha256": sha256(path.read_bytes()).hexdigest(),
+                "contentMode": MULTI_FRAGMENT_CONTENT_MODE,
+            }
+            for index, path in enumerate(selected, start=1)
+        ]
+
     def validate_story_generation_turn(
         self,
         workspace_root: Path,
@@ -1397,6 +1472,13 @@ class StoryProjectService:
         # 修改现有文件（重构/整理）不新建片段，不施加"必须 N 段 × 字数区间"的硬校验，
         # 否则重构请求会被字数校验反复打回。此时编排层已不规划 fragmentTargets。
         if str(intent.get("operationType") or "").strip().lower() == "modify_existing":
+            if isinstance(turn_plan.get("fragmentTargets"), list) and turn_plan.get(
+                "fragmentTargets"
+            ):
+                return self._validate_modify_existing_story_generation_turn(
+                    Path(workspace_root).resolve(),
+                    turn_plan=turn_plan,
+                )
             return {"applicable": False, "passed": True}
 
         targets = turn_plan.get("fragmentTargets") if isinstance(turn_plan.get("fragmentTargets"), list) else []
@@ -1490,6 +1572,147 @@ class StoryProjectService:
                 else "正文数量、章节结构和客观字数均已通过 Storydex 校验。"
                 if passed
                 else f"正文尚未满足章节模板或字数验收带（每片段需落在 {accept_min}-{accept_max} 字），不能结束本轮。"
+            ),
+        }
+
+    def _validate_modify_existing_story_generation_turn(
+        self,
+        root: Path,
+        *,
+        turn_plan: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Validate a replacement candidate without create-new length minima."""
+
+        targets = turn_plan.get("fragmentTargets")
+        targets = targets if isinstance(targets, list) else []
+        policy = turn_plan.get("wordCountPolicy") if isinstance(turn_plan.get("wordCountPolicy"), dict) else {}
+        target_count = len(targets)
+        results: List[Dict[str, Any]] = []
+        passed = bool(targets)
+        generated_total = 0
+        retained_total = 0
+        parents: Set[str] = set()
+        seen: Set[str] = set()
+        runtime_safety_maximum = max(
+            1,
+            int(
+                policy.get("runtimeSafetyMaximum")
+                or chapter_runtime_safety_maximum(
+                    self._story_chapter_word_count_target(
+                        turn_plan,
+                        1,
+                        1,
+                    )
+                )
+            ),
+        )
+        for index, raw_target in enumerate(targets, start=1):
+            target = raw_target if isinstance(raw_target, dict) else {}
+            relative = self._normalize_relative_path(str(target.get("path") or ""))
+            path = root / relative if relative else root
+            exists = bool(relative and path.is_file())
+            text = ""
+            if exists:
+                try:
+                    text = path.read_text(encoding="utf-8-sig")
+                except OSError:
+                    text = ""
+            count = count_story_text_words(text) if exists else 0
+            baseline = max(
+                0,
+                self._safe_int(target.get("baselineWordCount"), fallback=0, minimum=0, maximum=10**9),
+            )
+            baseline_matches = exists and count == baseline
+            expected_hash = str(target.get("baselineSha256") or "").strip().lower()
+            actual_hash = sha256(path.read_bytes()).hexdigest() if exists else ""
+            if expected_hash:
+                baseline_matches = baseline_matches and actual_hash == expected_hash
+            safe_path = bool(
+                relative
+                and relative.startswith("chapters/")
+                and path.suffix.lower() in _TEXT_SEGMENT_SUFFIXES
+                and path.name.lower() != "readme.md"
+            )
+            parent = Path(relative).parent.as_posix() if relative else ""
+            if parent:
+                parents.add(parent)
+            if relative:
+                seen.add(relative)
+            item_passed = bool(safe_path and exists and baseline_matches)
+            passed = passed and item_passed
+            generated_total += count
+            retained_total += baseline
+            results.append(
+                {
+                    "order": index,
+                    "path": relative,
+                    "exists": exists,
+                    "writeMode": str(target.get("writeMode") or "replace"),
+                    "baselineWordCount": baseline,
+                    "currentWordCount": count,
+                    "generatedWordCount": count,
+                    "baselineMatches": baseline_matches,
+                    "status": "passed" if item_passed else "failed",
+                }
+            )
+
+        structure_passed = bool(
+            targets
+            and len(seen) == target_count
+            and len(parents) == 1
+            and all(
+                isinstance(item, dict)
+                and str(item.get("writeMode") or "replace") == "replace"
+                for item in targets
+            )
+        )
+        passed = passed and structure_passed and generated_total <= runtime_safety_maximum
+        if generated_total > runtime_safety_maximum:
+            passed = False
+        baseline_failed = any(
+            isinstance(item, dict) and item.get("baselineMatches") is False
+            for item in results
+        )
+        return {
+            "_type": "StoryGenerationValidation",
+            "_version": 1,
+            "applicable": True,
+            "passed": passed,
+            "status": "success" if passed else "error",
+            "algorithm": STORY_WORD_COUNT_ALGORITHM,
+            "countingRule": STORY_WORD_COUNT_RULE,
+            "exact": False,
+            "operationType": "modify_existing",
+            "fragmentCount": target_count,
+            "expectedFragmentCount": target_count,
+            "actualFragmentCount": target_count,
+            "actualWordCount": generated_total,
+            "generatedWordCount": generated_total,
+            "retainedWordCount": retained_total,
+            "resultingWordCount": generated_total,
+            "chapterLengthTier": str(turn_plan.get("chapterLengthTier") or ""),
+            "wordCountScope": "edited_existing",
+            "hardMinimum": 0,
+            "hardMinimumPassed": True,
+            "runtimeSafetyMaximum": runtime_safety_maximum,
+            "runtimeSafetyExceeded": generated_total > runtime_safety_maximum,
+            "structurePassed": structure_passed,
+            "qualityPassed": True,
+            "machineQualityPassed": True,
+            "providerCalls": 1,
+            "contractViolations": [],
+            "targetPaths": [str(item.get("path") or "") for item in targets if isinstance(item, dict)],
+            "writeToolApplied": False,
+            "writtenPaths": [],
+            "fragments": results,
+            "message": (
+                "现有故事正文已通过替换写入前的结构、基线与运行安全校验。"
+                if passed
+                else (
+                    "现有故事候选未通过 baseline、结构或运行安全校验，未写入项目文件。"
+                    if baseline_failed
+                    else "现有故事候选未通过结构、基线或运行安全校验，未写入项目文件。"
+                )
             ),
         }
 
@@ -2900,6 +3123,16 @@ class StoryProjectService:
         expected_count = self._normalize_story_fragment_count(turn_plan.get("fragmentCount"))
         min_word_count, max_word_count = self._resolve_turn_plan_word_count_range(turn_plan)
         content_mode = self._normalize_chapter_content_mode(turn_plan.get("chapterContentMode"))
+        if str(intent.get("operationType") or "").strip().lower() == "modify_existing" and targets:
+            return self._prepare_modify_existing_story_increment(
+                workspace_root,
+                payload=payload,
+                fragments=fragments,
+                turn_plan=turn_plan,
+                targets=targets,
+                expected_count=expected_count,
+                content_mode=content_mode,
+            )
         if self._uses_chapter_story_aggregation(turn_plan):
             return self._prepare_chapter_scoped_story_increment(
                 workspace_root,
@@ -3005,6 +3238,163 @@ class StoryProjectService:
                 else "正文已通过 Storydex 落盘前客观字数和章节结构校验。"
                 if passed
                 else f"提示：请复核未通过的片段。每个片段的 Storydex 非空白字符数建议落在 {min_word_count}-{max_word_count} 字（放行区间 {accept_min}-{accept_max} 字），且片段数量与章节模板需一致。"
+            ),
+        }
+        if not passed:
+            return payload, fragments, validation
+        next_payload = dict(payload)
+        next_payload["fragments"] = prepared
+        return next_payload, prepared, validation
+
+    def _prepare_modify_existing_story_increment(
+        self,
+        workspace_root: Path,
+        *,
+        payload: Dict[str, Any],
+        fragments: List[Dict[str, Any]],
+        turn_plan: Dict[str, Any],
+        targets: List[Any],
+        expected_count: int,
+        content_mode: str,
+    ) -> tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
+        """Prepare an in-place replacement candidate with no create-new minimum."""
+
+        root = Path(workspace_root).resolve()
+        policy = turn_plan.get("wordCountPolicy") if isinstance(turn_plan.get("wordCountPolicy"), dict) else {}
+        target_word_count = self._story_chapter_word_count_target(turn_plan, 1, 1)
+        runtime_safety_maximum = max(
+            1,
+            int(
+                policy.get("runtimeSafetyMaximum")
+                or chapter_runtime_safety_maximum(target_word_count)
+            ),
+        )
+        prepared: List[Dict[str, Any]] = []
+        results: List[Dict[str, Any]] = []
+        passed = bool(targets) and len(targets) == expected_count and len(fragments) == expected_count
+        generated_total = 0
+        retained_total = 0
+        parents: Set[str] = set()
+        seen: Set[str] = set()
+
+        for index in range(max(len(targets), len(fragments), expected_count)):
+            target = targets[index] if index < len(targets) and isinstance(targets[index], dict) else {}
+            fragment = dict(fragments[index]) if index < len(fragments) else {}
+            relative = self._normalize_relative_path(str(target.get("path") or ""))
+            fragment_path = self._normalize_relative_path(
+                str(fragment.get("path") or fragment.get("segmentPath") or fragment.get("segment_path") or "")
+            )
+            text = strip_non_story_wrappers(self._story_increment_fragment_text(fragment)).strip()
+            path = root / relative if relative else root
+            exists = bool(relative and path.is_file())
+            current_bytes = path.read_bytes() if exists else b""
+            current_count = count_story_text_words(
+                current_bytes.decode("utf-8-sig", errors="replace")
+            ) if exists else 0
+            baseline = max(
+                0,
+                self._safe_int(target.get("baselineWordCount"), fallback=0, minimum=0, maximum=10**9),
+            )
+            expected_hash = str(target.get("baselineSha256") or "").strip().lower()
+            baseline_matches = exists and current_count == baseline
+            if expected_hash:
+                baseline_matches = baseline_matches and sha256(current_bytes).hexdigest() == expected_hash
+            safe_path = bool(
+                relative
+                and relative.startswith("chapters/")
+                and path.suffix.lower() in _TEXT_SEGMENT_SUFFIXES
+                and path.name.lower() != "readme.md"
+            )
+            if fragment_path and fragment_path != relative:
+                safe_path = False
+            parent = Path(relative).parent.as_posix() if relative else ""
+            if parent:
+                parents.add(parent)
+            if relative:
+                seen.add(relative)
+            generated_count = count_story_text_words(text)
+            item_passed = bool(safe_path and exists and text and baseline_matches)
+            generated_total += generated_count
+            retained_total += baseline
+            passed = passed and item_passed
+            results.append(
+                {
+                    "order": index + 1,
+                    "path": relative,
+                    "exists": exists,
+                    "writeMode": str(target.get("writeMode") or "replace"),
+                    "baselineWordCount": baseline,
+                    "currentWordCount": current_count,
+                    "generatedWordCount": generated_count,
+                    "baselineMatches": baseline_matches,
+                    "status": "passed" if item_passed else "failed",
+                }
+            )
+            if index < len(fragments):
+                fragment["path"] = relative
+                fragment["_storydexWriteMode"] = "replace"
+                fragment["_storydexBaselineWordCount"] = baseline
+                fragment["_storydexBaselineSha256"] = expected_hash
+                fragment["_storydexWordCountStatus"] = "passed" if item_passed else "failed"
+                prepared.append(fragment)
+
+        structure_passed = bool(
+            targets
+            and len(targets) == expected_count
+            and len(fragments) == expected_count
+            and len(seen) == expected_count
+            and len(parents) == 1
+            and all(
+                isinstance(item, dict)
+                and str(item.get("writeMode") or "replace") == "replace"
+                for item in targets
+            )
+        )
+        passed = passed and structure_passed and generated_total <= runtime_safety_maximum
+        baseline_failed = any(
+            isinstance(item, dict) and item.get("baselineMatches") is False
+            for item in results
+        )
+        validation = {
+            "_type": "StoryGenerationValidation",
+            "_version": 1,
+            "applicable": True,
+            "passed": passed,
+            "status": "success" if passed else "error",
+            "algorithm": STORY_WORD_COUNT_ALGORITHM,
+            "countingRule": STORY_WORD_COUNT_RULE,
+            "exact": False,
+            "operationType": "modify_existing",
+            "fragmentCount": expected_count,
+            "expectedFragmentCount": expected_count,
+            "actualFragmentCount": len(fragments),
+            "actualWordCount": generated_total,
+            "generatedWordCount": generated_total,
+            "retainedWordCount": retained_total,
+            "resultingWordCount": generated_total,
+            "chapterLengthTier": str(turn_plan.get("chapterLengthTier") or policy.get("tier") or ""),
+            "wordCountScope": "edited_existing",
+            "hardMinimum": 0,
+            "hardMinimumPassed": True,
+            "runtimeSafetyMaximum": runtime_safety_maximum,
+            "runtimeSafetyExceeded": generated_total > runtime_safety_maximum,
+            "structurePassed": structure_passed,
+            "qualityPassed": True,
+            "machineQualityPassed": True,
+            "providerCalls": 1,
+            "contractViolations": [],
+            "targetPaths": [str(item.get("path") or "") for item in targets if isinstance(item, dict)],
+            "writeToolApplied": False,
+            "writtenPaths": [],
+            "fragments": results,
+            "message": (
+                "现有故事正文已通过替换写入前的结构、基线与运行安全校验。"
+                if passed
+                else (
+                    "现有故事候选未通过 baseline、结构或运行安全校验，未写入项目文件。"
+                    if baseline_failed
+                    else "现有故事候选未通过结构、基线或运行安全校验，未写入项目文件。"
+                )
             ),
         }
         if not passed:
@@ -3393,6 +3783,14 @@ class StoryProjectService:
             if current_count != baseline:
                 raise StoryProjectServiceError(
                     f"Bounded story baseline changed before commit: {relative_path}"
+                )
+            expected_hash = str(fragment.get("_storydexBaselineSha256") or "").strip().lower()
+            if expected_hash and (
+                not target.is_file()
+                or sha256(target.read_bytes()).hexdigest() != expected_hash
+            ):
+                raise StoryProjectServiceError(
+                    f"Bounded story baseline bytes changed before commit: {relative_path}"
                 )
 
             existing_text = ""

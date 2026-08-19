@@ -4,6 +4,7 @@ import asyncio
 import concurrent.futures
 import contextvars
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -2673,8 +2674,15 @@ def _bounded_story_generation_gate(
         or (tier_mode and word_count_scope == "candidate")
     ):
         return {"enabled": False, "reason": "not_chapter_scoped"}
-    if str(turn_plan.get("operationType") or "").strip().lower() != "create_new":
+    operation_type = str(turn_plan.get("operationType") or "").strip().lower()
+    modify_existing = operation_type == "modify_existing"
+    if operation_type not in {"create_new", "modify_existing"}:
         return {"enabled": False, "reason": "operation_not_create_new"}
+    if modify_existing and not bool(turn_plan.get("boundedStoryGeneration")):
+        return {
+            "enabled": False,
+            "reason": "operation_not_bounded_modify_existing",
+        }
 
     def close_plan(
         reason: str,
@@ -2763,21 +2771,85 @@ def _bounded_story_generation_gate(
             validation=published_validation,
         )
 
-    chapter_states = story_project_service.list_chapter_states(workspace_root)
-    runtime_validation = validate_chapter_plan(
-        workspace_root,
-        action=action,
-        target_chapter_number=target_chapter_number,
-        authoritative_chapter_path=authoritative_chapter_path,
-        fragment_paths=authoritative_fragment_paths,
-        chapter_numbers=tuple(state.chapter_number for state in chapter_states),
-    )
+    if modify_existing:
+        runtime_validation = {
+            **published_validation,
+            "passed": bool(
+                authoritative_fragment_paths
+                and len(authoritative_fragment_paths) == len(set(authoritative_fragment_paths))
+                and all(
+                    (Path(workspace_root).resolve() / path).is_file()
+                    and Path(path).parts
+                    and Path(path).parts[0] == "chapters"
+                    and Path(path).parent.as_posix() == authoritative_chapter_path
+                    for path in authoritative_fragment_paths
+                )
+            ),
+            "issues": [],
+        }
+        if not runtime_validation["passed"]:
+            runtime_validation["issues"] = ["existing_fragment_targets_changed"]
+    else:
+        chapter_states = story_project_service.list_chapter_states(workspace_root)
+        runtime_validation = validate_chapter_plan(
+            workspace_root,
+            action=action,
+            target_chapter_number=target_chapter_number,
+            authoritative_chapter_path=authoritative_chapter_path,
+            fragment_paths=authoritative_fragment_paths,
+            chapter_numbers=tuple(state.chapter_number for state in chapter_states),
+        )
     if not bool(runtime_validation.get("passed")):
         return close_plan(
             "chapter_plan_runtime_validation_failed",
             [str(item) for item in list(runtime_validation.get("issues") or [])],
             validation=runtime_validation,
         )
+
+    if modify_existing:
+        expected_baselines = [
+            max(0, int(item.get("baselineWordCount") or 0))
+            for item in targets
+            if isinstance(item, dict)
+        ]
+        runtime_baselines = [
+            story_project_service.count_story_file_words(
+                Path(workspace_root).resolve() / path
+            )
+            for path in authoritative_fragment_paths
+        ]
+        expected_hashes = [
+            str(item.get("baselineSha256") or "").strip().lower()
+            for item in targets
+            if isinstance(item, dict)
+        ]
+        runtime_hashes = [
+            hashlib.sha256((Path(workspace_root).resolve() / path).read_bytes()).hexdigest()
+            for path in authoritative_fragment_paths
+        ]
+        if expected_baselines != runtime_baselines or any(
+            expected and expected != actual
+            for expected, actual in zip(expected_hashes, runtime_hashes)
+        ):
+            return close_plan(
+                "existing_story_baseline_changed",
+                ["existing_story_baseline_changed"],
+                validation={
+                    **runtime_validation,
+                    "baselineWordCounts": runtime_baselines,
+                },
+            )
+        flags = FeatureFlags(Path(workspace_root).resolve(), FEATURE_FLAG_DEFAULTS)
+        if not flags.get_bool("BOUNDED_STORY_GENERATION_ENABLED"):
+            return {"enabled": False, "reason": "feature_flag_disabled"}
+        return {
+            "enabled": True,
+            "reason": "enabled",
+            "chapterLengthTier": normalize_chapter_length_tier(
+                policy.get("tier") or turn_plan.get("chapterLengthTier")
+            ) if tier_mode else "",
+            "precisionEnabled": False,
+        }
 
     runtime_retained = (
         story_project_service.count_chapter_story_words(
@@ -2941,11 +3013,25 @@ async def _execute_bounded_story_generation(
             "error": {"type": "StoryGenerationApplyRejected"},
         }
 
-    validation = await asyncio.to_thread(
-        story_project_service.validate_story_generation_turn,
-        workspace_root,
-        turn_contract,
-    )
+    result_payload = result.get("applied") if isinstance(result.get("applied"), dict) else {}
+    operation_type = str(
+        ((turn_contract.get("turnPlan") or {}).get("operationType"))
+        if isinstance(turn_contract.get("turnPlan"), dict)
+        else ""
+    ).strip().lower()
+    if operation_type == "modify_existing" and isinstance(
+        result_payload.get("wordCountValidation"), dict
+    ):
+        # Replacement validation is a pre-write baseline check. Once the
+        # atomic commit succeeds, the old baseline is intentionally no longer
+        # present on disk, so reuse the authoritative pre-write packet.
+        validation = dict(result_payload["wordCountValidation"])
+    else:
+        validation = await asyncio.to_thread(
+            story_project_service.validate_story_generation_turn,
+            workspace_root,
+            turn_contract,
+        )
     validation = dict(validation) if isinstance(validation, dict) else {}
     return {
         "ok": bool(validation.get("passed")),
@@ -4087,7 +4173,23 @@ async def _stream_coomi_sse_worker(
                             )
                             or {}
                         )
-                        if str(turn_policy.get("mode") or "") == "tier":
+                        turn_plan_for_calibration = (
+                            turn_contract.get("turnPlan")
+                            if isinstance(turn_contract.get("turnPlan"), dict)
+                            else {}
+                        )
+                        # An existing-story rewrite is not a new-chapter length
+                        # sample.  Recording it in either calibration store
+                        # would teach the create-new planner from a replacement
+                        # candidate (and, on a cold project, create a derived
+                        # calibration file that the operation never requested).
+                        modify_existing = (
+                            str(turn_plan_for_calibration.get("operationType") or "").strip().lower()
+                            == "modify_existing"
+                        )
+                        if modify_existing:
+                            pass
+                        elif str(turn_policy.get("mode") or "") == "tier":
                             accounting = dict(
                                 bounded_result.get("callAccounting") or {}
                             )
@@ -4206,20 +4308,38 @@ async def _stream_coomi_sse_worker(
                             if isinstance(turn_plan.get("wordCountPolicy"), dict)
                             else {}
                         )
+                        modify_existing = (
+                            str(turn_plan.get("operationType") or "").strip().lower()
+                            == "modify_existing"
+                        )
                         tier_mode = (
                             str(word_count_policy.get("mode") or "") == "tier"
                         )
-                        count_summary = (
-                            f"本次续写 {final_word_count} 字"
-                            if tier_mode
-                            else f"字数 {final_word_count}"
-                        )
-                        reply = (
-                            f"章节已写入 {chapter_path}，{count_summary}"
-                            if chapter_path
-                            else f"章节已写入，{count_summary}"
-                        )
-                        if tier_mode:
+                        if modify_existing:
+                            target_paths = [
+                                str(path)
+                                for path in list(
+                                    turn_plan.get("authoritativeFragmentPaths") or []
+                                )
+                                if str(path).strip()
+                            ]
+                            target_label = ", ".join(target_paths) or chapter_path
+                            reply = (
+                                f"已重写现有故事文件 {target_label}，"
+                                f"本次生成 {final_word_count} 字"
+                            )
+                        else:
+                            count_summary = (
+                                f"本次续写 {final_word_count} 字"
+                                if tier_mode
+                                else f"字数 {final_word_count}"
+                            )
+                            reply = (
+                                f"章节已写入 {chapter_path}，{count_summary}"
+                                if chapter_path
+                                else f"章节已写入，{count_summary}"
+                            )
+                        if not modify_existing and tier_mode:
                             tier_labels = {
                                 "short": "短档",
                                 "medium": "中档",
@@ -4234,7 +4354,7 @@ async def _stream_coomi_sse_worker(
                                 if bool(validation_packet.get("tierHit"))
                                 else f"，{tier_label}未命中，正文按原稿保留"
                             )
-                        elif bool(validation_packet.get("preciseWordCountEnabled")) and not bool(
+                        elif not modify_existing and bool(validation_packet.get("preciseWordCountEnabled")) and not bool(
                             validation_packet.get("precisionAchieved")
                         ):
                             product_target = max(
@@ -4251,7 +4371,7 @@ async def _stream_coomi_sse_worker(
                             reply += (
                                 f"，未达到精确范围 {precision_low}-{precision_high}"
                             )
-                        elif validation_packet.get("normalBandPassed") is False:
+                        elif not modify_existing and validation_packet.get("normalBandPassed") is False:
                             product_target = max(
                                 1,
                                 int(
@@ -4263,7 +4383,7 @@ async def _stream_coomi_sse_worker(
                             normal_low, normal_high = chapter_normal_band(product_target)
                             reply += f"，未达到正常范围 {normal_low}-{normal_high}"
                         reply += "。"
-                        if not tier_mode and bool(validation_packet.get("overBudget")):
+                        if not modify_existing and not tier_mode and bool(validation_packet.get("overBudget")):
                             reply = f"{reply}{STORY_OVER_BUDGET_KEEP_MESSAGE}"
                         reply_packet = {
                             "_type": "TextChunk",

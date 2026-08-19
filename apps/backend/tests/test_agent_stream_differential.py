@@ -492,6 +492,110 @@ def test_create_new_tier_fixtures_are_registered_and_freeze_disk_event_calibrati
         assert observation["bands"][tier] == list(facts["preferred"])
 
 
+def test_create_new_multi_fragment_fixture_is_registered_and_publishable() -> None:
+    relative = (
+        "apps/backend/contracts/fixtures/"
+        "agent-chat-stream-story-create-new-multi-fragment-v1"
+    )
+    contract = json.loads(
+        (
+            REPOSITORY_ROOT
+            / "apps/backend/contracts/agent-chat-stream-v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    manifest = json.loads(
+        (
+            REPOSITORY_ROOT
+            / "apps/backend/contracts/agent-runtime-manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+    stream_contract = next(
+        item
+        for item in manifest["contracts"]
+        if item["id"] == "agent.chat.stream.v1"
+    )
+    fixture_root = REPOSITORY_ROOT / relative
+    scenario = json.loads(
+        (fixture_root / "scenario.json").read_text(encoding="utf-8")
+    )
+    replay = json.loads(
+        (fixture_root / "provider-replay.json").read_text(encoding="utf-8")
+    )
+
+    assert relative in contract["replay"]["fixtures"]
+    assert relative in stream_contract["replayFixtures"]
+    assert scenario["request"]["storyGeneration"]["fragmentCount"] == 3
+    assert "providerCompletionCount" not in scenario["expected"]
+    assert scenario["expected"]["storyEvents"]["StoryCallAccounting"][0][
+        "providerAttempts"
+    ] == 1
+    assert scenario["expected"]["storyEvents"]["StoryGenerationValidation"][0][
+        "fragmentCount"
+    ] == 3
+    assert count_story_text_words(replay["steps"][0]["response"]["content"]) >= 700
+    assert scenario["expected"]["workspaceEffects"]["changedPaths"] == [
+        "chapters/第1章 未命名/001.md",
+        "chapters/第1章 未命名/002.md",
+        "chapters/第1章 未命名/003.md",
+    ]
+
+
+def test_modify_existing_multi_fragment_fixture_freezes_contiguous_replacements() -> None:
+    relative = (
+        "apps/backend/contracts/fixtures/"
+        "agent-chat-stream-story-modify-existing-multi-fragment-v1"
+    )
+    contract = json.loads(
+        (
+            REPOSITORY_ROOT
+            / "apps/backend/contracts/agent-chat-stream-v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    manifest = json.loads(
+        (
+            REPOSITORY_ROOT
+            / "apps/backend/contracts/agent-runtime-manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+    stream_contract = next(
+        item
+        for item in manifest["contracts"]
+        if item["id"] == "agent.chat.stream.v1"
+    )
+    fixture_root = REPOSITORY_ROOT / relative
+    scenario = json.loads(
+        (fixture_root / "scenario.json").read_text(encoding="utf-8")
+    )
+    replay = json.loads(
+        (fixture_root / "provider-replay.json").read_text(encoding="utf-8")
+    )
+    expected = scenario["expected"]
+    turn_plan = expected["turnContract"]["turnPlan"]
+    effects = expected["workspaceEffects"]
+
+    assert relative in contract["replay"]["fixtures"]
+    assert relative in stream_contract["replayFixtures"]
+    assert scenario["request"]["activeFile"] == "chapters/第1章 既有/002.md"
+    assert scenario["request"]["storyGeneration"]["fragmentCount"] == 2
+    assert turn_plan["authoritativeFragmentPaths"] == [
+        "chapters/第1章 既有/002.md",
+        "chapters/第1章 既有/003.md",
+    ]
+    assert [target["writeMode"] for target in turn_plan["fragmentTargets"]] == [
+        "replace",
+        "replace",
+    ]
+    assert effects["changedPaths"] == turn_plan["authoritativeFragmentPaths"]
+    assert effects["createdPaths"] == []
+    assert effects["files"]["chapters/第1章 既有/004.md"]["exists"] is True
+    assert effects["files"]["chapters/第1章 既有/005.md"]["exists"] is False
+    assert effects["files"][
+        ".storydex/memory/length_tier_calibration.json"
+    ]["exists"] is False
+    assert len(replay["steps"]) == 1
+    assert len(replay["steps"][0]["response"]["content"].split("\n\n")) == 6
+
+
 def test_compare_reports_requires_matching_replacement_persistence() -> None:
     python = _report()
     rust = _report()

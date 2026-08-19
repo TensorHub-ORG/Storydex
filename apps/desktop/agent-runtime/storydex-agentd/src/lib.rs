@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 use axum::Json;
 use axum::Router;
 use axum::body::Body;

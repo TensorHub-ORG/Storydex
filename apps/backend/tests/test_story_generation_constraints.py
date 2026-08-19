@@ -124,6 +124,38 @@ def test_modify_existing_intent_plans_no_new_fragments(tmp_path: Path) -> None:
     assert plan["requiresChapterTemplateSelection"] is False
 
 
+def test_bounded_modify_existing_contract_publishes_only_the_existing_active_target(
+    tmp_path: Path,
+) -> None:
+    active = tmp_path / "chapters" / "fixture-story.md"
+    active.parent.mkdir(parents=True, exist_ok=True)
+    active.write_text("原始正文\n", encoding="utf-8")
+
+    contract = get_storydex_orchestration_service().build_turn_contract(
+        tmp_path,
+        prompt="请重写已存在的章节文件 chapters/fixture-story.md，保留事实并调整节奏。",
+        active_file="chapters/fixture-story.md",
+        story_generation={"fragmentCount": 1, "chapterLengthTier": "short"},
+        intent_frame={
+            "primary": "story_generation",
+            "confidence": "high",
+            "method": "llm",
+            "operationType": "modify_existing",
+            "effect": "modify",
+            "canWrite": True,
+        },
+    )
+
+    plan = contract["turnPlan"]
+    assert plan["operationType"] == "modify_existing"
+    assert plan["fragmentCount"] == 1
+    assert plan["authoritativeFragmentPaths"] == ["chapters/fixture-story.md"]
+    assert plan["fragmentTargets"][0]["path"] == "chapters/fixture-story.md"
+    assert plan["fragmentTargets"][0]["writeMode"] == "replace"
+    assert plan["fragmentTargets"][0]["baselineWordCount"] == len("原始正文")
+    assert plan["chapterPlanValidation"]["passed"] is True
+
+
 def test_story_discussion_contract_is_read_only_end_to_end(tmp_path: Path) -> None:
     contract = get_storydex_orchestration_service().build_turn_contract(
         tmp_path,
@@ -167,6 +199,81 @@ def test_modify_existing_turn_skips_story_word_count_validation(tmp_path: Path) 
     validation = service.validate_story_generation_turn(tmp_path, contract)
     assert validation["applicable"] is False
     assert validation["passed"] is True
+
+
+def test_modify_existing_candidate_replaces_active_file_without_a_new_story_minimum(
+    tmp_path: Path,
+) -> None:
+    service = get_story_project_service()
+    active = tmp_path / "chapters" / "fixture-story.md"
+    active.parent.mkdir(parents=True, exist_ok=True)
+    active.write_text("旧正文", encoding="utf-8")
+    contract = get_storydex_orchestration_service().build_turn_contract(
+        tmp_path,
+        prompt="请重写已存在的章节文件 chapters/fixture-story.md，保留事实并调整节奏。",
+        active_file="chapters/fixture-story.md",
+        story_generation={"fragmentCount": 1, "chapterLengthTier": "short"},
+        intent_frame={
+            "primary": "story_generation",
+            "confidence": "high",
+            "method": "llm",
+            "operationType": "modify_existing",
+            "effect": "modify",
+            "canWrite": True,
+        },
+    )
+
+    result = service.apply_story_generation_increment(
+        tmp_path,
+        {"fragments": [{"text": "新正文"}]},
+        generation_contract=contract,
+    )
+
+    assert result["ok"] is True
+    assert result["wordCountValidation"]["wordCountScope"] == "edited_existing"
+    assert result["wordCountValidation"]["hardMinimumPassed"] is True
+    assert active.read_text(encoding="utf-8") == "新正文\n"
+    story_files = sorted(
+        path.name
+        for path in (tmp_path / "chapters").iterdir()
+        if path.is_file() and path.name.lower() != "readme.md"
+    )
+    assert story_files == [active.name]
+
+
+def test_modify_existing_candidate_rejects_a_changed_baseline_without_writing(
+    tmp_path: Path,
+) -> None:
+    service = get_story_project_service()
+    active = tmp_path / "chapters" / "fixture-story.md"
+    active.parent.mkdir(parents=True, exist_ok=True)
+    active.write_text("旧正文", encoding="utf-8")
+    contract = get_storydex_orchestration_service().build_turn_contract(
+        tmp_path,
+        prompt="请重写已存在的章节文件 chapters/fixture-story.md。",
+        active_file="chapters/fixture-story.md",
+        story_generation={"fragmentCount": 1, "chapterLengthTier": "short"},
+        intent_frame={
+            "primary": "story_generation",
+            "confidence": "high",
+            "method": "llm",
+            "operationType": "modify_existing",
+            "effect": "modify",
+            "canWrite": True,
+        },
+    )
+    active.write_text("外部修改", encoding="utf-8")
+
+    result = service.apply_story_generation_increment(
+        tmp_path,
+        {"fragments": [{"text": "不应写入"}]},
+        generation_contract=contract,
+    )
+
+    assert result["ok"] is False
+    assert result["wordCountValidation"]["passed"] is False
+    assert "baseline" in result["wordCountValidation"]["message"].lower()
+    assert active.read_text(encoding="utf-8") == "外部修改"
 
 
 def _decode_sse(chunk: str) -> tuple[str, dict[str, Any]]:

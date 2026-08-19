@@ -128,6 +128,63 @@ def test_gate_accepts_a_chapter_scoped_current_word_count_contract(tmp_path: Pat
     assert gate["precisionEnabled"] is False
 
 
+def test_gate_accepts_a_bounded_existing_story_contract_without_new_chapter_plan(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "chapters" / "fixture-story.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("旧正文\n", encoding="utf-8")
+    contract = _contract()
+    plan = contract["turnPlan"]
+    contract["intentFrame"].update(
+        {"operationType": "modify_existing", "effect": "modify", "canWrite": True}
+    )
+    plan.update(
+        {
+            "operationType": "modify_existing",
+            "boundedStoryGeneration": True,
+            "chapterAction": "modify_existing",
+            "targetChapterNumber": 0,
+            "fragmentTargets": [
+                {
+                    "order": 1,
+                    "path": "chapters/fixture-story.md",
+                    "writeMode": "replace",
+                    "baselineWordCount": 3,
+                }
+            ],
+            "authoritativeChapterPath": "chapters",
+            "authoritativeFragmentPaths": ["chapters/fixture-story.md"],
+            "chapterPlanValidation": {
+                "_type": "ModifyExistingPlanValidation",
+                "_version": 1,
+                "passed": True,
+                "action": "modify_existing",
+                "targetChapterNumber": 0,
+                "authoritativeChapterPath": "chapters",
+                "authoritativeFragmentPaths": ["chapters/fixture-story.md"],
+                "issues": [],
+            },
+        }
+    )
+
+    gate = routes._bounded_story_generation_gate(tmp_path, contract)
+
+    assert gate["enabled"] is True
+
+
+def test_gate_keeps_explicit_generic_tool_modify_existing_on_the_bridge(
+    tmp_path: Path,
+) -> None:
+    contract = _contract()
+    contract["intentFrame"].update({"operationType": "modify_existing"})
+    contract["turnPlan"].update({"operationType": "modify_existing", "fragmentTargets": []})
+
+    gate = routes._bounded_story_generation_gate(tmp_path, contract)
+
+    assert gate == {"enabled": False, "reason": "operation_not_bounded_modify_existing"}
+
+
 def test_gate_reports_the_precision_switch_it_read(tmp_path: Path) -> None:
     gate = routes._bounded_story_generation_gate(tmp_path, _contract(precise=True))
 
@@ -165,7 +222,7 @@ def test_gate_closes_execution_when_the_published_chapter_plan_failed(
         ),
         (
             lambda c: c["turnPlan"].update({"operationType": "modify_existing"}),
-            "operation_not_create_new",
+            "operation_not_bounded_modify_existing",
         ),
         (
             lambda c: c["turnPlan"].update({"operationType": "inquiry"}),
@@ -623,6 +680,111 @@ def _payload(collected: Dict[str, Any], name: str) -> Dict[str, Any]:
         if event_name == name:
             return packet
     raise AssertionError(f"{name} was never emitted: {collected['names']}")
+
+
+def _modify_contract(*paths: str) -> Dict[str, Any]:
+    contract = _contract()
+    plan = contract["turnPlan"]
+    chapter_path = str(Path(paths[0]).parent).replace("\\", "/") if paths else "chapters"
+    contract["intentFrame"].update(
+        {"operationType": "modify_existing", "effect": "modify", "canWrite": True}
+    )
+    plan.update(
+        {
+            "operationType": "modify_existing",
+            "boundedStoryGeneration": True,
+            "chapterAction": "modify_existing",
+            "authoritativeChapterPath": chapter_path,
+            "authoritativeFragmentPaths": list(paths),
+            "fragmentTargets": [
+                {
+                    "order": index,
+                    "path": path,
+                    "writeMode": "replace",
+                    "baselineWordCount": 10,
+                    "baselineSha256": "baseline",
+                }
+                for index, path in enumerate(paths, start=1)
+            ],
+            "chapterPlanValidation": {
+                "_type": "ModifyExistingPlanValidation",
+                "_version": 1,
+                "passed": True,
+                "action": "modify_existing",
+                "authoritativeChapterPath": chapter_path,
+                "authoritativeFragmentPaths": list(paths),
+                "issues": [],
+            },
+        }
+    )
+    return contract
+
+
+def test_bounded_modify_existing_uses_rewrite_reply_and_skips_length_calibration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = ("chapters/fixture-story.md",)
+    result = _bounded_result(precise=False, draft=116)
+    collected = _collect(
+        monkeypatch,
+        tmp_path,
+        contract=_modify_contract(*paths),
+        outcome={
+            "ok": True,
+            "result": result,
+            "validation": {
+                "applicable": True,
+                "passed": True,
+                "wordCountScope": "edited_existing",
+                "actualWordCount": 116,
+                "generatedWordCount": 116,
+                "retainedWordCount": 10,
+                "resultingWordCount": 116,
+            },
+            "callAccounting": result["callAccounting"],
+            "error": {},
+        },
+    )
+
+    reply = _payload(collected, "TextChunk")["content"]
+    assert reply == "已重写现有故事文件 chapters/fixture-story.md，本次生成 116 字。"
+    assert collected["calibration"].chapter_calls == []
+    assert collected["calibration"].paragraph_calls == []
+    assert collected["tierCalibration"].calls == []
+
+
+def test_bounded_modify_existing_reply_lists_all_replaced_fragments(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = ("chapters/001.md", "chapters/002.md")
+    result = _bounded_result(precise=False, draft=240)
+    collected = _collect(
+        monkeypatch,
+        tmp_path,
+        contract=_modify_contract(*paths),
+        outcome={
+            "ok": True,
+            "result": result,
+            "validation": {
+                "applicable": True,
+                "passed": True,
+                "wordCountScope": "edited_existing",
+                "actualWordCount": 240,
+                "generatedWordCount": 240,
+                "retainedWordCount": 20,
+                "resultingWordCount": 240,
+            },
+            "callAccounting": result["callAccounting"],
+            "error": {},
+        },
+    )
+
+    reply = _payload(collected, "TextChunk")["content"]
+    assert reply == "已重写现有故事文件 chapters/001.md, chapters/002.md，本次生成 240 字。"
+    assert "续写" not in reply
+    assert "正常范围" not in reply
 
 
 def test_a_bounded_turn_replaces_the_agent_tool_loop(

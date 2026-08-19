@@ -1,0 +1,205 @@
+{
+  "schemaVersion": 1,
+  "contractId": "agent.chat.stream.v1",
+  "scenario": "story-modify-existing-success-two-contiguous-fragments-replay",
+  "allowMutatingTools": true,
+  "request": {
+    "prompt": "请连续重写已存在的章节文件 chapters/第1章 既有/002.md 和 chapters/第1章 既有/003.md，保留既有证据链事实但改写叙述节奏。请求标记 STORYDEX_STORY_MODIFY_MULTI_FRAGMENT_PROMPT_9C4E。",
+    "activeFile": "chapters/第1章 既有/002.md",
+    "reasoningEffort": "low",
+    "storyGeneration": {
+      "fragmentCount": 2,
+      "chapterLengthTier": "short"
+    },
+    "confirmNoSnapshot": true,
+    "permissionMode": "approve_for_me",
+    "capabilityMode": "scoped_write",
+    "writesAllowed": true,
+    "coreWritesAllowed": true,
+    "allowedWriteRoots": ["chapters/"]
+  },
+  "workspace": {
+    "initializeGit": true,
+    "initializeStorydex": true,
+    "stabilizeRuntimeBaseline": true,
+    "files": [
+      {
+        "path": "chapters/第1章 既有/001.md",
+        "content": "# 第一章 片段 001\n\n林澈抵达雨夜车站，开始追查失踪信使。\n"
+      },
+      {
+        "path": "chapters/第1章 既有/002.md",
+        "content": "# 第一章 片段 002\n\n旧标记：STORYDEX_MODIFY_MULTI_BEFORE_002_6A1F\n\n林澈在寄存柜旁发现铜叶印记。\n"
+      },
+      {
+        "path": "chapters/第1章 既有/003.md",
+        "content": "# 第一章 片段 003\n\n旧标记：STORYDEX_MODIFY_MULTI_BEFORE_003_7B2E\n\n线索暂时指向废弃维修通道。\n"
+      },
+      {
+        "path": "chapters/第1章 既有/004.md",
+        "content": "# 第一章 片段 004\n\n保护标记：STORYDEX_MODIFY_MULTI_UNCHANGED_004_8C3D\n\n南港的接应行动尚未开始。\n"
+      }
+    ]
+  },
+  "expected": {
+    "providerId": "OPENCODE",
+    "model": "deepseek-v4-flash",
+    "providerMode": "replay",
+    "toolSequence": [],
+    "terminalEvent": "AgentCompleted",
+    "httpStatus": 200,
+    "requiredEventSequence": [
+      "StoryProviderAttempt",
+      "StoryCommitStarted",
+      "StoryCommitFinished",
+      "StoryDraftMeasured",
+      "StoryGenerationValidation",
+      "StoryCallAccounting"
+    ],
+    "turnContract": {
+      "intentFrame": {
+        "primary": "story_generation",
+        "operationType": "modify_existing",
+        "effect": "modify"
+      },
+      "turnPlan": {
+        "requestedFragmentCount": 2,
+        "fragmentCount": 2,
+        "chapterContentMode": "multi_fragment",
+        "activeFile": "chapters/第1章 既有/002.md",
+        "isNewStory": false,
+        "requiresChapterTemplateSelection": false,
+        "boundedStoryGeneration": true,
+        "chapterAction": "modify_existing",
+        "chapterActionReason": "active_existing_file",
+        "targetChapterNumber": 1,
+        "authoritativeChapterPath": "chapters/第1章 既有",
+        "authoritativeFragmentPaths": [
+          "chapters/第1章 既有/002.md",
+          "chapters/第1章 既有/003.md"
+        ],
+        "fragmentTargets": [
+          {
+            "order": 1,
+            "path": "chapters/第1章 既有/002.md",
+            "writeMode": "replace",
+            "contentMode": "multi_fragment"
+          },
+          {
+            "order": 2,
+            "path": "chapters/第1章 既有/003.md",
+            "writeMode": "replace",
+            "contentMode": "multi_fragment"
+          }
+        ],
+        "chapterPlanValidation": {
+          "_type": "ModifyExistingPlanValidation",
+          "_version": 1,
+          "passed": true,
+          "action": "modify_existing",
+          "targetChapterNumber": 1,
+          "authoritativeChapterPath": "chapters/第1章 既有",
+          "authoritativeFragmentPaths": [
+            "chapters/第1章 既有/002.md",
+            "chapters/第1章 既有/003.md"
+          ],
+          "issues": []
+        }
+      }
+    },
+    "storyEvents": {
+      "StoryDraftMeasured": [
+        {
+          "initialWordCount": 306,
+          "retainedWordCount": 0,
+          "generatedWordCount": 306,
+          "completionTokens": 210,
+          "capApplied": false,
+          "calibrationStatus": ""
+        }
+      ],
+      "StoryGenerationValidation": [
+        {
+          "applicable": true,
+          "passed": true,
+          "status": "success",
+          "fragmentCount": 2,
+          "actualWordCount": 306,
+          "generatedWordCount": 306,
+          "retainedWordCount": 127,
+          "resultingWordCount": 306,
+          "chapterLengthTier": "",
+          "wordCountScope": "edited_existing",
+          "hardMinimum": 0,
+          "hardMinimumPassed": true,
+          "runtimeSafetyMaximum": 6000,
+          "runtimeSafetyExceeded": false,
+          "structurePassed": true,
+          "qualityPassed": true,
+          "providerCalls": 1,
+          "contractViolations": [],
+          "initialWordCount": 306,
+          "finalWordCount": 306,
+          "normalBandPassed": false,
+          "precisionAchieved": null
+        }
+      ],
+      "StoryCallAccounting": [
+        {
+          "chapterLengthTier": "",
+          "preciseWordCountEnabled": false,
+          "asymmetricLengthEnabled": false,
+          "logicalStoryCalls": 1,
+          "providerAttempts": 1,
+          "transportRetries": 0,
+          "initialGenerationCalls": 1,
+          "lengthRevisionCalls": 0,
+          "secondDraftCalls": 0,
+          "nonProseCalls": {},
+          "contractViolations": []
+        }
+      ]
+    },
+    "eventKindDifferences": {
+      "pythonOnly": ["GitCommitPrompt", "KnowledgeProjectionUpdated"],
+      "rustOnly": []
+    },
+    "workspaceEffects": {
+      "changedPaths": [
+        "chapters/第1章 既有/002.md",
+        "chapters/第1章 既有/003.md"
+      ],
+      "createdPaths": [],
+      "modifiedPaths": [
+        "chapters/第1章 既有/002.md",
+        "chapters/第1章 既有/003.md"
+      ],
+      "deletedPaths": [],
+      "gitPresent": true,
+      "gitHeadUnchanged": true,
+      "gitStatusBefore": [],
+      "excludedPrefixes": [".git/", ".storydex/.agent/", ".storydex/.cache/"],
+      "files": {
+        "chapters/第1章 既有/002.md": {"exists": true},
+        "chapters/第1章 既有/003.md": {"exists": true},
+        "chapters/第1章 既有/004.md": {"exists": true},
+        "chapters/第1章 既有/005.md": {"exists": false},
+        ".storydex/memory/length_tier_calibration.json": {"exists": false}
+      },
+      "pythonStableDerivedPaths": [
+        ".storydex/wiki/WIKI.md",
+        ".storydex/wiki/index.json",
+        ".storydex/wiki/knowledge_graph.json",
+        ".storydex/wiki/projection_status.json",
+        ".storydex/wiki/source_snapshot.json"
+      ],
+      "pythonStableDerivedFiles": {
+        ".storydex/wiki/WIKI.md": {"exists": true},
+        ".storydex/wiki/index.json": {"exists": true, "jsonMetadata": {"schemaVersion": 3}},
+        ".storydex/wiki/knowledge_graph.json": {"exists": true, "jsonMetadata": {"schemaVersion": 3}},
+        ".storydex/wiki/projection_status.json": {"exists": true, "jsonMetadata": {"schemaVersion": 3}},
+        ".storydex/wiki/source_snapshot.json": {"exists": true}
+      }
+    }
+  }
+}

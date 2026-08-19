@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 1,
+  "contractId": "agent.chat.stream.v1",
+  "scenario": "story-modify-existing-success-single-file-replay",
+  "allowMutatingTools": true,
+  "request": {
+    "prompt": "请重写已存在的章节文件 chapters/fixture-story.md，保留既有事实但改写叙述节奏。请求标记 STORYDEX_STORY_MODIFY_SUCCESS_PROMPT_5D8E。",
+    "activeFile": "chapters/fixture-story.md",
+    "reasoningEffort": "low",
+    "storyGeneration": {
+      "fragmentCount": 1,
+      "chapterLengthTier": "short"
+    },
+    "confirmNoSnapshot": true,
+    "permissionMode": "approve_for_me",
+    "capabilityMode": "scoped_write",
+    "writesAllowed": true,
+    "coreWritesAllowed": true,
+    "allowedWriteRoots": ["chapters/"]
+  },
+  "workspace": {
+    "initializeGit": true,
+    "initializeStorydex": true,
+    "stabilizeRuntimeBaseline": true,
+    "files": [
+      {
+        "path": "chapters/fixture-story.md",
+        "content": "# Fixture Story\n\nStatus: draft\nMarker: STORYDEX_STORY_MODIFY_SUCCESS_BEFORE_3F1A\n"
+      }
+    ]
+  },
+  "expected": {
+    "providerId": "OPENCODE",
+    "model": "deepseek-v4-flash",
+    "providerMode": "replay",
+    "toolSequence": [],
+    "terminalEvent": "AgentCompleted",
+    "httpStatus": 200,
+    "requiredEventSequence": [
+      "StoryProviderAttempt",
+      "StoryCommitStarted",
+      "StoryCommitFinished",
+      "StoryDraftMeasured",
+      "StoryGenerationValidation",
+      "StoryCallAccounting"
+    ],
+    "turnContract": {
+      "intentFrame": {
+        "primary": "story_generation",
+        "operationType": "modify_existing",
+        "effect": "modify"
+      },
+      "turnPlan": {
+        "requestedFragmentCount": 1,
+        "fragmentCount": 1,
+        "chapterContentMode": "multi_fragment",
+        "activeFile": "chapters/fixture-story.md",
+        "isNewStory": false,
+        "requiresChapterTemplateSelection": false,
+        "boundedStoryGeneration": true,
+        "chapterAction": "modify_existing",
+        "chapterActionReason": "active_existing_file",
+        "targetChapterNumber": 0,
+        "authoritativeChapterPath": "chapters",
+        "authoritativeFragmentPaths": ["chapters/fixture-story.md"],
+        "fragmentTargets": [
+          {
+            "order": 1,
+            "path": "chapters/fixture-story.md",
+            "writeMode": "replace",
+            "contentMode": "multi_fragment"
+          }
+        ],
+        "chapterPlanValidation": {
+          "_type": "ModifyExistingPlanValidation",
+          "_version": 1,
+          "passed": true,
+          "action": "modify_existing",
+          "targetChapterNumber": 0,
+          "authoritativeChapterPath": "chapters",
+          "authoritativeFragmentPaths": ["chapters/fixture-story.md"],
+          "issues": []
+        }
+      }
+    },
+    "eventKindDifferences": {
+      "pythonOnly": ["GitCommitPrompt", "KnowledgeProjectionUpdated"],
+      "rustOnly": []
+    },
+    "workspaceEffects": {
+      "changedPaths": ["chapters/fixture-story.md"],
+      "createdPaths": [],
+      "modifiedPaths": ["chapters/fixture-story.md"],
+      "deletedPaths": [],
+      "gitPresent": true,
+      "gitHeadUnchanged": true,
+      "excludedPrefixes": [".git/", ".storydex/.agent/", ".storydex/.cache/"],
+      "files": {
+        "chapters/fixture-story.md": {"exists": true}
+      },
+      "pythonStableDerivedPaths": [
+        ".storydex/wiki/WIKI.md",
+        ".storydex/wiki/index.json",
+        ".storydex/wiki/knowledge_graph.json",
+        ".storydex/wiki/projection_status.json",
+        ".storydex/wiki/source_snapshot.json"
+      ],
+      "pythonStableDerivedFiles": {
+        ".storydex/wiki/WIKI.md": {"exists": true},
+        ".storydex/wiki/index.json": {"exists": true, "jsonMetadata": {"schemaVersion": 3}},
+        ".storydex/wiki/knowledge_graph.json": {"exists": true, "jsonMetadata": {"schemaVersion": 3}},
+        ".storydex/wiki/projection_status.json": {"exists": true, "jsonMetadata": {"schemaVersion": 3}},
+        ".storydex/wiki/source_snapshot.json": {"exists": true}
+      }
+    }
+  }
+}

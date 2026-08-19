@@ -4,7 +4,7 @@
   "scenario": "story-modify-existing-provider-error-before-write-replay",
   "allowMutatingTools": true,
   "request": {
-    "prompt": "请重写已存在的章节文件 chapters/fixture-story.md。请求标记 STORYDEX_STORY_MODIFY_PROVIDER_ERROR_PROMPT_7A2D。",
+    "prompt": "请重写已存在的章节文件 chapters/fixture-story.md，只调用一次 write_file 完成写入。请求标记 STORYDEX_STORY_MODIFY_PROVIDER_ERROR_PROMPT_7A2D。",
     "activeFile": "chapters/fixture-story.md",
     "reasoningEffort": "low",
     "storyGeneration": {

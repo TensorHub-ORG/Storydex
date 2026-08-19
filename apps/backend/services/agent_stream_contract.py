@@ -405,7 +405,9 @@ def _safe_turn_contract(payload: Mapping[str, Any]) -> dict[str, Any]:
             key: turn_plan.get(key)
             for key in (
                 "operationType",
+                "requestedFragmentCount",
                 "fragmentCount",
+                "chapterContentMode",
                 "chapterLengthTier",
                 "selectedChapterTemplate",
                 "chapterWordCountTarget",
@@ -413,13 +415,18 @@ def _safe_turn_contract(payload: Mapping[str, Any]) -> dict[str, Any]:
                 "fragmentWordCountMin",
                 "fragmentWordCountMax",
                 "chapterAction",
+                "chapterActionReason",
                 "targetChapterNumber",
                 "authoritativeChapterPath",
                 "authoritativeFragmentPaths",
+                "boundedStoryGeneration",
                 "nextSegmentPath",
                 "chapterCount",
                 "activeFile",
                 "storyFormatSource",
+                "isNewStory",
+                "requiresChapterTemplateSelection",
+                "chapterPlanValidation",
             )
             if key in turn_plan
         },
@@ -434,6 +441,24 @@ def _safe_turn_contract(payload: Mapping[str, Any]) -> dict[str, Any]:
             "promptBlocks": prompt_blocks,
         },
     }
+    fragment_targets = turn_plan.get("fragmentTargets")
+    if isinstance(fragment_targets, list):
+        safe["turnPlan"]["fragmentTargets"] = [
+            {
+                key: target.get(key)
+                for key in (
+                    "order",
+                    "path",
+                    "writeMode",
+                    "baselineWordCount",
+                    "baselineSha256",
+                    "contentMode",
+                )
+                if key in target
+            }
+            for target in fragment_targets
+            if isinstance(target, Mapping)
+        ]
     if word_count_policy:
         safe["turnPlan"]["wordCountPolicy"] = {
             key: word_count_policy.get(key)

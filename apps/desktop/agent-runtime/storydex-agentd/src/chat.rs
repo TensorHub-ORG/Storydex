@@ -6,6 +6,7 @@ use crate::replacement::{
     ExecutionRecordInput, ReplacementError, ReplacementTransaction,
     persist_execution_record_with_events,
 };
+use anyhow::Context;
 use axum::Json;
 use axum::body::Body;
 use axum::extract::rejection::JsonRejection;
@@ -1048,6 +1049,44 @@ fn parse_story_generation(
     }))
 }
 
+fn story_operation_type(payload: &ChatStreamRequest, active_file_exists: bool) -> &'static str {
+    if payload.active_file.trim().is_empty() || !active_file_exists {
+        return "create_new";
+    }
+    let prompt = payload.prompt.to_ascii_lowercase();
+    let modify_signal = [
+        "重写",
+        "改写",
+        "修改",
+        "整理",
+        "重构",
+        "rewrite",
+        "edit existing",
+        "modify existing",
+    ]
+    .iter()
+    .any(|signal| prompt.contains(signal));
+    if modify_signal {
+        "modify_existing"
+    } else {
+        "create_new"
+    }
+}
+
+fn should_use_rust_modify_existing(payload: &ChatStreamRequest) -> bool {
+    let prompt = payload.prompt.to_ascii_lowercase();
+    ![
+        "write_file",
+        "read_file",
+        "tool call",
+        "tool_call",
+        "只调用",
+        "不要调用其他工具",
+    ]
+    .iter()
+    .any(|signal| prompt.contains(signal))
+}
+
 fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
         .get(name)
@@ -1228,6 +1267,44 @@ async fn run_chat(execution: ChatExecution) {
         cancellation.cancel("client_disconnected");
         return;
     }
+    let published_plan_failed = turn_contract
+        .get("turnPlan")
+        .and_then(|plan| plan.get("chapterPlanValidation"))
+        .and_then(Value::as_object)
+        .and_then(|validation| validation.get("passed"))
+        .and_then(Value::as_bool)
+        .is_some_and(|passed| !passed);
+    if published_plan_failed {
+        let issues = turn_contract
+            .get("turnPlan")
+            .and_then(|plan| plan.get("chapterPlanValidation"))
+            .and_then(|validation| validation.get("issues"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join("; ");
+        let plan_error_message = format!(
+            "Rust story target planning failed{}",
+            if issues.is_empty() {
+                ".".to_owned()
+            } else {
+                format!(": {issues}")
+            }
+        );
+        send_terminal_error(
+            &sender,
+            &mut terminal_sent,
+            &trace_id,
+            &session_id,
+            "story_generation_plan_error",
+            &plan_error_message,
+        )
+        .await;
+        send_done(&sender).await;
+        return;
+    }
     if cancellation.is_cancelled() {
         terminal_event = "AgentCancelled".to_owned();
         trace_events.push((
@@ -1306,11 +1383,12 @@ async fn run_chat(execution: ChatExecution) {
 
     let story_options = parse_story_generation(&payload.story_generation)
         .expect("validated storyGeneration request");
-    let story_create_new = story_options.as_ref().is_some_and(|options| {
-        options.fragment_count == 1
-            && (payload.active_file.trim().is_empty()
-                || !workspace.join(&payload.active_file).is_file())
-    });
+    let story_operation = story_options
+        .as_ref()
+        .map(|_| story_operation_type(&payload, workspace.join(&payload.active_file).is_file()));
+    let story_create_new = story_operation == Some("create_new");
+    let story_modify_existing =
+        story_operation == Some("modify_existing") && should_use_rust_modify_existing(&payload);
     if story_create_new {
         let outcome = match crate::story_generation::run_create_new(
             &state,
@@ -1373,6 +1451,73 @@ async fn run_chat(execution: ChatExecution) {
             model: &model,
         }) {
             tracing::warn!(error = %error, trace_id = %trace_id, "unable to persist Rust story generation trace");
+        }
+        send_done(&sender).await;
+        return;
+    }
+
+    if story_modify_existing {
+        let outcome = match crate::story_generation::run_modify_existing(
+            &state,
+            &payload,
+            story_options.as_ref().expect("story generation options"),
+            &workspace,
+            &trace_id,
+            &session_id,
+            &identity,
+            &cancellation,
+            &sender,
+            &mut trace_events,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                terminal_event = "AgentError".to_owned();
+                trace_events.push((
+                    terminal_event.clone(),
+                    with_event_identity(
+                        "AgentError",
+                        json!({
+                            "error_type": "story_generation_runtime_error",
+                            "code": "story_generation_runtime_error",
+                            "message": format!("Rust existing-story generation failed: {error:#}"),
+                        }),
+                        &trace_id,
+                        &session_id,
+                    ),
+                ));
+                send_terminal_error(
+                    &sender,
+                    &mut terminal_sent,
+                    &trace_id,
+                    &session_id,
+                    "story_generation_runtime_error",
+                    &format!("Rust existing-story generation failed: {error:#}"),
+                )
+                .await;
+                send_done(&sender).await;
+                return;
+            }
+        };
+        terminal_event = outcome.terminal_event;
+        let status = match terminal_event.as_str() {
+            "AgentCompleted" => "completed",
+            "AgentCancelled" => "cancelled",
+            _ => "failed",
+        };
+        if let Err(error) = persist_execution_record_with_events(ExecutionRecordInput {
+            workspace: &workspace,
+            session_id: &session_id,
+            trace_id: &trace_id,
+            prompt: &payload.prompt,
+            status,
+            events: &trace_events,
+            reply: &outcome.reply,
+            provider_id: &provider_id,
+            model: &model,
+        }) {
+            tracing::warn!(error = %error, trace_id = %trace_id, "unable to persist Rust existing-story trace");
         }
         send_done(&sender).await;
         return;
@@ -1520,37 +1665,201 @@ fn build_turn_contract(payload: &ChatStreamRequest, workspace: &Path) -> anyhow:
     let chapter_count = count_story_chapters(workspace);
     let chapter_word_count_target = story_chapter_word_count_target(workspace);
     let active_file_exists = workspace.join(&payload.active_file).is_file();
-    let story_create_new = story_generation.fragment_count == 1
-        && (payload.active_file.trim().is_empty() || !active_file_exists);
-    let (target_chapter_number, authoritative_chapter_path, authoritative_fragment_path) =
-        if story_create_new {
-            let target = crate::story_generation::plan_create_new_target(
-                workspace,
-                &story_generation.chapter_template_id,
-            )?;
-            let relative = target
-                .strip_prefix(workspace)
-                .map_err(|_| anyhow::anyhow!("planned story target is outside workspace"))?
-                .to_string_lossy()
-                .replace('\\', "/");
-            let chapter_path = Path::new(&relative)
+    let story_create_new = story_operation_type(payload, active_file_exists) == "create_new";
+    let bounded_modify_existing = !story_create_new && should_use_rust_modify_existing(payload);
+    let chapter_content_mode = if story_generation.chapter_template_id.contains("single_file") {
+        "single_file"
+    } else {
+        "multi_fragment"
+    };
+    let (
+        target_chapter_number,
+        authoritative_chapter_path,
+        authoritative_fragment_paths,
+        fragment_targets,
+        chapter_action,
+        chapter_action_reason,
+        chapter_plan_validation,
+    ) = if story_create_new {
+        let targets = crate::story_generation::plan_create_new_targets(
+            workspace,
+            &story_generation.chapter_template_id,
+            story_generation.fragment_count,
+        )?;
+        let relative_paths = targets
+            .iter()
+            .map(|target| {
+                target
+                    .strip_prefix(workspace)
+                    .map_err(|_| anyhow::anyhow!("planned story target is outside workspace"))
+                    .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let chapter_path = Path::new(
+            relative_paths
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("planned story target list is empty"))?,
+        )
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("planned story target has no chapter directory"))?
+        .to_string_lossy()
+        .replace('\\', "/");
+        let chapter_name = Path::new(&chapter_path)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| anyhow::anyhow!("planned story chapter name is invalid"))?;
+        let chapter_number = chapter_name
+            .strip_prefix('第')
+            .and_then(|value| value.split('章').next())
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| anyhow::anyhow!("planned story chapter number is invalid"))?;
+        let planned_targets = relative_paths
+            .iter()
+            .enumerate()
+            .map(|(index, path)| {
+                json!({
+                    "order": index + 1,
+                    "path": path,
+                    "writeMode": "replace",
+                    "baselineWordCount": 0,
+                    "contentMode": chapter_content_mode,
+                })
+            })
+            .collect::<Vec<_>>();
+        (
+            chapter_number,
+            chapter_path.clone(),
+            relative_paths.clone(),
+            planned_targets,
+            "create_next_chapter".to_owned(),
+            if chapter_count == 0 {
+                "new_story".to_owned()
+            } else {
+                "next_chapter_requested".to_owned()
+            },
+            json!({
+                "_type": "ChapterPlanValidation",
+                "_version": 1,
+                "passed": true,
+                "action": "create_next_chapter",
+                "targetChapterNumber": chapter_number,
+                "authoritativeChapterPath": chapter_path,
+                "authoritativeFragmentPaths": relative_paths,
+                "issues": [],
+            }),
+        )
+    } else if bounded_modify_existing {
+        match crate::story_generation::plan_modify_existing_targets(
+            workspace,
+            &payload.active_file,
+            story_generation.fragment_count,
+        ) {
+            Ok(targets) => {
+                let relative_paths = targets
+                    .iter()
+                    .map(|target| {
+                        target
+                            .strip_prefix(workspace)
+                            .map_err(|_| {
+                                anyhow::anyhow!(
+                                    "planned existing-story target is outside workspace"
+                                )
+                            })
+                            .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                let chapter_path = Path::new(relative_paths.first().ok_or_else(|| {
+                    anyhow::anyhow!("planned existing-story target list is empty")
+                })?)
                 .parent()
-                .ok_or_else(|| anyhow::anyhow!("planned story target has no chapter directory"))?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("planned existing-story target has no chapter directory")
+                })?
                 .to_string_lossy()
                 .replace('\\', "/");
-            let chapter_name = Path::new(&chapter_path)
-                .file_name()
-                .and_then(|value| value.to_str())
-                .ok_or_else(|| anyhow::anyhow!("planned story chapter name is invalid"))?;
-            let chapter_number = chapter_name
-                .strip_prefix('第')
-                .and_then(|value| value.split('章').next())
-                .and_then(|value| value.parse::<u64>().ok())
-                .ok_or_else(|| anyhow::anyhow!("planned story chapter number is invalid"))?;
-            (chapter_number, chapter_path, relative)
-        } else {
-            (0, String::new(), String::new())
-        };
+                let chapter_number = chapter_number_from_story_path(&payload.active_file);
+                let planned_targets = targets
+                    .iter()
+                    .zip(relative_paths.iter())
+                    .enumerate()
+                    .map(|(index, (target, relative))| {
+                        let bytes = fs::read(target).with_context(|| {
+                            format!(
+                                "unable to read existing-story baseline {}",
+                                target.display()
+                            )
+                        })?;
+                        let text = String::from_utf8(bytes.clone()).with_context(|| {
+                            format!("existing-story baseline is not UTF-8: {}", target.display())
+                        })?;
+                        Ok(json!({
+                            "order": index + 1,
+                            "path": relative,
+                            "writeMode": "replace",
+                            "baselineWordCount": text
+                                .trim_start_matches('\u{feff}')
+                                .chars()
+                                .filter(|character| !character.is_whitespace())
+                                .count(),
+                            "baselineSha256": format!("{:x}", Sha256::digest(&bytes)),
+                            "contentMode": "multi_fragment",
+                        }))
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                (
+                    chapter_number,
+                    chapter_path.clone(),
+                    relative_paths.clone(),
+                    planned_targets,
+                    "modify_existing".to_owned(),
+                    "active_existing_file".to_owned(),
+                    json!({
+                        "_type": "ModifyExistingPlanValidation",
+                        "_version": 1,
+                        "passed": true,
+                        "action": "modify_existing",
+                        "targetChapterNumber": chapter_number,
+                        "authoritativeChapterPath": chapter_path,
+                        "authoritativeFragmentPaths": relative_paths,
+                        "issues": [],
+                    }),
+                )
+            }
+            Err(error) => (
+                chapter_number_from_story_path(&payload.active_file),
+                String::new(),
+                Vec::new(),
+                Vec::new(),
+                String::new(),
+                String::new(),
+                json!({
+                    "_type": "ModifyExistingPlanValidation",
+                    "_version": 1,
+                    "passed": false,
+                    "action": "modify_existing",
+                    "targetChapterNumber": chapter_number_from_story_path(&payload.active_file),
+                    "authoritativeChapterPath": "",
+                    "authoritativeFragmentPaths": [],
+                    "issues": [format!("{error:#}")],
+                }),
+            ),
+        }
+    } else {
+        (
+            0,
+            String::new(),
+            Vec::new(),
+            Vec::new(),
+            String::new(),
+            String::new(),
+            json!({}),
+        )
+    };
+    let effective_fragment_count = authoritative_fragment_paths.len() as u64;
+    let next_segment_path = authoritative_fragment_paths
+        .first()
+        .cloned()
+        .unwrap_or_default();
     let script_path = workspace.join(".storydex/scripts/README.md");
     let story_script_exists = script_path.is_file();
     let mut prompt_blocks = Vec::new();
@@ -1627,17 +1936,25 @@ fn build_turn_contract(payload: &ChatStreamRequest, workspace: &Path) -> anyhow:
         },
         "turnPlan": {
             "operationType": if story_create_new { "create_new" } else { "modify_existing" },
-            "fragmentCount": story_generation.fragment_count,
+            "requestedFragmentCount": story_generation.fragment_count,
+            "fragmentCount": if story_create_new { effective_fragment_count } else { story_generation.fragment_count },
             "selectedChapterTemplate": story_generation.chapter_template_id,
+            "chapterContentMode": chapter_content_mode,
             "chapterWordCountTarget": chapter_word_count_target,
             "fragmentWordCount": chapter_word_count_target,
             "fragmentWordCountMin": chapter_word_count_target,
             "fragmentWordCountMax": chapter_word_count_target,
-            "chapterAction": if story_create_new { "create_next_chapter" } else { "" },
+            "chapterAction": chapter_action,
+            "chapterActionReason": chapter_action_reason,
             "targetChapterNumber": target_chapter_number,
             "authoritativeChapterPath": authoritative_chapter_path,
-            "authoritativeFragmentPaths": if story_create_new { json!([authoritative_fragment_path.clone()]) } else { json!([]) },
-            "nextSegmentPath": authoritative_fragment_path,
+            "authoritativeFragmentPaths": authoritative_fragment_paths,
+            "fragmentTargets": fragment_targets,
+            "boundedStoryGeneration": story_create_new || bounded_modify_existing,
+            "chapterPlanValidation": chapter_plan_validation,
+            "isNewStory": story_create_new && chapter_count == 0,
+            "requiresChapterTemplateSelection": false,
+            "nextSegmentPath": next_segment_path,
             "chapterCount": chapter_count,
             "activeFile": payload.active_file,
             "storyFormatSource": if story_create_new && chapter_count == 0 { "selected_chapter_template" } else { "existing_project" },
@@ -1753,6 +2070,19 @@ fn count_story_chapters(workspace: &Path) -> usize {
                             ))
                 })
                 .count()
+        })
+        .unwrap_or(0)
+}
+
+fn chapter_number_from_story_path(path: &str) -> u64 {
+    Path::new(path)
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .find_map(|component| {
+            component
+                .strip_prefix('第')
+                .and_then(|value| value.split('章').next())
+                .and_then(|value| value.parse::<u64>().ok())
         })
         .unwrap_or(0)
 }
@@ -2680,6 +3010,38 @@ mod tests {
     }
 
     #[test]
+    fn story_operation_routes_creation_continuation_and_existing_rewrites() {
+        let create: ChatStreamRequest = serde_json::from_value(json!({
+            "prompt": "生成故事的下一章",
+            "activeFile": "chapters/第1章 既有/001.md",
+            "storyGeneration": {"fragmentCount": 2}
+        }))
+        .expect("create request");
+        assert_eq!(story_operation_type(&create, true), "create_new");
+
+        let rewrite: ChatStreamRequest = serde_json::from_value(json!({
+            "prompt": "请重写当前章节，保留既有事实",
+            "activeFile": "chapters/第1章 既有/001.md",
+            "storyGeneration": {"fragmentCount": 2}
+        }))
+        .expect("rewrite request");
+        assert_eq!(story_operation_type(&rewrite, true), "modify_existing");
+        assert!(should_use_rust_modify_existing(&rewrite));
+
+        let tool_contract: ChatStreamRequest = serde_json::from_value(json!({
+            "prompt": "请重写当前章节，只调用一次 write_file",
+            "activeFile": "chapters/fixture-story.md",
+            "storyGeneration": {"fragmentCount": 1}
+        }))
+        .expect("tool request");
+        assert_eq!(
+            story_operation_type(&tool_contract, true),
+            "modify_existing"
+        );
+        assert!(!should_use_rust_modify_existing(&tool_contract));
+    }
+
+    #[test]
     fn scoped_write_roots_resolve_relative_to_workspace() {
         let directory = tempdir().expect("tempdir");
         let workspace = directory.path().join("workspace");
@@ -2754,6 +3116,84 @@ mod tests {
         assert_eq!(
             request["allowedWriteRoots"].as_array().map(Vec::len),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn modify_existing_turn_contract_publishes_authoritative_targets_and_baselines() {
+        let directory = tempdir().expect("tempdir");
+        let workspace = directory.path().join("workspace");
+        let chapter = workspace.join("chapters/第1章 既有");
+        std::fs::create_dir_all(&chapter).expect("chapter");
+        let second = chapter.join("002.md");
+        let third = chapter.join("003.md");
+        std::fs::write(&second, "原始二\n").expect("second");
+        std::fs::write(&third, "原始三\n").expect("third");
+        let workspace = workspace.canonicalize().expect("canonical workspace");
+        let payload: ChatStreamRequest = serde_json::from_value(json!({
+            "prompt": "请重写当前两个连续片段，保留既有事实",
+            "activeFile": "chapters/第1章 既有/002.md",
+            "reasoningEffort": "low",
+            "storyGeneration": {"fragmentCount": 2, "chapterLengthTier": "short"},
+            "capabilityMode": "scoped_write",
+            "writesAllowed": true,
+            "coreWritesAllowed": true,
+            "allowedWriteRoots": ["chapters/"]
+        }))
+        .expect("request");
+
+        let contract = build_turn_contract(&payload, &workspace).expect("turn contract");
+        let plan = &contract["turnPlan"];
+        assert_eq!(plan["chapterAction"], "modify_existing");
+        assert_eq!(plan["chapterActionReason"], "active_existing_file");
+        assert_eq!(plan["targetChapterNumber"], 1);
+        assert_eq!(plan["authoritativeChapterPath"], "chapters/第1章 既有");
+        assert_eq!(
+            plan["authoritativeFragmentPaths"],
+            json!(["chapters/第1章 既有/002.md", "chapters/第1章 既有/003.md"])
+        );
+        assert_eq!(plan["fragmentCount"], 2);
+        assert_eq!(plan["fragmentTargets"][0]["writeMode"], "replace");
+        assert_eq!(plan["fragmentTargets"][0]["baselineWordCount"], 3);
+        assert_eq!(
+            plan["fragmentTargets"][0]["baselineSha256"],
+            format!("{:x}", Sha256::digest("原始二\n".as_bytes()))
+        );
+        assert_eq!(
+            plan["chapterPlanValidation"]["_type"],
+            "ModifyExistingPlanValidation"
+        );
+        assert_eq!(plan["chapterPlanValidation"]["passed"], true);
+    }
+
+    #[test]
+    fn modify_existing_turn_contract_rejects_missing_contiguous_targets_before_provider() {
+        let directory = tempdir().expect("tempdir");
+        let workspace = directory.path().join("workspace");
+        let chapter = workspace.join("chapters/第1章 既有");
+        std::fs::create_dir_all(&chapter).expect("chapter");
+        std::fs::write(chapter.join("002.md"), "原始二\n").expect("second");
+        let workspace = workspace.canonicalize().expect("canonical workspace");
+        let payload: ChatStreamRequest = serde_json::from_value(json!({
+            "prompt": "请重写当前两个连续片段",
+            "activeFile": "chapters/第1章 既有/002.md",
+            "storyGeneration": {"fragmentCount": 2, "chapterLengthTier": "short"},
+            "capabilityMode": "scoped_write",
+            "writesAllowed": true,
+            "coreWritesAllowed": true,
+            "allowedWriteRoots": ["chapters/"]
+        }))
+        .expect("request");
+
+        let contract = build_turn_contract(&payload, &workspace).expect("turn contract");
+        let plan = &contract["turnPlan"];
+        assert_eq!(plan["fragmentTargets"], json!([]));
+        assert_eq!(plan["authoritativeFragmentPaths"], json!([]));
+        assert_eq!(plan["chapterPlanValidation"]["passed"], false);
+        assert!(
+            plan["chapterPlanValidation"]["issues"][0]
+                .as_str()
+                .is_some_and(|issue| issue.contains("enough contiguous fragments"))
         );
     }
 
@@ -2835,5 +3275,56 @@ mod tests {
         assert_eq!(contract["turnPlan"]["chapterLengthTier"], "medium");
         assert_eq!(contract["turnPlan"]["wordCountPolicy"]["mode"], "tier");
         assert_eq!(contract["storyGeneration"]["chapterLengthTier"], "medium");
+    }
+
+    #[test]
+    fn create_new_multi_fragment_turn_contract_publishes_authoritative_targets() {
+        let directory = tempdir().expect("tempdir");
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("chapters")).expect("chapters");
+        let workspace = workspace.canonicalize().expect("canonical workspace");
+        let payload: ChatStreamRequest = serde_json::from_value(json!({
+            "prompt": "create one short chapter across three fragment files",
+            "activeFile": "",
+            "reasoningEffort": "low",
+            "storyGeneration": {
+                "fragmentCount": 3,
+                "chapterLengthTier": "short",
+                "chapterTemplateId": "default_chapter_directory"
+            },
+            "capabilityMode": "scoped_write",
+            "writesAllowed": true,
+            "coreWritesAllowed": true,
+            "allowedWriteRoots": ["chapters/"]
+        }))
+        .expect("request");
+
+        let contract = build_turn_contract(&payload, &workspace).expect("turn contract");
+        assert_eq!(contract["intentFrame"]["operationType"], "create_new");
+        assert_eq!(contract["turnPlan"]["requestedFragmentCount"], 3);
+        assert_eq!(contract["turnPlan"]["fragmentCount"], 3);
+        assert_eq!(
+            contract["turnPlan"]["authoritativeFragmentPaths"],
+            json!([
+                "chapters/第1章 未命名/001.md",
+                "chapters/第1章 未命名/002.md",
+                "chapters/第1章 未命名/003.md",
+            ])
+        );
+        assert_eq!(
+            contract["turnPlan"]["fragmentTargets"]
+                .as_array()
+                .map(Vec::len),
+            Some(3)
+        );
+        assert_eq!(contract["turnPlan"]["chapterContentMode"], "multi_fragment");
+        assert_eq!(
+            contract["turnPlan"]["chapterPlanValidation"]["passed"],
+            true
+        );
+        assert_eq!(
+            contract["turnPlan"]["wordCountPolicy"]["scope"],
+            "candidate"
+        );
     }
 }

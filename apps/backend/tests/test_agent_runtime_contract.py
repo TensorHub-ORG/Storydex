@@ -298,12 +298,28 @@ def test_chat_stream_contract_freezes_safe_turn_contract_subset() -> None:
                     "reasoningEffort": "low",
                     "intentFrame": {
                         "primary": "story_generation",
-                        "operationType": "modify_existing",
+                        "operationType": "create_new",
                         "canWrite": True,
                     },
                     "executionPolicy": {
                         "capabilityMode": "scoped_write",
                         "allowedWriteRoots": ["chapters/"],
+                    },
+                    "turnPlan": {
+                        "operationType": "create_new",
+                        "requestedFragmentCount": 3,
+                        "fragmentCount": 3,
+                        "chapterContentMode": "multi_fragment",
+                        "chapterAction": "create_next_chapter",
+                        "targetChapterNumber": 1,
+                        "authoritativeChapterPath": "chapters/第1章 未命名",
+                        "authoritativeFragmentPaths": [
+                            "chapters/第1章 未命名/001.md",
+                            "chapters/第1章 未命名/002.md",
+                            "chapters/第1章 未命名/003.md",
+                        ],
+                        "isNewStory": True,
+                        "requiresChapterTemplateSelection": False,
                     },
                     "contextAssembly": {
                         "activeFile": "chapters/fixture.md",
@@ -342,12 +358,28 @@ def test_chat_stream_contract_freezes_safe_turn_contract_subset() -> None:
                 "turnContract": {
                     "intentFrame": {
                         "primary": "story_generation",
-                        "operationType": "modify_existing",
+                        "operationType": "create_new",
                         "canWrite": True,
                     },
                     "executionPolicy": {
                         "capabilityMode": "scoped_write",
                         "allowedWriteRoots": ["chapters/"],
+                    },
+                    "turnPlan": {
+                        "operationType": "create_new",
+                        "requestedFragmentCount": 3,
+                        "fragmentCount": 3,
+                        "chapterContentMode": "multi_fragment",
+                        "chapterAction": "create_next_chapter",
+                        "targetChapterNumber": 1,
+                        "authoritativeChapterPath": "chapters/第1章 未命名",
+                        "authoritativeFragmentPaths": [
+                            "chapters/第1章 未命名/001.md",
+                            "chapters/第1章 未命名/002.md",
+                            "chapters/第1章 未命名/003.md",
+                        ],
+                        "isNewStory": True,
+                        "requiresChapterTemplateSelection": False,
                     },
                     "contextAssembly": {
                         "activeFile": "chapters/fixture.md",
