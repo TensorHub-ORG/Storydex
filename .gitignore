@@ -135,6 +135,7 @@ docs/superpowers/
 /docs/fixes/
 /docs/*-context*.md
 /docs/*-plan*.md
+/docs/rust-tauri-migration.md
 /docs/*计划*.md
 /docs/*报告*.md
 /docs/*实测*.md
