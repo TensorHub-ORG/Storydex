@@ -1428,6 +1428,7 @@ fn validate_existing_candidate(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_candidate(
     content: &str,
     targets: &[PathBuf],
