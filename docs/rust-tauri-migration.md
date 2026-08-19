@@ -58,7 +58,7 @@
 
 ### 0.2 基线、分支与生产边界
 
-- 当前成功基线为 `debca4ed9ae84bcd400fb0f15da84f9645657a14`；该提交上的 `dev/windows` Development CI `32190523712` 与 `main` 完整 CI `32190920826` 均为 `success`。当前未提交的故事生成与文档改动须在新的同一 HEAD 上重新按顺序通过两条门禁。
+- 最近完成验证的故事实现 HEAD 为 `7a9c933e3d58cb15355b7d3c4f69bad857e50007`：主体提交 `034ce7b`，随后由 `7a9c933` 修复新增候选校验函数的 Clippy 门禁；`dev/windows` Development CI `32211993309` 与 `main` 完整 CI `32212259495` 均为 `success`。后续交付仍须在新的同一 HEAD 上按顺序重新通过两条门禁。
 - 每个准备同步到 `main` 的可验证交付块都必须先推 `dev/windows` 并等待该 HEAD 的 Development CI 最终 `success`，再推 `main` 并等待同一交付内容的完整 CI 最终 `success`；不得在已知失败的远端 CI 基线上继续堆叠推送。
 - 本轮依赖审计、story 外部语义、控制面故障模型、M0 性能窗口、Windows session 路径竞态修复和文档属于同一 Refactor 收口块；不得拆出一个绕开完整契约证据的 Stable 切换提交。
 - Stable 继续固定使用 `Electron + Python/FastAPI + Rust Coomi bridge`。`storydex-agentd` 只接入明确隔离的 Electron Rust Beta 与 Tauri Preview 候选入口，并只允许仓库 fixture 或系统临时 workspace；不得读取真实用户项目、不得静默 fallback，也未接入 Stable 默认启动、正式打包或正式更新源。
