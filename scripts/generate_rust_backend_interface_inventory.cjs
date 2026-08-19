@@ -1,9 +1,9 @@
 "use strict";
 
-// Build a deterministic inventory of the public FastAPI routes and the
-// frontend API consumers that the Rust backend candidate must replace.  The
-// inventory is intentionally descriptive: it never starts a server, reads a
-// user project, or silently marks an endpoint as migrated.
+// Build a deterministic inventory of the public FastAPI routes, Vue API
+// consumers, and Axum routes that the Rust backend candidate currently
+// exposes. The inventory is descriptive only: it never starts a service,
+// reads a user project, or treats a missing route as migrated.
 
 const fs = require("node:fs");
 const path = require("node:path");
@@ -11,12 +11,220 @@ const path = require("node:path");
 const repoRoot = path.resolve(__dirname, "..");
 const backendApiRoot = path.join(repoRoot, "apps", "backend", "api");
 const frontendApiRoot = path.join(repoRoot, "apps", "frontend", "src", "api");
+const rustRouterPath = path.join(
+  repoRoot,
+  "apps",
+  "desktop",
+  "agent-runtime",
+  "storydex-agentd",
+  "src",
+  "lib.rs"
+);
 
 const ROUTE_RE = /@router\.(get|post|put|patch|delete)\(\s*["']([^"']+)["']/g;
-// TypeScript generics may be nested (ApiEnvelope<Record<...>>), so matching
-// up to the call parenthesis is more robust than trying to parse angle
-// brackets with a regular expression.
-const CONSUMER_RE = /apiClient\.(get|post|put|patch|delete)[^\n]{0,400}?\(\s*["']([^"']+)["']/g;
+const FRONTEND_CALL_RE = /apiClient\.(get|post|put|patch|delete)\b/g;
+
+// This API deliberately passes a route variable to a shared request helper.
+// Keep the alternatives explicit so a future edit cannot silently disappear
+// from the generated contract inventory.
+const EXPLICIT_FRONTEND_ROUTES = [
+  {
+    method: "GET",
+    path: "/workspace/story/templates/chapters",
+    consumer: "apps/frontend/src/api/workspace.ts",
+    evidence: "fetchStoryChapterTemplates paths[0]"
+  },
+  {
+    method: "GET",
+    path: "/story/templates/chapters",
+    consumer: "apps/frontend/src/api/workspace.ts",
+    evidence: "fetchStoryChapterTemplates paths[1]"
+  }
+];
+
+function lineNumberAt(source, index) {
+  return source.slice(0, index).split("\n").length;
+}
+
+function skipQuoted(source, start, quote) {
+  for (let index = start + 1; index < source.length; index += 1) {
+    if (source[index] === "\\") {
+      index += 1;
+      continue;
+    }
+    if (source[index] === quote) return index + 1;
+  }
+  throw new Error(`unterminated ${quote} string while scanning route inventory`);
+}
+
+function skipLineComment(source, start) {
+  const end = source.indexOf("\n", start + 2);
+  return end < 0 ? source.length : end + 1;
+}
+
+function skipBlockComment(source, start) {
+  const end = source.indexOf("*/", start + 2);
+  if (end < 0) throw new Error("unterminated block comment while scanning route inventory");
+  return end + 2;
+}
+
+function skipTemplate(source, start) {
+  for (let index = start + 1; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === "\\") {
+      index += 1;
+      continue;
+    }
+    if (char === "`") return index + 1;
+  }
+  throw new Error("unterminated template string while scanning route inventory");
+}
+
+function skipTrivia(source, start) {
+  let index = start;
+  while (index < source.length) {
+    if (/\s/.test(source[index])) {
+      index += 1;
+    } else if (source.startsWith("//", index)) {
+      index = skipLineComment(source, index);
+    } else if (source.startsWith("/*", index)) {
+      index = skipBlockComment(source, index);
+    } else {
+      break;
+    }
+  }
+  return index;
+}
+
+function findCallOpen(source, start) {
+  let index = skipTrivia(source, start);
+  if (source[index] === "<") {
+    let depth = 0;
+    for (; index < source.length; index += 1) {
+      const char = source[index];
+      if (char === '"' || char === "'") {
+        index = skipQuoted(source, index, char) - 1;
+        continue;
+      }
+      if (char === "`") {
+        index = skipTemplate(source, index) - 1;
+        continue;
+      }
+      if (source.startsWith("//", index)) {
+        index = skipLineComment(source, index) - 1;
+        continue;
+      }
+      if (source.startsWith("/*", index)) {
+        index = skipBlockComment(source, index) - 1;
+        continue;
+      }
+      if (char === "<") depth += 1;
+      if (char === ">") {
+        depth -= 1;
+        if (depth === 0) {
+          index = skipTrivia(source, index + 1);
+          break;
+        }
+      }
+    }
+  }
+  return source[index] === "(" ? index : -1;
+}
+
+function readCallArguments(source, callOpen) {
+  const argumentsList = [];
+  let argumentStart = callOpen + 1;
+  const stack = [];
+  for (let index = callOpen + 1; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === '"' || char === "'") {
+      index = skipQuoted(source, index, char) - 1;
+      continue;
+    }
+    if (char === "`") {
+      index = skipTemplate(source, index) - 1;
+      continue;
+    }
+    if (source.startsWith("//", index)) {
+      index = skipLineComment(source, index) - 1;
+      continue;
+    }
+    if (source.startsWith("/*", index)) {
+      index = skipBlockComment(source, index) - 1;
+      continue;
+    }
+    if (char === "(" || char === "[" || char === "{") {
+      stack.push(char);
+      continue;
+    }
+    if (char === ")") {
+      if (stack.length === 0) {
+        argumentsList.push(source.slice(argumentStart, index).trim());
+        return { arguments: argumentsList, close: index };
+      }
+      stack.pop();
+      continue;
+    }
+    if (char === "]" || char === "}") {
+      stack.pop();
+      continue;
+    }
+    if (char === "," && stack.length === 0) {
+      argumentsList.push(source.slice(argumentStart, index).trim());
+      argumentStart = index + 1;
+    }
+  }
+  throw new Error("unterminated function call while scanning route inventory");
+}
+
+function decodeQuotedRoute(expression) {
+  const quote = expression[0];
+  const body = expression.slice(1, -1);
+  if (quote === '"') return JSON.parse(expression);
+  return body.replace(/\\([\\'"`])/g, "$1");
+}
+
+function normalizeTemplateRoute(expression) {
+  let route = "";
+  const body = expression.slice(1, -1);
+  for (let index = 0; index < body.length; index += 1) {
+    if (body[index] === "\\") {
+      route += body[index + 1] || "";
+      index += 1;
+      continue;
+    }
+    if (body[index] === "$" && body[index + 1] === "{") {
+      route += "{param}";
+      index += 2;
+      let depth = 1;
+      for (; index < body.length && depth > 0; index += 1) {
+        const char = body[index];
+        if (char === '"' || char === "'") {
+          index = skipQuoted(body, index, char) - 1;
+          continue;
+        }
+        if (char === "{") depth += 1;
+        if (char === "}") depth -= 1;
+      }
+      index -= 1;
+      continue;
+    }
+    route += body[index];
+  }
+  return route;
+}
+
+function routeFromExpression(expression) {
+  const value = String(expression || "").trim();
+  if (!value) return null;
+  if ((value[0] === '"' || value[0] === "'") && value.at(-1) === value[0]) {
+    return decodeQuotedRoute(value);
+  }
+  if (value[0] === "`" && value.at(-1) === "`") {
+    return normalizeTemplateRoute(value);
+  }
+  return null;
+}
 
 function readPythonRoutes() {
   const routes = [];
@@ -27,11 +235,13 @@ function readPythonRoutes() {
       routes.push({
         method: match[1].toUpperCase(),
         path: match[2],
-        owner: fileName.replace(/\.py$/, "")
+        owner: fileName.replace(/\.py$/, ""),
+        source: path.posix.join("apps/backend/api", fileName),
+        line: lineNumberAt(source, match.index)
       });
     }
   }
-  return dedupeRoutes(routes);
+  return dedupeRoutes(routes, ["method", "path", "owner"]);
 }
 
 function readFrontendConsumers() {
@@ -39,15 +249,48 @@ function readFrontendConsumers() {
   for (const fileName of fs.readdirSync(frontendApiRoot).filter((name) => name.endsWith(".ts")).sort()) {
     const filePath = path.join(frontendApiRoot, fileName);
     const source = fs.readFileSync(filePath, "utf8");
-    for (const match of source.matchAll(CONSUMER_RE)) {
+    for (const match of source.matchAll(FRONTEND_CALL_RE)) {
+      const callOpen = findCallOpen(source, match.index + match[0].length);
+      if (callOpen < 0) continue;
+      const call = readCallArguments(source, callOpen);
+      const routePath = routeFromExpression(call.arguments[0]);
+      if (!routePath || !routePath.startsWith("/")) continue;
       consumers.push({
         method: match[1].toUpperCase(),
-        path: match[2],
-        consumer: path.posix.join("apps/frontend/src/api", fileName)
+        path: routePath,
+        consumer: path.posix.join("apps/frontend/src/api", fileName),
+        line: lineNumberAt(source, match.index),
+        evidence: call.arguments[0]
       });
     }
   }
+  consumers.push(...EXPLICIT_FRONTEND_ROUTES);
   return dedupeRoutes(consumers, ["method", "path", "consumer"]);
+}
+
+function readRustRoutes() {
+  const source = fs.readFileSync(rustRouterPath, "utf8");
+  const routes = [];
+  const routeCallRe = /\.route\b/g;
+  for (const match of source.matchAll(routeCallRe)) {
+    const callOpen = findCallOpen(source, match.index + match[0].length);
+    if (callOpen < 0) continue;
+    const call = readCallArguments(source, callOpen);
+    const registeredPath = routeFromExpression(call.arguments[0]);
+    if (!registeredPath || !call.arguments[1]) continue;
+    const routePath = registeredPath.replace(/^\/api\/v1(?=\/)/, "");
+    const methods = [...call.arguments[1].matchAll(/\b(get|post|put|patch|delete)\s*\(/g)];
+    for (const method of methods) {
+      routes.push({
+        method: method[1].toUpperCase(),
+        path: routePath,
+        owner: "storydex-agentd",
+        source: "apps/desktop/agent-runtime/storydex-agentd/src/lib.rs",
+        line: lineNumberAt(source, match.index)
+      });
+    }
+  }
+  return dedupeRoutes(routes, ["method", "path", "owner"]);
 }
 
 function dedupeRoutes(items, keys = ["method", "path", "owner"]) {
@@ -65,7 +308,7 @@ function dedupeRoutes(items, keys = ["method", "path", "owner"]) {
 }
 
 function routeKey(method, routePath) {
-  return `${method.toUpperCase()} ${routePath}`;
+  return `${method.toUpperCase()} ${normalizePath(routePath)}`;
 }
 
 function normalizePath(routePath) {
@@ -91,22 +334,60 @@ function targetFor(routePath) {
 }
 
 function buildInventory() {
-  const routes = readPythonRoutes();
-  const consumers = readFrontendConsumers();
-  const routeSet = new Set(routes.map((route) => routeKey(route.method, normalizePath(route.path))));
-  const consumerCoverage = consumers.map((consumer) => ({
-    ...consumer,
-    normalizedPath: normalizePath(consumer.path),
-    routePresent: routeSet.has(routeKey(consumer.method, normalizePath(consumer.path))),
-    target: targetFor(consumer.path)
-  }));
-  const groups = {};
-  for (const route of routes) {
-    const target = targetFor(route.path);
-    groups[target] = (groups[target] || 0) + 1;
+  const pythonRoutes = readPythonRoutes();
+  const frontendConsumers = readFrontendConsumers();
+  const rustRoutes = readRustRoutes();
+  const pythonByKey = new Map(pythonRoutes.map((route) => [routeKey(route.method, route.path), route]));
+  const rustByKey = new Map(rustRoutes.map((route) => [routeKey(route.method, route.path), route]));
+  const consumersByKey = new Map();
+  for (const consumer of frontendConsumers) {
+    const key = routeKey(consumer.method, consumer.path);
+    const current = consumersByKey.get(key) || [];
+    current.push(consumer);
+    consumersByKey.set(key, current);
   }
+
+  const allKeys = new Set([...pythonByKey.keys(), ...consumersByKey.keys(), ...rustByKey.keys()]);
+  const contracts = [...allKeys].map((key) => {
+    const pythonRoute = pythonByKey.get(key) || null;
+    const rustRoute = rustByKey.get(key) || null;
+    const consumers = consumersByKey.get(key) || [];
+    const [method, ...pathParts] = key.split(" ");
+    const normalizedPath = pathParts.join(" ");
+    const status = rustRoute ? "implemented" : consumers.length ? "pending" : "excluded";
+    return {
+      method,
+      path: pythonRoute?.path || consumers[0]?.path || rustRoute?.path || normalizedPath,
+      normalizedPath,
+      target: targetFor(normalizedPath),
+      status,
+      pythonRoute,
+      rustRoute,
+      frontendConsumers: consumers,
+      exclusionEvidence: status === "excluded"
+        ? "No Vue API consumer exists under apps/frontend/src/api and the target candidate has no registered Rust route."
+        : null
+    };
+  }).sort((left, right) => `${left.normalizedPath}\0${left.method}`.localeCompare(`${right.normalizedPath}\0${right.method}`, "en"));
+
+  const frontendCoverage = frontendConsumers.map((consumer) => {
+    const key = routeKey(consumer.method, consumer.path);
+    return {
+      ...consumer,
+      normalizedPath: normalizePath(consumer.path),
+      pythonRoutePresent: pythonByKey.has(key),
+      rustRoutePresent: rustByKey.has(key),
+      target: targetFor(consumer.path)
+    };
+  });
+  const groups = {};
+  for (const contract of contracts) {
+    if (!groups[contract.target]) groups[contract.target] = { implemented: 0, pending: 0, excluded: 0 };
+    groups[contract.target][contract.status] += 1;
+  }
+
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedBy: "scripts/generate_rust_backend_interface_inventory.cjs",
     stableBoundary: {
       runtime: "Electron + Python/FastAPI + Rust Coomi bridge",
@@ -114,14 +395,23 @@ function buildInventory() {
       realUserProjects: "never read by inventory or replay checks"
     },
     counts: {
-      pythonRoutes: routes.length,
-      frontendConsumers: consumers.length,
-      frontendConsumersWithoutRoute: consumerCoverage.filter((item) => !item.routePresent).length,
+      pythonRoutes: pythonRoutes.length,
+      frontendConsumers: frontendConsumers.length,
+      rustRoutes: rustRoutes.length,
+      frontendConsumersWithoutPythonRoute: frontendCoverage.filter((item) => !item.pythonRoutePresent).length,
+      frontendConsumersImplementedInRust: frontendCoverage.filter((item) => item.rustRoutePresent).length,
+      frontendConsumersPendingInRust: frontendCoverage.filter((item) => !item.rustRoutePresent).length,
+      contractsImplemented: contracts.filter((item) => item.status === "implemented").length,
+      contractsPending: contracts.filter((item) => item.status === "pending").length,
+      contractsExcluded: contracts.filter((item) => item.status === "excluded").length,
+      rustRoutesWithoutPythonRoute: rustRoutes.filter((route) => !pythonByKey.has(routeKey(route.method, route.path))).length,
       targetGroups: Object.keys(groups).length
     },
     targetGroups: Object.fromEntries(Object.entries(groups).sort(([a], [b]) => a.localeCompare(b, "en"))),
-    routes,
-    frontendConsumers: consumerCoverage
+    pythonRoutes,
+    frontendConsumers: frontendCoverage,
+    rustRoutes,
+    contracts
   };
 }
 
@@ -136,6 +426,7 @@ function main(argv = process.argv.slice(2)) {
     if (!outputPath.startsWith(repoRoot + path.sep)) {
       throw new Error("inventory output must stay inside the repository");
     }
+    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
     fs.writeFileSync(outputPath, json, "utf8");
   } else {
     process.stdout.write(json);
@@ -152,4 +443,9 @@ if (require.main === module) {
   }
 }
 
-module.exports = { buildInventory, normalizePath, targetFor };
+module.exports = {
+  buildInventory,
+  normalizePath,
+  routeFromExpression,
+  targetFor
+};

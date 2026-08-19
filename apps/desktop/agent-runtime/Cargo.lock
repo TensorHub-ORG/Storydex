@@ -2460,6 +2460,7 @@ version = "2.1.0-storydex-desktop.1"
 dependencies = [
  "anyhow",
  "axum",
+ "base64",
  "chrono",
  "clap",
  "coomi-engine",

@@ -7,13 +7,13 @@
 
 use crate::AppState;
 use crate::error_response;
+use crate::workspace::resolve_workspace_for_request;
 use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use coomi_services::{
     ProjectionBundle, ProjectionBundleWriter, StorydexGit, StorydexKnowledge, graph_checksum,
-    resolve_bounded_path,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -181,37 +181,7 @@ fn success(data: Value, started: Instant, action: &str) -> Json<Value> {
 
 #[allow(clippy::result_large_err)]
 fn resolve_workspace(state: &AppState, raw: &str) -> Result<PathBuf, Response> {
-    let Some(bound) = state.refactor_root() else {
-        return Err(error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "refactor_root_unconfigured",
-            "Rust project routes require an isolated refactor fixture root.",
-        ));
-    };
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return Err(error_response(
-            StatusCode::BAD_REQUEST,
-            "workspace_root_required",
-            "workspaceRoot is required for candidate project routes.",
-        ));
-    }
-    let candidate = PathBuf::from(raw);
-    let canonical = resolve_bounded_path(bound, &candidate).map_err(|_| {
-        error_response(
-            StatusCode::FORBIDDEN,
-            "workspace_outside_refactor_root",
-            "Candidate project routes only accept existing workspaces inside the isolated fixture root.",
-        )
-    })?;
-    if !canonical.is_dir() {
-        return Err(error_response(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "workspace_not_directory",
-            "Candidate workspace root must be a directory.",
-        ));
-    }
-    Ok(canonical)
+    resolve_workspace_for_request(state, raw)
 }
 
 fn map_git_summary(summary: coomi_services::GitSummary) -> Value {

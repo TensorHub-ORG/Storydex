@@ -1,8 +1,10 @@
 # Rust 后端候选公开接口清单
 
 本清单由 `scripts/generate_rust_backend_interface_inventory.cjs` 从当前
-FastAPI 路由和 Vue 工作台 API 消费者生成。它是迁移追踪资料，不是把
-Python Stable 标记为已迁移的声明；Stable 仍固定使用
+FastAPI 路由、Vue 工作台 API 消费者和 `storydex-agentd` Axum 路由生成。
+它会识别跨行泛型调用、模板字符串动态路径和章节模板的显式备用路径，
+并为每个归一化契约记录 `implemented`、`pending` 或带依据的 `excluded`。
+它是迁移追踪资料，不是把 Python Stable 标记为已迁移的声明；Stable 仍固定使用
 `Electron + Python/FastAPI + Rust Coomi bridge`。
 
 生成完整 JSON 清单：
@@ -17,15 +19,27 @@ node scripts/generate_rust_backend_interface_inventory.cjs --output output/rust-
 node --test scripts/tests/rust-backend-interface-inventory.test.cjs
 ```
 
+2026-08-19 当前生成快照为：130 个 Python 路由、96 个 Vue 消费契约和
+63 个 Rust 路由；55 个 Vue 消费契约已由 Rust 覆盖，41 个仍待迁移，且不存在
+“Vue 已消费但 Python Stable 无对应路由”的悬空契约。
+
 当前所有权分组如下：
 
-| 公开边界 | Rust 目标 | 当前状态 |
-| --- | --- | --- |
-| Agent HTTP/SSE、控制面、Coomi 状态 | `storydex-agentd` + `coomi-services` | 已有 Agent fixture parity；持续扩展 |
-| WIKI/Story Knowledge 投影与 Git | `coomi-services::storydex_project` + WIKI projection | primitives 已建立，路由差分进行中 |
-| 文件/工作区边界 | `coomi-services::workspace boundary` | 复用安全路径契约，待 API 闭环 |
-| Story 生成、章节、回滚 | `coomi-services::story domain` + `storydex-agentd` | short 已闭环，medium/long 正在接入 |
-| Preset、Help、System、Auth | 对应 Rust domain modules | 清单已冻结，按前端实际消费者迁移 |
+| 公开边界 | Rust 目标 | 已实现 | 待迁移 |
+| --- | --- | ---: | ---: |
+| 文件/工作区 | `coomi-services::workspace boundary` | 22 | 0 |
+| Git | `coomi-services::storydex_project` | 14 | 0 |
+| WIKI/Story Knowledge | `coomi-services::storydex_project + wiki projection` | 5 | 0 |
+| 前端实际 Story 状态 | `coomi-services::story domain` | 4 | 0 |
+| System | `storydex-agentd::system boundary` | 8 | 2 |
+| Agent | `storydex-agentd` | 8 | 8 |
+| Coomi 控制面 | `storydex-agentd + coomi-services` | 2 | 6 |
+| Auth | `candidate auth boundary` | 0 | 9 |
+| Help | `coomi-services::help domain` | 0 | 4 |
+| Presets | `coomi-services::preset domain` | 0 | 12 |
 
-脚本会报告 Python 路由没有对应前端方法签名的内部接口，并将所有
-Python-only 行为保留为显式待迁移项；不会访问任何真实用户项目。
+脚本会把存在 Vue 消费者但没有 Rust 路由的契约标为 `pending`；只有在
+`apps/frontend/src/api` 中没有消费者、且候选也未注册 Rust 路由时，
+Python-only 路由才会标为 `excluded` 并记录排除依据。Rust 已实现但不属于
+Python Stable 公开路由的候选专用接口也会单独统计。生成过程不会访问任何
+真实用户项目。

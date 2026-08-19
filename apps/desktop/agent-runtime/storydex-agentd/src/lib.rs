@@ -32,6 +32,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -49,7 +50,10 @@ mod followup;
 mod length_tier_calibration;
 mod project;
 mod replacement;
+mod story;
 mod story_generation;
+mod system;
+mod workspace;
 
 pub const API_PROTOCOL_VERSION: u32 = 1;
 pub const SERVICE_NAME: &str = "storydex-agentd";
@@ -112,12 +116,19 @@ pub struct AppState {
     coomi_home: Arc<PathBuf>,
     bridge_path: Arc<PathBuf>,
     refactor_root: Option<Arc<PathBuf>>,
+    current_workspace: Arc<RwLock<Option<WorkspaceSelection>>>,
     replay_fixture: Option<Arc<PathBuf>>,
     started_at: Instant,
     shutdown: CancellationToken,
     tasks: TaskRegistry,
     executions: execution::ExecutionRegistry,
     followups: followup::FollowupStore,
+}
+
+#[derive(Clone)]
+struct WorkspaceSelection {
+    path: PathBuf,
+    opened_at: String,
 }
 
 impl AppState {
@@ -160,12 +171,19 @@ impl AppState {
         let refactor_root = refactor_root
             .map(|path| path.canonicalize().unwrap_or(path))
             .map(Arc::new);
+        let current_workspace = refactor_root.as_ref().and_then(|root| {
+            root.is_dir().then(|| WorkspaceSelection {
+                path: root.as_ref().clone(),
+                opened_at: Utc::now().to_rfc3339(),
+            })
+        });
         let replay_fixture = replay_fixture.map(Arc::new);
         Ok(Self {
             token: Arc::from(token),
             coomi_home: Arc::new(coomi_home),
             bridge_path: Arc::new(bridge_path),
             refactor_root,
+            current_workspace: Arc::new(RwLock::new(current_workspace)),
             replay_fixture,
             started_at: Instant::now(),
             shutdown: CancellationToken::new(),
@@ -201,6 +219,32 @@ impl AppState {
 
     pub fn refactor_root(&self) -> Option<&Path> {
         self.refactor_root.as_deref().map(|path| path.as_path())
+    }
+
+    pub(crate) fn current_workspace(&self) -> Option<PathBuf> {
+        self.current_workspace
+            .read()
+            .ok()
+            .and_then(|selection| selection.as_ref().map(|current| current.path.clone()))
+    }
+
+    pub(crate) fn current_workspace_opened_at(&self) -> Option<String> {
+        self.current_workspace
+            .read()
+            .ok()
+            .and_then(|selection| selection.as_ref().map(|current| current.opened_at.clone()))
+    }
+
+    pub(crate) fn select_workspace(&self, path: PathBuf) -> anyhow::Result<()> {
+        let mut selection = self
+            .current_workspace
+            .write()
+            .map_err(|_| anyhow::anyhow!("current workspace state lock is poisoned"))?;
+        *selection = Some(WorkspaceSelection {
+            path,
+            opened_at: Utc::now().to_rfc3339(),
+        });
+        Ok(())
     }
 
     pub fn replay_fixture(&self) -> Option<&Path> {
@@ -312,6 +356,13 @@ struct HealthData {
     protocol_version: u32,
     active_tasks: usize,
     uptime_ms: u128,
+    workspace_root: String,
+    storydex_root: String,
+    project_name: String,
+    has_storydex_config: bool,
+    requires_initialization: bool,
+    missing_directories: Vec<String>,
+    frontend_static_mode: bool,
 }
 
 #[derive(Serialize)]
@@ -527,6 +578,24 @@ fn cors_layer() -> CorsLayer {
 
 async fn health(State(state): State<AppState>) -> Json<ApiEnvelope<HealthData>> {
     let started_at = Instant::now();
+    let workspace = state.current_workspace();
+    let workspace_root = workspace
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    let storydex_root = workspace
+        .as_ref()
+        .map(|path| path.join(".storydex").display().to_string())
+        .unwrap_or_default();
+    let project_name = workspace
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_owned();
+    let has_storydex_config = workspace
+        .as_ref()
+        .is_some_and(|path| path.join(".storydex").is_dir());
     Json(ApiEnvelope::success(
         HealthData {
             status: "ok",
@@ -537,6 +606,13 @@ async fn health(State(state): State<AppState>) -> Json<ApiEnvelope<HealthData>> 
             protocol_version: API_PROTOCOL_VERSION,
             active_tasks: state.tasks.active_count(),
             uptime_ms: state.started_at.elapsed().as_millis(),
+            workspace_root,
+            storydex_root,
+            project_name,
+            has_storydex_config,
+            requires_initialization: workspace.is_some() && !has_storydex_config,
+            missing_directories: Vec::new(),
+            frontend_static_mode: false,
         },
         started_at,
     ))
@@ -605,6 +681,91 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/sys/version", get(version))
         .route("/api/v1/sys/shutdown", post(shutdown))
         .route("/api/v1/agent/coomi/status", get(coomi_status))
+        .route("/api/v1/sys/bootstrap", get(system::bootstrap))
+        .route(
+            "/api/v1/sys/ui-preferences",
+            get(system::ui_preferences).put(system::update_ui_preferences),
+        )
+        .route(
+            "/api/v1/sys/agent-settings",
+            get(system::agent_settings).put(system::update_agent_settings),
+        )
+        .route("/api/v1/workspace/tree", get(workspace::workspace_tree))
+        .route("/api/v1/workspace/project", get(workspace::current_project))
+        .route(
+            "/api/v1/workspace/project/open",
+            post(workspace::open_project),
+        )
+        .route(
+            "/api/v1/workspace/project/create",
+            post(workspace::create_project),
+        )
+        .route(
+            "/api/v1/workspace/project/initialize",
+            post(workspace::initialize_project),
+        )
+        .route("/api/v1/file/read", post(workspace::read_file))
+        .route("/api/v1/file/window", post(workspace::read_file_window))
+        .route("/api/v1/file/write", post(workspace::write_file))
+        .route(
+            "/api/v1/workspace/file/create",
+            post(workspace::create_file),
+        )
+        .route(
+            "/api/v1/workspace/directory/create",
+            post(workspace::create_directory),
+        )
+        .route(
+            "/api/v1/workspace/files/import",
+            post(workspace::import_files),
+        )
+        .route(
+            "/api/v1/workspace/path/rename",
+            post(workspace::rename_path),
+        )
+        .route(
+            "/api/v1/workspace/path/delete",
+            post(workspace::delete_path),
+        )
+        .route("/api/v1/workspace/path/copy", post(workspace::copy_path))
+        .route("/api/v1/workspace/path/move", post(workspace::move_path))
+        .route(
+            "/api/v1/workspace/search",
+            post(workspace::search_workspace),
+        )
+        .route(
+            "/api/v1/workspace/diagnostics",
+            post(workspace::workspace_diagnostics),
+        )
+        .route(
+            "/api/v1/workspace/diagnostics/fix",
+            post(workspace::apply_diagnostic_fix),
+        )
+        .route("/api/v1/story/chapters", get(story::story_chapters))
+        .route(
+            "/api/v1/story/current-state",
+            get(story::story_current_state),
+        )
+        .route(
+            "/api/v1/story/snapshots/latest",
+            get(story::latest_snapshot),
+        )
+        .route(
+            "/api/v1/workspace/story/settings",
+            get(story::story_settings).put(story::update_story_settings),
+        )
+        .route(
+            "/api/v1/workspace/story/templates/chapters",
+            get(story::chapter_templates),
+        )
+        .route(
+            "/api/v1/story/templates/chapters",
+            get(story::chapter_templates),
+        )
+        .route(
+            "/api/v1/workspace/story/chapters/completion",
+            axum::routing::put(story::update_chapter_completion),
+        )
         .route("/api/v1/workspace/git/summary", get(project::git_summary))
         .route("/api/v1/workspace/git/diff", get(project::git_diff))
         .route("/api/v1/workspace/git/init", post(project::git_init))
@@ -758,6 +919,25 @@ mod tests {
             None,
         )
         .expect("state");
+        (state, workspace)
+    }
+
+    fn workspace_test_state(root: &Path) -> (AppState, PathBuf) {
+        let workspace = root.join("workspace");
+        let home = root.join("coomi-home");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::create_dir_all(&home).expect("coomi home");
+        let state = AppState::with_paths(
+            "test-token",
+            home,
+            root.join("unused-bridge"),
+            Some(root.to_path_buf()),
+            None,
+        )
+        .expect("state");
+        state
+            .select_workspace(workspace.clone())
+            .expect("select workspace");
         (state, workspace)
     }
 
@@ -989,6 +1169,322 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(body["ok"], false);
         assert_eq!(body["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn workspace_routes_require_selection_without_test_boundary() {
+        let root = tempdir().expect("root");
+        let home = root.path().join("coomi-home");
+        std::fs::create_dir_all(&home).expect("home");
+        let state =
+            AppState::with_paths("test-token", home, root.path().join("bridge"), None, None)
+                .expect("state");
+        let response = router(state)
+            .oneshot(protected_get_request("/api/v1/workspace/project"))
+            .await
+            .expect("workspace response");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(response).await["error"]["code"],
+            "workspace_not_selected"
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_routes_create_switch_and_mutate_current_project() {
+        let root = tempdir().expect("root");
+        let boundary = root.path();
+        let initial = boundary.join("initial");
+        let created = boundary.join("created-project");
+        let home = boundary.join("coomi-home");
+        std::fs::create_dir_all(&initial).expect("initial");
+        std::fs::create_dir_all(&home).expect("home");
+        let state = AppState::with_paths(
+            "test-token",
+            home,
+            boundary.join("bridge"),
+            Some(boundary.to_path_buf()),
+            None,
+        )
+        .expect("state");
+
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/workspace/project/create",
+                json!({"projectPath": created.to_string_lossy(), "architecture": "standard"}),
+            ))
+            .await
+            .expect("create project response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["data"]["requiresInitialization"], false);
+        assert_eq!(state.current_workspace(), created.canonicalize().ok());
+
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/workspace/file/create",
+                json!({"relativePath": "notes/a.md", "content": "hello\nworld"}),
+            ))
+            .await
+            .expect("create file response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await["data"]["relativePath"],
+            "notes/a.md"
+        );
+
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/file/write",
+                json!({"relativePath": "notes/a.md", "content": "updated\nworld"}),
+            ))
+            .await
+            .expect("write file response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await["data"]["content"],
+            "updated\nworld"
+        );
+
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/workspace/search",
+                json!({"query": "updated", "limit": 10}),
+            ))
+            .await
+            .expect("search response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert!(body["data"]["items"].as_array().is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item["relativePath"] == "notes/a.md")
+        }));
+
+        let response = router(state.clone())
+            .oneshot(protected_get_request("/api/v1/workspace/tree"))
+            .await
+            .expect("tree response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response_json(response).await["data"]["roots"].is_array());
+
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/workspace/project/open",
+                json!({"projectPath": initial.to_string_lossy()}),
+            ))
+            .await
+            .expect("open project response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(state.current_workspace(), initial.canonicalize().ok());
+
+        let outside = tempdir().expect("outside");
+        let response = router(state)
+            .oneshot(protected_json_request(
+                "/api/v1/workspace/project/open",
+                json!({"projectPath": outside.path().to_string_lossy()}),
+            ))
+            .await
+            .expect("outside project response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response_json(response).await["error"]["code"],
+            "workspace_outside_refactor_root"
+        );
+    }
+
+    #[tokio::test]
+    async fn git_and_wiki_routes_use_selected_workspace_without_query_parameter() {
+        let root = tempdir().expect("root");
+        let (state, workspace) = workspace_test_state(root.path());
+        std::fs::create_dir_all(workspace.join("chapters")).expect("chapters");
+        std::fs::write(workspace.join("chapters/001.md"), "fixture story").expect("story");
+
+        let response = router(state.clone())
+            .oneshot(protected_get_request("/api/v1/workspace/git/summary"))
+            .await
+            .expect("git response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await["ok"], true);
+
+        let response = router(state)
+            .oneshot(protected_get_request("/api/v1/story/wiki"))
+            .await
+            .expect("wiki response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn story_and_system_routes_persist_candidate_state() {
+        let root = tempdir().expect("root");
+        let (state, workspace) = workspace_test_state(root.path());
+        std::fs::create_dir_all(workspace.join("chapters/第1章")).expect("chapter");
+        std::fs::create_dir_all(workspace.join(".storydex/memory/current-state"))
+            .expect("current state");
+        std::fs::create_dir_all(workspace.join(".storydex/memory/chapters/第1章"))
+            .expect("snapshots");
+        std::fs::write(
+            workspace.join(".storydex/memory/current-state/全部变量.json"),
+            r#"{"fullState":{"location":"fixture"}}"#,
+        )
+        .expect("current state file");
+        std::fs::write(
+            workspace.join(".storydex/memory/chapters/第1章/001.variables.json"),
+            r#"{"segment":"001"}"#,
+        )
+        .expect("snapshot");
+        std::fs::write(
+            workspace.join(".storydex/memory/current-state/最新快照索引.json"),
+            r#"{"latestSnapshotPath":".storydex/memory/chapters/第1章/001.variables.json"}"#,
+        )
+        .expect("latest snapshot index");
+
+        let response = router(state.clone())
+            .oneshot(protected_json_request_with_method(
+                "PUT",
+                "/api/v1/workspace/story/settings",
+                json!({
+                    "segmentExtension": ".txt",
+                    "maxSegmentsPerChapter": 4,
+                    "storyFragmentCount": 2,
+                    "chapterLengthTier": "long",
+                    "chapterWordCountTarget": 6000,
+                    "autoUpdateVariables": true,
+                    "autoUpdateWiki": true,
+                    "agentCommitPromptEnabled": false,
+                    "autoNameChapterTitle": true,
+                    "contextConcisionMinCalls": 1,
+                    "contextConcisionMaxCalls": 3,
+                    "contextConcisionMaxInputTokens": 16000,
+                    "chapterCompletion": {}
+                }),
+            ))
+            .await
+            .expect("story settings response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["data"]["segmentExtension"], ".txt");
+        assert_eq!(body["data"]["chapterLengthTier"], "long");
+
+        let response = router(state.clone())
+            .oneshot(protected_json_request_with_method(
+                "PUT",
+                "/api/v1/workspace/story/chapters/completion",
+                json!({"chapterPath": "chapters/第1章", "completed": true}),
+            ))
+            .await
+            .expect("completion response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["data"]["chapterCompletion"]["chapters/第1章"], true);
+        assert_eq!(body["data"]["segmentExtension"], ".txt");
+
+        let response = router(state.clone())
+            .oneshot(protected_get_request("/api/v1/story/chapters"))
+            .await
+            .expect("chapters response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await["data"]["items"][0]["completed"],
+            true
+        );
+
+        let response = router(state.clone())
+            .oneshot(protected_get_request("/api/v1/story/current-state"))
+            .await
+            .expect("current state response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await["data"]["data"]["fullState"]["location"],
+            "fixture"
+        );
+
+        let response = router(state.clone())
+            .oneshot(protected_get_request("/api/v1/story/snapshots/latest"))
+            .await
+            .expect("latest snapshot response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await["data"]["snapshot"]["segment"],
+            "001"
+        );
+
+        std::fs::write(
+            workspace.join(".storydex/memory/current-state/最新快照索引.json"),
+            r#"{"latestSnapshotPath":"../outside.json"}"#,
+        )
+        .expect("invalid latest snapshot index");
+        let response = router(state.clone())
+            .oneshot(protected_get_request("/api/v1/story/snapshots/latest"))
+            .await
+            .expect("invalid latest snapshot response");
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            response_json(response).await["error"]["code"],
+            "snapshot_path_invalid"
+        );
+
+        let response = router(state.clone())
+            .oneshot(protected_get_request(
+                "/api/v1/workspace/story/templates/chapters",
+            ))
+            .await
+            .expect("chapter templates response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response_json(response).await["data"]["items"][0]["relativePath"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        );
+
+        let response = router(state.clone())
+            .oneshot(protected_json_request_with_method(
+                "PUT",
+                "/api/v1/sys/ui-preferences",
+                json!({
+                    "theme": "dark",
+                    "activeActivity": "resources",
+                    "workbenchMode": "storydex",
+                    "sidebarWidth": 9999,
+                    "sidebarCollapsed": false,
+                    "agentCollapsed": false,
+                    "agentWidth": 1,
+                    "leftPaneFontScale": 100,
+                    "centerPaneFontScale": 110,
+                    "rightPaneFontScale": 100,
+                    "fontFamily": "system"
+                }),
+            ))
+            .await
+            .expect("UI preferences response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["data"]["sidebarWidth"], 520);
+        assert_eq!(body["data"]["agentWidth"], 320);
+
+        let response = router(state.clone())
+            .oneshot(protected_json_request_with_method(
+                "PUT",
+                "/api/v1/sys/agent-settings",
+                json!({"coomiMemoryEnabled": false, "wikiContextEnabled": true}),
+            ))
+            .await
+            .expect("Agent settings response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await["data"]["coomiMemoryEnabled"],
+            false
+        );
+
+        let response = router(state)
+            .oneshot(protected_get_request("/api/v1/sys/bootstrap"))
+            .await
+            .expect("bootstrap response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["data"]["uiPreferences"]["theme"], "dark");
+        assert!(body["data"]["globalRoot"].as_str().is_some());
     }
 
     #[tokio::test]
