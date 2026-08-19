@@ -44,6 +44,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
+mod auth;
 pub(crate) mod chat;
 mod execution;
 mod followup;
@@ -125,6 +126,7 @@ pub struct AppState {
     tasks: TaskRegistry,
     executions: execution::ExecutionRegistry,
     followups: followup::FollowupStore,
+    auth: auth::AuthService,
 }
 
 #[derive(Clone)]
@@ -158,6 +160,27 @@ impl AppState {
         refactor_root: Option<PathBuf>,
         replay_fixture: Option<PathBuf>,
     ) -> anyhow::Result<Self> {
+        Self::with_paths_internal(
+            token,
+            coomi_home,
+            bridge_path,
+            refactor_root,
+            replay_fixture,
+            auth::AuthKeyMode::Platform,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_paths_internal(
+        token: impl Into<String>,
+        coomi_home: impl Into<PathBuf>,
+        bridge_path: impl Into<PathBuf>,
+        refactor_root: Option<PathBuf>,
+        replay_fixture: Option<PathBuf>,
+        auth_key_mode: auth::AuthKeyMode,
+        account_base_url: Option<&str>,
+    ) -> anyhow::Result<Self> {
         let token = token.into();
         anyhow::ensure!(!token.trim().is_empty(), "agentd token must not be empty");
         let coomi_home = coomi_home.into();
@@ -180,6 +203,7 @@ impl AppState {
             })
         });
         let replay_fixture = replay_fixture.map(Arc::new);
+        let auth = auth::AuthService::new(&coomi_home, auth_key_mode, account_base_url)?;
         Ok(Self {
             token: Arc::from(token),
             coomi_home: Arc::new(coomi_home),
@@ -192,7 +216,29 @@ impl AppState {
             tasks: TaskRegistry::default(),
             executions: execution::ExecutionRegistry::default(),
             followups: followup::FollowupStore::default(),
+            auth,
         })
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    fn with_paths_and_account_base(
+        token: impl Into<String>,
+        coomi_home: impl Into<PathBuf>,
+        bridge_path: impl Into<PathBuf>,
+        refactor_root: Option<PathBuf>,
+        replay_fixture: Option<PathBuf>,
+        account_base_url: &str,
+    ) -> anyhow::Result<Self> {
+        Self::with_paths_internal(
+            token,
+            coomi_home,
+            bridge_path,
+            refactor_root,
+            replay_fixture,
+            auth::AuthKeyMode::Local,
+            Some(account_base_url),
+        )
     }
 
     pub fn shutdown_token(&self) -> CancellationToken {
@@ -209,6 +255,10 @@ impl AppState {
 
     pub(crate) fn followup_store(&self) -> followup::FollowupStore {
         self.followups.clone()
+    }
+
+    pub(crate) fn auth_service(&self) -> auth::AuthService {
+        self.auth.clone()
     }
 
     pub fn coomi_home(&self) -> &Path {
@@ -518,13 +568,22 @@ fn read_coomi_status(home: &Path) -> anyhow::Result<CoomiStatusData> {
 }
 
 pub(crate) fn error_response(status: StatusCode, code: &str, message: &str) -> Response {
+    error_response_with_details(status, code, message, None)
+}
+
+pub(crate) fn error_response_with_details(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+    details: Option<Value>,
+) -> Response {
     let envelope = ApiEnvelope::<Value> {
         ok: false,
         data: None,
         error: Some(ApiError {
             code: code.to_owned(),
             message: message.to_owned(),
-            details: None,
+            details,
         }),
         trace: ApiTrace::new(Instant::now()),
         audit: Vec::new(),
@@ -547,7 +606,13 @@ async fn auth_layer(State(state): State<AppState>, request: Request<Body>, next:
         .get("x-storydex-runtime-token")
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value == state.token.as_ref());
-    if bearer_authorized || runtime_authorized {
+    let is_account_route = request.uri().path().starts_with("/api/v1/auth/");
+    let authorized = if is_account_route {
+        runtime_authorized
+    } else {
+        runtime_authorized || bearer_authorized
+    };
+    if authorized {
         next.run(request).await
     } else {
         error_response(
@@ -682,6 +747,24 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/sys/health", get(health))
         .route("/api/v1/sys/version", get(version))
         .route("/api/v1/sys/shutdown", post(shutdown))
+        .route("/api/v1/auth/register", post(auth::register))
+        .route("/api/v1/auth/login", post(auth::login))
+        .route("/api/v1/auth/session", get(auth::session))
+        .route("/api/v1/auth/me", get(auth::current_account))
+        .route("/api/v1/auth/account-summary", get(auth::account_summary))
+        .route(
+            "/api/v1/auth/profile",
+            axum::routing::put(auth::update_profile),
+        )
+        .route(
+            "/api/v1/auth/password",
+            axum::routing::put(auth::update_password),
+        )
+        .route("/api/v1/auth/logout", post(auth::logout))
+        .route(
+            "/api/v1/auth/check-username/{username}",
+            get(auth::check_username),
+        )
         .route("/api/v1/agent/coomi/status", get(coomi_status))
         .route("/api/v1/sys/bootstrap", get(system::bootstrap))
         .route(

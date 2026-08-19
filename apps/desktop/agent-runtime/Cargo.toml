@@ -21,6 +21,7 @@ rust-version = "1.85"
 anyhow = "1"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["clock", "serde"] }
+chacha20poly1305 = "0.10.1"
 md5 = "0.7"
 serde_yaml = "0.9"
 clap = { version = "4", features = ["derive"] }
@@ -28,6 +29,7 @@ crossterm = "0.28"
 dirs = "6"
 encoding_rs = "0.8"
 ignore = "0.4"
+keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_28", "layout-cache", "underline-color"] }
 pulldown-cmark = "0.13"
 regex = "1"

@@ -34,10 +34,10 @@ test("inventory discovers template routes and normalizes parameterized paths", (
 test("inventory keeps migration status and exclusion evidence explicit", () => {
   const inventory = buildInventory();
   const implemented = inventory.contracts.find((item) => item.method === "GET" && item.normalizedPath === "/workspace/git/summary");
-  const pending = inventory.contracts.find((item) => item.method === "POST" && item.normalizedPath === "/auth/login");
+  const implementedAuth = inventory.contracts.find((item) => item.method === "POST" && item.normalizedPath === "/auth/login");
   const excluded = inventory.contracts.find((item) => item.method === "GET" && item.normalizedPath === "/sys/workspace-state");
   assert.equal(implemented?.status, "implemented");
-  assert.equal(pending?.status, "pending");
+  assert.equal(implementedAuth?.status, "implemented");
   assert.equal(excluded?.status, "excluded");
   assert.match(excluded?.exclusionEvidence || "", /No Vue API consumer/);
   assert.equal(targetFor("/story/wiki/graph"), "coomi-services::storydex_project + wiki projection");
