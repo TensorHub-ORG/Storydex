@@ -24,21 +24,24 @@ test("release metadata writes a complete checksum file from the artifact digest 
   const version = desktopPackage.version;
   const setupName = `StorydexSetup-x64-${version}.exe`;
   const setup = Buffer.from("test installer payload", "utf8");
+  const signature = "dGVzdC1zaWduYXR1cmU=";
 
   try {
     fs.writeFileSync(path.join(releaseDir, setupName), setup);
-    fs.writeFileSync(path.join(releaseDir, `${setupName}.blockmap`), "blockmap\n");
-    fs.writeFileSync(path.join(releaseDir, "Storydex-win-unpacked.zip"), "portable\n");
+    fs.writeFileSync(path.join(releaseDir, `${setupName}.sig`), `${signature}\n`);
+    fs.writeFileSync(path.join(releaseDir, "Storydex-win-portable.zip"), "portable\n");
     fs.writeFileSync(path.join(releaseDir, "RELEASE_NOTES.md"), "# Test release\n");
     fs.writeFileSync(
-      path.join(releaseDir, "latest.yml"),
-      [
-        `version: ${version}`,
-        `path: ${setupName}`,
-        `sha512: ${digest(setup, "sha512", "base64")}`,
-        `size: ${setup.length}`,
-        ""
-      ].join("\n")
+      path.join(releaseDir, "latest.json"),
+      JSON.stringify({
+        version,
+        platforms: {
+          "windows-x86_64": {
+            signature,
+            url: `https://updates.example.test/${setupName}`
+          }
+        }
+      })
     );
 
     const result = spawnSync(
@@ -59,19 +62,20 @@ test("release metadata writes a complete checksum file from the artifact digest 
           return [match[2], match[1]];
         })
     );
-    const expectedFiles = fs.readdirSync(releaseDir)
+    const checksumFiles = fs.readdirSync(releaseDir)
       .filter((name) => name !== "SHA256SUMS.txt")
       .sort();
-    assert.deepEqual([...checksumEntries.keys()].sort(), expectedFiles);
-    for (const name of expectedFiles) {
+    assert.deepEqual([...checksumEntries.keys()].sort(), checksumFiles);
+    for (const name of checksumFiles) {
       assert.equal(checksumEntries.get(name), digest(path.join(releaseDir, name), "sha256").toUpperCase());
     }
 
     const manifest = JSON.parse(fs.readFileSync(path.join(releaseDir, "BUILD_MANIFEST.json"), "utf8"));
     assert.equal(manifest.version, version);
+    const manifestFiles = checksumFiles.filter((name) => name !== "BUILD_MANIFEST.json" && name !== "SHA256SUMS.txt");
     assert.deepEqual(
       manifest.artifacts.map((artifact) => artifact.name).sort(),
-      expectedFiles.filter((name) => name !== "BUILD_MANIFEST.json").sort()
+      manifestFiles.sort()
     );
   } finally {
     fs.rmSync(releaseDir, { recursive: true, force: true });

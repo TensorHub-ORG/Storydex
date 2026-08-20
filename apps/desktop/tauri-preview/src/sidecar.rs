@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 
 const SIDECAR_NAME: &str = "storydex-agentd";
+const DESKTOP_RUNTIME_NAME: &str = "storydex-tauri";
 const READY_TIMEOUT: Duration = Duration::from_secs(15);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -117,6 +118,7 @@ impl SidecarRuntime {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        configure_runtime_environment(&mut command, app)?;
         configure_hidden_process(&mut command);
 
         let mut child = command
@@ -173,7 +175,7 @@ impl SidecarRuntime {
 
     pub fn runtime_info(&self) -> RuntimeInfo {
         RuntimeInfo {
-            runtime: "storydex-tauri-preview",
+            runtime: DESKTOP_RUNTIME_NAME,
             backend_base_url: self.backend_base_url.clone(),
             sidecar: SIDECAR_NAME,
             sidecar_version: self.ready.version.clone(),
@@ -183,8 +185,8 @@ impl SidecarRuntime {
         }
     }
 
-    pub fn initialization_script(&self) -> Result<String> {
-        adapter_script(&self.backend_base_url, &self.ready.token)
+    pub fn initialization_script(&self, app_version: String) -> Result<String> {
+        adapter_script(&self.backend_base_url, &self.ready.token, &app_version)
     }
 
     pub fn webview_data_directory(&self) -> Option<PathBuf> {
@@ -293,18 +295,65 @@ fn resolve_runtime_paths(app: &tauri::App) -> Result<RuntimePaths> {
         });
     }
 
+    let coomi_home = dirs::home_dir()
+        .context("failed to resolve the Storydex user home directory")?
+        .join(".storydex")
+        .join(".coomi");
     Ok(RuntimePaths {
-        runtime_home: app
-            .path()
-            .app_local_data_dir()
-            .context("failed to resolve Tauri preview local data directory")?
-            .join("agent-runtime"),
+        runtime_home: coomi_home,
         log_root: app
             .path()
             .app_log_dir()
-            .context("failed to resolve Tauri preview log directory")?,
+            .context("failed to resolve Tauri log directory")?,
         webview_data_dir: None,
     })
+}
+
+fn configure_runtime_environment(command: &mut Command, app: &tauri::App) -> Result<()> {
+    let mingit_root = resolve_mingit_root(app)?;
+    let git_executable = if cfg!(windows) {
+        mingit_root.join("cmd").join("git.exe")
+    } else {
+        mingit_root.join("bin").join("git")
+    };
+    ensure!(
+        git_executable.is_file(),
+        "bundled MinGit executable was not found: {}",
+        git_executable.display()
+    );
+    command
+        .env("STORYDEX_MINGIT_ROOT", &mingit_root)
+        .env("STORYDEX_GIT_EXECUTABLE", &git_executable);
+    Ok(())
+}
+
+fn resolve_mingit_root(app: &tauri::App) -> Result<PathBuf> {
+    let resource_root = app
+        .path()
+        .resource_dir()
+        .context("failed to resolve Tauri resource directory")?;
+    let candidates = [
+        resource_root.join("mingit"),
+        resource_root.join("resources").join("mingit"),
+    ];
+    if let Some(path) = candidates.into_iter().find(|path| path.is_dir()) {
+        return Ok(path);
+    }
+    if cfg!(debug_assertions) {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("vendor")
+            .join("mingit");
+        if repository.is_dir() {
+            return repository
+                .canonicalize()
+                .with_context(|| format!("failed to resolve {}", repository.display()));
+        }
+    }
+    bail!(
+        "bundled MinGit directory was not found under {}",
+        resource_root.display()
+    )
 }
 
 fn configured_test_root() -> Result<Option<PathBuf>> {
@@ -532,7 +581,7 @@ fn parse_http_json(response: &[u8]) -> Result<Value> {
     serde_json::from_slice(&response[split + 4..]).context("sidecar HTTP body is invalid JSON")
 }
 
-fn adapter_script(backend_base_url: &str, token: &str) -> Result<String> {
+fn adapter_script(backend_base_url: &str, token: &str, app_version: &str) -> Result<String> {
     let platform = if cfg!(windows) {
         "win32"
     } else {
@@ -542,11 +591,12 @@ fn adapter_script(backend_base_url: &str, token: &str) -> Result<String> {
         "platform": platform,
         "backendBaseUrl": backend_base_url,
         "backendAuthToken": token,
+        "versions": {"tauri": app_version},
         "isTitleBarOverlaySupported": false,
     });
     let bridge = serde_json::to_string(&bridge)?;
     Ok(format!(
-        "if (window.location.protocol === 'tauri:' || window.location.hostname === 'tauri.localhost') {{ const bridge = {bridge}; const invoke = (command, args = {{}}) => window.__TAURI_INTERNALS__.invoke(command, args); Object.assign(bridge, {{ pickDirectory: (options = {{}}) => invoke('pick_directory', {{ options }}), revealPath: (absolutePath) => invoke('reveal_path', {{ absolutePath }}), openWithDialog: (absolutePath) => invoke('open_with_dialog', {{ absolutePath }}) }}); Object.defineProperty(window, 'storydexDesktop', {{ value: Object.freeze(bridge), configurable: false, writable: false }}); }}"
+        "if (window.location.protocol === 'tauri:' || window.location.hostname === 'tauri.localhost') {{ const bridge = {bridge}; const invoke = (command, args = {{}}) => window.__TAURI_INTERNALS__.invoke(command, args); Object.assign(bridge, {{ pickDirectory: (options = {{}}) => invoke('pick_directory', {{ options }}), revealPath: (absolutePath) => invoke('reveal_path', {{ absolutePath }}), openWithDialog: (absolutePath) => invoke('open_with_dialog', {{ absolutePath }}), openPreviewWindow: (relativePath) => invoke('open_preview_window', {{ relativePath }}), setTitleBarTheme: (theme) => invoke('set_titlebar_theme', {{ theme }}), getPendingOpenTarget: () => invoke('get_pending_open_target'), ackOpenTarget: (targetId) => invoke('ack_open_target', {{ targetId }}) }}); Object.defineProperty(window, 'storydexDesktop', {{ value: bridge, configurable: false, writable: false }}); }}"
     ))
 }
 
@@ -679,6 +729,7 @@ mod tests {
         let script = adapter_script(
             "http://127.0.0.1:49152/api/v1",
             "0123456789abcdef0123456789abcdef",
+            "2.0.5",
         )
         .expect("adapter script");
         assert!(script.contains("backendBaseUrl"));
@@ -686,7 +737,7 @@ mod tests {
         assert!(script.contains("pickDirectory"));
         assert!(script.contains("revealPath"));
         assert!(script.contains("openWithDialog"));
-        assert!(script.contains("Object.freeze"));
+        assert!(script.contains("Object.defineProperty"));
         assert!(!script.contains("shell"));
         assert!(!script.contains("18081"));
     }

@@ -1,93 +1,61 @@
-const fs = require("fs");
-const path = require("path");
+"use strict";
+
+const fs = require("node:fs");
+const path = require("node:path");
 
 const desktopRoot = path.resolve(__dirname, "..");
 const projectRoot = path.resolve(desktopRoot, "..", "..");
-const packageJsonPath = path.join(desktopRoot, "package.json");
-const workflowPath = path.join(projectRoot, ".github", "workflows", "release-windows.yml");
-const mainPath = path.join(desktopRoot, "electron", "main.cjs");
-const staleReleaseConfigPath = path.join(desktopRoot, "storydex-release.json");
-const appUpdateConfigScriptPath = path.join(desktopRoot, "scripts", "write-app-update-config.cjs");
-const afterPackScriptPath = path.join(desktopRoot, "scripts", "after-pack.cjs");
-const windowsSignScriptPath = path.join(desktopRoot, "scripts", "windows-sign.cjs");
-
-const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
-const workflow = fs.readFileSync(workflowPath, "utf8");
-const mainSource = fs.readFileSync(mainPath, "utf8");
+const packageJson = JSON.parse(fs.readFileSync(path.join(desktopRoot, "package.json"), "utf8"));
+const tauriConfig = JSON.parse(fs.readFileSync(path.join(desktopRoot, "tauri-preview", "tauri.conf.json"), "utf8"));
+const capability = JSON.parse(fs.readFileSync(path.join(desktopRoot, "tauri-preview", "capabilities", "default.json"), "utf8"));
+const previewCapability = JSON.parse(fs.readFileSync(path.join(desktopRoot, "tauri-preview", "capabilities", "preview.json"), "utf8"));
+const workflow = fs.readFileSync(path.join(projectRoot, ".github", "workflows", "release-windows.yml"), "utf8");
+const packageScript = fs.readFileSync(path.join(desktopRoot, "tauri-preview", "scripts", "package-preview.ps1"), "utf8");
 const failures = [];
 
-function fail(message) {
-  failures.push(message);
-}
-
 function assert(condition, message) {
-  if (!condition) {
-    fail(message);
-  }
+  if (!condition) failures.push(message);
 }
 
-const packageVersion = String(packageJson.version || "").trim();
-const metadataVersion = String(packageJson.build?.extraMetadata?.version || "").trim();
-const metadataUpdateFeedUrl = String(packageJson.build?.extraMetadata?.storydexUpdateFeedUrl || "").trim();
-const appId = String(packageJson.build?.appId || "").trim();
-const artifactName = String(packageJson.build?.win?.artifactName || "").trim();
-const preparePackageScript = String(packageJson.scripts?.["prepare:package"] || "");
-const preparePackageAssetsScript = String(packageJson.scripts?.["prepare:package:assets"] || "");
-const buildDesktopScript = String(packageJson.scripts?.["build:desktop"] || "");
-const buildDesktopPreparedScript = String(packageJson.scripts?.["build:desktop:prepared"] || "");
-const packageWinScript = String(packageJson.scripts?.["package:win"] || "");
-const packageWinPreparedScript = String(packageJson.scripts?.["package:win:prepared"] || "");
-const publish = packageJson.build?.publish;
-const publishEntries = Array.isArray(publish) ? publish : publish ? [publish] : [];
-const genericFeed = publishEntries.find((entry) => String(entry?.provider || "").trim() === "generic" && entry?.url);
-const genericFeedUrl = String(genericFeed?.url || "").trim();
-
-assert(packageVersion, "apps/desktop/package.json must define version.");
-assert(metadataVersion === packageVersion, "build.extraMetadata.version must match package.json version.");
-assert(artifactName.includes("${version}"), "Windows artifactName must use ${version} instead of a literal version.");
-assert(Boolean(packageJson.scripts?.["check:embedded-python"]), "package.json must define check:embedded-python.");
-assert(preparePackageScript.includes("build:frontend"), "prepare:package must build the frontend.");
-assert(preparePackageScript.includes("build:coomi-runtime"), "prepare:package must build the Coomi runtime.");
-assert(preparePackageScript.includes("prepare:package:assets"), "prepare:package must prepare desktop assets.");
-assert(preparePackageAssetsScript.includes("sync:assets"), "prepare:package:assets must synchronize desktop assets.");
-assert(preparePackageAssetsScript.includes("check:embedded-python"), "prepare:package:assets must validate the embedded Python runtime.");
-assert(buildDesktopScript.includes("prepare:package") && buildDesktopScript.includes("build:desktop:prepared"), "build:desktop must run preparation before the prepared directory build.");
-assert(Boolean(packageJson.scripts?.["write:update-config"]), "package.json must define write:update-config.");
-assert(buildDesktopPreparedScript.includes("electron-builder --dir --win"), "build:desktop:prepared must create a Windows directory package.");
-assert(buildDesktopPreparedScript.includes("write:update-config"), "build:desktop:prepared must write resources/app-update.yml.");
-assert(fs.existsSync(appUpdateConfigScriptPath), "write:update-config script must exist.");
-assert(fs.existsSync(afterPackScriptPath), "after-pack script must exist for signed Windows builds.");
-assert(fs.existsSync(windowsSignScriptPath), "scoped Windows signing script must exist.");
-assert(packageJson.build?.win?.signAndEditExecutable === false, "Global executable signing must stay disabled to avoid re-signing embedded Python and MinGit binaries.");
-assert(packageJson.build?.win?.signtoolOptions?.sign === "scripts/windows-sign.cjs", "Windows builds must use the scoped Storydex signing hook.");
-assert(JSON.stringify(packageJson.build?.win?.signtoolOptions?.signingHashAlgorithms) === '["sha256"]', "Windows releases must use SHA-256 Authenticode signatures.");
-assert(packageWinScript.includes("prepare:package") && packageWinScript.includes("package:win:prepared"), "package:win must run preparation before the prepared NSIS build.");
-assert(packageWinPreparedScript.includes("electron-builder --win nsis"), "package:win:prepared must run a complete NSIS build.");
-assert(!packageWinPreparedScript.includes("--prepackaged"), "package:win:prepared must not use --prepackaged because it skips app signing.");
-assert(!packageWinPreparedScript.includes("signAndEditExecutable=false"), "package:win:prepared must not disable executable signing.");
-assert(genericFeedUrl === "https://updates.septemc.com/storydex/windows/", "build.publish must point to the Storydex generic update feed.");
-assert(metadataUpdateFeedUrl === genericFeedUrl, "build.extraMetadata.storydexUpdateFeedUrl must match build.publish URL.");
-assert(!fs.existsSync(staleReleaseConfigPath), "Remove stale apps/desktop/storydex-release.json; it conflicts with package.json build config.");
-assert(!workflow.includes(`StorydexSetup-x64-${packageVersion}`), "release workflow must not hardcode the current package version in artifact names.");
-assert(!workflow.includes(`release-notes-v${packageVersion}.md`), "release workflow must not hardcode a versioned release notes path.");
-assert(workflow.includes("package.json") && workflow.includes("GITHUB_OUTPUT"), "release workflow must derive release metadata from package.json/tag outputs.");
-assert(workflow.includes("steps.release.outputs"), "release workflow must publish files selected by the release preparation step.");
-assert(workflow.includes("test:update-feed"), "release workflow must run the desktop update feed regression test.");
-assert(workflow.includes("WINDOWS_CSC_LINK") && workflow.includes("WINDOWS_CSC_KEY_PASSWORD"), "release workflow must support Windows signing secrets.");
-assert(workflow.includes("steps.signing.outputs.enabled") && workflow.includes("STORYDEX_REQUIRE_SIGNING"), "release workflow must enable signing only when both secrets are configured.");
-assert(workflow.includes("Unsigned Windows release"), "release workflow must explicitly report unsigned production artifacts.");
-assert(workflow.includes("Get-AuthenticodeSignature") && workflow.includes('Status -ne "Valid"'), "signed releases must verify app and installer signatures.");
-assert(workflow.includes("publisherName"), "signed releases must require publisherName in app-update.yml for update signature verification.");
-assert(!mainSource.includes('setAppUserModelId("'), "Electron AppUserModelId must be derived from package build.appId.");
-assert(appId && mainSource.includes("DESKTOP_APP_ID"), "Electron main process must expose a DESKTOP_APP_ID derived from package metadata.");
-assert(mainSource.includes("resolveUpdateFeedUrl") && mainSource.includes("autoUpdater.setFeedURL"), "Electron updater must set a default generic feed URL at runtime.");
+const version = String(packageJson.version || "").trim();
+assert(/^\d+\.\d+\.\d+$/.test(version), "apps/desktop/package.json must define a semantic version.");
+assert(tauriConfig.version === version, "Tauri config version must match apps/desktop/package.json.");
+assert(tauriConfig.identifier === "cn.tensorhub.storydex", "Tauri Stable must use the production application identifier.");
+assert(tauriConfig.productName === "Storydex", "Tauri Stable product name must be Storydex.");
+assert(packageJson.main === undefined, "Stable desktop must not expose an Electron main entry.");
+assert(!packageJson.dependencies?.["electron-updater"], "Stable desktop must not depend on electron-updater.");
+assert(!packageJson.devDependencies?.electron, "Stable desktop package must not install Electron.");
+assert(!packageJson.devDependencies?.["electron-builder"], "Stable desktop package must not install electron-builder.");
+assert(String(packageJson.scripts?.dev || "").includes("dev:tauri"), "Default desktop development must run Tauri.");
+assert(String(packageJson.scripts?.["build:desktop"] || "").includes("package-preview.ps1"), "Default desktop build must run the Tauri packaging wrapper.");
+assert(String(packageJson.scripts?.["package:win"] || "").includes("build:desktop"), "Windows packaging must use the Tauri build.");
+assert(tauriConfig.bundle?.createUpdaterArtifacts === true, "Tauri must create updater artifacts.");
+assert(tauriConfig.bundle?.targets?.includes("nsis"), "Tauri Windows release must build NSIS.");
+assert(tauriConfig.bundle?.licenseFile === "../build/installer-license.zh-CN.txt", "Tauri NSIS must retain the Stable installer license.");
+assert(tauriConfig.plugins?.updater?.pubkey === "__STORYDEX_TAURI_UPDATER_PUBKEY__", "The checked-in Tauri config must not contain a production updater key.");
+assert(tauriConfig.plugins?.updater?.endpoints?.[0] === "https://updates.septemc.com/storydex/windows/latest.json", "Tauri updater endpoint must use latest.json.");
+assert(capability.permissions?.includes("updater:default"), "The main Tauri window must have updater permission.");
+assert(!/shell|fs:|process:/i.test(JSON.stringify(capability.permissions || [])), "The renderer capability must not expose shell, filesystem, or process plugins.");
+assert(previewCapability.windows?.includes("preview"), "The dynamically created preview window must have an explicit capability.");
+assert(previewCapability.permissions?.includes("core:default"), "The preview window must be allowed to subscribe to Tauri core events.");
+assert(!/updater|shell|fs:|process:/i.test(JSON.stringify(previewCapability.permissions || [])), "The preview window must not receive updater, shell, filesystem, or process permissions.");
+assert(/npx --no-install tauri build --ci/.test(packageScript), "Tauri packaging must use the pinned npm CLI in non-interactive mode.");
+assert(/STORYDEX_TAURI_UPDATER_PUBKEY/.test(packageScript), "Tauri packaging must require the updater public key.");
+assert(/TAURI_SIGNING_PRIVATE_KEY/.test(packageScript), "Tauri packaging must require the updater private key.");
+assert(/TAURI_SIGNING_PRIVATE_KEY_PATH/.test(packageScript), "Tauri packaging must support CI private key files without treating the path as key content.");
+assert(/quality-gate\.yml/.test(workflow), "Windows release must depend on the reusable full quality gate.");
+assert(/TAURI_SIGNING_PRIVATE_KEY/.test(workflow), "Windows release must load the updater private key from CI secrets.");
+assert(/STORYDEX_TAURI_UPDATER_PUBKEY/.test(workflow), "Windows release must load the updater public key from CI secrets.");
+assert(/latest\.json/.test(workflow) && /\.exe\.sig/.test(workflow), "Windows release must publish the Tauri updater manifest, signed NSIS installer, and signature.");
+assert(/steps\.release\.outputs\.updater_signature_path/.test(workflow), "GitHub Release must include the signed NSIS updater signature.");
+assert(/\$\(\$env:SETUP_NAME\)\.sig/.test(workflow) && /\$env:PORTABLE_NAME/.test(workflow), "VPS publishing must upload the updater signature and portable archive.");
+assert(!/\$target:/.test(workflow), "PowerShell remote targets must delimit the target variable before a colon.");
+assert(!/setup-python|bootstrap_python39|embedded Python|electron-builder|Electron E2E/i.test(workflow), "Stable Windows release must not build Python or Electron runtime assets.");
 
 if (failures.length) {
-  console.error("[Storydex Desktop] Release configuration validation failed:");
-  for (const failure of failures) {
-    console.error(`- ${failure}`);
-  }
+  console.error("[Storydex Desktop] Tauri release configuration validation failed:");
+  for (const failure of failures) console.error(`- ${failure}`);
   process.exit(1);
 }
 
-console.log(`[Storydex Desktop] Release configuration is valid for version ${packageVersion} (${appId}).`);
+console.log(`[Storydex Desktop] Tauri release configuration is valid for version ${version}.`);

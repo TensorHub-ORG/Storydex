@@ -2573,6 +2573,7 @@ dependencies = [
  "fs2",
  "futures-util",
  "keyring",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

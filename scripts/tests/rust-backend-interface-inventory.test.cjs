@@ -19,7 +19,11 @@ test("inventory discovers the current public routes and frontend consumers", () 
   assert.ok(inventory.pythonRoutes.some((route) => route.path === "/agent/chat/stream" && route.method === "POST"));
   assert.ok(inventory.frontendConsumers.some((item) => item.path === "/workspace/git/summary"));
   assert.ok(inventory.rustRoutes.some((item) => item.path === "/workspace/git/summary" && item.method === "GET"));
-  assert.ok(inventory.counts.frontendConsumersPendingInRust > 0);
+  assert.equal(inventory.counts.frontendConsumersImplementedInRust, inventory.counts.frontendConsumers);
+  assert.equal(inventory.counts.frontendConsumersPendingInRust, 0);
+  assert.equal(inventory.counts.contractsImplemented, inventory.counts.rustRoutes);
+  assert.equal(inventory.counts.contractsPending, 0);
+  assert.equal(inventory.counts.contractsExcluded, 29);
 });
 
 test("inventory discovers template routes and normalizes parameterized paths", () => {

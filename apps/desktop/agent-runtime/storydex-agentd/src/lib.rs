@@ -48,6 +48,7 @@ mod agent_control;
 mod auth;
 pub(crate) mod chat;
 mod execution;
+mod feedback;
 mod followup;
 mod help;
 mod length_tier_calibration;
@@ -119,6 +120,7 @@ pub struct AppState {
     token: Arc<str>,
     coomi_home: Arc<PathBuf>,
     bridge_path: Arc<PathBuf>,
+    feedback_url: Arc<str>,
     refactor_root: Option<Arc<PathBuf>>,
     current_workspace: Arc<RwLock<Option<WorkspaceSelection>>>,
     replay_fixture: Option<Arc<PathBuf>>,
@@ -169,6 +171,7 @@ impl AppState {
             replay_fixture,
             auth::AuthKeyMode::Platform,
             None,
+            None,
         )
     }
 
@@ -181,6 +184,7 @@ impl AppState {
         replay_fixture: Option<PathBuf>,
         auth_key_mode: auth::AuthKeyMode,
         account_base_url: Option<&str>,
+        feedback_url: Option<&str>,
     ) -> anyhow::Result<Self> {
         let token = token.into();
         anyhow::ensure!(!token.trim().is_empty(), "agentd token must not be empty");
@@ -205,10 +209,20 @@ impl AppState {
         });
         let replay_fixture = replay_fixture.map(Arc::new);
         let auth = auth::AuthService::new(&coomi_home, auth_key_mode, account_base_url)?;
+        let feedback_url = feedback_url
+            .map(str::to_owned)
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("STORYDEX_FEEDBACK_URL")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| feedback::FEEDBACK_DEFAULT_URL.to_owned());
         Ok(Self {
             token: Arc::from(token),
             coomi_home: Arc::new(coomi_home),
             bridge_path: Arc::new(bridge_path),
+            feedback_url: Arc::from(feedback_url),
             refactor_root,
             current_workspace: Arc::new(RwLock::new(current_workspace)),
             replay_fixture,
@@ -239,6 +253,28 @@ impl AppState {
             replay_fixture,
             auth::AuthKeyMode::Local,
             Some(account_base_url),
+            None,
+        )
+    }
+
+    #[cfg(test)]
+    fn with_paths_and_feedback_url(
+        token: impl Into<String>,
+        coomi_home: impl Into<PathBuf>,
+        bridge_path: impl Into<PathBuf>,
+        refactor_root: Option<PathBuf>,
+        replay_fixture: Option<PathBuf>,
+        feedback_url: &str,
+    ) -> anyhow::Result<Self> {
+        Self::with_paths_internal(
+            token,
+            coomi_home,
+            bridge_path,
+            refactor_root,
+            replay_fixture,
+            auth::AuthKeyMode::Platform,
+            None,
+            Some(feedback_url),
         )
     }
 
@@ -268,6 +304,10 @@ impl AppState {
 
     pub fn bridge_path(&self) -> &Path {
         self.bridge_path.as_path()
+    }
+
+    pub(crate) fn feedback_url(&self) -> &str {
+        self.feedback_url.as_ref()
     }
 
     pub fn refactor_root(&self) -> Option<&Path> {
@@ -797,6 +837,11 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/sys/agent-settings",
             get(system::agent_settings).put(system::update_agent_settings),
+        )
+        .route("/api/v1/sys/feedback", post(feedback::submit_feedback))
+        .route(
+            "/api/v1/sys/feedback/tool-analysis",
+            post(feedback::analyze_tool_failures),
         )
         .route("/api/v1/help/guide", get(help::guide))
         .route("/api/v1/help/prompts", get(help::prompts))

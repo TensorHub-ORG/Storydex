@@ -196,19 +196,15 @@ if ($runAndroid) {
 }
 
 if ($Mode -eq "Full") {
-  Invoke-Step "Refresh Storydex Coomi package identity" { node (Join-Path $desktop "scripts/build-coomi-runtime.cjs") }
-  Invoke-Step "Prepare desktop package assets" { npm --prefix $desktop run prepare:package:assets }
-  Invoke-Step "Desktop directory package" { npm --prefix $desktop run build:desktop:prepared }
-  Invoke-Step "Packaged asset validation" { npm --prefix $desktop run check:packaged }
-  Invoke-Step "Electron packaged smoke" { npm --prefix $desktop run test:smoke }
+  Invoke-Step "Build Tauri desktop package" { npm --prefix $desktop run build:desktop }
+  Invoke-Step "Validate Tauri packaged assets" { npm --prefix $desktop run check:packaged }
+  Invoke-Step "Packaged Tauri lifecycle smoke" { npm --prefix $desktop run smoke:tauri }
 }
 if ($Mode -eq "Release") {
-  Invoke-Step "Refresh Storydex Coomi package identity" { node (Join-Path $desktop "scripts/build-coomi-runtime.cjs") }
-  Invoke-Step "Prepare desktop package assets" { npm --prefix $desktop run prepare:package:assets }
-  Invoke-Step "Windows installer" { npm --prefix $desktop run package:win:prepared }
-  Invoke-Step "Installer and updater assets" { node (Join-Path $desktop "scripts/validate-packaged-assets.cjs") "--release=$(Join-Path $desktop 'release')" }
-  Invoke-Step "Electron packaged E2E" { npm --prefix $desktop run test:e2e }
-  Invoke-Step "Local release bundle" { & (Join-Path $repoRoot "scripts/prepare_release_bundle.ps1") -Version $packageVersion }
+  Invoke-Step "Build signed Tauri Windows installer" { npm --prefix $desktop run package:win }
+  Invoke-Step "Validate Tauri installer and updater assets" { npm --prefix $desktop run check:packaged }
+  Invoke-Step "Packaged Tauri lifecycle smoke" { npm --prefix $desktop run smoke:tauri }
+  Invoke-Step "Local Tauri release bundle" { & (Join-Path $repoRoot "scripts/prepare_tauri_release_bundle.ps1") -Version $packageVersion }
 }
 Invoke-Step "Git whitespace check" { git -C $repoRoot diff --check }
 Write-Host "`n== Pipeline timing summary ==" -ForegroundColor Cyan

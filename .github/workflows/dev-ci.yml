@@ -50,7 +50,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: apps/desktop/agent-runtime -> target
+          workspaces: |
+            apps/desktop/agent-runtime -> target
+            apps/desktop/tauri-preview -> target
       - name: Install pinned Rust dependency auditor
         run: cargo install cargo-deny --version 0.20.2 --locked
       - name: Audit Rust dependencies
@@ -58,6 +60,8 @@ jobs:
         run: ./scripts/run_rust_dependency_audit.ps1
       - name: Test Windows Agent runtime
         run: cargo test --manifest-path apps/desktop/agent-runtime/Cargo.toml --locked --workspace
+      - name: Check Tauri Stable shell
+        run: cargo check --manifest-path apps/desktop/tauri-preview/Cargo.toml --locked
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"

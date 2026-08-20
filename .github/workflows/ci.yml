@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       full:
-        description: Run packaging and packaged Electron E2E in addition to the standard gate
+        description: Run packaging and packaged Tauri lifecycle checks in addition to the standard gate
         required: true
         default: false
         type: boolean
@@ -24,5 +24,5 @@ jobs:
   quality-gate:
     uses: ./.github/workflows/quality-gate.yml
     with:
-      full: ${{ inputs.full || false }}
+      full: ${{ inputs.full || github.ref == 'refs/heads/main' || github.base_ref == 'main' }}
 

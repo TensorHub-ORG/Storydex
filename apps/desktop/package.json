@@ -3,113 +3,29 @@
   "private": true,
   "version": "2.0.5",
   "description": "Storydex desktop app",
-  "main": "electron/main.cjs",
   "scripts": {
-    "dev": "concurrently -k -n FRONTEND,ELECTRON -c cyan,green \"npm:dev:frontend\" \"npm:dev:electron\"",
-    "dev:frontend": "npm --prefix ../frontend run dev",
-    "dev:electron": "node scripts/wait-for-dev-frontend.cjs && electron .",
-    "dev:rust-beta:electron": "node scripts/wait-for-dev-frontend.cjs && electron electron/rust-beta/main.cjs",
-    "dev:rust-beta": "npm run build:rust-beta && concurrently -k -n FRONTEND,RUST-BETA -c cyan,magenta \"npm:dev:frontend\" \"npm:dev:rust-beta:electron\"",
+    "dev": "npm run dev:tauri",
+    "dev:tauri": "npx --no-install tauri dev --config tauri-preview/tauri.conf.json",
     "build:frontend": "npm --prefix ../frontend run build",
-    "build:coomi-runtime": "node scripts/build-coomi-runtime.cjs",
-    "build:rust-beta": "node scripts/build-rust-beta-runtime.cjs",
-    "build:rust-beta:release": "node scripts/build-rust-beta-runtime.cjs --release",
-    "sync:assets": "node scripts/sync-app-assets.cjs",
-    "prepare:package:assets": "npm run sync:assets && npm run check:embedded-python",
-    "prepare:package": "npm run build:frontend && npm run build:coomi-runtime && npm run prepare:package:assets",
-    "patch:win-exe": "node scripts/patch-win-executable.cjs",
-    "write:update-config": "node scripts/write-app-update-config.cjs",
-    "check:embedded-python": "node scripts/validate-embedded-python.cjs",
     "check:encoding": "node ../../scripts/validate_text_encoding.cjs",
     "check:release": "node scripts/validate-release-config.cjs",
-    "check:packaged": "node scripts/validate-packaged-assets.cjs",
+    "check:packaged": "node scripts/validate-tauri-release-assets.cjs",
     "check:rust-candidate": "node scripts/validate-rust-candidate-assets.cjs",
-    "check:tauri-preview": "cargo check --manifest-path tauri-preview/Cargo.toml --locked",
+    "check:tauri": "cargo check --manifest-path tauri-preview/Cargo.toml --locked",
+    "check:tauri-preview": "npm run check:tauri",
     "test": "npm run test:unit",
-    "test:unit": "node --test tests/daily-active.test.cjs tests/update-feed.test.cjs tests/release-contract.test.cjs tests/packaging-policy.test.cjs tests/rust-beta-runtime.test.cjs tests/rust-candidate-assets.test.cjs tests/tauri-candidate-contract.test.cjs tests/preload-updater.test.cjs tests/update-installer.test.cjs tests/update-helper.test.cjs tests/windows-sign.test.cjs ../../scripts/tests/generate-release-metadata.test.cjs",
-    "test:rust-beta": "node --test tests/rust-beta-runtime.test.cjs",
-    "test:smoke": "node --test --test-concurrency=1 --test-name-pattern=\"^(packaged updater|packaged backend)\" tests/packaged.e2e.cjs",
-    "test:e2e": "node --test --test-concurrency=1 tests/packaged.e2e.cjs",
-    "test:update-feed": "node --test tests/update-feed.test.cjs",
-    "build:desktop:prepared": "set ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/&& electron-builder --dir --win --config.win.signAndEditExecutable=false && npm run write:update-config",
-    "package:win:prepared": "set ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/&& electron-builder --win nsis",
-    "build:desktop": "npm run prepare:package && npm run build:desktop:prepared",
-    "package:win": "npm run prepare:package && npm run package:win:prepared",
-    "build:tauri-preview": "powershell -NoProfile -ExecutionPolicy Bypass -File tauri-preview/scripts/package-preview.ps1",
-    "smoke:tauri-preview": "powershell -NoProfile -ExecutionPolicy Bypass -File tauri-preview/scripts/smoke-preview.ps1"
-  },
-  "dependencies": {
-    "electron-updater": "^6.3.9"
+    "test:unit": "node --test tests/rust-candidate-assets.test.cjs tests/tauri-candidate-contract.test.cjs tests/tauri-release-contract.test.cjs ../../scripts/tests/generate-release-metadata.test.cjs ../../scripts/tests/rust-backend-interface-inventory.test.cjs",
+    "test:smoke": "npm run smoke:tauri",
+    "test:e2e": "npm run smoke:tauri",
+    "test:update-feed": "node --test tests/tauri-release-contract.test.cjs",
+    "build:desktop": "powershell -NoProfile -ExecutionPolicy Bypass -File tauri-preview/scripts/package-preview.ps1",
+    "package:win": "npm run build:desktop",
+    "build:tauri-preview": "npm run build:desktop",
+    "smoke:tauri": "powershell -NoProfile -ExecutionPolicy Bypass -File tauri-preview/scripts/smoke-preview.ps1",
+    "smoke:tauri-preview": "npm run smoke:tauri",
+    "test:smoke:tauri": "npm run smoke:tauri"
   },
   "devDependencies": {
-    "@playwright/test": "^1.53.1",
-    "concurrently": "^9.2.4",
-    "core-util-is": "1.0.3",
-    "electron": "^40.10.6",
-    "electron-builder": "^26.15.3",
-    "isarray": "1.0.0",
-    "process-nextick-args": "2.0.1",
-    "resedit": "^1.7.2",
-    "wait-on": "^8.0.1"
-  },
-  "overrides": {
-    "js-yaml": "4.3.0"
-  },
-  "build": {
-    "appId": "cn.tensorhub.storydex",
-    "productName": "Storydex",
-    "asar": true,
-    "asarUnpack": [
-      "app/backend/**/*",
-      "app/docs/**/*",
-      "app/python-env/**/*",
-      "app/mingit/**/*",
-      "app/assets/**/*",
-      "electron/update-helper.ps1"
-    ],
-    "directories": {
-      "output": "release"
-    },
-    "extraMetadata": {
-      "version": "2.0.5",
-      "storydexUpdateFeedUrl": "https://updates.septemc.com/storydex/windows/"
-    },
-    "files": [
-      "electron/**/*",
-      "app/**/*",
-      "package.json"
-    ],
-    "publish": [
-      {
-        "provider": "generic",
-        "url": "https://updates.septemc.com/storydex/windows/"
-      }
-    ],
-    "afterPack": "scripts/after-pack.cjs",
-    "win": {
-      "icon": "../../assets/Storydex_icon/storydex_icon_01.ico",
-      "signAndEditExecutable": false,
-      "signtoolOptions": {
-        "sign": "scripts/windows-sign.cjs",
-        "signingHashAlgorithms": [
-          "sha256"
-        ]
-      },
-      "executableName": "Storydex",
-      "target": [
-        "nsis"
-      ],
-      "artifactName": "StorydexSetup-x64-${version}.${ext}"
-    },
-    "nsis": {
-      "license": "build/installer-license.zh-CN.txt",
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "perMachine": false,
-      "allowElevation": false,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "shortcutName": "Storydex"
-    }
+    "@tauri-apps/cli": "^2.11.4"
   }
 }

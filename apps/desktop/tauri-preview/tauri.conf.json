@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Storydex Rust Tauri Preview",
-  "version": "0.1.0",
-  "identifier": "cn.tensorhub.storydex.preview",
+  "productName": "Storydex",
+  "version": "2.0.5",
+  "identifier": "cn.tensorhub.storydex",
   "build": {
     "frontendDist": "../../frontend/dist",
     "devUrl": "http://127.0.0.1:5173",
@@ -20,10 +20,25 @@
     "active": true,
     "targets": ["nsis"],
     "icon": ["../../../assets/Storydex_icon/storydex_icon_01.png"],
+    "licenseFile": "../build/installer-license.zh-CN.txt",
+    "createUpdaterArtifacts": true,
     "windows": {
+      "minimumWebview2Version": "110.0.1587.46",
       "webviewInstallMode": {
         "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese", "English"],
+        "displayLanguageSelector": false,
+        "startMenuFolder": "Storydex"
       }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "__STORYDEX_TAURI_UPDATER_PUBKEY__",
+      "endpoints": ["https://updates.septemc.com/storydex/windows/latest.json"]
     }
   }
 }

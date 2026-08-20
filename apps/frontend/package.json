@@ -17,6 +17,8 @@
   },
   "dependencies": {
     "@fontsource/material-symbols-rounded": "^5.2.41",
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-updater": "^2.10.1",
     "axios": "^1.19.0",
     "markdown-it": "^14.3.0",
     "pinia": "^2.2.6",
@@ -24,11 +26,11 @@
     "vue-router": "^4.4.5"
   },
   "devDependencies": {
-    "@vitest/coverage-v8": "^4.1.10",
-    "@vue/test-utils": "^2.4.6",
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^22.10.1",
     "@vitejs/plugin-vue": "^5.1.4",
+    "@vitest/coverage-v8": "^4.1.10",
+    "@vue/test-utils": "^2.4.6",
     "happy-dom": "^20.11.1",
     "typescript": "^5.6.3",
     "vite": "^6.4.3",

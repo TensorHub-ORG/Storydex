@@ -5,6 +5,9 @@ $repoRoot = (Resolve-Path (Join-Path $previewRoot "..\..\.." )).Path
 $runtimeManifest = Join-Path $repoRoot "apps\desktop\agent-runtime\Cargo.toml"
 $runtimeBinary = Join-Path $repoRoot "apps\desktop\agent-runtime\target\release\storydex-agentd.exe"
 $binariesRoot = Join-Path $previewRoot "binaries"
+$resourcesRoot = Join-Path $previewRoot "resources"
+$mingitSource = if ($env:STORYDEX_MINGIT_SOURCE) { [System.IO.Path]::GetFullPath($env:STORYDEX_MINGIT_SOURCE) } else { Join-Path $repoRoot "apps\desktop\vendor\mingit" }
+$mingitTarget = Join-Path $resourcesRoot "mingit"
 $frontendRoot = Join-Path $repoRoot "apps\frontend"
 
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
@@ -16,8 +19,11 @@ if (-not (Get-Command rustc -ErrorAction SilentlyContinue)) {
 if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
     throw "npm is required only for the Vue build; it is never copied into the candidate runtime assets."
 }
+if (-not (Test-Path -LiteralPath $mingitSource -PathType Container)) {
+    throw "Bundled MinGit source was not found: $mingitSource"
+}
 
-Write-Host "[Storydex] Building isolated Rust sidecar for Tauri preview..."
+Write-Host "[Storydex] Building isolated Rust sidecar for Tauri desktop..."
 & cargo build --manifest-path $runtimeManifest --release --locked -p storydex-agentd
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $runtimeBinary)) {
     throw "storydex-agentd release build did not produce $runtimeBinary"
@@ -33,7 +39,13 @@ New-Item -ItemType Directory -Force -Path $binariesRoot | Out-Null
 $sidecarPath = Join-Path $binariesRoot "storydex-agentd-$targetTriple.exe"
 Copy-Item -LiteralPath $runtimeBinary -Destination $sidecarPath -Force
 
-Write-Host "[Storydex] Building Vue assets for the Tauri preview..."
+if (Test-Path -LiteralPath $mingitTarget) {
+    Remove-Item -LiteralPath $mingitTarget -Recurse -Force
+}
+New-Item -ItemType Directory -Force -Path $resourcesRoot | Out-Null
+Copy-Item -LiteralPath $mingitSource -Destination $mingitTarget -Recurse -Force
+
+Write-Host "[Storydex] Building Vue assets for the Tauri desktop..."
 & npm --prefix $frontendRoot run build
 if ($LASTEXITCODE -ne 0) {
     throw "Vue build failed; Tauri preview packaging stopped before bundling."

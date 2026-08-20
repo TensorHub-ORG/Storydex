@@ -5,7 +5,8 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$manifestPath = Join-Path $repoRoot "apps/desktop/agent-runtime/Cargo.toml"
+$agentManifestPath = Join-Path $repoRoot "apps/desktop/agent-runtime/Cargo.toml"
+$tauriManifestPath = Join-Path $repoRoot "apps/desktop/tauri-preview/Cargo.toml"
 $configPath = Join-Path $repoRoot "apps/desktop/agent-runtime/deny.toml"
 $expectedVersion = "cargo-deny 0.20.2"
 
@@ -25,12 +26,22 @@ Write-Host "Rust dependency audit tool: $actualVersion" -ForegroundColor Cyan
 Write-Host "RustSec advisory source: https://github.com/RustSec/advisory-db" -ForegroundColor Cyan
 
 & cargo deny `
-  --manifest-path $manifestPath `
+  --manifest-path $agentManifestPath `
   --config $configPath `
   --locked `
   check advisories licenses sources
 if ($LASTEXITCODE -ne 0) {
-  throw "Rust dependency audit failed with exit code $LASTEXITCODE"
+  throw "Rust Agent dependency audit failed with exit code $LASTEXITCODE"
+}
+
+& cargo deny `
+  --manifest-path $tauriManifestPath `
+  --config $configPath `
+  --locked `
+  --target x86_64-pc-windows-msvc `
+  check advisories licenses sources
+if ($LASTEXITCODE -ne 0) {
+  throw "Tauri Windows dependency audit failed with exit code $LASTEXITCODE"
 }
 
 $cargoHome = if ($env:CARGO_HOME) {

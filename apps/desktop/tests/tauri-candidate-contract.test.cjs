@@ -10,11 +10,12 @@ function read(relativePath) {
   return fs.readFileSync(path.join(tauriRoot, relativePath), "utf8");
 }
 
-test("Tauri preview has an isolated build descriptor and minimum capability", () => {
+test("Tauri Stable has an isolated build descriptor and minimum capability", () => {
   const config = JSON.parse(read("tauri.conf.json"));
   const capability = JSON.parse(read("capabilities/default.json"));
+  const previewCapability = JSON.parse(read("capabilities/preview.json"));
   const desktopPackage = JSON.parse(fs.readFileSync(path.join(desktopRoot, "package.json"), "utf8"));
-  assert.equal(config.identifier, "cn.tensorhub.storydex.preview");
+  assert.equal(config.identifier, "cn.tensorhub.storydex");
   assert.equal(config.build.frontendDist, "../../frontend/dist");
   assert.deepEqual(config.app.windows, []);
   assert.equal(config.app.withGlobalTauri, false);
@@ -22,15 +23,18 @@ test("Tauri preview has an isolated build descriptor and minimum capability", ()
   assert.match(config.app.security.csp, /script-src 'self'(?:;|$)/);
   assert.doesNotMatch(config.app.security.csp, /script-src[^;]*unsafe-inline/);
   assert.equal(Object.prototype.hasOwnProperty.call(config.bundle, "externalBin"), false);
-  assert.deepEqual(capability.permissions, ["core:default"]);
+  assert.deepEqual(capability.permissions, ["core:default", "updater:default"]);
   assert.deepEqual(capability.windows, ["main"]);
-  assert.doesNotMatch(JSON.stringify(capability.permissions), /shell|fs|updater|process/i);
-  assert.match(desktopPackage.scripts["check:tauri-preview"], /tauri-preview\/Cargo\.toml --locked/);
-  assert.match(desktopPackage.scripts["build:tauri-preview"], /tauri-preview\/scripts\/package-preview\.ps1/);
-  assert.match(desktopPackage.scripts["smoke:tauri-preview"], /tauri-preview\/scripts\/smoke-preview\.ps1/);
+  assert.deepEqual(previewCapability.permissions, ["core:default"]);
+  assert.deepEqual(previewCapability.windows, ["preview"]);
+  assert.doesNotMatch(JSON.stringify(capability.permissions), /shell|fs|process/i);
+  assert.doesNotMatch(JSON.stringify(previewCapability.permissions), /updater|shell|fs|process/i);
+  assert.match(desktopPackage.scripts["check:tauri-preview"], /check:tauri/);
+  assert.match(desktopPackage.scripts["build:tauri-preview"], /build:desktop/);
+  assert.match(desktopPackage.scripts["smoke:tauri-preview"], /smoke:tauri/);
 });
 
-test("Tauri preview build input never points at Stable Electron or embedded Python", () => {
+test("Tauri Stable build input never points at legacy runtime assets", () => {
   const config = read("tauri.conf.json");
   const prepare = read("scripts/prepare-preview.ps1");
   const source = read("src/main.rs");
@@ -52,7 +56,7 @@ test("Tauri preview build input never points at Stable Electron or embedded Pyth
   assert.match(packageScript, /beforeBuildCommand/);
   assert.match(packageScript, /EncodedCommand/);
   assert.match(packageScript, /STORYDEX_TAURI_CLI/);
-  assert.match(packageScript, /cargo-tauri\.exe/);
+  assert.match(packageScript, /npx --no-install tauri build --ci/);
   assert.match(packageScript, /WriteAllText/);
   assert.match(packageScript, /UTF8Encoding\(\$false\)/);
   assert.match(packageScript, /Push-Location \$previewRoot/);

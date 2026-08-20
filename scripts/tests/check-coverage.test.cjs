@@ -160,11 +160,13 @@ test("standard CI scopes quality jobs while full CI retains its compatibility ma
   assert.match(workflow, /if full or pc_runtime:\s*required\.add\("pc-runtime-tests"\)/);
   assert.match(workflow, /if backend and not full:\s*required\.add\("backend-compatibility"\)/);
   assert.match(workflow, /desktop-package-smoke:\s*[\s\S]*?if:\s*inputs\.full/);
-  assert.match(workflow, /electron-e2e:\s*[\s\S]*?if:\s*inputs\.full/);
+  assert.match(workflow, /tauri-e2e:\s*[\s\S]*?if:\s*inputs\.full/);
+  assert.match(workflow, /Generate ephemeral updater key/);
+  assert.doesNotMatch(workflow, /Run packaged Electron E2E|Prepare embedded Python/);
 
   const ci = fs.readFileSync(path.resolve(__dirname, "..", "..", ".github", "workflows", "ci.yml"), "utf8");
   const release = fs.readFileSync(path.resolve(__dirname, "..", "..", ".github", "workflows", "release-windows.yml"), "utf8");
-  assert.match(ci, /full:\s*\$\{\{ inputs\.full \|\| false \}\}/);
+  assert.match(ci, /full:\s*\$\{\{ inputs\.full \|\| github\.ref ===? 'refs\/heads\/main' \|\| github\.base_ref ===? 'main' \}\}/);
   assert.match(release, /enforce_coverage:\s*true\s+full:\s*true/);
 });
 

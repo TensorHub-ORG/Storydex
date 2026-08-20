@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-capability",
-  "description": "Minimal preview capability; no shell, filesystem, or updater permissions are granted.",
+  "description": "Stable Storydex desktop capability with updater access and no shell/filesystem permissions.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "updater:default"]
 }

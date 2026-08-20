@@ -53,6 +53,14 @@ test("pre-push stays lightweight and leaves component suites to GitHub Actions",
   assert.doesNotMatch(guard, /run_full_test_suite|pytest|cargo test|npm test|storydex-ci-preflight/);
 });
 
+test("Rust dependency audit covers the Agent workspace and the Windows Tauri runtime", () => {
+  const audit = read("scripts/run_rust_dependency_audit.ps1");
+  assert.match(audit, /apps\/desktop\/agent-runtime\/Cargo\.toml/);
+  assert.match(audit, /apps\/desktop\/tauri-preview\/Cargo\.toml/);
+  assert.match(audit, /--target x86_64-pc-windows-msvc/);
+  assert.doesNotMatch(audit, /--exclude|advisories\.ignore/);
+});
+
 test("development branches use lightweight CI while main keeps the remote full gate", () => {
   const guard = read("scripts/run_pre_push_ci.ps1");
   const ci = read(".github/workflows/ci.yml");
@@ -70,6 +78,7 @@ test("development branches use lightweight CI while main keeps the remote full g
   assert.match(developmentCi, /cargo test --manifest-path apps\/desktop\/agent-runtime\/Cargo\.toml/);
   assert.match(developmentCi, /cargo test --manifest-path apps\/android\/agent-runtime\/Cargo\.toml/);
   assert.doesNotMatch(developmentCi, /pytest|coverage|electron-e2e|package:win/);
+  assert.match(developmentCi, /Check Tauri Stable shell/);
 });
 
 test("Agent runtimes are owned by their platforms without cross-source dependencies", () => {

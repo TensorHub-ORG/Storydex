@@ -3,3 +3,4 @@
 /tauri.generated.conf.json
 /binaries/*
 !/binaries/.gitkeep
+/resources/

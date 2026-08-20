@@ -9,6 +9,7 @@ interface StorydexDesktopBridge {
   backendAuthToken?: string;
   isTitleBarOverlaySupported?: boolean;
   versions?: {
+    tauri?: string;
     electron?: string;
     chrome?: string;
     node?: string;

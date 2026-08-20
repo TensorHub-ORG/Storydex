@@ -3,7 +3,12 @@ import FilePreviewView from "@/views/FilePreviewView.vue";
 import WorkbenchView from "@/views/WorkbenchView.vue";
 
 function createRouterHistory() {
-  if (typeof window !== "undefined" && window.location.protocol === "file:") {
+  if (
+    typeof window !== "undefined"
+    && (window.location.protocol === "file:"
+      || window.location.protocol === "tauri:"
+      || window.location.hostname === "tauri.localhost")
+  ) {
     return createWebHashHistory();
   }
   return createWebHistory();

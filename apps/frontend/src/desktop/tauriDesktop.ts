@@ -1,0 +1,47 @@
+type TauriEventModule = typeof import("@tauri-apps/api/event");
+
+export function isTauriRuntime(): boolean {
+  return typeof window !== "undefined"
+    && (window.location.protocol === "tauri:" || window.location.hostname === "tauri.localhost")
+    && Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
+}
+
+export async function installTauriDesktopBridge(): Promise<void> {
+  if (!isTauriRuntime() || !window.storydexDesktop) {
+    return;
+  }
+
+  const bridge = window.storydexDesktop;
+  const eventModule = await loadEventModule();
+  const openTargetListeners = new Set<(target: StorydexDesktopOpenTarget) => void>();
+  const previewListeners = new Set<(relativePath: string) => void>();
+  const detachOpenTargets = await eventModule.listen<StorydexDesktopOpenTarget>("storydex:open-target", (event) => {
+    for (const listener of openTargetListeners) {
+      listener(event.payload);
+    }
+  });
+  const detachPreview = await eventModule.listen<string>("storydex:preview-open-file", (event) => {
+    for (const listener of previewListeners) {
+      listener(event.payload);
+    }
+  });
+  bridge.onOpenTarget = (listener) => subscribe(openTargetListeners, listener);
+  bridge.onPreviewOpenFile = (listener) => subscribe(previewListeners, listener);
+  window.addEventListener("pagehide", () => {
+    detachOpenTargets();
+    detachPreview();
+  }, { once: true });
+}
+
+async function loadEventModule(): Promise<TauriEventModule> {
+  try {
+    return await import("@tauri-apps/api/event");
+  } catch (error) {
+    throw new Error(`Tauri 桌面事件组件加载失败：${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function subscribe<T>(listeners: Set<(payload: T) => void>, listener: (payload: T) => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}

@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "preview-capability",
+  "description": "File preview window capability for Tauri core events only.",
+  "windows": ["preview"],
+  "permissions": ["core:default"]
+}

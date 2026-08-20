@@ -28,181 +28,108 @@ jobs:
       run_packaged_checks: false
 
   release-windows:
-    name: Build and publish Windows release
+    name: Build and publish Tauri Windows release
     needs: quality-gate
     runs-on: windows-latest
     environment: ${{ (github.event_name == 'push' || inputs.dry_run == false) && 'production' || 'release-dry-run' }}
-    env:
-      PYTHONUTF8: "1"
-      PYTHONIOENCODING: "utf-8"
-      NPM_CONFIG_UNICODE: "true"
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.95.0
 
-      - name: Use UTF-8 console
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-          $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-          chcp 65001
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            apps/desktop/agent-runtime -> target
+            apps/desktop/tauri-preview -> target
 
-      - name: Setup Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
-          cache: "npm"
+          cache: npm
           cache-dependency-path: |
             apps/frontend/package-lock.json
             apps/desktop/package-lock.json
 
-      - name: Setup Python 3.9
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.9"
-
       - name: Install Node dependencies
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
-          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-          $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-          npm ci --prefix apps/frontend
-          npm ci --prefix apps/desktop
+          npm ci --prefix apps/frontend --prefer-offline --no-audit --fund=false
+          npm ci --prefix apps/desktop --prefer-offline --no-audit --fund=false
 
       - name: Resolve release metadata
         id: metadata
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-          $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-
           $package = Get-Content -Raw -LiteralPath "apps/desktop/package.json" | ConvertFrom-Json
           $version = [string]$package.version
-          if (-not $version) {
-            throw "apps/desktop/package.json does not define a version."
-          }
-
-          $metadataVersion = [string]$package.build.extraMetadata.version
-          if ($metadataVersion -and $metadataVersion -ne $version) {
-            throw "build.extraMetadata.version ($metadataVersion) does not match package version ($version)."
-          }
-
+          if (-not $version) { throw "apps/desktop/package.json does not define a version." }
           $tag = "v$version"
           if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne $tag) {
-            throw "Release tag '$env:GITHUB_REF_NAME' does not match apps/desktop/package.json version '$tag'."
+            throw "Release tag '$env:GITHUB_REF_NAME' does not match desktop version '$tag'."
           }
-
           $outputs = @{
             version = $version
             tag = $tag
             setup_name = "StorydexSetup-x64-$version.exe"
-            blockmap_name = "StorydexSetup-x64-$version.exe.blockmap"
-            unpacked_zip_name = "Storydex-win-unpacked.zip"
+            updater_name = "StorydexSetup-x64-$version.exe"
+            updater_signature_name = "StorydexSetup-x64-$version.exe.sig"
+            portable_name = "Storydex-win-portable.zip"
             release_name = "Storydex $tag"
           }
-
           foreach ($entry in $outputs.GetEnumerator()) {
             "$($entry.Key)=$($entry.Value)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           }
 
-      - name: Validate release configuration
+      - name: Validate Tauri release configuration
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
           npm --prefix apps/desktop run check:encoding
           npm --prefix apps/desktop run check:release
-          npm --prefix apps/desktop run test:update-feed
+          npm --prefix apps/desktop run test:unit
 
-      - name: Resolve Windows code-signing mode
-        id: signing
+      - name: Validate production updater signing secrets
         shell: pwsh
         env:
-          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+          STORYDEX_TAURI_UPDATER_PUBKEY: ${{ secrets.STORYDEX_TAURI_UPDATER_PUBKEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           $ErrorActionPreference = "Stop"
-          $hasCertificate = -not [string]::IsNullOrWhiteSpace($env:CSC_LINK)
-          $hasPassword = -not [string]::IsNullOrWhiteSpace($env:CSC_KEY_PASSWORD)
-          if ($hasCertificate -xor $hasPassword) {
-            throw "Windows signing is only partially configured; set both WINDOWS_CSC_LINK and WINDOWS_CSC_KEY_PASSWORD."
+          foreach ($name in @("STORYDEX_TAURI_UPDATER_PUBKEY", "TAURI_SIGNING_PRIVATE_KEY", "TAURI_SIGNING_PRIVATE_KEY_PASSWORD")) {
+            if ([string]::IsNullOrWhiteSpace((Get-Item "Env:$name").Value)) { throw "Missing production updater secret: $name" }
           }
 
-          $enabled = $hasCertificate -and $hasPassword
-          "enabled=$($enabled.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          if ($enabled) {
-            Write-Host "Windows code signing is enabled."
-          } else {
-            Write-Warning "Windows code signing secrets are not configured; this release will be published unsigned."
-            "### Windows code signing`n`nUnsigned Windows release: signing secrets were not configured." |
-              Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
-          }
+      - name: Build signed Tauri NSIS and updater artifacts
+        shell: pwsh
+        env:
+          STORYDEX_TAURI_UPDATER_PUBKEY: ${{ secrets.STORYDEX_TAURI_UPDATER_PUBKEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          STORYDEX_WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.STORYDEX_WINDOWS_CERTIFICATE_THUMBPRINT }}
+        run: npm --prefix apps/desktop run package:win
 
-      - name: Prepare embedded Python
+      - name: Verify Tauri runtime and updater assets
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
-          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-          $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap_python39.ps1 -InstallRequirements
+          npm --prefix apps/desktop run check:packaged
+          npm --prefix apps/desktop run smoke:tauri
 
-      - name: Build Windows package
-        shell: cmd
-        env:
-          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
-          STORYDEX_REQUIRE_SIGNING: ${{ steps.signing.outputs.enabled == 'true' && '1' || '0' }}
-        run: |
-          chcp 65001
-          npm --prefix apps/desktop run package:win
-
-      - name: Verify Windows code signatures
-        if: steps.signing.outputs.enabled == 'true'
+      - name: Verify optional Authenticode signatures
+        if: ${{ secrets.STORYDEX_WINDOWS_CERTIFICATE_THUMBPRINT != '' }}
         shell: pwsh
         env:
           STORYDEX_SETUP_NAME: ${{ steps.metadata.outputs.setup_name }}
         run: |
           $ErrorActionPreference = "Stop"
-          $targets = @(
-            "apps/desktop/release/win-unpacked/Storydex.exe",
+          foreach ($target in @(
+            "apps/desktop/candidate/staging/Storydex.exe",
             "apps/desktop/release/$env:STORYDEX_SETUP_NAME"
-          )
-          foreach ($target in $targets) {
-            if (-not (Test-Path -LiteralPath $target)) {
-              throw "Signed release target not found: $target"
-            }
+          )) {
             $signature = Get-AuthenticodeSignature -LiteralPath $target
-            if ($signature.Status -ne "Valid") {
-              throw "Invalid Authenticode signature for $target: $($signature.Status) $($signature.StatusMessage)"
-            }
-            Write-Host "Verified signature: $target [$($signature.SignerCertificate.Subject)]"
+            if ($signature.Status -ne "Valid") { throw "Invalid Authenticode signature for ${target}: $($signature.Status)" }
           }
-          $updateConfigPath = "apps/desktop/release/win-unpacked/resources/app-update.yml"
-          if (-not (Test-Path -LiteralPath $updateConfigPath)) {
-            throw "Packaged updater configuration not found: $updateConfigPath"
-          }
-          $updateConfig = Get-Content -Raw -LiteralPath $updateConfigPath
-          if ($updateConfig -notmatch "(?m)^publisherName:") {
-            throw "app-update.yml does not contain publisherName; downloaded installer signatures would not be verified."
-          }
-
-      - name: Run packaged Electron E2E on release artifact
-        working-directory: apps/desktop
-        run: npm run test:e2e
-
-      - name: Upload release E2E diagnostics
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: release-electron-e2e-diagnostics
-          path: apps/desktop/test-results
-          if-no-files-found: warn
 
       - name: Prepare release assets
         id: release
@@ -210,32 +137,34 @@ jobs:
         env:
           STORYDEX_VERSION: ${{ steps.metadata.outputs.version }}
           STORYDEX_SETUP_NAME: ${{ steps.metadata.outputs.setup_name }}
-          STORYDEX_BLOCKMAP_NAME: ${{ steps.metadata.outputs.blockmap_name }}
-          STORYDEX_UNPACKED_ZIP_NAME: ${{ steps.metadata.outputs.unpacked_zip_name }}
+          STORYDEX_UPDATER_NAME: ${{ steps.metadata.outputs.updater_name }}
+          STORYDEX_UPDATER_SIGNATURE_NAME: ${{ steps.metadata.outputs.updater_signature_name }}
+          STORYDEX_PORTABLE_NAME: ${{ steps.metadata.outputs.portable_name }}
         run: |
           $ErrorActionPreference = "Stop"
-          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-          $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-
-          $releaseDir = Join-Path (Resolve-Path ".").Path "release-assets"
-          & ./scripts/prepare_release_bundle.ps1 `
+          & ./scripts/prepare_tauri_release_bundle.ps1 `
             -Version $env:STORYDEX_VERSION `
             -SourceDirectory "apps/desktop/release" `
-            -DestinationDirectory $releaseDir `
-            -TestSummary "Reusable quality gate passed"
-
+            -DestinationDirectory "release-assets" `
+            -TestSummary "Reusable quality gate and packaged Tauri smoke passed"
           $outputs = @{
             notes_path = "release-assets/RELEASE_NOTES.md"
-            setup_path = "release-assets/$($env:STORYDEX_SETUP_NAME)"
-            zip_path = "release-assets/$($env:STORYDEX_UNPACKED_ZIP_NAME)"
-            blockmap_path = "release-assets/$($env:STORYDEX_BLOCKMAP_NAME)"
-            latest_path = "release-assets/latest.yml"
+            setup_path = "release-assets/$env:STORYDEX_SETUP_NAME"
+            updater_signature_path = "release-assets/$env:STORYDEX_UPDATER_SIGNATURE_NAME"
+            portable_path = "release-assets/$env:STORYDEX_PORTABLE_NAME"
+            latest_path = "release-assets/latest.json"
             sums_path = "release-assets/SHA256SUMS.txt"
           }
-
           foreach ($entry in $outputs.GetEnumerator()) {
             "$($entry.Key)=$($entry.Value)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           }
+
+      - name: Upload verified release bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: storydex-tauri-windows-release
+          path: release-assets
+          retention-days: 7
 
       - name: Publish GitHub Release
         if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
@@ -248,14 +177,14 @@ jobs:
           prerelease: false
           files: |
             ${{ steps.release.outputs.setup_path }}
-            ${{ steps.release.outputs.zip_path }}
-            ${{ steps.release.outputs.blockmap_path }}
+            ${{ steps.release.outputs.updater_signature_path }}
+            ${{ steps.release.outputs.portable_path }}
             ${{ steps.release.outputs.latest_path }}
             ${{ steps.release.outputs.sums_path }}
             release-assets/BUILD_MANIFEST.json
             release-assets/DEPENDENCIES.json
 
-      - name: Publish update feed to VPS
+      - name: Publish Tauri update feed to VPS
         if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
         shell: pwsh
         env:
@@ -266,97 +195,54 @@ jobs:
           DEPLOY_SSH_KEY: ${{ secrets.STORYDEX_DEPLOY_SSH_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ secrets.STORYDEX_DEPLOY_KNOWN_HOSTS }}
           SETUP_NAME: ${{ steps.metadata.outputs.setup_name }}
-          BLOCKMAP_NAME: ${{ steps.metadata.outputs.blockmap_name }}
+          UPDATER_NAME: ${{ steps.metadata.outputs.updater_name }}
+          PORTABLE_NAME: ${{ steps.metadata.outputs.portable_name }}
+          STORYDEX_VERSION: ${{ steps.metadata.outputs.version }}
         run: |
           $ErrorActionPreference = "Stop"
-          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-          $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-
-          foreach ($name in @("DEPLOY_HOST","DEPLOY_PORT","DEPLOY_USER","DEPLOY_PATH","DEPLOY_SSH_KEY")) {
-            if (-not (Get-Item "Env:$name" -ErrorAction SilentlyContinue).Value) {
-              throw "Missing required secret: $name"
-            }
+          foreach ($name in @("DEPLOY_HOST", "DEPLOY_USER", "DEPLOY_PATH", "DEPLOY_SSH_KEY")) {
+            if ([string]::IsNullOrWhiteSpace((Get-Item "Env:$name").Value)) { throw "Missing deploy secret: $name" }
           }
-
           $sshDir = Join-Path $env:RUNNER_TEMP "storydex-deploy-ssh"
           New-Item -ItemType Directory -Force -Path $sshDir | Out-Null
           $keyPath = Join-Path $sshDir "id_deploy"
           $knownHostsPath = Join-Path $sshDir "known_hosts"
-
-          # Write private key with LF line endings (OpenSSH requires it).
-          $keyText = $env:DEPLOY_SSH_KEY -replace "`r`n", "`n"
-          if (-not $keyText.EndsWith("`n")) { $keyText += "`n" }
-          [System.IO.File]::WriteAllText($keyPath, $keyText, (New-Object System.Text.UTF8Encoding($false)))
-
-          # Lock down key permissions so ssh does not refuse it.
+          [IO.File]::WriteAllText($keyPath, (($env:DEPLOY_SSH_KEY -replace "`r`n", "`n").TrimEnd() + "`n"), (New-Object Text.UTF8Encoding($false)))
           icacls $keyPath /inheritance:r | Out-Null
           icacls $keyPath /grant:r "$($env:USERNAME):(R)" | Out-Null
-
-          $port = $env:DEPLOY_PORT
-          if (-not $port) { $port = "22" }
-
-          # Host key verification: use pinned known_hosts if provided, else accept-new.
+          $port = if ($env:DEPLOY_PORT) { $env:DEPLOY_PORT } else { "22" }
           if ($env:DEPLOY_KNOWN_HOSTS) {
-            $khText = $env:DEPLOY_KNOWN_HOSTS -replace "`r`n", "`n"
-            [System.IO.File]::WriteAllText($knownHostsPath, $khText, (New-Object System.Text.UTF8Encoding($false)))
+            [IO.File]::WriteAllText($knownHostsPath, ($env:DEPLOY_KNOWN_HOSTS -replace "`r`n", "`n"), (New-Object Text.UTF8Encoding($false)))
             $hostKeyOpts = @("-o", "UserKnownHostsFile=$knownHostsPath", "-o", "StrictHostKeyChecking=yes")
           } else {
             $hostKeyOpts = @("-o", "UserKnownHostsFile=$knownHostsPath", "-o", "StrictHostKeyChecking=accept-new")
           }
-
-          $sshCommon = @("-i", $keyPath, "-P", $port) + $hostKeyOpts
           $target = "$($env:DEPLOY_USER)@$($env:DEPLOY_HOST)"
           $remoteDir = $env:DEPLOY_PATH.TrimEnd("/")
-
-          $files = @(
-            @{ local = "release-assets/$($env:SETUP_NAME)";     remote = $env:SETUP_NAME },
-            @{ local = "release-assets/$($env:BLOCKMAP_NAME)";  remote = $env:BLOCKMAP_NAME }
-          )
-
-          foreach ($f in $files) {
-            if (-not (Test-Path -LiteralPath $f.local)) {
-              throw "Release asset not found for upload: $($f.local)"
-            }
+          & ssh @(@("-i", $keyPath, "-p", $port) + $hostKeyOpts + @($target, "mkdir -p '$remoteDir'"))
+          if ($LASTEXITCODE -ne 0) { throw "Failed to prepare remote update directory." }
+          foreach ($name in @($env:SETUP_NAME, "$($env:SETUP_NAME).sig", $env:PORTABLE_NAME)) {
+            & scp @(@("-i", $keyPath, "-P", $port) + $hostKeyOpts + @("release-assets/$name", "$target`:$remoteDir/$name"))
+            if ($LASTEXITCODE -ne 0) { throw "Upload failed: $name" }
           }
-
-          # Ensure remote directory exists.
-          $sshArgs = @("-i", $keyPath, "-p", $port) + $hostKeyOpts + @($target, "mkdir -p '$remoteDir'")
-          & ssh @sshArgs
-          if ($LASTEXITCODE -ne 0) { throw "Failed to ensure remote directory: $remoteDir" }
-
-          foreach ($f in $files) {
-            $scpArgs = @("-i", $keyPath, "-P", $port) + $hostKeyOpts + @($f.local, "$target`:$remoteDir/$($f.remote)")
-            Write-Host "Uploading $($f.local) -> $remoteDir/$($f.remote)"
-            & scp @scpArgs
-            if ($LASTEXITCODE -ne 0) { throw "Upload failed for $($f.local)" }
-          }
-
-          # latest.yml is uploaded under a temporary name and atomically renamed last.
-          $latestTemporary = "latest.yml.$($env:GITHUB_RUN_ID).tmp"
-          $latestScpArgs = @("-i", $keyPath, "-P", $port) + $hostKeyOpts + @("release-assets/latest.yml", "$target`:$remoteDir/$latestTemporary")
-          & scp @latestScpArgs
-          if ($LASTEXITCODE -ne 0) { throw "Upload failed for latest.yml" }
-          $replaceArgs = @("-i", $keyPath, "-p", $port) + $hostKeyOpts + @($target, "mv -f '$remoteDir/$latestTemporary' '$remoteDir/latest.yml'")
-          & ssh @replaceArgs
-          if ($LASTEXITCODE -ne 0) { throw "Atomic latest.yml replacement failed" }
-
+          $latestTemporary = "latest.json.$($env:GITHUB_RUN_ID).tmp"
+          & scp @(@("-i", $keyPath, "-P", $port) + $hostKeyOpts + @("release-assets/latest.json", "$target`:$remoteDir/$latestTemporary"))
+          if ($LASTEXITCODE -ne 0) { throw "Upload failed: latest.json" }
+          & ssh @(@("-i", $keyPath, "-p", $port) + $hostKeyOpts + @($target, "mv -f '$remoteDir/$latestTemporary' '$remoteDir/latest.json'"))
+          if ($LASTEXITCODE -ne 0) { throw "Atomic latest.json replacement failed." }
+          $published = Invoke-RestMethod -Headers @{ "Cache-Control" = "no-cache" } -Uri "https://updates.septemc.com/storydex/windows/latest.json?run=$env:GITHUB_RUN_ID"
+          if ([string]$published.version -ne $env:STORYDEX_VERSION) { throw "Published latest.json version mismatch." }
+          if ([string]$published.platforms.'windows-x86_64'.url -notmatch [regex]::Escape($env:UPDATER_NAME)) { throw "Published updater URL mismatch." }
           $publicBase = "https://updates.septemc.com/storydex/windows"
-          $latestResponse = Invoke-WebRequest -UseBasicParsing -Headers @{ "Cache-Control" = "no-cache" } -Uri "$publicBase/latest.yml?run=$env:GITHUB_RUN_ID"
-          $publishedLatest = if ($latestResponse.Content -is [byte[]]) {
-            [System.Text.Encoding]::UTF8.GetString($latestResponse.Content)
-          } else {
-            [string]$latestResponse.Content
-          }
-          if ($publishedLatest -notmatch "(?m)^version:\s*$([regex]::Escape('${{ steps.metadata.outputs.version }}'))\s*$") {
-            throw "Published latest.yml version mismatch"
-          }
-          if ($publishedLatest -notmatch "(?m)^path:\s*$([regex]::Escape($env:SETUP_NAME))\s*$") {
-            throw "Published latest.yml installer path mismatch"
-          }
-          foreach ($name in @($env:SETUP_NAME, $env:BLOCKMAP_NAME)) {
-            $response = Invoke-WebRequest -UseBasicParsing -Method Head -Uri "$publicBase/$name"
+          foreach ($name in @($env:SETUP_NAME, "$($env:SETUP_NAME).sig", $env:PORTABLE_NAME)) {
+            $response = Invoke-WebRequest -Method Head -Headers @{ "Cache-Control" = "no-cache" } -Uri "$publicBase/${name}?run=$env:GITHUB_RUN_ID"
             if ($response.StatusCode -lt 200 -or $response.StatusCode -ge 400) { throw "Published asset unavailable: $name" }
           }
-
+          $signatureResponse = Invoke-WebRequest -Headers @{ "Cache-Control" = "no-cache" } -Uri "$publicBase/$($env:SETUP_NAME).sig?run=$env:GITHUB_RUN_ID"
+          $publishedSignature = if ($signatureResponse.Content -is [byte[]]) {
+            [Text.Encoding]::UTF8.GetString($signatureResponse.Content).Trim()
+          } else {
+            ([string]$signatureResponse.Content).Trim()
+          }
+          if ($publishedSignature -ne [string]$published.platforms.'windows-x86_64'.signature) { throw "Published updater signature mismatch." }
           Remove-Item -LiteralPath $keyPath -Force -ErrorAction SilentlyContinue
-          Write-Host "Update feed published to $target`:$remoteDir"

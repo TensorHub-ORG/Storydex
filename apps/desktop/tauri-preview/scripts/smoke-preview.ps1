@@ -45,7 +45,7 @@ if ([string]::IsNullOrWhiteSpace($CandidateRoot)) {
     $CandidateRoot = Join-Path $desktopRoot "candidate\staging"
 }
 $candidatePath = [System.IO.Path]::GetFullPath($CandidateRoot)
-$previewExecutable = Join-Path $candidatePath "storydex-tauri-preview.exe"
+$previewExecutable = Join-Path $candidatePath "Storydex.exe"
 $sidecarExecutable = Join-Path $candidatePath "storydex-agentd.exe"
 foreach ($requiredFile in @($previewExecutable, $sidecarExecutable)) {
     if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
