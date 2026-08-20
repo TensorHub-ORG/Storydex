@@ -290,7 +290,7 @@
                       <small>
                         {{ updaterState.progress.percent.toFixed(1) }}% ·
                         {{ formatUpdateBytes(updaterState.progress.transferred) }} / {{ formatUpdateBytes(updaterState.progress.total) }}
-                        · 差分下载，仅传输有变化的部分
+                        · 正在下载并校验签名安装包
                       </small>
                     </div>
 
@@ -310,7 +310,7 @@
                         :disabled="updaterBusy"
                         @click="downloadDesktopUpdate"
                       >
-                        下载更新（增量）
+                        下载更新
                       </button>
                       <button
                         v-if="updaterState.status === 'downloaded'"
@@ -538,7 +538,7 @@ const updaterStatusText = computed(() => {
     case "checking":
       return "正在检查更新…";
     case "available":
-      return `发现新版本 v${updaterState.value.availableVersion}，可增量下载。`;
+      return `发现新版本 v${updaterState.value.availableVersion}，可下载签名安装包。`;
     case "not-available":
       return "当前已是最新版本。";
     case "downloading":
@@ -552,7 +552,7 @@ const updaterStatusText = computed(() => {
     case "unsupported":
       return updaterState.value.error || "当前环境不支持自动更新。";
     default:
-      return "点击“检查更新”获取最新版本，下载时使用差分更新以节省流量。";
+      return "点击“检查更新”获取最新版本，下载完成后会先校验签名再安装。";
   }
 });
 let detachUpdaterListener: (() => void) | null = null;

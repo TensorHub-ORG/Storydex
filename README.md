@@ -1,285 +1,180 @@
 # Storydex
 
-<table align="center">
-  <tr>
-    <td align="center" width="25%">
-      <img src="assets/storydex.png" alt="Storydex 项目 LOGO" width="96" />
-      <br />
-      <sub><strong>Storydex</strong><br />项目 LOGO</sub>
-    </td>
-    <td align="center" width="25%">
-      <img src="assets/coomi.png" alt="Coomi Agent 吉祥物" width="96" />
-      <br />
-      <sub><strong>Coomi</strong><br />Agent 吉祥物</sub>
-    </td>
-    <td align="center" width="25%">
-      <img src="assets/tensorhub.png" alt="TensorHub 组织 LOGO" width="96" />
-      <br />
-      <sub><strong>TensorHub</strong><br />组织 LOGO</sub>
-    </td>
-    <td align="center" width="25%">
-      <img src="assets/qq_group_qr.png" alt="QQ 交流群二维码" width="96" />
-      <br />
-      <sub><strong>QQ 交流群</strong><br />扫码加入</sub>
-    </td>
-  </tr>
-</table>
-
 <p align="center">
-  <img alt="release" src="https://img.shields.io/badge/release-v2.0.5-2563eb?style=flat-square" />
-  <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0%20%2B%20Commons%20Clause-0f766e?style=flat-square" />
-  <img alt="platform" src="https://img.shields.io/badge/platform-Windows-f97316?style=flat-square" />
-  <img alt="desktop" src="https://img.shields.io/badge/desktop-Electron%2040-47848f?style=flat-square&logo=electron&logoColor=white" />
-  <img alt="frontend" src="https://img.shields.io/badge/frontend-Vue%203%20%2B%20Vite%206-42b883?style=flat-square&logo=vuedotjs&logoColor=white" />
-  <img alt="backend" src="https://img.shields.io/badge/backend-FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white" />
-  <img alt="python" src="https://img.shields.io/badge/python-3.9-3776ab?style=flat-square&logo=python&logoColor=white" />
-  <img alt="agent" src="https://img.shields.io/badge/agent-Coomi-7c3aed?style=flat-square" />
-  <img alt="local first" src="https://img.shields.io/badge/local--first-novel%20workspace-334155?style=flat-square" />
-  <img alt="version control" src="https://img.shields.io/badge/version%20control-MinGit-22c55e?style=flat-square&logo=git&logoColor=white" />
-</p>
-
-Storydex 是一个面向长篇小说创作的本地优先写作工作台。它把正文编辑、项目文件管理、Coomi Agent、版本控制、预设管理、知识图谱和使用指南放在同一个桌面应用里，让 AI 参与创作时保持可观察、可审阅、可回滚。
-
-<p align="center">
-  <a href="docs/assets/readme/storydex-workbench-review-full.png">点击查看高分辨率工作台截图</a>
+  <img src="assets/storydex.png" alt="Storydex" width="104" />
 </p>
 
 <p align="center">
-  <a href="docs/assets/readme/storydex-workbench-coomi-short.png">
-    <img src="docs/assets/readme/storydex-workbench-coomi-short.png" alt="Storydex Coomi 独立窗口" width="820" />
+  <strong>本地优先的 AI 长篇小说创作工作台</strong><br />
+  把正文、设定、Agent、检索、WIKI 和版本记录放在一个可审阅、可回滚的工作区。
+</p>
+
+<p align="center">
+  <a href="https://github.com/TensorHub-ORG/Storydex/actions/workflows/ci.yml?query=branch%3Amain"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/TensorHub-ORG/Storydex/ci.yml?branch=main&style=flat-square&label=CI" /></a>
+  <a href="https://github.com/TensorHub-ORG/Storydex/releases"><img alt="最新版本" src="https://img.shields.io/github/v/release/TensorHub-ORG/Storydex?display_name=tag&sort=semver&style=flat-square" /></a>
+  <a href="LICENSE"><img alt="许可证" src="https://img.shields.io/badge/license-Apache--2.0%20%2B%20Commons%20Clause-0f766e?style=flat-square" /></a>
+  <a href="https://github.com/TensorHub-ORG/Storydex/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/TensorHub-ORG/Storydex?style=flat-square" /></a>
+  <img alt="平台" src="https://img.shields.io/badge/platform-Windows-f97316?style=flat-square" />
+  <img alt="桌面" src="https://img.shields.io/badge/desktop-Tauri%202-FFC131?style=flat-square&logo=tauri&logoColor=111827" />
+  <img alt="前端" src="https://img.shields.io/badge/frontend-Vue%203%20%2B%20Vite-42b883?style=flat-square&logo=vuedotjs&logoColor=white" />
+  <img alt="后端" src="https://img.shields.io/badge/backend-Rust%20%2B%20Axum-ce422b?style=flat-square&logo=rust&logoColor=white" />
+</p>
+
+<p align="center">
+  <a href="https://storydex.septemc.com/">官网</a> ·
+  <a href="https://github.com/TensorHub-ORG/Storydex/releases">下载</a> ·
+  <a href="docs/guide/README.md">使用文档</a> ·
+  <a href="https://github.com/TensorHub-ORG/Storydex/issues">问题反馈</a>
+</p>
+
+<p align="center">
+  <a href="docs/assets/readme/storydex-workbench-review-full.png">
+    <img src="docs/assets/readme/storydex-workbench-review-full.png" alt="Storydex 工作台" width="900" />
   </a>
 </p>
 
+## 简介
+
+Storydex 面向需要长期维护世界观、角色关系和章节连续性的小说作者。它以本地文件为事实源，把写作、资料整理、Agent 协作和版本控制放进同一个桌面工作台：你可以先查证项目资料，再让 Agent 生成或修改内容，并在提交前审阅 Diff。
+
+Windows 当前源码主线的默认桌面链路是 `Vue → Tauri 2 → storydex-agentd → Coomi Rust`。仓库仍保留 Python/FastAPI、Electron 以及旧启动脚本和兼容测试，用于迁移期间的差分验证、兼容支持和人工回滚；它们不是当前 Tauri Stable 安装包的默认运行时。已发布版本的具体资产格式以对应的 [GitHub Release](https://github.com/TensorHub-ORG/Storydex/releases) 为准，README 不复制逐版本历史说明。
+
 ## 核心能力
 
-- **小说项目工作台**：统一管理章节、设定、角色、WIKI、世界观和项目资源。
-- **Coomi Agent**：理解你本轮的创作意图，围绕当前 Storydex 项目读取上下文，进行续写、整理、审阅、生成和工具调用。
-- **检索与记忆**：面向中文优化的项目全文检索、滚动章节摘要、相关旧文召回和 WIKI 参考注入，让 Agent 在长篇续写中先查证再落笔。
-- **版本控制**：内置 Git / MinGit 工作流，支持本轮修改审阅、Diff 查看和历史回看。
-- **创作预设**：维护写作约束、风格规则、导入规则和默认章节目录。
-- **知识图谱与 WIKI**：把角色、事件、关系、地点和设定组织成可检索的结构化资料。
-- **指令仓库**：从 `docs/prompts` 读取通用小说创作提示词，支持分类、搜索、复制和一键填入 Agent。
-- **桌面体验**：提供多主题界面、资源浏览器、编辑区、Agent 面板和项目级使用指南，支持应用内差分更新。
+- **小说项目工作台**：统一管理章节、角色、世界观、WIKI、预设和项目资源。
+- **Coomi Agent**：围绕当前项目证据进行续写、整理、审阅、设定生成和工具调用。
+- **长篇检索与记忆**：全文搜索、章节摘要、相关旧文召回和 WIKI 参考注入，帮助 Agent 先查证再落笔。
+- **可审阅的修改流程**：展示运行阶段、工具结果和 Diff；写入操作受项目目录边界约束。
+- **本地版本控制**：使用 Git/MinGit 记录小说项目变化，支持提交、Diff、历史回看和回退。
+- **可复用创作资产**：内置指令仓库、技能模板和项目级预设，可按自己的写作流程扩展。
 
-## 快速开始
+## 下载与运行
+
+### 普通用户
+
+从 [GitHub Releases](https://github.com/TensorHub-ORG/Storydex/releases) 下载与你的平台和版本匹配的发行资产。公开 Release 可能与当前源码主线处于不同发布阶段：已发布版本按 Release 页面说明使用，当前 Tauri 源码按下方开发步骤验证。安装包、便携包、校验文件和发行说明以 Release 页面为准；不要从源码仓库的 `target`、`release` 或测试目录直接运行发行文件。
+
+首次启动后，在 Storydex 的系统设置中配置模型服务。API Key 等敏感配置只应保存在本机受保护的位置，不要提交到 Git 仓库或反馈材料中。
+
+### Windows 源码开发
+
+需要：Windows 10/11、Node.js 20、Rust 工具链（仓库使用 Rust 1.95）、Windows WebView2 和可用的 Cargo/npm 网络环境。
 
 ```powershell
-npm --prefix apps/frontend install
-npm --prefix apps/desktop install
-.\scripts\bootstrap_python39.ps1 -InstallRequirements
+npm ci --prefix apps/frontend
+npm ci --prefix apps/desktop
+cargo build --manifest-path apps/desktop/agent-runtime/Cargo.toml --locked -p storydex-agentd
+npm --prefix apps/desktop run dev
 ```
 
-复制 `.env.sample` 为 `.env`，按需填写模型服务配置，然后启动：
+桌面端的默认 `dev`、构建、打包和 Tauri 检查入口位于 `apps/desktop/package.json`。普通 Windows Stable 开发不需要安装 Python；旧 Python 全栈脚本仅用于兼容路径和差分验证：
 
 ```powershell
-.\start-storydex.bat
-```
-
-也可以分别启动桌面端或完整开发环境：
-
-```powershell
-.\start-desktop.bat
 .\scripts\run_fullstack_dev.bat
 ```
 
-## 项目结构
+运行兼容脚本前，请确认自己是在验证旧后端链路，而不是准备 Tauri 发行包。
+
+## 文档
+
+### 面向用户
+
+- [使用说明索引](docs/guide/README.md)：安装后操作、项目结构、LLM 配置、预设、WIKI、版本控制和系统设置。
+- [指令仓库模板](docs/prompts/README.md)：可直接在 Storydex 中使用的通用创作指令。
+- [内置技能模板](docs/skills/README.md)：初始化小说项目时使用的 Agent 技能输入。
+
+### 面向贡献者与维护者
+
+- [项目架构说明](docs/项目架构说明.md)：源码目录、运行链路和数据边界。
+- [Agent 双平台 Rust 架构](docs/agent-runtime-architecture.md)：Windows 与 Android runtime 的职责边界。
+- [Rust 接口覆盖清单](docs/rust-backend-interface-inventory.md)：前端真实 API 消费契约与 Rust 路由核对方式。
+- [项目决策与评测结论](docs/项目决策与评测结论.md)：当前有效的架构决策和可复现实验结论。
+- [封装与发布要求](docs/发行说明/Storydex-封装与发布要求.md)：版本、签名、发行资产、更新源和回滚门禁。
+- [仓库自动化规则](AGENTS.md)：本地 hook、CI、提交和安全边界。
+
+专项诊断、交接记录和一次性实验材料不属于公开产品文档，统一保存在被 `.gitignore` 忽略的 `local/archive/` 或外部存储中。
+
+## 架构概览
+
+```text
+Vue 3 / TypeScript / Vite
+          │
+          ▼
+Tauri 2 桌面壳
+窗口、文件选择、预览、单实例、更新和进程生命周期
+          │
+          ▼
+storydex-agentd（独立 Rust sidecar）
+HTTP/SSE、Agent、项目文件、Git、WIKI、预设和系统接口
+          │
+          ▼
+Coomi Rust runtime
+Provider、会话、工具循环、权限、压缩与恢复
+```
+
+Tauri 只负责桌面能力和 sidecar 生命周期。`storydex-agentd` 使用动态 loopback 端口和运行令牌，前端不能直接获得任意 shell 或文件系统权限；小说项目读写在 Rust 服务侧执行路径归一化和工作区边界检查。
+
+## 仓库结构
 
 ```text
 Storydex/
 ├─ apps/frontend/                # Vue 小说创作工作台
-├─ apps/backend/                 # Windows FastAPI 编排服务
-├─ apps/desktop/                 # Electron 桌面应用
-│  └─ agent-runtime/             # Windows Agent（JSONL bridge）
-├─ apps/android/                 # Android 原生应用
-│  └─ agent-runtime/             # Android Agent（HTTP/WebSocket）
+├─ apps/desktop/                 # Tauri 2 Windows 桌面应用
+│  ├─ agent-runtime/             # storydex-agentd 与 Coomi Rust runtime
+│  └─ tauri-preview/             # 当前 Tauri Stable 源码（迁移期目录名）
+├─ apps/backend/                 # 旧 Python 兼容、差分和回滚参考
+├─ apps/android/                 # Android 原生应用与独立 Rust runtime
 ├─ apps/android-frontend/        # Android WebView 前端
-├─ assets/               # 项目 LOGO、吉祥物与组织 LOGO
-├─ docs/guide/            # 内置使用指南
-├─ docs/prompts/          # 指令仓库 Markdown 模板
-├─ docs/skills/           # 新建小说项目使用的内置技能模板
-├─ docs/assets/readme/   # README 展示图
-├─ scripts/              # 开发与启动脚本
-└─ start-storydex.bat    # 一键启动入口
+├─ assets/                       # LOGO、图标和展示资源
+├─ docs/guide/                   # 用户使用说明
+├─ docs/prompts/                 # 产品内置指令模板
+├─ docs/skills/                  # 产品内置技能模板
+├─ scripts/                      # 构建、检查和发布辅助脚本
+├─ deploy/                       # 独立部署组件
+├─ AGENTS.md                     # 仓库自动化与安全规则
+└─ LICENSE / COMMERCIAL-LICENSE.md
 ```
 
-## 文档
+## 分支与 CI
 
-- [使用指南](docs/guide/README.md)
-- [指令仓库模板](docs/prompts/README.md)
-- [内置技能模板](docs/skills/README.md)
-- [项目架构说明](docs/项目架构说明.md)
-- [Agent 双运行时架构](docs/agent-runtime-architecture.md)
-- [Rust 后端与 Tauri 桌面重构计划](docs/rust-tauri-migration.md)
+本仓库当前只在公开说明中定义两条主线：
 
-Windows 与 Android 分别在 `dev/windows`、`dev/android` 进行轻量开发集成；两个分支不得互相合并，完成后分别进入 `main` 接受完整双端质量门禁。
+- `dev/windows`：Windows 桌面端日常开发和聚焦验证，先通过 Development CI。
+- `main`：稳定集成和正式发布，必须通过完整质量门禁。
+
+准备合入 `main` 的 Windows 改动应先在 `dev/windows` 验证，再以同一交付内容进入 `main`。其他远端分支和历史引用不在本次仓库治理范围内，本项目不会因本次文档整理删除或改写它们。
+
+## 开发检查
+
+根据改动范围运行聚焦检查。例如 Windows 桌面端：
+
+```powershell
+npm --prefix apps/frontend run test:unit
+npm --prefix apps/desktop run test:unit
+npm --prefix apps/desktop run check:release
+npm --prefix apps/desktop run check:tauri
+```
+
+每次准备 push 前运行仓库规定的轻量检查：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_pre_push_ci.ps1
+```
+
+这个入口只检查编码、冲突标记、版本一致性和 whitespace；全组件测试、打包和 E2E 由 GitHub Actions 按改动范围执行。需要完整本地验证时，人工运行 `scripts/run_full_test_suite.ps1 -Mode Fast|Full|Release`。
+
+## 贡献与安全
+
+欢迎通过 [Issues](https://github.com/TensorHub-ORG/Storydex/issues) 报告可复现问题，或提交围绕当前产品主线的 Pull Request。提交前请：
+
+- 说明用户可感知的行为变化和验证命令；
+- 不提交 API Key、私钥、证书、用户小说、日志、缓存、`node_modules`、Rust `target` 或打包产物；
+- 修改运行时、发布配置或内置提示词时，同时更新对应的维护者文档和聚焦测试。
+
+发现安全问题时，请不要在公开 Issue 中粘贴凭据或完整利用细节；请先通过 `septemc@foxmail.com` 私下联系维护者。
 
 ## 许可证
 
-本项目采用 Apache License 2.0 + Commons Clause 许可证组合。源码可用于个人学习、研究和教学等非商业用途；商业使用、SaaS 托管、付费服务、二次分发或对外提供衍生版本前，需要获得单独书面授权。
-
-商业授权请联系：septemc@foxmail.com。详细条款请阅读 [LICENSE](LICENSE) 与 [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md)。
-
-## 作者与版权
+本项目采用 Apache License 2.0 与 Commons Clause 组合许可。个人学习、研究和教学等非商业用途可按许可证使用；商业使用、SaaS 托管、付费服务、二次分发或对外提供衍生版本前，请先取得书面授权。商业授权联系：`septemc@foxmail.com`。详见 [LICENSE](LICENSE) 和 [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md)。
 
 Copyright 2026 Septemc and Flowby.
-
-## v2.0.5
-
-v2.0.5 完成 Windows 桌面 Agent 架构重构，并集中提升长篇小说创作任务中的调用稳定性、过程反馈和隐私保护。
-
-- 桌面 Agent 迁移到 `apps/desktop/agent-runtime`，与 Android 运行时彻底分离，使用面向小说创作者工作台的独立提示词、技能目录和 JSONL bridge。
-- 对齐 Coomi 优化后的 Provider 执行逻辑，增强流式响应、连接恢复、重试退避、usage 统计和工具调用链路的稳定性。
-- 补齐 Agent 接受、上下文装配、模型等待、工具执行、完成与异常阶段的可观察反馈，并新增可审阅的工具失败反馈入口。
-- 强化桌面反馈隐私保护，提交前过滤敏感配置、鉴权信息、本地路径和不应离开设备的诊断内容。
-- 优化 Windows 开发分支 CI 与运行时构建校验，确保后端测试使用当前提交对应的 Rust Agent，降低跨平台迭代耦合。
-
-## v2.0.4
-
-v2.0.4 完成 Storydex Android 剧情创作系统的项目级重构，并同步增强桌面端共用的 Coomi Rust 运行时与发行能力。
-
-- Android 剧情设置重构为基础设置、风格预设、随机系统、剧本管理、记忆系统、时间系统和主题外观七个页面，配置随故事项目独立保存。
-- 新增项目级风格预设、持续推进剧本、结构化记忆、故事时间、上下文周期、缓存命中率和分模式 token 统计。
-- 随机事件与随机人物支持男女独立词库、分类 JSON 导入导出、项目隔离、内置恢复与因果链合并，并约束人物命名避免模板化高频风雅名。
-- 文件管理补齐内联操作菜单、多选、冲突处理和永久删除确认；剧情、旁白与 Agent 模式切换保留旧对话并重建上下文。
-- 官网同步提供 Windows 2.0.4 与 Android 0.1.2 下载入口，并分别统计桌面版与 Android 下载量。
-
-## v2.0.3
-
-v2.0.3 是修复 Coomi Rust 运行时崩溃的维护版本，建议所有现有安装升级。
-
-- 修复 Coomi 工具输出截断在非 UTF-8 字符边界触发 `String::truncate` 断言崩溃的问题；输出截断改为按字符边界对齐，分析长中文小说文本不再导致运行时崩溃。
-- 完善有界读取完整性协议，大文件在输出预算内按页流式读取，不再破坏多字节字符。
-
-## v2.0.1
-
-v2.0.1 是面向 Windows 安装体验和发行流程的维护版本。
-
-- 修复 NSIS 安装器在普通用户安装流程中重复显示许可协议的问题。
-- 关闭安装器自动提权，移除安装按钮上的管理员盾牌图标，避免按钮图标错位。
-- 按 Windows 发行要求同步版本元数据、发布说明和封装产物校验。
-
-## v2.0.0
-
-v2.0.0 将 Storydex 的 Agent 基座完整升级为内置的 Storydex 专用 Coomi Rust 运行时，并同步重构创作工作台、项目架构、全文检索、编辑器和本地版本控制体验。
-
-- 旧 Python Coomi 运行时已移除，正式包改为内置 `apps/desktop/agent-runtime` 构建的 `storydex-coomi-bridge`，Windows Agent 执行不再依赖 asyncio 子进程能力。
-- Coomi 上下文窗口支持 128K、256K、512K 和自定义配置，Storydex 默认值统一为 256K。
-- 资源管理器支持文件/文件夹多选与拖动，自由项目架构和规范项目分类视图可按创作习惯切换。
-- 全文搜索覆盖整个项目中的常用文本与源码格式，并补齐顶部高级搜索和文件内查找、高亮、上下定位。
-- 编辑器新增字体样式、可靠缩放、文件内搜索和 Agent 文件链接中栏跳转，长篇写作操作更集中。
-- 本地版本控制新增分支创建与切换，支持空仓库先创建分支，并加强提交错误诊断与 `.storydex` 运行缓存忽略规则。
-- Windows 发行继续提供安装包、便携包、blockmap、更新元数据、校验值、依赖清单和构建 manifest，且会校验 Rust bridge 确实进入最终封装。
-
-## v1.0.0
-
-v1.0.0 是 Storydex 首个稳定版发行，在 v0.4.0 用量来源治理基础上，进一步完善 Agent 执行反馈、工作台状态可见性、模型配置诊断和官方站点文档。
-
-- Agent 面板与浮动状态条会展示更清晰的接受、执行、等待、完成和异常状态，降低长任务期间的等待不确定性。
-- 工作台资源浏览器、状态栏和模型配置面板补充运行状态、配置来源与错误提示，问题定位路径更直接。
-- Coomi 模型获取、会话回放和 Provider usage 记录继续加强一致性，并补充对应契约与回归测试。
-- 新增官方站点、在线帮助文档、隐私说明和使用条款，下载入口自动读取 Windows 更新源的 `latest.yml`。
-- Windows 正式包继续提供 NSIS 安装包、便携 ZIP、blockmap、更新元数据、SHA256 校验、依赖清单和构建 manifest。
-
-## v0.4.0
-
-v0.4.0 为 Storydex 接入基于 Coomi 1.1.2 的专用 usage 适配版，重点提升长会话用量统计的可信度与发布一致性。
-
-- 区分 Provider 上游报告、缺失、历史未知和本地估算 usage，避免把字符估算误记为真实用量。
-- 支持 OpenAI-compatible 与 Anthropic usage、缓存与推理 token，并正确折叠流式累计快照。
-- 项目 Python 仅保留 Storydex HTTP/SSE 编排层；桌面 Agent 使用 `apps/desktop/agent-runtime` 中的 `storydex-coomi-bridge`，Android 使用独立的 `apps/android/agent-runtime`。
-- Rust bridge、运行时版本、桌面同步和打包资产均由 Cargo lock 与 `--version` 预检统一校验。
-- 真实增长会话连续 3 轮、11 次 Provider 请求通过，usage 覆盖率 100%，录制/回放零差异。
-
-## v0.3.10
-
-v0.3.10 加强长会话与发布稳定性：Agent 现在按项目与 sessionId 隔离运行态和上下文，完整记录上下文来源、截断、Provider 请求与 token 估算，长期运行结束后会及时回收请求级指标；录制/回放对工具参数、稳定路径和累计 usage 的处理也更一致。
-
-故事知识门禁继续坚持“需复核即不写入”，混合批次只持久化已接受的安全操作。工具开始事件去重、工作区解析和发布门禁同步得到修复；本地 Release 脚本不再硬编码旧版本，前端生产构建会在依赖构建产物的回归测试之前完成。
-
-## v0.3.9
-
-v0.3.9 是稳定性更新：修复兼容模型服务下的流式 token 统计异常和工具状态重复显示，加强故事知识变更保护，并完善内置运行环境的一致性检查。
-
-## v0.3.7
-
-v0.3.7 同时包含原计划 v0.3.6 的稳定性改进：提升 AI 对话与任务执行在不同安装环境下的稳定性和一致性，加强启动时的运行环境检查与异常诊断，并完善安装包、便携包的兼容性验证。
-
-同时修复部分 Windows 环境中 Agent 调用 LLM 时持续出现 `APIConnectionError` 或 `SSLEOFError` 的问题。项目 Python 构建现在优先选择明确配置的运行时、官方 `py -3.9` 或系统 Python 3.9，避免迁移环境中不匹配的 OpenSSL 组件影响 HTTPS 连接。正式包继续内置并验证统一的 Python 3.9 运行环境、后端依赖和 MinGit。
-
-## v0.3.5
-
-v0.3.5 改进了大文件、长期记忆、文件诊断和桌面差分安装体验。小文件继续完整编辑，2～20MB 文件采用渐进读取，大于 20MB 默认使用只读快速预览；首屏按约 256KB 分块读取，滚动时按需跳转并取消过期请求，避免大文件阻塞界面。
-
-`.storydex/memory` 现在只保存变量、事实、人物状态、关系、时间线等长期记忆，历史会话仍位于 `.storydex/.agent/sessions`。memory 使用带模块目录、稳定 ID、schemaVersion、revision、变更账本和恢复点的受约束自适应布局；`.storydex/temp` 只是用户可见的普通临时工作台，不参与索引、诊断、自动清理或常规上下文注入。每个新项目都会在 memory README 中写入完整治理规范。
-
-资源浏览器增加统一问题面板和分级诊断：错误、警告、迁移提示与 Git 修改状态互相独立，UTF-8 BOM 可兼容读取并一键移除。Coomi 运行环境严格固定为 Storydex 专用 Rust bridge，开发、CI 和内嵌 Python 均验证 bridge 实际版本。
-
-差分安装改由独立辅助窗口接管，持续显示等待退出、安装、成功或失败状态。安装锁会阻止半更新状态的主程序启动；完成后由用户选择立即启动或稍后启动，失败时保留旧版本及安装日志。
-
-## v0.3.4
-
-v0.3.4 是桌面差分更新热修复版。它取消了 NSIS 替换应用文件期间强制立即拉起新进程的行为，避免更新后的首次启动因 `electron-updater/out/main.js` 尚未就位而出现 JavaScript 主进程错误。
-
-自动更新组件现在会对安装切换窗口中的临时加载失败执行确定性重试，恢复后自动回到可检查更新状态；设置页不再重复显示同一条“不支持更新”错误。桌面打包校验会强制检查 `electron-updater` 入口文件，Electron E2E 也会模拟入口文件短暂缺失并验证自动恢复。
-
-## v0.3.3
-
-v0.3.3 修复了离线 Material Symbols 图标在冷启动或字体加载失败时显示为空白的问题，并为字体加载增加确定性重试、超时状态和可见文本降级。Coomi 现在会在请求进入后立即发送 `RunAccepted`，随后持续发送带耗时的 `TurnPhase` 和 heartbeat，因此意图识别、上下文装配或模型等待期间不会长期停留在没有过程反馈的“执行中”。
-
-Coomi/OpenAI provider 的首次导入和客户端初始化已从 SSE 请求事件循环中隔离，冷启动时也不会阻塞阶段计时。打包态自动化实测首个 SSE 通常在 10ms 内到达，heartbeat 按约 600ms 周期继续刷新。
-
-会话恢复改为 Storydex 项目、Storydex sessionId 与 Coomi JSONL 历史的隔离映射。重新启动应用后，原会话可继续读取上一轮用户、助手、工具与待执行动作；“执行”等省略指令会承接上一轮确认语义，不会仅因活动文件位于 `chapters/` 而误触发新剧情生成。
-
-同时修复了 AgentPanel 启动阶段的历史读取竞态：较晚返回的旧历史请求不会再覆盖正在运行的新会话，也不会导致末尾 Git 提交提示丢失。
-
-本地 Git 确认面板会在点击自动提交、手动提交或跳过后立即收起并显示操作状态。跳过不再重新扫描完整仓库，提交说明生成有 2 秒超时和本地确定性回退。该功能只在小说项目中创建本地 Git 版本，**不会自动配置远程仓库，也不会自动 push**。
-
-## 开发与测试
-
-安装测试依赖后，可使用统一 PowerShell 入口：
-
-```powershell
-.\.python39\Scripts\python.exe -m pip install --require-hashes -r apps/backend/requirements-test.lock
-npm ci --prefix apps/frontend
-npm ci --prefix apps/desktop
-.\scripts\run_full_test_suite.ps1 -Mode Fast
-.\scripts\run_full_test_suite.ps1 -Mode Full
-.\scripts\run_full_test_suite.ps1 -Mode Release
-```
-
-- `Fast`：编码、冲突标记、版本、固定 Coomi 运行时、Python 编译、后端 pytest/覆盖率门禁、前端类型/Vitest/覆盖率门禁/回归/构建、桌面单元与发布配置检查。
-- `Full`：在 Fast 基础上构建 `win-unpacked`，验证前端字体、后端、嵌入式 Python、MinGit 与更新配置，并运行隔离用户目录的 Electron E2E。
-- `Release`：在 Full 基础上生成并验证 NSIS installer、blockmap、`latest.yml` 和校验文件；任何阶段失败都会返回非零退出码。
-
-测试代码分别位于 `apps/backend/tests`、`apps/frontend/tests` 和 `apps/desktop/tests`。后端覆盖 unit、API contract、integration、security、SSE 性能、会话恢复和并发失败恢复；前端覆盖 SSE parser、Pinia store、AgentPanel 与字体状态机；桌面覆盖 Node 契约、打包资源、Electron 冷启动和更新元数据。所有自动化测试使用临时 HOME、临时项目和 fake/mock provider，不访问真实付费 LLM 或用户配置。
-
-`.github/workflows/ci.yml` 在 PR、main push 和手动触发时调用可复用的 `quality-gate.yml`。日常 CI 和 `release-windows.yml` 都通过 `scripts/check_coverage.cjs` 读取 `coverage-baseline.json` 检查覆盖率：普通 CI 使用 `advisory` 模式，覆盖率下降会生成 GitHub warning 和诊断产物，但不会掩盖已经通过的测试、类型检查与构建；缺报告、非法 JSON、缺字段或测试命令失败仍会直接阻断。发布门禁使用零容差 `release` 模式，覆盖率未达到版本基线时继续失败。覆盖率提升时应同步上调基线；只有统计工具或纳入范围发生有意变化时才可显式重置基线，并在工程风险文档记录旧口径、新口径和原因。CI 不会自动改低基线，禁止为绕过缺失测试而降低。后端只由规范 job 生成覆盖率报告，避免不同 OS/解释器的 coverage.py 分支统计漂移。质量门禁同时覆盖 Node 20，并上传 JUnit、覆盖率和失败诊断产物。
-
-本地执行提交前硬性覆盖率复核：
-
-```powershell
-.\scripts\run_full_test_suite.ps1 -Mode Fast
-```
-
-仅复核已有报告时可运行：
-
-```powershell
-node scripts/check_coverage.cjs --component=backend --report=apps/backend/test-results/coverage.json --mode=ci
-node scripts/check_coverage.cjs --component=frontend --report=apps/frontend/test-results/coverage/coverage-summary.json --mode=ci
-```
-
-## Windows 安装、便携包与应用内更新
-
-v1.0.0 发布资产包括 NSIS 安装包、`Storydex-win-unpacked.zip` 便携包、blockmap、`latest.yml`、SHA256 校验、发布说明、依赖清单和构建 manifest。安装包与便携包均内置可迁移的 Python 3.9 运行环境、后端依赖、固定版本的 Storydex Coomi 运行时和 MinGit，用户无需另外安装 Python 或 Git 即可启动后端并使用小说项目本地版本管理。
-
-发布构建会执行嵌入式 Python import/preflight、MinGit 文件检查和完整打包资源扫描；测试目录、coverage 文件、pytest 缓存、日志、`.env` 和其他开发期临时文件不会进入正式包。应用内更新使用 `electron-updater` 的 generic feed；安装版可使用 blockmap 进行差分下载，便携包适合解压后直接启动和人工验证。
-
-## Desktop Update Feed
-
-Windows desktop releases use the generic electron-updater feed at:
-
-```text
-https://updates.septemc.com/storydex/windows/
-```
-
-For differential-update testing, keep the previous installer and blockmap available, publish the `1.0.0` assets, and leave `latest.yml` pointing to `1.0.0`. Install the previous stable version first, then check for updates inside Storydex to verify the assisted-install and recovery path.

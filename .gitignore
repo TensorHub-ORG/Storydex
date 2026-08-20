@@ -120,6 +120,7 @@ experiments/
 playwright/
 .playwright-mcp/
 docs/archive/
+docs/history/
 docs/superpowers/
 
 # Style preset R&D fixtures (copyright-sensitive excerpts + local tests)

@@ -1,9 +1,9 @@
 "use strict";
 
-// Build a deterministic inventory of the public FastAPI routes, Vue API
-// consumers, and Axum routes that the Rust backend candidate currently
-// exposes. The inventory is descriptive only: it never starts a service,
-// reads a user project, or treats a missing route as migrated.
+// Build a deterministic inventory of legacy FastAPI routes, Vue API consumers,
+// and the Axum routes exposed by the Rust Stable backend. The inventory is
+// descriptive only: it never starts a service, reads a user project, or treats
+// an unconsumed legacy route as a required migration.
 
 const fs = require("node:fs");
 const path = require("node:path");
@@ -412,8 +412,8 @@ function buildInventory() {
     schemaVersion: 2,
     generatedBy: "scripts/generate_rust_backend_interface_inventory.cjs",
     stableBoundary: {
-      runtime: "Electron + Python/FastAPI + Rust Coomi bridge",
-      candidateRuntime: "Rust backend + Electron Rust Beta/Tauri preview",
+      runtime: "Tauri 2 + storydex-agentd + Rust Coomi",
+      legacyRuntime: "Electron + Python/FastAPI retained for compatibility scripts, differential tests, selected full CI jobs, and manual rollback",
       realUserProjects: "never read by inventory or replay checks"
     },
     counts: {

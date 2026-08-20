@@ -120,7 +120,8 @@ test("hook installer is repository local and agent rules require remote success"
   assert.match(rules, /run_pre_push_ci\.ps1/);
   assert.match(rules, /install_git_hooks\.ps1/);
   assert.match(rules, /--no-verify/);
-  assert.match(rules, /dev-flowby/);
+  assert.match(rules, /dev\/windows/);
+  assert.match(rules, /其他远端分支不在本文件治理范围内/);
   assert.match(rules, /不运行 Backend/);
   assert.match(rules, /GitHub Actions/);
   assert.match(rules, /success/);

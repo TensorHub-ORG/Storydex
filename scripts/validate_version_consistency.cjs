@@ -26,7 +26,9 @@ equal("Tauri config version", tauri.version, version);
 equal("Tauri Cargo version", cargoVersion, version);
 
 const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
-if (!readme.includes(`v${version}`)) failures.push(`README does not identify current release v${version}`);
+if (!readme.includes("https://github.com/TensorHub-ORG/Storydex/releases")) {
+  failures.push("README must link to GitHub Releases instead of hardcoding a historical version summary");
+}
 const notes = path.join(root, "apps", "desktop", "build", `release-notes-v${version}.md`);
 if (expected && !fs.existsSync(notes)) failures.push(`missing ${path.relative(root, notes)}`);
 

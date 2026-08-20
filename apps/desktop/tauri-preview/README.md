@@ -1,66 +1,59 @@
-# Storydex Tauri 2 Preview
+# Storydex Tauri 2 Stable
 
-This directory is an isolated candidate shell. It is not referenced by the
-Stable Electron entry points, Stable update feed, or release package.
+该目录是当前 Windows Stable 桌面壳源码。`tauri-preview` 是迁移期遗留目录名；默认 `dev`、`build:desktop`、`package:win` 和正式 Windows Release 均已指向这里。
 
-The shell uses Tauri Core and one minimal capability. Tauri Core starts the
-bundled `storydex-agentd` itself, waits for its dynamic loopback port and random
-runtime token, verifies `/api/v1/sys/health`, then creates the Vue window with a
-narrow `window.storydexDesktop` adapter. The renderer receives no shell or file
-system permission. `runtime_info` reports lifecycle status without returning
-the runtime token. Updater, signing, and preview feed wiring remain separate
-gates.
+仓库中仍存在 Electron/Python 兼容代码、旧启动脚本和相应测试，但它们不进入这里生成的 Tauri Stable staging。
 
-## Local candidate build
+Tauri Core 启动打包的 `storydex-agentd`，等待其返回动态 loopback 端口和随机运行令牌，验证 `/api/v1/sys/health` 后创建 Vue 主窗口。渲染层只获得最小 `window.storydexDesktop` 适配和 updater capability，不获得任意 shell 或文件系统权限。
 
-Install a Tauri 2 CLI in the development environment, then run from this
-directory:
+## 本地开发
+
+从仓库根目录执行：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-preview.ps1
+npm ci --prefix apps/frontend
+npm ci --prefix apps/desktop
+cargo build --manifest-path apps/desktop/agent-runtime/Cargo.toml --locked -p storydex-agentd
+npm --prefix apps/desktop run dev
 ```
 
-If the Tauri CLI is installed in an isolated tool directory instead of the
-global Cargo bin directory, set `STORYDEX_TAURI_CLI` to the absolute
-`cargo-tauri.exe` path for this command. The wrapper validates the executable
-name and does not modify global Cargo configuration.
+debug 模式默认读取 `apps/desktop/agent-runtime/target/debug/storydex-agentd.exe`。`STORYDEX_TAURI_SIDECAR_PATH` 仅用于显式指定隔离测试二进制。
 
-`scripts/prepare-preview.ps1` builds the release `storydex-agentd` sidecar and
-the Vue dist before Tauri bundles the preview. The packaging wrapper creates a
-generated config containing the sidecar only after that binary exists; this
-keeps `cargo check` deterministic in a clean checkout. The sidecar is copied
-with the target-triple suffix required by Tauri's `externalBin` convention.
-After a successful bundle, the wrapper recreates `../candidate/staging` with
-only `storydex-tauri-preview.exe` and `storydex-agentd.exe`, then runs the Rust
-candidate asset policy. No Python, FastAPI/Uvicorn, Electron, Node, npm, or
-package-manager assets are copied into the candidate runtime output.
+## 打包
 
-At runtime, stdout/stderr are captured under the preview application's log
-directory. The ready token is redacted from logs. Normal exit calls the
-authenticated agentd shutdown route; a timeout terminates the Windows Job
-Object so child processes cannot survive the preview shell. Startup and health
-failures stop before the Vue window is created and never fall back to Python.
-
-Run the packaged lifecycle smoke after staging:
+打包入口：
 
 ```powershell
-npm --prefix .. run smoke:tauri-preview
+npm --prefix apps/desktop run package:win
 ```
 
-The smoke launches only the staged candidate, redirects its application data
-and fixture workspace into a new operating-system temporary directory, checks
-the dynamic loopback health endpoint and token-free logs, closes the real Tauri
-window, and verifies that both the shell and sidecar exit cleanly. It removes
-the temporary directory only after success and preserves diagnostics on
-failure. It does not open or scan a real user project.
+`scripts/prepare-preview.ps1` 构建 release sidecar、同步带 target triple 后缀的 `externalBin`、准备 MinGit 并构建 Vue。`scripts/package-preview.ps1` 注入 updater 公钥和私钥，调用固定 npm Tauri CLI，随后生成 Stable staging、NSIS、`.sig`、`latest.json` 和便携 ZIP。
 
-The candidate output must be checked separately:
+虽然脚本名仍包含 `preview`，它们现在服务于 Stable。重命名属于独立机械清理任务，不影响运行时身份或发布契约。
+
+正式 staging 只包含：
+
+```text
+Storydex.exe
+storydex-agentd.exe
+mingit/
+```
+
+不复制 Python、FastAPI/Uvicorn、Electron、Node、npm 或包管理器运行时。
+
+## 生命周期验证
+
+```powershell
+npm --prefix apps/desktop run smoke:tauri
+```
+
+smoke 启动真实 staging，但将应用数据和 fixture workspace 指向新的操作系统临时目录。它验证动态健康端点、日志脱敏、窗口关闭、鉴权 shutdown 以及 Tauri/sidecar 进程完全退出；成功后清理临时目录，失败时保留诊断。
+
+单独检查 staging：
 
 ```powershell
 $env:STORYDEX_RUST_CANDIDATE_ROOT = "apps/desktop/candidate/staging"
-npm --prefix .. run check:rust-candidate
+npm --prefix apps/desktop run check:rust-candidate
 ```
 
-Do not point the candidate root at `apps/desktop`, `apps/desktop/app`, or
-`apps/desktop/release`; those are Stable/legacy roots and the policy fails closed
-if they overlap.
+不要将检查根指向 `apps/desktop`、旧 `apps/desktop/app` 或 `apps/desktop/release`。策略会对越界、根目录重叠和非 Rust Stable 资产直接失败。

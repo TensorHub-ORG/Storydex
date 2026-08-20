@@ -1,45 +1,57 @@
-# Rust 后端候选公开接口清单
+# Rust 后端公开接口覆盖清单
 
-本清单由 `scripts/generate_rust_backend_interface_inventory.cjs` 从当前
-FastAPI 路由、Vue 工作台 API 消费者和 `storydex-agentd` Axum 路由生成。
-它会识别跨行泛型调用、模板字符串动态路径和章节模板的显式备用路径，
-并为每个归一化契约记录 `implemented`、`pending` 或带依据的 `excluded`。
-它是迁移追踪资料，不是把 Python Stable 标记为已迁移的声明；Stable 仍固定使用
-`Electron + Python/FastAPI + Rust Coomi bridge`。
+更新日期：2026-08-20
 
-生成完整 JSON 清单：
+这是面向贡献者和维护者的可再生契约清单，不是普通用户文档。完整 JSON 只在本地 `output/` 生成，不提交到仓库。
+
+本清单由 `scripts/generate_rust_backend_interface_inventory.cjs` 对比以下三类公开边界：
+
+- `apps/frontend/src/api` 中 Vue 工作台真实消费的 API；
+- `storydex-agentd` 当前注册的 Axum 路由；
+- 旧 FastAPI 路由，用于迁移差分和识别无消费者的历史接口。
+
+脚本会识别跨行泛型调用、模板字符串动态路径和章节模板的显式备用路径，并为归一化契约记录 `implemented`、`pending` 或带依据的 `excluded`。它不会启动服务、读取真实用户项目或把旧 Python 路由自动视为必须迁移的产品接口。
+
+## 当前结论
+
+2026-08-20 当前生成结果：
+
+- Vue 实际消费契约：96；
+- 已由 Rust 覆盖：96；
+- 待迁移：0；
+- Rust 公开路由：104；
+- 已实现契约：104；
+- 无消费者且不再迁移的历史契约：29。
+
+`excluded` 不表示 Rust 后端缺失当前产品功能，而表示该旧 Python 路由在 `apps/frontend/src/api` 中没有消费者，且 Rust Stable 未注册对应路由。Windows 正式运行时已经是 `Tauri 2 + storydex-agentd + Rust Coomi`；旧 Python/Electron 仍供兼容脚本、差分测试、部分完整 CI 和回滚路径使用，但不进入默认 Stable 产物。
+
+当前所有权分组如下：
+
+| 公开边界 | 已实现 | 待迁移 | 排除的历史接口 |
+| --- | ---: | ---: | ---: |
+| 文件/工作区 | 22 | 0 | 0 |
+| Git | 14 | 0 | 0 |
+| WIKI / Story Knowledge | 5 | 0 | 9 |
+| Story 状态 | 4 | 0 | 14 |
+| System | 10 | 0 | 1 |
+| Agent | 16 | 0 | 1 |
+| Coomi 控制面 | 8 | 0 | 0 |
+| Auth | 9 | 0 | 3 |
+| Help | 4 | 0 | 1 |
+| Presets | 12 | 0 | 0 |
+
+## 生成与检查
+
+完整 JSON 是可再生运行产物，写入已被忽略的 `output/`，不应作为长期文档提交：
 
 ```powershell
 node scripts/generate_rust_backend_interface_inventory.cjs --output output/rust-backend-interface-inventory.json
 ```
 
-检查清单发现的硬契约：
+契约门禁：
 
 ```powershell
 node --test scripts/tests/rust-backend-interface-inventory.test.cjs
 ```
 
-2026-08-19 当前生成快照为：130 个 Python 路由、96 个 Vue 消费契约和
-63 个 Rust 路由；55 个 Vue 消费契约已由 Rust 覆盖，41 个仍待迁移，且不存在
-“Vue 已消费但 Python Stable 无对应路由”的悬空契约。
-
-当前所有权分组如下：
-
-| 公开边界 | Rust 目标 | 已实现 | 待迁移 |
-| --- | --- | ---: | ---: |
-| 文件/工作区 | `coomi-services::workspace boundary` | 22 | 0 |
-| Git | `coomi-services::storydex_project` | 14 | 0 |
-| WIKI/Story Knowledge | `coomi-services::storydex_project + wiki projection` | 5 | 0 |
-| 前端实际 Story 状态 | `coomi-services::story domain` | 4 | 0 |
-| System | `storydex-agentd::system boundary` | 8 | 2 |
-| Agent | `storydex-agentd` | 8 | 8 |
-| Coomi 控制面 | `storydex-agentd + coomi-services` | 2 | 6 |
-| Auth | `candidate auth boundary` | 0 | 9 |
-| Help | `coomi-services::help domain` | 0 | 4 |
-| Presets | `coomi-services::preset domain` | 0 | 12 |
-
-脚本会把存在 Vue 消费者但没有 Rust 路由的契约标为 `pending`；只有在
-`apps/frontend/src/api` 中没有消费者、且候选也未注册 Rust 路由时，
-Python-only 路由才会标为 `excluded` 并记录排除依据。Rust 已实现但不属于
-Python Stable 公开路由的候选专用接口也会单独统计。生成过程不会访问任何
-真实用户项目。
+门禁要求所有 Vue 消费契约均存在 Rust 路由，且 `contractsPending` 为 0。新增或删除前端 API 时应先更新真实路由，再重新生成清单；不得通过放宽解析或静默排除来掩盖缺口。

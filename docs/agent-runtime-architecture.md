@@ -1,4 +1,8 @@
-# Storydex Agent 双运行时架构
+# Storydex Agent 双平台 Rust 架构
+
+更新日期：2026-08-20
+
+本文是贡献者和维护者参考，不是普通用户操作手册。它描述当前源码边界；迁移过程中的诊断、交接和一次性实验不作为公开架构文档保存。
 
 ## 1. 运行时边界
 
@@ -6,71 +10,71 @@ Storydex 从同一套经过项目适配的 Coomi Rust 基线派生出两个独�
 
 | 平台 | 源码根目录 | 集成入口 | 产品定位 |
 | --- | --- | --- | --- |
-| Windows 桌面端 | `apps/desktop/agent-runtime` | `storydex-coomi-bridge` JSONL | 专业长篇小说创作工作台 |
-| Android 手机端 | `apps/android/agent-runtime` | `coomi-ui` HTTP/WebSocket | 角色扮演文字冒险游戏 |
+| Windows 桌面端 | `apps/desktop/agent-runtime` | `storydex-agentd` HTTP/SSE sidecar | 专业长篇小说创作工作台 |
+| Android 手机端 | `apps/android/agent-runtime` | `coomi-ui` HTTP/WebSocket | 角色扮演与移动创作体验 |
 
-两个 workspace 分别维护版本和 `Cargo.lock`。Provider、engine、security、tools
-的通用稳定性修复应分别验证后同步；提示词、入口 crate、交互协议和平台工具不得混用。
-旧 `vendor/coomi-rs` 暂时只作为迁移前快照保留，不再参与构建、打包、版本校验或 CI。
+两个 workspace 分别维护版本和 `Cargo.lock`。Provider、engine、security、tools 的通用稳定性修复需要分别验证后同步；提示词、入口 crate、交互协议和平台工具不得混用。
 
-## 2. 桌面端职责
+Windows Stable 已使用 Tauri 2 启动独立 `storydex-agentd`。旧 Electron/Python 源码不参与默认 Stable 构建、打包或更新；兼容脚本、差分测试、部分完整 CI 和人工回滚仍会在支持窗口内引用它们。
 
-桌面端通过 FastAPI 编排 HTTP/SSE、项目上下文、WIKI、人物、世界观、时间线、
-预设和写入复核。Rust bridge 负责 Provider 网络、会话、上下文压缩、权限、工具循环、
-MCP、memory 与 checkpoint。系统提示强调作者拥有创作决策权、区分正典证据与推断、
-保持文风/视角/节奏/连续性，并将写入控制在可审阅范围。
+## 2. Windows 桌面端职责
+
+Windows 正式链路为：
+
+```text
+Vue 工作台 → Tauri 2 → storydex-agentd → Coomi Rust
+```
+
+`storydex-agentd` 负责 HTTP/SSE、项目上下文、WIKI、人物、世界观、时间线、预设、Git、写入复核和 Agent 控制面。Coomi Rust crate 负责 Provider 网络、会话、上下文压缩、权限、工具循环、MCP、memory 与 checkpoint。
+
+Tauri 只负责桌面能力和 sidecar 生命周期，不承载长时间 Agent 执行。动态 loopback 端口和随机运行令牌不暴露给渲染层；退出时通过鉴权 shutdown 和 Windows Job Object 保证进程树回收。
 
 ## 3. Android 职责
 
-Android Rust binary 在本机提供 WebView API 和 WebSocket，会话与任务不依赖单个连接存活。
-系统提示强调玩家自主权，不代替玩家决定行动、思想、台词或同意；Story、Narrator、Agent
-三种模式分别约束正文推进、旁白裁定和文件/工具操作。关闭全局记忆时，security policy
-同时阻断文件工具和 shell 对私有 session/config/memory/cache 路径的访问。
+Android Rust binary 在本机提供 WebView API 和 WebSocket，会话与任务不依赖单个连接存活。Story、Narrator、Agent 三种模式分别约束正文推进、旁白裁定和文件/工具操作。关闭全局记忆时，security policy 同时阻断文件工具和 shell 对私有 session、config、memory、cache 路径的访问。
 
 ## 4. 执行稳定性
 
-- Provider 请求有连接、响应头、首字节、流停滞和总读取超时。
-- 408、429 和可恢复 5xx 有有界重试，并尊重服务端 `Retry-After`，最长等待 30 秒。
-- 流在未产生可见输出前可恢复；工具参数截断可扩容输出预算后重试。
-- 用户消息、模型回复、每个工具结果、压缩结果和终态均原子写入 session checkpoint。
-- 中断恢复使用内部 recovery message，不伪装成用户消息，并要求不重复已完成工具。
-- 压缩前保存带完整性 hash 的 checkpoint，保留工具调用与证据修订。
+- Provider 请求具有连接、响应头、首字节、流停滞和总读取超时。
+- 408、429 和可恢复 5xx 使用有界重试，并尊重服务端 `Retry-After`。
+- 流在未产生可见输出前可以恢复；工具参数截断可以扩容输出预算后重试。
+- 用户消息、模型回复、工具结果、压缩结果和终态原子写入 session checkpoint。
+- 中断恢复使用内部 recovery message，不伪装成用户消息，并禁止重复已完成工具。
+- Windows 前端实际消费的 API 契约全部由 `storydex-agentd` 覆盖，正常路径不回退到 Python。
 
 ## 5. 反馈状态机
 
-主动反馈和运行错误反馈均须由用户发起。工具故障反馈仅在单轮至少三次失败时显示警告：
+主动反馈和运行错误反馈均须由用户发起。工具故障反馈仅在单轮达到失败阈值时显示警告：
 
-`consent -> analyzing -> ready -> uploading -> complete`
+```text
+consent → analyzing → ready → uploading → complete
+```
 
-分析失败回到可重新整理状态；上传失败保留 `ready` 报告，重试只上传，不再次调用模型。
-前端先将工具参数转换为结构形状并移除真实值；Rust/后端再次执行 key、路径、URL、密钥、
-邮箱和长标识符脱敏。分析固定使用当前 Provider、`reasoning_effort=low`、`tools=[]`、
-最多 40 条调用、32 KB 请求和 180 秒超时。上传内容不得包含对话、小说正文、文件内容、
-真实路径、URL、API key 或模型隐藏思维。
-
-服务端按 Windows/Android 和 `tool_failure_analysis` 分类检索，分别展示程序证据与本地模型分析。
+前端先移除工具参数真实值；Rust 服务再次执行字段、路径、URL、密钥、邮箱和长标识符脱敏。上传内容不得包含对话、小说正文、文件内容、真实路径、URL、API Key 或模型隐藏思维。
 
 ## 6. 分支与源码所有权
 
-- `main` 同时保存 Windows 和 Android 的稳定实现，并执行完整质量门禁。
-- `dev/windows` 只集成 Windows 桌面端改动，`dev/android` 只集成 Android 改动；两个分支只从 `main` 同步，不得互相合并。
+- `main` 保存 Windows 和 Android 的稳定实现，并执行完整质量门禁。
+- `dev/windows` 只集成 Windows 桌面端改动，先通过 Windows Development CI，再进入 `main`。
 - Windows runtime 不得依赖 `apps/android/agent-runtime`，Android runtime 不得依赖 `apps/desktop/agent-runtime`。
-- Provider 事件、反馈载荷和 session 版本等跨端兼容要求通过文档、Schema 和契约 fixture 同步，不通过共享运行时源码实现。
-- 开发分支只运行对应平台的 Development CI。合入 `main` 时必须重新执行完整双端质量门禁。
+- `apps/backend` 不再属于 Windows Stable runtime，仍服务于兼容脚本、差分测试、部分完整 CI 和人工回滚。
+- Provider 事件、反馈载荷和 session 版本等跨端要求通过文档、Schema 和契约 fixture 同步。
 
 平台主要所有权如下：
 
 | 分支 | 主要路径 |
 | --- | --- |
-| `dev/windows` | `apps/desktop`、`apps/frontend`、`apps/backend` |
-| `dev/android` | `apps/android`、`apps/android-frontend` |
+| `dev/windows` | `apps/desktop`、`apps/frontend` |
 
-`.github`、`scripts`、`deploy`、根级依赖和跨端协议属于集成范围，最终以 `main` 的完整 CI 为准。
+`main` 的稳定集成范围包括 `.github`、`scripts`、`deploy`、根级依赖和跨端协议。其他远端分支不在本文的治理范围内。
 
-## 7. 标准验证入口
+## 7. 聚焦验证入口
 
 ```powershell
 cargo test --manifest-path apps/desktop/agent-runtime/Cargo.toml --locked --workspace
-cargo test --manifest-path apps/android/agent-runtime/Cargo.toml --locked --workspace
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_full_test_suite.ps1 -Mode Fast
+npm --prefix apps/desktop run test:unit
+npm --prefix apps/desktop run check:release
+npm --prefix apps/desktop run check:tauri
 ```
+
+普通 push 前只执行 `scripts/run_pre_push_ci.ps1` 的基础检查；全组件和发布门禁由 GitHub Actions 执行，本地完整套件仅在人工明确需要时运行。
