@@ -117,12 +117,16 @@ jobs:
           npm --prefix apps/desktop run smoke:tauri
 
       - name: Verify optional Authenticode signatures
-        if: ${{ secrets.STORYDEX_WINDOWS_CERTIFICATE_THUMBPRINT != '' }}
         shell: pwsh
         env:
           STORYDEX_SETUP_NAME: ${{ steps.metadata.outputs.setup_name }}
+          STORYDEX_WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.STORYDEX_WINDOWS_CERTIFICATE_THUMBPRINT }}
         run: |
           $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrWhiteSpace($env:STORYDEX_WINDOWS_CERTIFICATE_THUMBPRINT)) {
+            Write-Host "Authenticode signing is not configured; Tauri updater signatures remain required and verified."
+            exit 0
+          }
           foreach ($target in @(
             "apps/desktop/candidate/staging/Storydex.exe",
             "apps/desktop/release/$env:STORYDEX_SETUP_NAME"

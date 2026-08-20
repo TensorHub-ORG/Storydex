@@ -50,6 +50,7 @@ assert(/latest\.json/.test(workflow) && /\.exe\.sig/.test(workflow), "Windows re
 assert(/steps\.release\.outputs\.updater_signature_path/.test(workflow), "GitHub Release must include the signed NSIS updater signature.");
 assert(/\$\(\$env:SETUP_NAME\)\.sig/.test(workflow) && /\$env:PORTABLE_NAME/.test(workflow), "VPS publishing must upload the updater signature and portable archive.");
 assert(!/\$target:/.test(workflow), "PowerShell remote targets must delimit the target variable before a colon.");
+assert(!/\bif:\s*\$\{\{\s*secrets\./.test(workflow), "Workflow step conditions must not reference the unavailable secrets context directly.");
 assert(!/setup-python|bootstrap_python39|embedded Python|electron-builder|Electron E2E/i.test(workflow), "Stable Windows release must not build Python or Electron runtime assets.");
 
 if (failures.length) {
