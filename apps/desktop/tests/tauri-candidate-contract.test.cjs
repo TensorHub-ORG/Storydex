@@ -72,6 +72,8 @@ test("Tauri Stable build input never points at legacy runtime assets", () => {
   assert.match(smokeScript, /Invoke-RestMethod/);
   assert.match(smokeScript, /CloseMainWindow/);
   assert.match(smokeScript, /Wait-ForProcessExit/);
+  assert.match(smokeScript, /Remove-DirectoryWithRetry/);
+  assert.match(smokeScript, /Remove-Item[^\r\n]*-ErrorAction Stop/);
   assert.match(smokeScript, /sidecar stopped cleanly/);
   assert.match(source, /runtime_info/);
   assert.match(source, /WebviewWindowBuilder/);

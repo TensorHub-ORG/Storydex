@@ -39,6 +39,35 @@ function Wait-ForProcessExit {
     return $false
 }
 
+function Remove-DirectoryWithRetry {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $lastError = $null
+    do {
+        try {
+            if (-not (Test-Path -LiteralPath $Path)) {
+                return
+            }
+            Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+            return
+        }
+        catch [System.IO.IOException] {
+            $lastError = $_.Exception
+        }
+        catch [System.UnauthorizedAccessException] {
+            $lastError = $_.Exception
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    $detail = if ($null -eq $lastError) { "unknown cleanup failure" } else { $lastError.Message }
+    throw "Timed out cleaning Tauri smoke directory after $TimeoutSeconds seconds: $Path ($detail)"
+}
+
 $previewRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $desktopRoot = (Resolve-Path (Join-Path $previewRoot "..")).Path
 if ([string]::IsNullOrWhiteSpace($CandidateRoot)) {
@@ -223,7 +252,7 @@ finally {
         if (-not (Test-IsPathInside -Candidate $resolvedSmokeRoot -Root $systemTemporaryRoot)) {
             throw "Refusing to clean an unexpected smoke directory: $resolvedSmokeRoot"
         }
-        Remove-Item -LiteralPath $resolvedSmokeRoot -Recurse -Force
+        Remove-DirectoryWithRetry -Path $resolvedSmokeRoot -TimeoutSeconds $ShutdownTimeoutSeconds
     }
     else {
         Write-Warning "Tauri preview smoke artifacts were preserved for diagnosis: $smokeRoot"
