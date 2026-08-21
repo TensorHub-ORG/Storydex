@@ -26,5 +26,5 @@ jobs:
     with:
       # Ordinary pushes and pull requests use affected-component checks.
       # Full CI stays explicit for release validation and manual runs.
-      full: ${{ inputs.full }}
+      full: ${{ inputs.full == true }}
 

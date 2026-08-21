@@ -68,7 +68,7 @@ test("normal CI stays scoped while full CI remains explicit for release validati
   assert.match(guard, /full local pre-push gate has been retired/);
   assert.match(ci, /pull_request:\s*\n\s*branches: \[main\]/);
   assert.match(ci, /push:\s*\n\s*branches: \[main\]/);
-  assert.match(ci, /full:\s*\$\{\{ inputs\.full \}\}/);
+  assert.match(ci, /full:\s*\$\{\{ inputs\.full\s*==\s*true \}\}/);
   assert.doesNotMatch(ci, /github\.ref\s*==\s*'refs\/heads\/main'|github\.base_ref\s*==\s*'main'/);
   const qualityGate = read(".github/workflows/quality-gate.yml");
   assert.match(qualityGate, /if \[\[ "\$FULL" == "true" \]\]/);
