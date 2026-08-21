@@ -53,6 +53,11 @@ export interface LoopProgressEvent { event_type: 'loop_progress'; current_step: 
 export interface LoopIssueCreatedEvent { event_type: 'loop_issue_created'; step_index: number; step_description: string }
 export interface ToolApprovalRequestEvent { event_type: 'tool_approval_request'; call_id: string; tool_name: string; arguments: Record<string, unknown>; access: ToolAccess; risk_summary?: string; }
 export interface UserQuestionRequestEvent { event_type: 'user_question_request'; call_id: string; question: string; options?: string[]; allow_free_text?: boolean }
+/**
+ * Agent 要求前端执行一条配置改动（风格预设 / 剧本 / 记忆 / 词库 / 各机制设置）。
+ * 引擎发出后阻塞等 `resolve_config_intent` 回执，所以这条事件必须被处理——超时会白等 300 秒。
+ */
+export interface StorydexConfigIntentEvent { event_type: 'storydex_config_intent'; call_id: string; tool: string; arguments: Record<string, unknown> }
 export interface FileTransferRequestEvent { event_type: 'file_transfer_request'; request_id: string; operation: 'import' | 'export'; path?: string; suggested_name?: string; multiple: boolean }
 export interface TurnEndEvent { event_type: 'turn_end' }
 /** 重连补发：会话是否正在后台执行（切走会话后任务继续跑）。 */
@@ -70,6 +75,7 @@ export type AgentEvent =
   | CompressionEvent | AgentErrorEvent | AgentCancelledEvent | BgTaskDetachedEvent
   | BgTaskCompletedEvent | LoopStepStartEvent | LoopStepDoneEvent | LoopProgressEvent
   | LoopIssueCreatedEvent | ToolApprovalRequestEvent | UserQuestionRequestEvent
+  | StorydexConfigIntentEvent
   | FileTransferRequestEvent
   | TurnEndEvent
   | SessionStateEvent

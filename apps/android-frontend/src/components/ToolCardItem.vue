@@ -292,7 +292,7 @@ async function copy(text: string) {
 .risk {
   display: flex; align-items: flex-start; gap: 7px;
   padding: 8px 12px 10px; border-top: 1px solid var(--orange-border);
-  font-size: 12.5px; line-height: 1.55; color: #8a4a30;
+  font-size: 12.5px; line-height: 1.55; color: var(--orange-text);
 }
 .risk :deep(svg) { flex-shrink: 0; margin-top: 1px; color: var(--orange); }
 
@@ -321,7 +321,7 @@ async function copy(text: string) {
   color: var(--code-text); white-space: pre-wrap; word-break: break-word;
   overflow-x: auto;
 }
-.out.err { background: var(--danger-soft); color: #9b3a2c; }
+.out.err { background: var(--danger-soft); color: var(--danger-text); }
 .out.clip { max-height: 210px; overflow: hidden; mask-image: linear-gradient(180deg, #000 72%, transparent); }
 .more {
   width: 100%; margin-top: 6px; padding: 7px 0;
@@ -336,8 +336,10 @@ async function copy(text: string) {
   font-family: var(--font-mono); font-size: 11.6px; line-height: 1.62;
 }
 .dl { display: flex; gap: 6px; padding: 0 8px; }
-.dl.del { background: #fdecea; color: #99392c; }
-.dl.add { background: #e9f7ef; color: #1c7a52; }
+/* 增删行原先底色与字色都写死成浅色值，四档深色主题下是「亮底深字」压在深色卡片里，
+   跟周围完全脱节；换成语义令牌后深色档位会自动取深底 + 亮字。 */
+.dl.del { background: var(--danger-soft); color: var(--danger-text); }
+.dl.add { background: var(--ok-soft); color: var(--ok-text); }
 .dsign { flex-shrink: 0; opacity: .55; }
 .dtext { flex: 1; white-space: pre-wrap; word-break: break-word; }
 

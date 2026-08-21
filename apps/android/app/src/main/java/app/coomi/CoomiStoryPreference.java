@@ -20,7 +20,8 @@ import java.io.IOException;
 public final class CoomiStoryPreference {
     private static final String PREFS_NAME = "coomi_settings";
     private static final String KEY_PROJECT_PATH = "story_project_path";
-    private static final String STORIES_DIR_NAME = "stories";
+    /** 包内可见：CoomiUsbBridge 发布桥文件时要拼出 stories 目录的绝对路径。 */
+    static final String STORIES_DIR_NAME = "stories";
 
     private CoomiStoryPreference() {}
 

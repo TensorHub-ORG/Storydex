@@ -10,6 +10,7 @@ import { useStoryStore, type AgentMode, type NarrativeMode } from '@/stores/stor
 import { useConnectionStore } from '@/stores/connection'
 import CoomiIcon from './CoomiIcon.vue'
 import CoomiMark from './CoomiMark.vue'
+import Segments from './ui/Segments.vue'
 
 const session = useSessionStore()
 const story = useStoryStore()
@@ -64,25 +65,19 @@ function pick(key: AgentMode) {
       <span>演示模式：对话由脚本驱动，只用来预览界面，不会真的执行任何命令。</span>
     </p>
 
-    <div class="seg" role="tablist">
-      <button
-        v-for="m in MODES"
-        :key="m.key"
-        class="sitem"
-        :class="{ on: story.agentMode === m.key }"
-        role="tab"
-        :aria-selected="story.agentMode === m.key"
-        @click="pick(m.key)"
-      >
-        <CoomiIcon :name="m.icon" :size="15" />
-        <span>{{ m.label }}</span>
-      </button>
-    </div>
+    <Segments class="modes" :items="MODES" :value="story.agentMode" @pick="pick" />
     <p class="hint">{{ hint }}</p>
 
-    <div v-if="story.agentMode !== 'agent'" class="freedom" aria-label="剧情控制强度">
-      <button v-for="m in FREEDOM" :key="m.key" :class="{ on: story.narrativeMode === m.key }" @click="story.setNarrativeMode(m.key)">{{ m.label }}</button>
-    </div>
+    <Segments
+      v-if="story.agentMode !== 'agent'"
+      :items="FREEDOM"
+      :value="story.narrativeMode"
+      size="sm"
+      role="radiogroup"
+      aria-label="剧情控制强度"
+      item-min-width="62px"
+      @pick="story.setNarrativeMode"
+    />
 
     <div class="sugs">
       <button
@@ -117,26 +112,13 @@ h1 { font-size: 21px; font-weight: 600; letter-spacing: 0; color: var(--text); }
   display: flex; align-items: flex-start; gap: 7px;
   max-width: 320px; margin-top: 14px; padding: 9px 12px;
   border-radius: var(--r-md); background: var(--orange-soft);
-  font-size: 12.5px; line-height: 1.55; color: #8a4a30; text-align: left;
+  font-size: 12.5px; line-height: 1.55; color: var(--orange-text); text-align: left;
 }
 .demobar :deep(svg) { flex-shrink: 0; margin-top: 1px; color: var(--orange); }
 
-.seg {
-  display: flex; gap: 2px; margin-top: 20px; padding: 3px;
-  border-radius: var(--r-pill); background: var(--fill);
-}
-.sitem {
-  display: inline-flex; align-items: center; gap: 5px;
-  height: 34px; padding: 0 14px;
-  border: 0; border-radius: var(--r-pill); background: none;
-  font-size: 13.5px; font-weight: 600; color: var(--text-3);
-  transition: background .16s, color .16s;
-}
-.sitem.on { background: var(--bg); color: var(--blue); box-shadow: var(--shadow-1); }
+/* 两条分段控件的外观来自 components/ui/Segments，这里只排它们在首屏的上下留白。 */
+.modes { margin-top: 20px; }
 .hint { min-height: 17px; margin-top: 10px; font-size: 12px; color: var(--text-3); }
-.freedom { display: flex; gap: 2px; padding: 3px; border-radius: var(--r-pill); background: var(--fill); }
-.freedom button { min-width: 62px; height: 30px; border-radius: var(--r-pill); font-size: 12.5px; color: var(--text-3); }
-.freedom button.on { background: var(--bg); color: var(--blue); box-shadow: var(--shadow-1); }
 
 .sugs { width: 100%; display: flex; flex-direction: column; gap: 8px; margin-top: 18px; }
 .sug {

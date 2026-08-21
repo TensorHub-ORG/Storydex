@@ -38,20 +38,28 @@
   --danger-soft: #fceeec;
   --danger-border: #f4cfc9;
 
+  /* 压在对应 *-soft 浅底上的深色文字。浅色档位下 --ok / --danger / --orange 本身
+     饱和度太高、直接当正文色会发飘，所以另给一档更深的。
+     深色档位必须覆写：那边 *-soft 是深底，深字压深底等于看不见
+     （ToolCardItem 的错误输出与 diff 行原先就写死了深字，四档深色下几乎不可读）。 */
+  --ok-text: #1c7a52;
+  --danger-text: #99392c;
+  --orange-text: #8a4a30;
+
   /* ── 代码 ── */
   --code-bg: #f5f6f8;
   --code-text: #313743;
-  --code-bg-dark: #1e2430;
 
   /* ── 形状 / 阴影 ── */
   --r-card: 16px;
   --r-md: 12px;
   --r-sm: 9px;
   --r-pill: 999px;
+  /* 贴底弹层的上圆角。曾经各文件写 14 / 16 / 18 / 22px 四种，现在只此一处。 */
+  --r-sheet: 22px;
   --shadow-1: 0 1px 2px rgba(23, 32, 54, 0.05), 0 2px 8px rgba(23, 32, 54, 0.04);
   --shadow-2: 0 6px 24px rgba(23, 32, 54, 0.1);
   --shadow-sheet: 0 -10px 44px rgba(23, 32, 54, 0.16);
-  --shadow-drawer: 10px 0 44px rgba(23, 32, 54, 0.18);
 
   /* ── 排版 ── */
   --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC",
@@ -62,25 +70,22 @@
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
 
-  /* ── 旧组件仍在用的别名，保留以免一次性大改 ── */
-  --accent: var(--blue);
-  --accent-hover: var(--blue-press);
-  --accent-soft: var(--blue-soft);
-  --accent-border: var(--blue-border);
-  --accent-dim: var(--blue-border);
-  --text-dim: var(--text-2);
-  --text-faint: var(--text-3);
-  --bg-subtle: var(--fill);
-  --bg-soft: var(--fill-strong);
-  --bg-hover: var(--fill-press);
-  --bg-card: #ffffff;
+  /* ── 叠层与实色之上的文字 ── */
+  /* 压在饱和实色填充（--blue / --danger 等）上的文字色。浅色主题一律白字；
+     ink / ember 的强调色本身很亮，白字对比度不够，它们会把这一项覆写成深色。
+     纯黑遮罩上的白字（图片查看器）不走这个令牌，那里的白与主题无关。 */
+  --on-accent: #ffffff;
+  --scrim: rgba(16, 21, 31, 0.44);  /* 抽屉与底部弹层的遮罩 */
+  --accent-rgb: 45, 97, 198;        /* 需要带透明度的强调色（脉冲环）用它拼 rgba() */
+
+  /* ── 表面别名：跟随各主题的 --bg / --fill，不写死颜色 ──
+     这三个曾经写死 #ffffff，浅色主题又不覆写，于是 book 主题下面板是
+     纯白压在暖纸底上。改成引用主题变量后新增主题不必再逐个补。 */
+  --bg-card: var(--bg);
+  --bg-elevated: var(--bg);
   --bg-input: var(--fill);
-  --bg-elevated: #ffffff;
-  --user-bubble: var(--blue);
-  --user-text: #ffffff;
-  --radius: var(--r-card);
-  --radius-sm: var(--r-md);
-  --radius-xs: var(--r-sm);
+  /* --text-1 是文字层级里最强的一档，等于基准色；SettingsView 一直在引用它。 */
+  --text-1: var(--text);
 
   color-scheme: light;
 }
@@ -89,18 +94,21 @@
   --blue: #d06d3b; --blue-press: #b6562d; --blue-soft: #fff1e9; --blue-soft-2: #f9e2d6; --blue-border: #edc9b7;
   --bg: #ffffff; --page: #f3f4f6; --fill: #f7f7f8; --fill-strong: #edeef1; --fill-press: #e5e7eb;
   --border: #e5e7eb; --border-strong: #d7d9de; --text: #1f2937; --text-2: #596273; --text-3: #8b93a1;
+  --accent-rgb: 208, 109, 59;
 }
 
 :root[data-theme='default'] {
   --blue: #d06d3b; --blue-press: #b6562d; --blue-soft: #fbece4; --blue-soft-2: #f3ddd2; --blue-border: #e9c4b2;
   --bg: #f8fafc; --page: #eef2f7; --fill: #f3f6fa; --fill-strong: #e9eef5; --fill-press: #dfe6ef;
   --border: #e1e7ef; --border-strong: #cfd8e5; --text: #162030; --text-2: #3f4e62; --text-3: #728095;
+  --accent-rgb: 208, 109, 59;
 }
 
 :root[data-theme='snow'] {
   --blue: #2d61c6; --blue-press: #24509f; --blue-soft: #eaf0fc; --blue-soft-2: #dce7f9; --blue-border: #c6d7f4;
   --bg: #ffffff; --page: #f4f6fa; --fill: #f5f7fb; --fill-strong: #eaf0f8; --fill-press: #dfe7f2;
   --border: #e2e7ef; --border-strong: #ced7e5; --text: #172033; --text-2: #526079; --text-3: #8490a4;
+  --accent-rgb: 45, 97, 198;
 }
 
 :root[data-theme='book'] {
@@ -108,56 +116,131 @@
   --bg: #fffaf2; --page: #efe7dd; --fill: #f3eadf; --fill-strong: #eadfd2; --fill-press: #e2d3c2;
   --border: #e5d8ca; --border-strong: #d3c0ac; --text: #3f2f26; --text-2: #5b4738; --text-3: #816f62;
   --orange: #7e5c32; --orange-soft: #eee3d4; --orange-border: #d7c2a7;
+  --code-bg: #f3eadf; --code-text: #4a382c;
+  --scrim: rgba(52, 38, 26, 0.42);
+  --accent-rgb: 181, 96, 51;
 }
 
-/* ── 暗色主题：跟随系统深色模式 ──
+/* ── 青瓷（浅）：低饱和青绿，长时间阅读时比纯白柔和 ── */
+:root[data-theme='celadon'] {
+  --blue: #2f7d6e; --blue-press: #24685b; --blue-soft: #e4f1ed; --blue-soft-2: #d2e7e1; --blue-border: #b4d6cd;
+  --bg: #fbfdfc; --page: #eaf1ee; --fill: #f1f6f4; --fill-strong: #e4ede9; --fill-press: #d8e4df;
+  --border: #dde8e4; --border-strong: #c7d7d1; --text: #1c2b28; --text-2: #47605a; --text-3: #7b918b;
+  --orange: #b4703c; --orange-soft: #f6ebe1; --orange-border: #e2c9b2;
+  --ok: #2f8a62; --ok-soft: #e3f2eb;
+  --warn: #a8762a; --warn-soft: #f7efdf;
+  --danger: #c9503f; --danger-soft: #f9ebe8; --danger-border: #eecdc6;
+  --code-bg: #eff5f3; --code-text: #2c3d39;
+  --scrim: rgba(18, 38, 34, 0.4);
+  --accent-rgb: 47, 125, 110;
+}
+
+/* ── 亚麻（浅）：中性米灰，无色偏，接近印刷纸 ── */
+:root[data-theme='linen'] {
+  --blue: #6b5bd2; --blue-press: #5a49bd; --blue-soft: #eeecfa; --blue-soft-2: #e0ddf5; --blue-border: #cac5ec;
+  --bg: #fcfbf9; --page: #f0eeea; --fill: #f5f3ef; --fill-strong: #ebe8e2; --fill-press: #e0dcd4;
+  --border: #e6e3dc; --border-strong: #d2cec5; --text: #232120; --text-2: #58544f; --text-3: #8b867e;
+  --orange: #b0693f; --orange-soft: #f8ece4; --orange-border: #e5cbb8;
+  --ok: #3f8a5c; --ok-soft: #e8f2eb;
+  --warn: #a3762b; --warn-soft: #f7f0df;
+  --danger: #c65243; --danger-soft: #f9ecea; --danger-border: #edcdc8;
+  --code-bg: #f2f0eb; --code-text: #35322e;
+  --scrim: rgba(30, 27, 24, 0.4);
+  --accent-rgb: 107, 91, 210;
+}
+
+/* ── 暗色主题族 ──
    Android 侧（CoomiActivity）把系统深色状态经 JS 桥写入 <html data-theme="dark">；
-   桌面浏览器由前端 matchMedia 监听自动设置，两者等效。 */
+   桌面浏览器由前端 matchMedia 监听自动设置，两者等效。
+
+   与色相无关的那几项（阴影、遮罩、color-scheme）在这里一次写完，各主题只覆写调色板。
+   否则每加一个暗色主题都要照抄三十多项，漏掉一项就会漏出浅色值。 */
+:root[data-theme='dark'],
+:root[data-theme='ink'],
+:root[data-theme='abyss'],
+:root[data-theme='ember'] {
+  color-scheme: dark;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.35), 0 2px 8px rgba(0, 0, 0, 0.3);
+  --shadow-2: 0 6px 24px rgba(0, 0, 0, 0.45);
+  --shadow-sheet: 0 -10px 44px rgba(0, 0, 0, 0.55);
+  --scrim: rgba(0, 0, 0, 0.58);
+  /* 深底上不能用深字：这三项回到各档位自己的亮色语义色。 */
+  --ok-text: var(--ok);
+  --danger-text: var(--danger);
+  --orange-text: var(--orange);
+}
+
+/* 纯净暗色：中性灰蓝 */
 :root[data-theme='dark'] {
-    color-scheme: dark;
-    --bg: #131518;
-    --page: #0e1013;
-    --fill: #1a1d22;
-    --fill-strong: #22262d;
-    --fill-press: #2a2f38;
-    --border: #252a32;
-    --border-strong: #313844;
-    --text: #e7e9ee;
-    --text-2: #9aa2af;
-    --text-3: #68717f;
-    --blue: #5b8bf0;
-    --blue-press: #6f9bf3;
-    --blue-soft: #1c2c50;
-    --blue-soft-2: #23365f;
-    --blue-border: #3b5285;
-    --orange: #e08a6b;
-    --orange-soft: #3a2821;
-    --orange-border: #5e3b2e;
-    --ok: #38b98a;
-    --ok-soft: #1b362c;
-    --warn: #d3a44e;
-    --warn-soft: #3a3120;
-    --danger: #e86a58;
-    --danger-soft: #3d241f;
-    --danger-border: #613630;
-    --code-bg: #1a1d22;
-    --code-text: #cdd3de;
-    --code-bg-dark: #0d0f12;
-    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.35), 0 2px 8px rgba(0, 0, 0, 0.3);
-    --shadow-2: 0 6px 24px rgba(0, 0, 0, 0.45);
-    --shadow-sheet: 0 -10px 44px rgba(0, 0, 0, 0.55);
-    --shadow-drawer: 10px 0 44px rgba(0, 0, 0, 0.55);
-    --bg-card: #191c21;
-    --bg-input: #1c1f24;
-    --bg-elevated: #1f232a;
-    --user-bubble: var(--blue);
-    --user-text: #ffffff;
-  }
+  --bg: #131518; --page: #0e1013; --fill: #1a1d22; --fill-strong: #22262d; --fill-press: #2a2f38;
+  --border: #252a32; --border-strong: #313844;
+  --text: #e7e9ee; --text-2: #9aa2af; --text-3: #68717f;
+  --blue: #5b8bf0; --blue-press: #6f9bf3; --blue-soft: #1c2c50; --blue-soft-2: #23365f; --blue-border: #3b5285;
+  --orange: #e08a6b; --orange-soft: #3a2821; --orange-border: #5e3b2e;
+  --ok: #38b98a; --ok-soft: #1b362c;
+  --warn: #d3a44e; --warn-soft: #3a3120;
+  --danger: #e86a58; --danger-soft: #3d241f; --danger-border: #613630;
+  --code-bg: #1a1d22; --code-text: #cdd3de;
+  --bg-card: #191c21; --bg-input: #1c1f24; --bg-elevated: #1f232a;
+  --accent-rgb: 91, 139, 240;
+}
+
+/* 墨玉：极深中性底 + 青玉强调色 */
+:root[data-theme='ink'] {
+  --bg: #14181a; --page: #0f1214; --fill: #1b2023; --fill-strong: #232a2d; --fill-press: #2c3438;
+  --border: #252d30; --border-strong: #333d41;
+  --text: #e6ebe9; --text-2: #98a5a2; --text-3: #67736f;
+  --blue: #4cb597; --blue-press: #62c4a8; --blue-soft: #12332a; --blue-soft-2: #17453a; --blue-border: #2c6354;
+  --orange: #d99a63; --orange-soft: #3a2c1c; --orange-border: #5c452a;
+  --ok: #3fbd8c; --ok-soft: #123328;
+  --warn: #d0a555; --warn-soft: #362c18;
+  --danger: #e0705c; --danger-soft: #3a231e; --danger-border: #5c3730;
+  --code-bg: #1b2023; --code-text: #ccd6d3;
+  --bg-card: #191e21; --bg-input: #1c2225; --bg-elevated: #212829;
+  --accent-rgb: 76, 181, 151;
+  --on-accent: #0d211b;  /* 青玉太亮，白字对比度不足，实色按钮上改用深字 */
+}
+
+/* 深海：靛蓝底 + 亮蓝强调色 */
+:root[data-theme='abyss'] {
+  --bg: #10151f; --page: #0b0f17; --fill: #171d29; --fill-strong: #1f2633; --fill-press: #28303f;
+  --border: #212936; --border-strong: #2f394a;
+  --text: #e4e9f2; --text-2: #98a2b8; --text-3: #66718a;
+  --blue: #5c8cf5; --blue-press: #7099f7; --blue-soft: #182647; --blue-soft-2: #1f3157; --blue-border: #35507e;
+  --orange: #e0956e; --orange-soft: #3a2a20; --orange-border: #5c4331;
+  --ok: #37bd93; --ok-soft: #113328;
+  --warn: #cfa652; --warn-soft: #342c19;
+  --danger: #e5705f; --danger-soft: #3a2320; --danger-border: #5e3630;
+  --code-bg: #171d29; --code-text: #cbd4e4;
+  --bg-card: #151b26; --bg-input: #18202c; --bg-elevated: #1d2531;
+  --accent-rgb: 92, 140, 245;
+}
+
+/* 炭褐：暖炭底 + 琥珀强调色 */
+:root[data-theme='ember'] {
+  --bg: #1a1614; --page: #131110; --fill: #221d1a; --fill-strong: #2b2521; --fill-press: #352d28;
+  --border: #2b2420; --border-strong: #3a322c;
+  --text: #ece7e2; --text-2: #a89e96; --text-3: #776e67;
+  --blue: #d98b4a; --blue-press: #e59a5c; --blue-soft: #3a2717; --blue-soft-2: #4b3320; --blue-border: #6a4728;
+  --orange: #cf9f5e; --orange-soft: #382c1a; --orange-border: #574327;
+  --ok: #4fb583; --ok-soft: #143226;
+  --warn: #d4a94f; --warn-soft: #362d18;
+  --danger: #e06a55; --danger-soft: #3b231d; --danger-border: #5d3630;
+  --code-bg: #221d1a; --code-text: #dbd3cc;
+  --bg-card: #1f1a17; --bg-input: #221d19; --bg-elevated: #272119;
+  --accent-rgb: 217, 139, 74;
+  --on-accent: #2a1a0c;  /* 琥珀太亮，白字对比度不足，实色按钮上改用深字 */
+}
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-/* 点击不出现蓝色高亮方块：WebView 的 tap highlight / focus ring 全部去掉，
-   交互反馈交给各组件自己的 :active 样式。 */
-*:focus { outline: none !important; }
-*:focus-visible { outline: none !important; }
+/* 点击不出现蓝色高亮方块：去掉 WebView 的 tap highlight 和「鼠标/触摸点击」产生的焦点环，
+   但保留 :focus-visible —— 键盘 Tab 和辅助功能仍然需要看得见焦点在哪。
+   曾经这里是 *:focus, *:focus-visible { outline: none !important }，等于全局没有焦点环。 */
+*:focus { outline: none; }
+*:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+  border-radius: inherit;
+}
 button, a, [role="button"], input, textarea, select, label {
   -webkit-tap-highlight-color: transparent !important;
   -webkit-touch-callout: none;
@@ -189,7 +272,7 @@ h1, h2, h3 { margin: 0; font-weight: 650; }
   transition: background 0.16s, opacity 0.16s, transform 0.07s;
 }
 .btn:active { transform: scale(0.985); }
-.btn-primary { background: var(--blue); color: #fff; }
+.btn-primary { background: var(--blue); color: var(--on-accent); }
 .btn-primary:active { background: var(--blue-press); }
 .btn-soft { background: var(--blue-soft); color: var(--blue); }
 .btn-danger { background: var(--danger-soft); color: var(--danger); }
@@ -211,6 +294,10 @@ h1, h2, h3 { margin: 0; font-weight: 650; }
   flex-shrink: 0; transition: background 0.15s;
 }
 .icon-btn:active { background: var(--fill-strong); }
+/* 唯一的「浮起来的面」配方：页面底色是 --page，卡片/分组一律 --bg + --shadow-1 + --r-card。
+   五个页面此前各自在 scoped 里把这三行又写了一遍（CatalogView/PersonaView/ProvidersView 的
+   .card，SessionsView/RuntimeView 的 .group），SettingsView 的 .group 还写成了
+   1px 边框 + 7px 圆角——同一个东西在设置页是扁的、在别处是浮的。调用方现在只补 padding。 */
 .card { background: var(--bg); border-radius: var(--r-card); box-shadow: var(--shadow-1); overflow: hidden; }
 .sec-label { font-size: 12.5px; color: var(--text-3); padding: 0 4px 8px; letter-spacing: 0.02em; }
 
@@ -242,10 +329,11 @@ h1, h2, h3 { margin: 0; font-weight: 650; }
   55% { transform: translateX(30%) scaleX(0.7); }
   100% { transform: translateX(100%) scaleX(0.35); }
 }
+/* 强调色写死会让暗色主题的脉冲环仍是浅色主题的蓝，所以用 --accent-rgb 拼透明度。 */
 @keyframes coomi-pulse-ring {
-  0% { box-shadow: 0 0 0 0 rgba(45, 97, 198, 0.28); }
-  70% { box-shadow: 0 0 0 7px rgba(45, 97, 198, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(45, 97, 198, 0); }
+  0% { box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0.28); }
+  70% { box-shadow: 0 0 0 7px rgba(var(--accent-rgb), 0); }
+  100% { box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0); }
 }
 
 /* 流式文本的"正在写"光标 */

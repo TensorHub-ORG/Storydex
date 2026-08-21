@@ -8,6 +8,7 @@ import type { ToolCard } from '@/stores/viewModel'
 import type { ApprovalDecision } from '@/protocol/commands'
 import { asText, toolMeta, toolTarget } from '@/utils/toolMeta'
 import CoomiIcon from './CoomiIcon.vue'
+import BottomSheet from './ui/BottomSheet.vue'
 
 const props = defineProps<{ card: ToolCard }>()
 const emit = defineEmits<{ decide: [decision: ApprovalDecision] }>()
@@ -35,71 +36,50 @@ const detail = computed(() => {
 </script>
 
 <template>
-  <div class="scrim" @click.self="emit('decide', 'deny')">
-    <div class="sheet">
-      <div class="grip" />
+  <BottomSheet role="alertdialog" @close="emit('decide', 'deny')">
+    <template #head>
+      <span class="title">需要你的授权</span>
+      <span v-if="accessMeta.label" class="access" :class="accessMeta.cls">{{ accessMeta.label }}</span>
+    </template>
 
-      <div class="head">
-        <span class="title">需要你的授权</span>
-        <span v-if="accessMeta.label" class="access" :class="accessMeta.cls">{{ accessMeta.label }}</span>
-      </div>
-
-      <div class="tool">
-        <span class="tile" :class="{ danger: isDestructive }"><CoomiIcon :name="meta.icon" :size="18" /></span>
-        <span class="tinfo">
-          <span class="verb">{{ meta.verb }}</span>
-          <code v-if="target" class="target">{{ target }}</code>
-        </span>
-      </div>
-
-      <p v-if="card.riskSummary" class="risk">
-        <CoomiIcon name="alert" :size="15" /><span>{{ card.riskSummary }}</span>
-      </p>
-
-      <pre class="mono">{{ detail }}</pre>
-
-      <label v-if="isDestructive" class="confirm">
-        <input v-model="confirmed" type="checkbox" />
-        <span>我已了解这是<b>不可恢复</b>的操作</span>
-      </label>
-
-      <div class="actions">
-        <button class="act ghost" @click="emit('decide', 'deny')">拒绝</button>
-        <button class="act soft" :disabled="isDestructive && !confirmed" @click="emit('decide', 'always')">始终允许</button>
-        <button class="act primary" :class="{ danger: isDestructive }" :disabled="isDestructive && !confirmed" @click="emit('decide', 'allow')">允许一次</button>
-      </div>
+    <div class="tool">
+      <span class="tile" :class="{ danger: isDestructive }"><CoomiIcon :name="meta.icon" :size="18" /></span>
+      <span class="tinfo">
+        <span class="verb">{{ meta.verb }}</span>
+        <code v-if="target" class="target">{{ target }}</code>
+      </span>
     </div>
-  </div>
+
+    <p v-if="card.riskSummary" class="risk">
+      <CoomiIcon name="alert" :size="15" /><span>{{ card.riskSummary }}</span>
+    </p>
+
+    <pre class="mono">{{ detail }}</pre>
+
+    <label v-if="isDestructive" class="confirm">
+      <input v-model="confirmed" type="checkbox" />
+      <span>我已了解这是<b>不可恢复</b>的操作</span>
+    </label>
+
+    <template #actions>
+      <button class="act ghost" @click="emit('decide', 'deny')">拒绝</button>
+      <button class="act soft" :disabled="isDestructive && !confirmed" @click="emit('decide', 'always')">始终允许</button>
+      <button class="act primary" :class="{ danger: isDestructive }" :disabled="isDestructive && !confirmed" @click="emit('decide', 'allow')">允许一次</button>
+    </template>
+  </BottomSheet>
 </template>
 
 <style scoped>
-.scrim {
-  position: fixed; inset: 0; z-index: 70;
-  display: flex; align-items: flex-end;
-  background: rgba(17, 22, 31, .36);
-  animation: fade .18s ease-out;
-}
-@keyframes fade { from { opacity: 0; } }
-
-.sheet {
-  width: 100%; padding: 6px 16px calc(var(--safe-bottom) + 16px);
-  border-radius: 22px 22px 0 0; background: var(--bg);
-  box-shadow: var(--shadow-sheet);
-  animation: rise .26s cubic-bezier(.2, .8, .2, 1);
-}
-@keyframes rise { from { transform: translateY(100%); } }
-
-.grip { width: 38px; height: 4px; margin: 4px auto 14px; border-radius: 2px; background: var(--border-strong); }
-
-.head { display: flex; align-items: center; justify-content: space-between; }
-.title { font-size: 17px; font-weight: 650; color: var(--text); }
+/* 标题行由 BottomSheet 的 #head 插槽承载，这里只管行内那两个元素。 */
+.title { flex: 1; font-size: 17px; font-weight: 650; color: var(--text); }
 .access {
+  align-self: center;
   padding: 4px 11px; border-radius: var(--r-pill);
   background: var(--fill-strong); color: var(--text-2);
   font-size: 11.5px; font-weight: 650;
 }
 .access.write { background: var(--orange-soft); color: var(--orange); }
-.access.destructive { background: var(--danger); color: #fff; }
+.access.destructive { background: var(--danger); color: var(--on-accent); }
 
 .tool { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
 .tile {
@@ -118,7 +98,7 @@ const detail = computed(() => {
 .risk {
   display: flex; align-items: flex-start; gap: 7px; margin-top: 12px;
   padding: 9px 12px; border-radius: var(--r-md);
-  background: var(--orange-soft); color: #8a4a30;
+  background: var(--orange-soft); color: var(--orange-text);
   font-size: 13px; line-height: 1.55;
 }
 .risk :deep(svg) { flex-shrink: 0; margin-top: 1px; color: var(--orange); }
@@ -139,7 +119,6 @@ const detail = computed(() => {
 .confirm input { flex-shrink: 0; width: 18px; height: 18px; accent-color: var(--danger); }
 .confirm b { color: var(--danger); }
 
-.actions { display: flex; gap: 8px; margin-top: 14px; }
 .act {
   flex: 1; min-height: 46px; padding: 0 8px;
   border: 0; border-radius: var(--r-md);
@@ -148,7 +127,7 @@ const detail = computed(() => {
 }
 .act.ghost { background: var(--fill); color: var(--text-2); }
 .act.soft { background: var(--blue-soft); color: var(--blue); }
-.act.primary { background: var(--blue); color: #fff; }
+.act.primary { background: var(--blue); color: var(--on-accent); }
 .act.primary.danger { background: var(--danger); }
 .act:disabled { opacity: .4; pointer-events: none; }
 .act:active { transform: scale(.98); }

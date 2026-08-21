@@ -16,6 +16,8 @@ export interface SelectModelCommand { command: 'select_model'; provider_id: stri
 export interface SetReasoningEffortCommand { command: 'set_reasoning_effort'; effort: ReasoningEffort }
 export interface SetStorydexModeCommand { command: 'set_storydex_mode'; mode: 'story' | 'narrator' | 'agent' }
 export interface ResetStoryContextCommand { command: 'reset_story_context' }
+/** 配置意图的执行回执：前端执行完 `storydex_config_intent` 后把成败原样回给引擎。 */
+export interface ResolveConfigIntentCommand { command: 'resolve_config_intent'; call_id: string; ok: boolean; detail: string }
 export interface FileTransferResultCommand { command: 'file_transfer_result'; request_id: string; paths: string[] }
 export interface SendGuideCommand { command: 'send_guide'; key: string }
 
@@ -23,7 +25,7 @@ export type AgentCommand =
   | SendMessageCommand | CancelCommand | JumpInCommand | ApproveToolCommand
   | AnswerQuestionCommand | SetPermissionModeCommand | EnterPlanModeCommand
   | ExitPlanModeCommand | SelectModelCommand | SetReasoningEffortCommand | SetStorydexModeCommand
-  | ResetStoryContextCommand | FileTransferResultCommand
+  | ResetStoryContextCommand | ResolveConfigIntentCommand | FileTransferResultCommand
   | SendGuideCommand
 
 export const PROTOCOL_VERSION = 1

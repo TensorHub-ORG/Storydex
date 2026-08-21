@@ -11,6 +11,7 @@ import { useRouter } from 'vue-router'
 import { useConfigStore, type ProviderConfig } from '@/stores/config'
 import PageHead from '@/components/PageHead.vue'
 import CoomiIcon from '@/components/CoomiIcon.vue'
+import BottomSheet from '@/components/ui/BottomSheet.vue'
 
 const router = useRouter()
 const config = useConfigStore()
@@ -301,17 +302,14 @@ function back() {
       </form>
 
     </main>
-    <div v-if="pendingDelete" class="scrim" @click.self="pendingDelete = null">
-      <div class="sheet">
-        <div class="grip" />
-        <p class="sq">删除 Provider「{{ pendingDelete.name }}」？</p>
-        <p class="ssub">对应的 API Key 也会一起从本机删除，无法恢复。</p>
-        <div class="sacts">
-          <button class="btn" @click="pendingDelete = null">取消</button>
-          <button class="btn btn-danger" @click="confirmDelete">删除</button>
-        </div>
-      </div>
-    </div>
+    <BottomSheet v-if="pendingDelete" role="alertdialog" @close="pendingDelete = null">
+      <p class="sq">删除 Provider「{{ pendingDelete.name }}」？</p>
+      <p class="ssub">对应的 API Key 也会一起从本机删除，无法恢复。</p>
+      <template #actions>
+        <button class="btn" @click="pendingDelete = null">取消</button>
+        <button class="btn btn-danger" @click="confirmDelete">删除</button>
+      </template>
+    </BottomSheet>
 
   </div>
 </template>
@@ -323,12 +321,13 @@ function back() {
 .banner {
   display: flex; align-items: flex-start; gap: 7px; margin-bottom: 12px;
   padding: 10px 12px; border-radius: var(--r-md);
-  background: var(--orange-soft); color: #8a4a30; font-size: 12.8px; line-height: 1.55;
+  background: var(--orange-soft); color: var(--orange-text); font-size: 12.8px; line-height: 1.55;
 }
 .banner :deep(svg) { flex-shrink: 0; margin-top: 1px; color: var(--orange); }
 .hint { padding: 4px 4px 10px; font-size: 13px; line-height: 1.65; color: var(--text-3); }
 
-.card { padding: 13px 14px 12px; border-radius: var(--r-card); background: var(--bg); box-shadow: var(--shadow-1); margin-bottom: 10px; }
+/* 底色 / 圆角 / 投影来自 global.css 的 .card。 */
+.card { padding: 13px 14px 12px; margin-bottom: 10px; }
 .chead { display: flex; align-items: center; gap: 10px; }
 .tile {
   display: grid; place-items: center; flex-shrink: 0;
@@ -388,22 +387,7 @@ function back() {
 .toggle-row em { font-style: normal; font-size: 11px; color: var(--text-3); margin-left: 2px; }
 .form .btn { margin-top: 4px; }
 
-.scrim {
-  position: fixed; inset: 0; z-index: 70;
-  display: flex; align-items: flex-end;
-  background: rgba(17, 22, 31, .36); animation: fade .18s ease-out;
-}
-@keyframes fade { from { opacity: 0; } }
-.sheet {
-  width: 100%; padding: 6px 16px calc(var(--safe-bottom) + 16px);
-  border-radius: 22px 22px 0 0; background: var(--bg);
-  box-shadow: var(--shadow-sheet); animation: rise .26s cubic-bezier(.2, .8, .2, 1);
-}
-@keyframes rise { from { transform: translateY(100%); } }
-.grip { width: 38px; height: 4px; margin: 4px auto 14px; border-radius: 2px; background: var(--border-strong); }
-.sq { font-size: 15.5px; font-weight: 620; color: var(--text); }
-.ssub { margin-top: 6px; font-size: 13px; line-height: 1.6; color: var(--text-2); }
-.sacts { display: flex; gap: 8px; margin-top: 16px; }
-.sacts .btn { flex: 1; }
+.sq { margin: 0; font-size: 15.5px; font-weight: 620; color: var(--text); }
+.ssub { margin: 6px 0 0; font-size: 13px; line-height: 1.6; color: var(--text-2); }
 
 </style>

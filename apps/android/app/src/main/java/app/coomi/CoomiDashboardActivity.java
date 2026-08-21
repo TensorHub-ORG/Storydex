@@ -48,6 +48,9 @@ public class CoomiDashboardActivity extends Activity {
     private Button mStopButton;
     private View mOpenWebUiButton;
     private View mWebUiButtonContainer;
+    private View mUsbBridgeButton;
+    private androidx.appcompat.widget.SwitchCompat mUsbBridgeSwitch;
+    private TextView mUsbBridgeDesc;
     private View mCatalogButton;
     private View mFilesButton;
     private View mProvidersButton;
@@ -99,6 +102,9 @@ public class CoomiDashboardActivity extends Activity {
         mStopButton = findViewById(R.id.btn_stop);
         mOpenWebUiButton = findViewById(R.id.btn_open_webui);
         mWebUiButtonContainer = findViewById(R.id.webui_button_container);
+        mUsbBridgeButton = findViewById(R.id.btn_usb_bridge);
+        mUsbBridgeSwitch = findViewById(R.id.switch_usb_bridge);
+        mUsbBridgeDesc = findViewById(R.id.txt_usb_bridge_desc);
         mCatalogButton = findViewById(R.id.btn_web_catalog);
         mFilesButton = findViewById(R.id.btn_web_files);
         mCheckUpdateButton = findViewById(R.id.btn_check_update);
@@ -124,6 +130,7 @@ public class CoomiDashboardActivity extends Activity {
         mRestartButton.setOnClickListener(v -> restartEngine());
         mStopButton.setOnClickListener(v -> stopEngine());
         mOpenWebUiButton.setOnClickListener(v -> openWebUi());
+        mUsbBridgeButton.setOnClickListener(v -> toggleUsbBridge());
         mCatalogButton.setOnClickListener(v -> openCatalog());
         mFilesButton.setOnClickListener(v -> openFiles());
         mProvidersButton = findViewById(R.id.btn_web_providers);
@@ -295,6 +302,7 @@ public class CoomiDashboardActivity extends Activity {
                 if (mWebUiButtonContainer != null) {
                     mWebUiButtonContainer.setVisibility(running ? View.VISIBLE : View.GONE);
                 }
+                renderUsbBridge();
             });
         });
     }
@@ -441,6 +449,47 @@ public class CoomiDashboardActivity extends Activity {
         } catch (Exception e) {
             Toast.makeText(this, R.string.coomi_dash_toast_no_browser, Toast.LENGTH_SHORT).show();
         }
+    }
+
+    /** 按开关与发布状态刷新 USB 调试桥那一行的文案。 */
+    private void renderUsbBridge() {
+        if (mUsbBridgeSwitch == null || mUsbBridgeDesc == null) return;
+        boolean enabled = CoomiUsbBridge.isEnabled(this);
+        mUsbBridgeSwitch.setChecked(enabled);
+        int desc = !enabled ? R.string.coomi_dash_usb_bridge_off
+            : CoomiUsbBridge.isPublished() ? R.string.coomi_dash_usb_bridge_on
+            : R.string.coomi_dash_usb_bridge_pending;
+        mUsbBridgeDesc.setText(desc);
+    }
+
+    /**
+     * 开启前必须弹确认框：这会把引擎访问令牌写入共享存储，等于把私有目录的读写权限
+     * 交给任何能读 /sdcard 的一方。关闭则直接生效，无需确认。
+     */
+    private void toggleUsbBridge() {
+        if (CoomiUsbBridge.isEnabled(this)) {
+            CoomiUsbBridge.setEnabled(this, false);
+            applyUsbBridge();
+            Toast.makeText(this, R.string.coomi_dash_usb_bridge_toast_off, Toast.LENGTH_SHORT).show();
+            return;
+        }
+        new android.app.AlertDialog.Builder(this)
+            .setTitle(R.string.coomi_dash_usb_bridge_confirm_title)
+            .setMessage(R.string.coomi_dash_usb_bridge_confirm_message)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(R.string.coomi_dash_usb_bridge_confirm_ok, (d, w) -> {
+                CoomiUsbBridge.setEnabled(this, true);
+                applyUsbBridge();
+                Toast.makeText(this, R.string.coomi_dash_usb_bridge_toast_on, Toast.LENGTH_LONG).show();
+            })
+            .show();
+    }
+
+    /** 让服务按新开关状态发布或收回桥文件，再回主线程刷新文案。 */
+    private void applyUsbBridge() {
+        if (mBound && mCoomiService != null) mCoomiService.refreshUsbBridge();
+        else CoomiUsbBridge.clear();
+        renderUsbBridge();
     }
 
     /** 打开应用内 SKILL / MCP 管理页（WebView 直达 #/catalog）。 */

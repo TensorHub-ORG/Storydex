@@ -100,7 +100,6 @@
     <color name="coomi_theme_book_accent_press">#984520</color>
     <color name="coomi_theme_book_accent_soft">#F3E4D8</color>
 
-    <color name="coomi_night_fill_strong">#22262D</color>
     <color name="coomi_night_blue">#5B8BF0</color>
     <color name="coomi_night_ok">#38B98A</color>
     <color name="coomi_night_ok_soft">#1B362C</color>
@@ -118,4 +117,95 @@
     <color name="coomi_night_text_3">#68717F</color>
     <color name="coomi_night_blue_soft">#1C2C50</color>
     <color name="coomi_night_danger_soft">#3D241F</color>
+
+    <!-- ============ 新增外观档位（与前端 global.css 的 :root[data-theme=…] 逐项对齐） ============
+         浅色档位每套 10 色，与上面 white / default / snow / book 同构。
+         深色档位每套 18 色：除调色板外还要覆写语义色，因为 Theme.Coomi.Night 的语义色是按
+         中性灰蓝调的，直接继承会让墨玉/深海/炭褐的成功色与警示色跟底色对不上。
+         深色档位的 _page 沿用 night 的语义 —— 它是「浮起来的卡片面」（对应前端的 bg-card 变量），
+         比 _bg 更亮，与浅色档位里 _page 比 _bg 更暗正好相反。 -->
+
+    <!-- 青瓷：低饱和青绿 -->
+    <color name="coomi_theme_celadon_bg">#FBFDFC</color>
+    <color name="coomi_theme_celadon_page">#EAF1EE</color>
+    <color name="coomi_theme_celadon_fill">#F1F6F4</color>
+    <color name="coomi_theme_celadon_border">#DDE8E4</color>
+    <color name="coomi_theme_celadon_text">#1C2B28</color>
+    <color name="coomi_theme_celadon_text_2">#47605A</color>
+    <color name="coomi_theme_celadon_text_3">#7B918B</color>
+    <color name="coomi_theme_celadon_accent">#2F7D6E</color>
+    <color name="coomi_theme_celadon_accent_press">#24685B</color>
+    <color name="coomi_theme_celadon_accent_soft">#E4F1ED</color>
+
+    <!-- 亚麻：中性米灰 -->
+    <color name="coomi_theme_linen_bg">#FCFBF9</color>
+    <color name="coomi_theme_linen_page">#F0EEEA</color>
+    <color name="coomi_theme_linen_fill">#F5F3EF</color>
+    <color name="coomi_theme_linen_border">#E6E3DC</color>
+    <color name="coomi_theme_linen_text">#232120</color>
+    <color name="coomi_theme_linen_text_2">#58544F</color>
+    <color name="coomi_theme_linen_text_3">#8B867E</color>
+    <color name="coomi_theme_linen_accent">#6B5BD2</color>
+    <color name="coomi_theme_linen_accent_press">#5A49BD</color>
+    <color name="coomi_theme_linen_accent_soft">#EEECFA</color>
+
+    <!-- 墨玉：极深中性底 + 青玉强调色 -->
+    <color name="coomi_theme_ink_bg">#14181A</color>
+    <color name="coomi_theme_ink_page">#191E21</color>
+    <color name="coomi_theme_ink_fill">#1B2023</color>
+    <color name="coomi_theme_ink_border">#252D30</color>
+    <color name="coomi_theme_ink_text">#E6EBE9</color>
+    <color name="coomi_theme_ink_text_2">#98A5A2</color>
+    <color name="coomi_theme_ink_text_3">#67736F</color>
+    <color name="coomi_theme_ink_accent">#4CB597</color>
+    <color name="coomi_theme_ink_accent_press">#62C4A8</color>
+    <color name="coomi_theme_ink_accent_soft">#12332A</color>
+    <color name="coomi_theme_ink_ok">#3FBD8C</color>
+    <color name="coomi_theme_ink_ok_soft">#123328</color>
+    <color name="coomi_theme_ink_danger">#E0705C</color>
+    <color name="coomi_theme_ink_danger_soft">#3A231E</color>
+    <color name="coomi_theme_ink_warn_soft">#362C18</color>
+    <color name="coomi_theme_ink_orange">#D99A63</color>
+    <color name="coomi_theme_ink_orange_soft">#3A2C1C</color>
+    <color name="coomi_theme_ink_orange_border">#5C452A</color>
+
+    <!-- 深海：靛蓝底 + 亮蓝强调色 -->
+    <color name="coomi_theme_abyss_bg">#10151F</color>
+    <color name="coomi_theme_abyss_page">#151B26</color>
+    <color name="coomi_theme_abyss_fill">#171D29</color>
+    <color name="coomi_theme_abyss_border">#212936</color>
+    <color name="coomi_theme_abyss_text">#E4E9F2</color>
+    <color name="coomi_theme_abyss_text_2">#98A2B8</color>
+    <color name="coomi_theme_abyss_text_3">#66718A</color>
+    <color name="coomi_theme_abyss_accent">#5C8CF5</color>
+    <color name="coomi_theme_abyss_accent_press">#7099F7</color>
+    <color name="coomi_theme_abyss_accent_soft">#182647</color>
+    <color name="coomi_theme_abyss_ok">#37BD93</color>
+    <color name="coomi_theme_abyss_ok_soft">#113328</color>
+    <color name="coomi_theme_abyss_danger">#E5705F</color>
+    <color name="coomi_theme_abyss_danger_soft">#3A2320</color>
+    <color name="coomi_theme_abyss_warn_soft">#342C19</color>
+    <color name="coomi_theme_abyss_orange">#E0956E</color>
+    <color name="coomi_theme_abyss_orange_soft">#3A2A20</color>
+    <color name="coomi_theme_abyss_orange_border">#5C4331</color>
+
+    <!-- 炭褐：暖炭底 + 琥珀强调色 -->
+    <color name="coomi_theme_ember_bg">#1A1614</color>
+    <color name="coomi_theme_ember_page">#1F1A17</color>
+    <color name="coomi_theme_ember_fill">#221D1A</color>
+    <color name="coomi_theme_ember_border">#2B2420</color>
+    <color name="coomi_theme_ember_text">#ECE7E2</color>
+    <color name="coomi_theme_ember_text_2">#A89E96</color>
+    <color name="coomi_theme_ember_text_3">#776E67</color>
+    <color name="coomi_theme_ember_accent">#D98B4A</color>
+    <color name="coomi_theme_ember_accent_press">#E59A5C</color>
+    <color name="coomi_theme_ember_accent_soft">#3A2717</color>
+    <color name="coomi_theme_ember_ok">#4FB583</color>
+    <color name="coomi_theme_ember_ok_soft">#143226</color>
+    <color name="coomi_theme_ember_danger">#E06A55</color>
+    <color name="coomi_theme_ember_danger_soft">#3B231D</color>
+    <color name="coomi_theme_ember_warn_soft">#362D18</color>
+    <color name="coomi_theme_ember_orange">#CF9F5E</color>
+    <color name="coomi_theme_ember_orange_soft">#382C1A</color>
+    <color name="coomi_theme_ember_orange_border">#574327</color>
 </resources>

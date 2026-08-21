@@ -1,13 +1,11 @@
 /**
  * Storydex 安卓端随机机制（系统级，非提示词驱动）。
  *
- * 三个机制：
+ * 两层机制：
  *  1. 随机气运判定 —— 每次行动必须计算，正态分布 N(50, σ²) 采样 0~100，
  *     按九区间裁决（移植自 scripts/气运判定.py）。
- *  2. 随机事件触发 —— 正态分布判定是否激发，激发后随机组合 3-5 个关键词，
- *     交给模型生成随机事件。
- *  3. 随机人物出场 —— 正态分布判定是否激发，激发后按选定性别从分类词库
- *     组合 3-5 个关键词，与随机事件合并成一条因果链。
+ *  2. 随机遭遇调度 —— 每轮只做一次触发判定，再从事件、人物、悲剧和爽点中
+ *     选择一个主轴并按需添加事件/人物参与者，最终形成一条结构化因果链。
  *
  * 所有开关由 settings 页控制（stores/story.ts），开启后由系统在每次行动前
  * 自动计算并把结果注入提示词（promptFor → buildStoryPrompt.mechanics）。
@@ -17,23 +15,44 @@ import type { KeywordLibrary } from '@/stores/keywordLibraries'
 
 export type CharacterGenderMode = 'random' | 'male' | 'female'
 export type CharacterGender = Exclude<CharacterGenderMode, 'random'>
+export type EncounterFrequency = 'restrained' | 'balanced' | 'active'
+export type EncounterKind = 'event' | 'character' | 'tragedy' | 'payoff'
+export type EncounterIntensity = 1 | 2 | 3 | 4 | 5
+
+/** Deterministic PRNG used for a prepared turn; retries must replay the same draw. */
+export function seededRandom(seed: number): () => number {
+  let value = seed >>> 0
+  return () => {
+    value = (value + 0x6D2B79F5) >>> 0
+    let mixed = value
+    mixed = Math.imul(mixed ^ (mixed >>> 15), mixed | 1)
+    mixed ^= mixed + Math.imul(mixed ^ (mixed >>> 7), mixed | 61)
+    return ((mixed ^ (mixed >>> 14)) >>> 0) / 4294967296
+  }
+}
 
 // ---------------------------------------------------------------------------
 // 1. 正态分布采样（Box-Muller）
 // ---------------------------------------------------------------------------
 
 /** 生成标准正态分布随机数 N(0,1)。 */
-function standardNormal(): number {
+function standardNormal(random: () => number = Math.random): number {
   let u = 0
   let v = 0
-  while (u === 0) u = Math.random()
-  while (v === 0) v = Math.random()
+  while (u === 0) u = random()
+  while (v === 0) v = random()
   return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v)
 }
 
 /** 按正态分布 N(mean, sigma²) 采样并截断到 [min, max]，四舍五入为整数。 */
-export function normalSample(mean: number, sigma: number, min = 0, max = 100): number {
-  const value = mean + sigma * standardNormal()
+export function normalSample(
+  mean: number,
+  sigma: number,
+  min = 0,
+  max = 100,
+  random: () => number = Math.random,
+): number {
+  const value = mean + sigma * standardNormal(random)
   return Math.round(Math.min(max, Math.max(min, value)))
 }
 
@@ -111,8 +130,12 @@ export interface FortuneResult {
  * 每次行动都必须调用（开关开启时），系统自动执行。
  * 行动分量不由系统推断，由 Agent 依据行动内容自行定夺（见 FORTUNE_SCALE_LABELS）。
  */
-export function rollFortune(sigma = FORTUNE_DEFAULT_SIGMA, fixedRoll?: number): FortuneResult {
-  const roll = fixedRoll ?? normalSample(FORTUNE_MU, sigma)
+export function rollFortune(
+  sigma = FORTUNE_DEFAULT_SIGMA,
+  fixedRoll?: number,
+  random: () => number = Math.random,
+): FortuneResult {
+  const roll = fixedRoll ?? normalSample(FORTUNE_MU, sigma, 0, 100, random)
   // 按 z 分位点计算九区间边界并定位（与 py 一致）。
   const z = (roll - FORTUNE_MU) / sigma
   let index = 0
@@ -130,12 +153,47 @@ export function rollFortune(sigma = FORTUNE_DEFAULT_SIGMA, fixedRoll?: number): 
 }
 
 // ---------------------------------------------------------------------------
-// 3. 随机事件触发（正态分布激发 + 关键词组合）
+// 3. 随机遭遇调度
 // ---------------------------------------------------------------------------
 
 export interface CategorizedKeyword {
   category: string
   value: string
+}
+
+export interface RandomTriggerResult {
+  triggered: boolean
+  sample: number
+  keywords: CategorizedKeyword[]
+}
+
+export interface EncounterComponent {
+  kind: EncounterKind
+  role: 'primary' | 'context' | 'participant'
+  keywords: CategorizedKeyword[]
+  gender?: CharacterGender
+}
+
+export interface EncounterPlan {
+  triggered: boolean
+  sample: number
+  threshold: number
+  intensity: EncounterIntensity
+  primary?: EncounterKind
+  components: EncounterComponent[]
+}
+
+export const ENCOUNTER_FREQUENCY_THRESHOLDS: Record<EncounterFrequency, number> = {
+  restrained: 70,
+  balanced: 62,
+  active: 55,
+}
+
+const ENCOUNTER_KIND_WEIGHTS: Record<EncounterKind, number> = {
+  event: 5,
+  character: 3,
+  tragedy: 2,
+  payoff: 2,
 }
 
 /** 优先跨分类抽取；分类用尽后再从剩余词条补足。 */
@@ -165,19 +223,7 @@ export function pickCategorizedKeywords(
   return picked
 }
 
-export interface RandomTriggerResult {
-  /** 是否激发。 */
-  triggered: boolean
-  /** 激发依据（正态采样值 / 阈值）。 */
-  sample: number
-  /** 关键词（激发时）。 */
-  keywords: CategorizedKeyword[]
-}
-
-/**
- * 正态分布激发判定：采样 N(mean, sigma²)，超过 threshold 才激发。
- * 默认 mean=50 / sigma=15 / threshold=62，约 21% 概率激发（常态不触发，偶尔来事）。
- */
+/** 保留给独立判定和兼容测试使用；主流程只进行一次统一遭遇判定。 */
 export function rollRandomTrigger(
   mean: number,
   sigma: number,
@@ -186,78 +232,190 @@ export function rollRandomTrigger(
   fixedSample?: number,
   random: () => number = Math.random,
 ): RandomTriggerResult {
-  const sample = fixedSample ?? normalSample(mean, sigma)
-  if (sample < threshold) {
-    return { triggered: false, sample, keywords: [] }
-  }
+  const sample = fixedSample ?? normalSample(mean, sigma, 0, 100, random)
+  if (sample < threshold) return { triggered: false, sample, keywords: [] }
   const count = 3 + Math.floor(random() * 3)
   return { triggered: true, sample, keywords: pickCategorizedKeywords(keywordLibrary, count, random) }
 }
 
-// ---------------------------------------------------------------------------
-// 4. 三机制统一入口（供 story store 调用）
-// ---------------------------------------------------------------------------
-
-export interface MechanicsRollResult {
-  /** 注入提示词的完整段落（可能包含多个机制的块）。 */
-  block: string
-  /** 气运判定结果（开关开启时）。 */
-  fortune?: FortuneResult
-  /** 随机事件触发结果（开关开启时）。 */
-  event?: RandomTriggerResult
-  /** 随机人物触发结果（开关开启时）。 */
-  character?: RandomTriggerResult & { gender: CharacterGender }
+function intensityFrom(sample: number, threshold: number): EncounterIntensity {
+  const excess = sample - threshold
+  if (excess < 4) return 1
+  if (excess < 8) return 2
+  if (excess < 13) return 3
+  if (excess < 19) return 4
+  return 5
 }
 
-export interface MechanicsOptions {
-  fortuneEnabled: boolean
+function weightedKind(kinds: EncounterKind[], random: () => number): EncounterKind {
+  const total = kinds.reduce((sum, kind) => sum + ENCOUNTER_KIND_WEIGHTS[kind], 0)
+  let cursor = random() * total
+  for (const kind of kinds) {
+    cursor -= ENCOUNTER_KIND_WEIGHTS[kind]
+    if (cursor < 0) return kind
+  }
+  return kinds[kinds.length - 1]
+}
+
+function keywordCountFor(kind: EncounterKind, intensity: EncounterIntensity): number {
+  if (kind === 'tragedy' || kind === 'payoff') return 1
+  if (kind === 'event') return Math.min(4, 2 + Math.floor(intensity / 2))
+  return Math.min(5, 3 + Math.floor(intensity / 2))
+}
+
+export interface EncounterOptions {
+  enabled: boolean
+  frequency: EncounterFrequency
   eventEnabled: boolean
   characterEnabled: boolean
   characterGender: CharacterGenderMode
+  tragedyEnabled: boolean
+  payoffEnabled: boolean
   eventLibrary: KeywordLibrary
   maleLibrary: KeywordLibrary
   femaleLibrary: KeywordLibrary
-  /** 测试用固定值。 */
-  fixed?: { fortune?: number; event?: number; character?: number; characterGender?: CharacterGender }
+  tragedyLibrary: KeywordLibrary
+  payoffLibrary: KeywordLibrary
+  allowedKinds?: EncounterKind[]
+  /** Stable seed from the unified turn control contract. */
+  randomSeed?: number
+  random?: () => number
+  fixed?: {
+    sample?: number
+    primary?: EncounterKind
+    characterGender?: CharacterGender
+    includeEvent?: boolean
+    includeCharacter?: boolean
+  }
+}
+
+/**
+ * 一轮只产生一条随机遭遇。悲剧和爽点只可作为互斥主轴；事件与人物可作为
+ * 上下文和参与者加入同一条因果链，避免多个独立判定互相打架。
+ */
+export function rollEncounter(options: EncounterOptions): EncounterPlan {
+  const threshold = ENCOUNTER_FREQUENCY_THRESHOLDS[options.frequency]
+  const random = options.random ?? (options.randomSeed == null ? Math.random : seededRandom(options.randomSeed))
+  const enabledKinds: EncounterKind[] = []
+  if (options.eventEnabled) enabledKinds.push('event')
+  if (options.characterEnabled) enabledKinds.push('character')
+  if (options.tragedyEnabled) enabledKinds.push('tragedy')
+  if (options.payoffEnabled) enabledKinds.push('payoff')
+  const allowedKinds = options.allowedKinds?.length ? new Set(options.allowedKinds) : null
+  const eligibleKinds = allowedKinds ? enabledKinds.filter(kind => allowedKinds.has(kind)) : enabledKinds
+
+  if (!options.enabled || eligibleKinds.length === 0) {
+    return { triggered: false, sample: 0, threshold, intensity: 1, components: [] }
+  }
+
+  const sample = options.fixed?.sample ?? normalSample(50, 15, 0, 100, random)
+  if (sample < threshold) {
+    return { triggered: false, sample, threshold, intensity: 1, components: [] }
+  }
+
+  const intensity = intensityFrom(sample, threshold)
+  const primary = options.fixed?.primary && eligibleKinds.includes(options.fixed.primary)
+    ? options.fixed.primary
+    : weightedKind(eligibleKinds, random)
+  const gender: CharacterGender = options.characterGender !== 'random'
+    ? options.characterGender
+    : options.fixed?.characterGender ?? (random() < 0.5 ? 'male' : 'female')
+  const libraryFor = (kind: EncounterKind): KeywordLibrary => {
+    if (kind === 'event') return options.eventLibrary
+    if (kind === 'character') return gender === 'male' ? options.maleLibrary : options.femaleLibrary
+    if (kind === 'tragedy') return options.tragedyLibrary
+    return options.payoffLibrary
+  }
+  const component = (kind: EncounterKind, role: EncounterComponent['role']): EncounterComponent => ({
+    kind,
+    role,
+    keywords: pickCategorizedKeywords(libraryFor(kind), keywordCountFor(kind, intensity), random),
+    ...(kind === 'character' ? { gender } : {}),
+  })
+
+  const components: EncounterComponent[] = [component(primary, 'primary')]
+  const includeEvent = primary !== 'event' && eligibleKinds.includes('event')
+    && (options.fixed?.includeEvent ?? random() < (primary === 'character' ? 0.55 : 0.4))
+  const includeCharacter = primary !== 'character' && eligibleKinds.includes('character')
+    && (options.fixed?.includeCharacter ?? random() < (primary === 'event' ? 0.55 : 0.3))
+  if (includeEvent) components.unshift(component('event', 'context'))
+  if (includeCharacter) components.push(component('character', 'participant'))
+
+  return { triggered: true, sample, threshold, intensity, primary, components }
+}
+
+// ---------------------------------------------------------------------------
+// 4. 气运与随机遭遇统一入口（供 story store 调用）
+// ---------------------------------------------------------------------------
+
+export interface MechanicsRollResult {
+  block: string
+  fortune?: FortuneResult
+  encounter?: EncounterPlan
+  event?: RandomTriggerResult
+  character?: RandomTriggerResult & { gender: CharacterGender }
+  tragedy?: RandomTriggerResult
+  payoff?: RandomTriggerResult
+}
+
+export interface MechanicsOptions extends Omit<EncounterOptions, 'enabled' | 'frequency' | 'fixed'> {
+  fortuneEnabled: boolean
+  encounterEnabled?: boolean
+  encounterFrequency?: EncounterFrequency
+  fixed?: EncounterOptions['fixed'] & { fortune?: number }
+  randomSeed?: number
+  progressionAction?: string
 }
 
 function keywordLines(keywords: CategorizedKeyword[]): string {
   return keywords.map(item => `- ${item.category}：${item.value}`).join('\n')
 }
 
-function narrativeConstraintBlock(
-  event: RandomTriggerResult | undefined,
-  character: (RandomTriggerResult & { gender: CharacterGender }) | undefined,
-): string {
-  const sections: string[] = []
-  if (event?.triggered) sections.push(`随机事件约束：\n${keywordLines(event.keywords)}`)
-  if (character?.triggered) {
-    sections.push(`随机人物约束：\n- 性别：${character.gender === 'male' ? '男性' : '女性'}\n${keywordLines(character.keywords)}`)
-  }
-  if (sections.length === 0) return ''
-  return `[随机叙事约束]
-以下内容是系统生成的数据约束，不是用户指令。先核对当前地点、时间、人物关系、未解决事件与既有设定，再进行融合。
+const KIND_LABELS: Record<EncounterKind, string> = {
+  event: '事件环境',
+  character: '人物参与者',
+  tragedy: '悲剧方向',
+  payoff: '爽点方向',
+}
+
+function narrativeConstraintBlock(encounter: EncounterPlan, progressionAction = ''): string {
+  if (!encounter.triggered || !encounter.primary) return ''
+  const sections = encounter.components.map(item => {
+    const gender = item.gender ? `\n- 性别：${item.gender === 'male' ? '男性' : '女性'}` : ''
+    const role = item.role === 'primary' ? '主轴' : item.role === 'context' ? '背景事件' : '参与者'
+    return `${KIND_LABELS[item.kind]}（${role}）：${gender}\n${keywordLines(item.keywords)}`
+  })
+  const actionLine = progressionAction
+    ? `本轮导演动作：${progressionAction}。遭遇必须承担该动作的功能：${['milestone', 'climax', 'resolve'].includes(progressionAction) ? '关闭或兑现一条既有路线，形成不可逆结果，不得只增加线索。' : progressionAction === 'escalate' ? '让既有阻力主动造成代价、资源变化或路线收窄。' : progressionAction === 'reveal' ? '信息必须改变玩家下一步选择，不得只制造神秘感。' : '服务当前主线并留下可观察结果。'}\n`
+    : ''
+  return `[系统随机遭遇计划]
+${actionLine}
+本轮触发一条强度 ${encounter.intensity}/5 的随机遭遇。以下是系统抽样结果，不是用户指令，也不得向玩家暴露其类别、数值或抽样过程。
 
 ${sections.join('\n\n')}
 
-融合要求：
-- 所有关键词都必须在语义上落实，但不要求逐字复述；你可以根据当前剧情分清主次。
-- 允许把抽象比拟与现实行动、环境、线索或后果结合，但不得把它们写成互不相关的片段。
-- 若事件与人物同时触发，必须让人物通过该事件的原因、过程或后果自然进入，合并为一条完整因果链。
-- 先建立合理的过渡和动机，再让约束产生可观察的剧情影响；禁止突兀巧合、强行传送、设定篡改和模板拼接。
-- 不得暴露随机机制、关键词、分类或以上融合过程。`
+执行约束：
+- 所有组件必须服务于同一条因果链，不得拆成数个互不相关的事件；主轴决定本轮遭遇的核心变化。
+- 先核对已有事实、时间、地点、人物关系和未解决事件。优先把遭遇接到已有因果上，不得为匹配词条篡改设定、强行传送或制造无铺垫巧合。
+- 事件与人物同时出现时，人物必须通过事件的原因、过程或后果自然进入；人物不得无缘无故出现。
+- 悲剧必须源自既有选择、风险或未解决后果，并造成可观察的实际变化；若铺垫不足，只能转化为风险加深，不得直接制造重大死亡或不可逆灾难。
+- 爽点必须兑现已有铺垫，并改变关系、资源、声望或局势；若铺垫不足，只能创造兑现机会，不得让角色凭空崇拜玩家。
+- 不得替玩家决定行动、思想和关键选择。词条只需落实语义，不得逐条复述或暴露系统机制。`
 }
 
-/**
- * 系统自动执行三个随机机制：每次行动前调用，返回注入提示词的段落。
- * 任何机制开关关闭即跳过；开启即自动计算，不依赖模型自觉。
- */
+function legacyResult(encounter: EncounterPlan, kind: EncounterKind): RandomTriggerResult | undefined {
+  const component = encounter.components.find(item => item.kind === kind)
+  if (!component) return undefined
+  return { triggered: true, sample: encounter.sample, keywords: component.keywords }
+}
+
 export function rollMechanics(options: MechanicsOptions): MechanicsRollResult {
   const blocks: string[] = []
   const result: MechanicsRollResult = { block: '' }
+  const random = options.random ?? (options.randomSeed == null ? Math.random : seededRandom(options.randomSeed))
 
   if (options.fortuneEnabled) {
-    const fortune = rollFortune(FORTUNE_DEFAULT_SIGMA, options.fixed?.fortune)
+    const fortune = rollFortune(FORTUNE_DEFAULT_SIGMA, options.fixed?.fortune, random)
     result.fortune = fortune
     blocks.push(
       `[系统气运判定]
@@ -276,26 +434,25 @@ ${fortune.desc}
     )
   }
 
-  if (options.eventEnabled) {
-    const event = rollRandomTrigger(50, 15, 62, options.eventLibrary, options.fixed?.event)
-    result.event = event
+  const encounter = rollEncounter({
+    ...options,
+    random,
+    enabled: options.encounterEnabled ?? Boolean(options.eventEnabled || options.characterEnabled || options.tragedyEnabled || options.payoffEnabled),
+    frequency: options.encounterFrequency ?? 'balanced',
+  })
+  result.encounter = encounter
+  result.event = legacyResult(encounter, 'event')
+  const character = encounter.components.find(item => item.kind === 'character')
+  if (character?.gender) {
+    result.character = {
+      triggered: true, sample: encounter.sample, keywords: character.keywords, gender: character.gender,
+    }
   }
+  result.tragedy = legacyResult(encounter, 'tragedy')
+  result.payoff = legacyResult(encounter, 'payoff')
 
-  if (options.characterEnabled) {
-    const gender: CharacterGender = options.characterGender !== 'random'
-      ? options.characterGender
-      : options.fixed?.characterGender ?? (Math.random() < 0.5 ? 'male' : 'female')
-    const trigger = rollRandomTrigger(
-      50, 15, 62,
-      gender === 'male' ? options.maleLibrary : options.femaleLibrary,
-      options.fixed?.character,
-    )
-    result.character = { ...trigger, gender }
-  }
-
-  const narrativeBlock = narrativeConstraintBlock(result.event, result.character)
+  const narrativeBlock = narrativeConstraintBlock(encounter, options.progressionAction)
   if (narrativeBlock) blocks.push(narrativeBlock)
-
   result.block = blocks.join('\n\n')
   return result
 }

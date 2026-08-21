@@ -10,7 +10,7 @@ import androidx.annotation.NonNull;
 
 import com.termux.R;
 
-/** Applies the same five appearance palettes to native pages and the WebView. */
+/** Applies the same ten appearance palettes to native pages and the WebView. */
 public final class CoomiTheme {
 
     /** Desktop-compatible palette codes. Legacy values remain readable during migration. */
@@ -21,6 +21,11 @@ public final class CoomiTheme {
     public static final String MODE_DEFAULT = "default";
     public static final String MODE_SNOW = "snow";
     public static final String MODE_BOOK = "book";
+    public static final String MODE_CELADON = "celadon";
+    public static final String MODE_LINEN = "linen";
+    public static final String MODE_INK = "ink";
+    public static final String MODE_ABYSS = "abyss";
+    public static final String MODE_EMBER = "ember";
 
     public static final String PREF_THEME_MODE = "coomi.themeMode";
     private static final String PREF_NAME = "coomi_settings";
@@ -43,15 +48,18 @@ public final class CoomiTheme {
             .edit().putString(PREF_THEME_MODE, mode).apply();
     }
 
-    /** 只有纯净暗色使用深色系统栏图标策略。 */
+    /** 深色系全档位都用浅色系统栏图标策略（前端 config.ts 的 DARK_THEMES 与此一一对应）。 */
     public static boolean isDark(Context context) {
         String mode = getMode(context);
-        return MODE_DARK.equals(mode);
+        return MODE_DARK.equals(mode) || MODE_INK.equals(mode)
+            || MODE_ABYSS.equals(mode) || MODE_EMBER.equals(mode);
     }
 
     private static boolean isValid(String mode) {
         return MODE_WHITE.equals(mode) || MODE_DEFAULT.equals(mode) || MODE_SNOW.equals(mode)
-            || MODE_BOOK.equals(mode) || MODE_DARK.equals(mode);
+            || MODE_BOOK.equals(mode) || MODE_DARK.equals(mode)
+            || MODE_CELADON.equals(mode) || MODE_LINEN.equals(mode)
+            || MODE_INK.equals(mode) || MODE_ABYSS.equals(mode) || MODE_EMBER.equals(mode);
     }
 
     /** 常规页面必须在 {@code super.onCreate} 之前应用主题。 */
@@ -74,7 +82,12 @@ public final class CoomiTheme {
             case MODE_WHITE: return R.style.Theme_Coomi_White;
             case MODE_DEFAULT: return R.style.Theme_Coomi_Default;
             case MODE_BOOK: return R.style.Theme_Coomi_Book;
+            case MODE_CELADON: return R.style.Theme_Coomi_Celadon;
+            case MODE_LINEN: return R.style.Theme_Coomi_Linen;
             case MODE_DARK: return R.style.Theme_Coomi_Night;
+            case MODE_INK: return R.style.Theme_Coomi_Ink;
+            case MODE_ABYSS: return R.style.Theme_Coomi_Abyss;
+            case MODE_EMBER: return R.style.Theme_Coomi_Ember;
             case MODE_SNOW:
             default: return R.style.Theme_Coomi_Snow;
         }
@@ -85,7 +98,12 @@ public final class CoomiTheme {
             case MODE_WHITE: return R.style.Theme_Coomi_White_Page;
             case MODE_DEFAULT: return R.style.Theme_Coomi_Default_Page;
             case MODE_BOOK: return R.style.Theme_Coomi_Book_Page;
+            case MODE_CELADON: return R.style.Theme_Coomi_Celadon_Page;
+            case MODE_LINEN: return R.style.Theme_Coomi_Linen_Page;
             case MODE_DARK: return R.style.Theme_Coomi_Night_Page;
+            case MODE_INK: return R.style.Theme_Coomi_Ink_Page;
+            case MODE_ABYSS: return R.style.Theme_Coomi_Abyss_Page;
+            case MODE_EMBER: return R.style.Theme_Coomi_Ember_Page;
             case MODE_SNOW:
             default: return R.style.Theme_Coomi_Snow_Page;
         }
@@ -96,7 +114,12 @@ public final class CoomiTheme {
             case MODE_WHITE: return R.style.Theme_Coomi_White_Web;
             case MODE_DEFAULT: return R.style.Theme_Coomi_Default_Web;
             case MODE_BOOK: return R.style.Theme_Coomi_Book_Web;
+            case MODE_CELADON: return R.style.Theme_Coomi_Celadon_Web;
+            case MODE_LINEN: return R.style.Theme_Coomi_Linen_Web;
             case MODE_DARK: return R.style.Theme_Coomi_Night_Web;
+            case MODE_INK: return R.style.Theme_Coomi_Ink_Web;
+            case MODE_ABYSS: return R.style.Theme_Coomi_Abyss_Web;
+            case MODE_EMBER: return R.style.Theme_Coomi_Ember_Web;
             case MODE_SNOW:
             default: return R.style.Theme_Coomi_Snow_Web;
         }
@@ -107,7 +130,12 @@ public final class CoomiTheme {
             case MODE_WHITE: return activity.getColor(R.color.coomi_theme_white_bg);
             case MODE_DEFAULT: return activity.getColor(R.color.coomi_theme_default_bg);
             case MODE_BOOK: return activity.getColor(R.color.coomi_theme_book_bg);
+            case MODE_CELADON: return activity.getColor(R.color.coomi_theme_celadon_bg);
+            case MODE_LINEN: return activity.getColor(R.color.coomi_theme_linen_bg);
             case MODE_DARK: return activity.getColor(R.color.coomi_night_bg);
+            case MODE_INK: return activity.getColor(R.color.coomi_theme_ink_bg);
+            case MODE_ABYSS: return activity.getColor(R.color.coomi_theme_abyss_bg);
+            case MODE_EMBER: return activity.getColor(R.color.coomi_theme_ember_bg);
             case MODE_SNOW:
             default: return activity.getColor(R.color.coomi_theme_snow_bg);
         }

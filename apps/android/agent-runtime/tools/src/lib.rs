@@ -7,6 +7,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use coomi_catalogs::CatalogInstaller;
 use coomi_engine::ApprovalHandler;
+use coomi_engine::ConfigIntent;
 use coomi_engine::LoopState;
 use coomi_engine::LoopStatus;
 use coomi_engine::PlanState;
@@ -165,6 +166,9 @@ pub struct CoreTools {
     memory: Option<Arc<MemoryManager>>,
     hooks: Option<Arc<HookRunner>>,
     parent_history: Vec<coomi_engine::ChatMessage>,
+    /// 是否登记 Storydex 配置工具。只有挂着界面的 Agent 模式才置真：这些工具靠前端执行，
+    /// 在终端 / headless 下登记出来只会被模型调用然后必然失败。
+    story_config: bool,
 }
 
 impl CoreTools {
@@ -183,6 +187,7 @@ impl CoreTools {
             memory: None,
             hooks: None,
             parent_history: Vec::new(),
+            story_config: false,
         }
     }
 
@@ -231,6 +236,12 @@ impl CoreTools {
         self
     }
 
+    /// 开启 Storydex 配置工具（风格预设 / 剧本 / 记忆 / 各机制设置）。
+    pub fn with_story_config(mut self, enabled: bool) -> Self {
+        self.story_config = enabled;
+        self
+    }
+
     pub fn policy(&self) -> &SecurityPolicy {
         &self.policy
     }
@@ -264,6 +275,12 @@ impl CoreTools {
             "memory_delete" => self.memory_delete(call, approval).await,
             "configure_mcp" => self.configure_mcp(call, approval).await,
             "install_skill" => self.install_skill(call, approval).await,
+            "storydex_config_get"
+            | "storydex_config_set"
+            | "storydex_script_manage"
+            | "storydex_preset_manage"
+            | "storydex_memory_manage"
+            | "storydex_keyword_library" => self.storydex_config(call, approval).await,
             _ => {
                 if let Some(runtime) = &self.mcp_runtime
                     && let Some(result) = runtime.call(&call.name, call.arguments.clone()).await
@@ -272,6 +289,37 @@ impl CoreTools {
                 }
                 ToolResult::error(format!("unknown tool: {}", call.name))
             }
+        }
+    }
+
+    /// 把 Storydex 配置意图交给前端执行。
+    ///
+    /// 这里不校验 arguments：校验规则在前端的 store action 里，引擎再抄一份就会有两套规则各自
+    /// 演进（详见 `storydex_config_specs`）。本函数只保证三件事——工具没启用时不放行，
+    /// 不可逆的意图先过一次审批，没有界面响应时明确失败而不是假装成功。
+    async fn storydex_config(&self, call: &ToolCall, approval: &dyn ApprovalHandler) -> ToolResult {
+        if !self.story_config {
+            return ToolResult::error(
+                "Storydex configuration tools are not available in this session",
+            );
+        }
+        // 不可逆的改动先问一遍。agent 模式把权限强制成 full，`approve()` 的快路径会恒真，
+        // 所以 `BrowserApproval::approve` 对这些调用另有豁免（见 web.rs），否则等于没有闸门。
+        if let Some(reason) = storydex_intent_approval_reason(call)
+            && !approval.approve(call, &reason).await
+        {
+            return ToolResult::error("the user declined this configuration change");
+        }
+        let intent = ConfigIntent {
+            tool: call.name.clone(),
+            arguments: call.arguments.clone(),
+        };
+        match approval.request_config_intent(&intent).await {
+            Some(outcome) if outcome.ok => ToolResult::success(outcome.detail),
+            Some(outcome) => ToolResult::error(outcome.detail),
+            None => ToolResult::error(
+                "the Storydex settings interface did not respond; nothing was changed",
+            ),
         }
     }
 
@@ -1575,6 +1623,9 @@ impl ToolRuntime for CoreTools {
         if let Some(runtime) = &self.mcp_runtime {
             specs.extend(runtime.specs());
         }
+        if self.story_config {
+            specs.extend(storydex_config_specs());
+        }
         if self.memory.is_some() {
             specs.extend(memory_specs());
         }
@@ -1683,6 +1734,188 @@ impl ToolRuntime for CoreTools {
 
 const fn default_memory_scope() -> MemoryScope {
     MemoryScope::Project
+}
+
+/// 判断一条 Storydex 配置意图是否必须先问过用户，`Some` 时携带审批理由。
+///
+/// 只列**不可逆**的操作。其余改动（启停、改标题、调层级、改配置数值）用户在设置页看得见，
+/// 也随手能改回来，逐条审批只会把 agent 模式变成不停点确认。
+///
+/// 理由文案里的 delete / overwrite 是有意为之：`approval_access` 靠这两个词把审批卡片标成
+/// destructive，用户扫一眼就知道这次不是普通写入。
+pub fn storydex_intent_approval_reason(call: &ToolCall) -> Option<String> {
+    let action = call.arguments.get("action").and_then(Value::as_str)?;
+    match (call.name.as_str(), action) {
+        ("storydex_script_manage", "delete") => {
+            Some("delete a script entry and its file".into())
+        }
+        ("storydex_preset_manage", "delete") => {
+            Some("delete a style preset and its file".into())
+        }
+        // 事实删除会连"曾经为真"的历史一起消失，作废（invalidate）才是可逆的那条路。
+        ("storydex_memory_manage", "delete") => {
+            Some("permanently delete an established fact".into())
+        }
+        ("storydex_keyword_library", "replace") => {
+            Some("overwrite a random-system keyword library".into())
+        }
+        ("storydex_keyword_library", "restore_builtin") => {
+            Some("delete the project keyword library and revert to the built-in one".into())
+        }
+        _ => None,
+    }
+}
+
+/// Storydex 配置工具。
+///
+/// 这些工具不落盘，只把意图送给前端；前端用界面按钮走的**同一批** store action 执行，
+/// 所以改动即时出现在界面上，也自动继承那批 action 已有的校验（枚举收敛、比例求和、
+/// 剧本三级层级、状态机、锁定事实保护）。工具在这里只描述「能做什么」，不复制「怎么校验」。
+///
+/// 不提供「格式化重构」：那会在 agent 回合内再触发一次模型调用，形成嵌套。要标准化某个条目，
+/// 直接用 read_file / write_file 改写内容即可，效果相同且不嵌套。
+fn storydex_config_specs() -> Vec<ToolSpec> {
+    vec![
+        ToolSpec {
+            name: "storydex_config_get".into(),
+            description: "Read the current Storydex story configuration exactly as the settings UI shows it: mechanics settings, plot mechanics, time state, director state, style presets, the three-level script tree, memory facts, keyword libraries, and appearance. Call this before changing anything.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "sections": {
+                        "type": "array",
+                        "description": "Omit for everything.",
+                        "items": {"type": "string", "enum": ["settings", "plot", "time", "director", "presets", "scripts", "memory", "keywords", "appearance"]}
+                    }
+                },
+                "additionalProperties": false
+            }),
+        },
+        ToolSpec {
+            name: "storydex_config_set".into(),
+            description: "Change Storydex settings. Every field is optional; only the ones you send are written, and each is validated and clamped exactly as the UI would. Covers story progression, the random systems, the time system, and the theme.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "settings": {
+                        "type": "object",
+                        "description": "Mechanics toggles and pacing.",
+                        "properties": {
+                            "recentFragments": {"type": "integer", "minimum": 1, "maximum": 12},
+                            "memoryCheckpoint": {"type": "integer", "enum": [5, 10, 15, 20, 30]},
+                            "fortuneEnabled": {"type": "boolean"},
+                            "encounterEnabled": {"type": "boolean"},
+                            "encounterFrequency": {"type": "string", "enum": ["restrained", "balanced", "active"]},
+                            "eventEnabled": {"type": "boolean"},
+                            "characterEnabled": {"type": "boolean"},
+                            "characterGender": {"type": "string", "enum": ["random", "male", "female"]},
+                            "tragedyEnabled": {"type": "boolean"},
+                            "payoffEnabled": {"type": "boolean"},
+                            "directorEnabled": {"type": "boolean"},
+                            "storyPace": {"type": "string", "enum": ["slow", "balanced", "fast"]},
+                            "majorHookEnabled": {"type": "boolean"},
+                            "stagnationWarningThreshold": {"type": "integer", "minimum": 1, "maximum": 10}
+                        },
+                        "additionalProperties": false
+                    },
+                    "plot": {
+                        "type": "object",
+                        "description": "Plot mechanics. Send scale alone to apply a preset; send ranges to customise. Phase minimums must fit inside totalMinorPlots and the three mix percentages must sum to 100.",
+                        "additionalProperties": true
+                    },
+                    "time": {
+                        "type": "object",
+                        "properties": {
+                            "calendar": {"type": "string", "enum": ["gregorian", "relative", "custom"]},
+                            "calendarName": {"type": "string"},
+                            "current": {"type": "string"},
+                            "display": {"type": "string"},
+                            "precision": {"type": "string", "enum": ["fuzzy", "day", "hour"]},
+                            "locked": {"type": "boolean"}
+                        },
+                        "additionalProperties": false
+                    },
+                    "appearance": {
+                        "type": "object",
+                        "properties": {"theme": {"type": "string"}},
+                        "additionalProperties": false
+                    }
+                },
+                "additionalProperties": false
+            }),
+        },
+        ToolSpec {
+            name: "storydex_script_manage".into(),
+            description: "Manage the three-level script tree: stage frames a run of majors, a major frames its minors, and a minor holds the actual plot content. Stages carry guidance only and never enter the progression state machine. The list order is the priority order: the first active non-stage entry is the sole primary script and the next two become background clocks, so use reorder deliberately.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["create", "update", "delete", "enable", "disable", "set_status", "set_parent", "reorder"]},
+                    "id": {"type": "string", "description": "Target entry; required for everything except create."},
+                    "level": {"type": "string", "enum": ["stage", "major", "minor"], "description": "create only; a level is fixed once created."},
+                    "title": {"type": "string"},
+                    "content": {"type": "string"},
+                    "completionCondition": {"type": "string", "description": "For a stage this is the mark that closes the whole stage."},
+                    "defaultRoute": {"type": "string", "description": "For a stage this is the stage goal."},
+                    "parentId": {"type": "string", "description": "A major's parent must be a stage, a minor's parent must be a major. Empty string detaches it."},
+                    "status": {"type": "string", "enum": ["active", "pending", "completed"], "description": "set_status only; not valid on a stage."},
+                    "direction": {"type": "string", "enum": ["up", "down"], "description": "reorder only; moves the entry among its siblings."}
+                },
+                "required": ["action"],
+                "additionalProperties": false
+            }),
+        },
+        ToolSpec {
+            name: "storydex_preset_manage".into(),
+            description: "Manage style presets. They control expression only and can never override progression or established facts. Display order is priority order.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["create", "update", "delete", "enable", "disable", "reorder"]},
+                    "id": {"type": "string", "description": "Target preset; required for everything except create."},
+                    "title": {"type": "string"},
+                    "content": {"type": "string"},
+                    "direction": {"type": "string", "enum": ["up", "down"], "description": "reorder only."}
+                },
+                "required": ["action"],
+                "additionalProperties": false
+            }),
+        },
+        ToolSpec {
+            name: "storydex_memory_manage".into(),
+            description: "Manage established story facts. A locked fact is one the user pinned by hand: it is never rewritten or invalidated automatically, so unlock it explicitly first if it truly must change. Prefer invalidate over delete so the history of what was once true survives.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["add", "update", "invalidate", "restore", "delete", "lock", "unlock"]},
+                    "id": {"type": "string", "description": "Target fact; required for everything except add."},
+                    "text": {"type": "string"},
+                    "scope": {"type": "string", "enum": ["objective", "protagonist"], "description": "objective = world truth; protagonist = only what the protagonist believes."},
+                    "sources": {"type": "array", "items": {"type": "string"}, "description": "Fragment or chapter paths this fact came from."}
+                },
+                "required": ["action"],
+                "additionalProperties": false
+            }),
+        },
+        ToolSpec {
+            name: "storydex_keyword_library".into(),
+            description: "Read or replace a random-system keyword library. Replacing one turns it into a project library that overrides the built-in set; restore_builtin drops the project copy and goes back to the built-in one.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["get", "replace", "restore_builtin"]},
+                    "kind": {"type": "string", "enum": ["event", "male", "female", "tragedy", "payoff"]},
+                    "library": {
+                        "type": "object",
+                        "description": "replace only: category name to word list.",
+                        "additionalProperties": {"type": "array", "items": {"type": "string"}}
+                    }
+                },
+                "required": ["action", "kind"],
+                "additionalProperties": false
+            }),
+        },
+    ]
 }
 
 fn memory_specs() -> Vec<ToolSpec> {
@@ -2183,5 +2416,80 @@ mod tests {
         let config = std::fs::read_to_string(home.path().join("config/mcp_servers.json"))
             .expect("MCP configuration");
         assert!(config.contains("mcp==1.16.0"));
+    }
+
+    #[test]
+    fn only_irreversible_storydex_intents_require_approval() {
+        let reason = |name: &str, action: &str| {
+            storydex_intent_approval_reason(&ToolCall {
+                id: "intent".into(),
+                name: name.into(),
+                arguments: json!({"action": action}),
+            })
+        };
+        // 不可逆：删条目、删事实、覆盖或还原词库。
+        for (name, action) in [
+            ("storydex_script_manage", "delete"),
+            ("storydex_preset_manage", "delete"),
+            ("storydex_memory_manage", "delete"),
+            ("storydex_keyword_library", "replace"),
+            ("storydex_keyword_library", "restore_builtin"),
+        ] {
+            let reason = reason(name, action).unwrap_or_else(|| panic!("{name}/{action}"));
+            let lower = reason.to_ascii_lowercase();
+            // approval_access 靠 delete / overwrite 把卡片标成 destructive。
+            assert!(
+                lower.contains("delete") || lower.contains("overwrite"),
+                "{name}/{action}: {reason}"
+            );
+        }
+        // 可逆：用户在设置页看得见，也随手改得回来。
+        for (name, action) in [
+            ("storydex_script_manage", "create"),
+            ("storydex_script_manage", "set_status"),
+            ("storydex_preset_manage", "disable"),
+            ("storydex_memory_manage", "invalidate"),
+            ("storydex_keyword_library", "get"),
+            ("storydex_config_set", "whatever"),
+        ] {
+            assert!(reason(name, action).is_none(), "{name}/{action}");
+        }
+    }
+
+    #[tokio::test]
+    async fn storydex_config_tools_register_only_when_enabled() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        let policy =
+            SecurityPolicy::new(workspace.path(), AccessMode::ReadOnly).expect("security policy");
+        let base = CoreTools::new(workspace.path().to_path_buf(), policy.clone());
+        assert!(
+            !base
+                .specs()
+                .iter()
+                .any(|spec| spec.name.starts_with("storydex_")),
+            "story / narrator 与终端都不该看到配置工具"
+        );
+
+        let agent = CoreTools::new(workspace.path().to_path_buf(), policy).with_story_config(true);
+        assert!(
+            agent
+                .specs()
+                .iter()
+                .any(|spec| spec.name == "storydex_script_manage")
+        );
+        // 删除被拒时不能继续下发给前端：Deny 没有实现 request_config_intent，
+        // 一旦越过审批就会得到"界面没响应"，而不是这里断言的拒绝信息。
+        let denied = agent
+            .call(
+                &ToolCall {
+                    id: "drop-script".into(),
+                    name: "storydex_script_manage".into(),
+                    arguments: json!({"action": "delete", "id": "script-1"}),
+                },
+                &Deny,
+            )
+            .await;
+        assert!(!denied.success);
+        assert!(denied.output.contains("declined"), "{}", denied.output);
     }
 }

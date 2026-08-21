@@ -98,6 +98,15 @@
     <string name="coomi_dash_tui_desc">在终端里运行原生 coomi</string>
     <string name="coomi_dash_browser">在浏览器打开</string>
     <string name="coomi_dash_browser_desc">用系统浏览器访问本机引擎</string>
+    <string name="coomi_dash_usb_bridge">USB 调试桥</string>
+    <string name="coomi_dash_usb_bridge_off">已关闭 · 开启后 PC 可经 USB 读写故事项目</string>
+    <string name="coomi_dash_usb_bridge_on">已开启 · 访问令牌已写入 /sdcard/Storydex/bridge.json</string>
+    <string name="coomi_dash_usb_bridge_pending">已开启 · 待引擎启动后发布</string>
+    <string name="coomi_dash_usb_bridge_confirm_title">开启 USB 调试桥？</string>
+    <string name="coomi_dash_usb_bridge_confirm_message">这会把引擎的访问令牌写入共享存储（/sdcard/Storydex/bridge.json）。持有该令牌即可读写应用私有目录里的全部故事项目。\n\n请仅在通过 USB 连接电脑调试时开启，用完及时关闭。关闭并重启引擎后，旧令牌立即失效。</string>
+    <string name="coomi_dash_usb_bridge_confirm_ok">我了解，开启</string>
+    <string name="coomi_dash_usb_bridge_toast_on">USB 调试桥已开启</string>
+    <string name="coomi_dash_usb_bridge_toast_off">USB 调试桥已关闭，令牌已收回</string>
     <string name="coomi_dash_catalog">拓展管理</string>
     <string name="coomi_dash_catalog_desc">安装与管理 Skill 和 MCP 拓展</string>
     <string name="coomi_dash_files">文件管理</string>
@@ -197,5 +206,10 @@
     <string name="storydex_theme_default">现代浅色</string>
     <string name="storydex_theme_snow">经典蓝白</string>
     <string name="storydex_theme_book">沉浸书卷</string>
+    <string name="storydex_theme_celadon">青瓷</string>
+    <string name="storydex_theme_linen">亚麻</string>
     <string name="storydex_theme_dark">纯净暗色</string>
+    <string name="storydex_theme_ink">墨玉</string>
+    <string name="storydex_theme_abyss">深海</string>
+    <string name="storydex_theme_ember">炭褐</string>
 </resources>

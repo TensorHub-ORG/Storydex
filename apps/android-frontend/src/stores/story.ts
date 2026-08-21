@@ -1,9 +1,14 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { apiGet, authedFetch } from '@/bridge/http'
+import { pickEnum } from '@/utils/validate'
 import type { Timelineitem } from './viewModel'
 import { buildStoryPrompt } from '@/story/prompt'
-import { rollMechanics, type CharacterGenderMode } from '@/story/randomMechanics'
+import type { CharacterGenderMode, EncounterFrequency } from '@/story/randomMechanics'
+import {
+  directorPlanPrompt, type DirectorPlan,
+} from '@/story/directorMechanics'
+import { prepareUnifiedTurn } from '@/story/unifiedTurnController'
 import { useKeywordLibraryStore } from './keywordLibraries'
 import { useProjectStore } from './project'
 
@@ -22,6 +27,7 @@ export interface StoryFragment {
   suggestions: string[]
   sourceMessageId?: string
   synced?: boolean
+  suggestionsPersisted?: boolean
 }
 
 const LEGACY_STORAGE_KEY = 'storydex.mobile.story.v1'
@@ -47,15 +53,32 @@ interface StoryState {
   fragmentMax: number
   reasoningEffort: ReasoningEffort
   fortuneEnabled: boolean
+  encounterEnabled: boolean
+  encounterFrequency: EncounterFrequency
   eventEnabled: boolean
   characterEnabled: boolean
   characterGender: CharacterGenderMode
+  tragedyEnabled: boolean
+  payoffEnabled: boolean
 }
 
 function normalizedLength(value: unknown, fallback: number): number {
   const parsed = Number(value)
   return Number.isFinite(parsed) ? Math.min(8000, Math.max(200, Math.round(parsed))) : fallback
 }
+
+/**
+ * 枚举字段的合法取值。读盘（readState）与写入（各 setter）共用同一份清单。
+ *
+ * 此前这些清单只内联在 readState 里：读的时候校验，写的时候不校验。story.ts 又是
+ * 提示词组装时的读取权威，所以一个非法值写进 ref 后，落盘的 project.settings 是
+ * 合法的、内存里的却不是，两边静默分叉，表现为"设置显示对了但不起作用"。
+ */
+const AGENT_MODES: readonly AgentMode[] = ['story', 'narrator', 'agent']
+const NARRATIVE_MODES: readonly NarrativeMode[] = ['immersive', 'narrative', 'free']
+const REASONING_EFFORTS: readonly ReasoningEffort[] = ['auto', 'low', 'medium', 'high', 'xhigh']
+const ENCOUNTER_FREQUENCIES: readonly EncounterFrequency[] = ['restrained', 'balanced', 'active']
+const CHARACTER_GENDERS: readonly CharacterGenderMode[] = ['random', 'male', 'female']
 
 function readState(projectPath: string): StoryState {
   try {
@@ -72,32 +95,40 @@ function readState(projectPath: string): StoryState {
     const fragmentMax = Math.max(fragmentMin, normalizedLength(preferences.fragmentMax, 2000))
     const reasoningEffort = preferences.reasoningEffort === 'max'
       ? 'xhigh'
-      : ['auto', 'low', 'medium', 'high', 'xhigh'].includes(preferences.reasoningEffort)
-        ? preferences.reasoningEffort as ReasoningEffort : 'high'
+      : pickEnum(preferences.reasoningEffort, REASONING_EFFORTS, 'high')
     const fortuneEnabled = preferences.fortuneEnabled !== false
     const eventEnabled = preferences.eventEnabled === true
     const characterEnabled = (preferences.characterEnabled ?? preferences.romanceEnabled) === true
-    const characterGender = ['random', 'male', 'female'].includes(preferences.characterGender)
-      ? preferences.characterGender as CharacterGenderMode : 'random'
+    const tragedyEnabled = preferences.tragedyEnabled === true
+    const payoffEnabled = preferences.payoffEnabled === true
+    const encounterEnabled = typeof preferences.encounterEnabled === 'boolean'
+      ? preferences.encounterEnabled
+      : eventEnabled || characterEnabled
+    const encounterFrequency = pickEnum(preferences.encounterFrequency, ENCOUNTER_FREQUENCIES, 'balanced')
+    const characterGender = pickEnum(preferences.characterGender, CHARACTER_GENDERS, 'random')
     return {
       fragments: Array.isArray(value.fragments) ? value.fragments : [],
-      agentMode: ['story', 'narrator', 'agent'].includes(preferences.agentMode ?? value.agentMode)
-        ? (preferences.agentMode ?? value.agentMode) : 'story',
-      narrativeMode: ['immersive', 'narrative', 'free'].includes(preferences.narrativeMode ?? value.narrativeMode)
-        ? (preferences.narrativeMode ?? value.narrativeMode) : 'immersive',
+      agentMode: pickEnum(preferences.agentMode ?? value.agentMode, AGENT_MODES, 'story'),
+      narrativeMode: pickEnum(preferences.narrativeMode ?? value.narrativeMode, NARRATIVE_MODES, 'immersive'),
       fragmentMin,
       fragmentMax,
       reasoningEffort,
       fortuneEnabled,
+      encounterEnabled,
+      encounterFrequency,
       eventEnabled,
       characterEnabled,
       characterGender,
+      tragedyEnabled,
+      payoffEnabled,
     }
   } catch {
     return {
       fragments: [], agentMode: 'story', narrativeMode: 'immersive',
       fragmentMin: 1000, fragmentMax: 2000, reasoningEffort: 'high',
-      fortuneEnabled: true, eventEnabled: false, characterEnabled: false, characterGender: 'random',
+      fortuneEnabled: true, encounterEnabled: false, encounterFrequency: 'balanced',
+      eventEnabled: false, characterEnabled: false, characterGender: 'random',
+      tragedyEnabled: false, payoffEnabled: false,
     }
   }
 }
@@ -111,12 +142,29 @@ function shortSummary(content: string): string {
   return content.replace(/[#*_>`\[\]()]/g, '').replace(/\s+/g, ' ').trim().slice(0, 50)
 }
 
-function parseStoryResponse(raw: string): { content: string; suggestions: string[]; delta: import('./project').StoryStateDelta } | null {
+function containsLeakedPlanning(content: string): boolean {
+  const head = content.slice(0, 8_000)
+  const signals = [
+    /\bI now have (?:strong|enough|the) context\b/i,
+    /\bLet me (?:reconsider|refine|finalize|write|draft|construct|proceed)\b/i,
+    /\bNow for the state JSON\b/i,
+    /\bMy handling:\s/i,
+    /\bThe player wants\b/i,
+    /\bI(?:'ll| will) proceed\b/i,
+  ]
+  return signals.reduce((count, pattern) => count + Number(pattern.test(head)), 0) >= 2
+}
+
+export function parseStoryResponse(raw: string): { content: string; suggestions: string[]; delta: import('./project').StoryStateDelta } | null {
   const markerIndex = raw.lastIndexOf(ACTIONS_MARKER)
   if (markerIndex < 0) return null
   const stateIndex = raw.lastIndexOf(STATE_MARKER)
   if (stateIndex < markerIndex) return null
   const content = raw.slice(0, markerIndex).trim()
+  // Some providers may incorrectly stream hidden planning as visible text.
+  // Never archive or apply state from such a response: it pollutes chapters,
+  // memory and director scoring at the same time.
+  if (containsLeakedPlanning(content)) return null
   const suggestions = raw.slice(markerIndex + ACTIONS_MARKER.length, stateIndex)
     .split(/\r?\n/)
     .map(line => line.replace(/^\s*(?:[-*•]|\d+[.)、])\s*/, '').trim())
@@ -137,6 +185,17 @@ function nextGroupTimestamp(existingGroups: Set<string>, latestGroup?: string): 
   return candidate
 }
 
+/** 一个章节分组容纳的片段数。满了就滚到下一个时间戳分组。 */
+const FRAGMENTS_PER_GROUP = 5
+
+/** 组内已有的最大序号；文件名形如 {group}-{三位序号}.md，无法解析的按 0 计。 */
+function maxSequence(groupFragments: StoryFragment[]): number {
+  return groupFragments.reduce((max, item) => {
+    const parsed = Number(item.filename.replace(/\.md$/i, '').split('-').pop())
+    return Number.isFinite(parsed) ? Math.max(max, parsed) : max
+  }, 0)
+}
+
 interface FsEntry { name: string; is_dir: boolean; size: number; modified: number }
 interface FsListData { path: string; entries: FsEntry[] }
 
@@ -151,7 +210,7 @@ function unquoteFrontmatterValue(value: string): string {
 }
 
 /** 解析剧情片段文件的 frontmatter（---\nsummary: …\ncreatedAt: …\n---\n\n正文）。 */
-function parseFragmentFile(raw: string): { summary: string; createdAt: number; content: string } | null {
+function parseFragmentFile(raw: string): { summary: string; createdAt: number; suggestions: string[]; content: string } | null {
   const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/)
   if (!match) return null
   const meta: Record<string, string> = {}
@@ -163,6 +222,12 @@ function parseFragmentFile(raw: string): { summary: string; createdAt: number; c
   return {
     summary: meta.summary ?? '',
     createdAt: Number.isFinite(createdAt) ? createdAt : 0,
+    suggestions: (() => {
+      try {
+        const value = JSON.parse(meta.suggestions ?? '[]')
+        return Array.isArray(value) ? value.filter(item => typeof item === 'string').slice(0, 8) : []
+      } catch { return [] }
+    })(),
     content: (match[2] ?? '').trim(),
   }
 }
@@ -199,14 +264,28 @@ export const useStoryStore = defineStore('story', () => {
   const fragmentMax = ref(initial.fragmentMax)
   const reasoningEffort = ref<ReasoningEffort>(initial.reasoningEffort)
   const fortuneEnabled = ref(initial.fortuneEnabled)
+  const encounterEnabled = ref(initial.encounterEnabled)
+  const encounterFrequency = ref<EncounterFrequency>(initial.encounterFrequency)
   const eventEnabled = ref(initial.eventEnabled)
   const characterEnabled = ref(initial.characterEnabled)
   const characterGender = ref<CharacterGenderMode>(initial.characterGender)
+  const tragedyEnabled = ref(initial.tragedyEnabled)
+  const payoffEnabled = ref(initial.payoffEnabled)
   const olderExpanded = ref(false)
+  /** null means the live/latest story surface; a value means a read-only historical fragment. */
+  const viewedFragmentId = ref<string | null>(null)
+  /** Increments when restored engine history has been replaced by the canonical latest-fragment projection. */
+  const liveViewRevision = ref(0)
+  const pendingDirectorPlans = new Map<string, DirectorPlan>()
 
   const latest = computed(() => fragments.value[fragments.value.length - 1] ?? null)
+  const turnCommitPending = computed(() => Boolean(project.pendingCommit))
   const latestFive = computed(() => fragments.value.slice(-5).reverse())
   const older = computed(() => fragments.value.slice(0, -5).reverse())
+  const viewedFragment = computed(() => viewedFragmentId.value
+    ? fragments.value.find(fragment => fragment.id === viewedFragmentId.value) ?? null
+    : null)
+  const viewingHistory = computed(() => Boolean(viewedFragment.value && viewedFragment.value.id !== latest.value?.id))
 
   function persist() {
     localStorage.setItem(projectStorageKey(projectPath.value), JSON.stringify({ fragments: fragments.value }))
@@ -217,14 +296,28 @@ export const useStoryStore = defineStore('story', () => {
       fragmentMax: fragmentMax.value,
       reasoningEffort: reasoningEffort.value,
       fortuneEnabled: fortuneEnabled.value,
+      encounterEnabled: encounterEnabled.value,
+      encounterFrequency: encounterFrequency.value,
       eventEnabled: eventEnabled.value,
       characterEnabled: characterEnabled.value,
       characterGender: characterGender.value,
+      tragedyEnabled: tragedyEnabled.value,
+      payoffEnabled: payoffEnabled.value,
     }))
   }
 
-  function setAgentMode(mode: AgentMode) { agentMode.value = mode; persist(); if (mode !== 'agent') void loadFragmentsFromProject() }
-  function setNarrativeMode(mode: NarrativeMode) { narrativeMode.value = mode; persist() }
+  function setAgentMode(mode: AgentMode) {
+    const next = pickEnum(mode, AGENT_MODES, agentMode.value)
+    agentMode.value = next; persist(); if (next !== 'agent') void loadFragmentsFromProject()
+  }
+  function viewFragment(id: string) {
+    viewedFragmentId.value = id === latest.value?.id ? null : id
+  }
+  function showLatestFragment() {
+    viewedFragmentId.value = null
+    liveViewRevision.value += 1
+  }
+  function setNarrativeMode(mode: NarrativeMode) { narrativeMode.value = pickEnum(mode, NARRATIVE_MODES, narrativeMode.value); persist() }
   function setFragmentLength(min: number, max: number) {
     const nextMin = normalizedLength(min, fragmentMin.value)
     const nextMax = normalizedLength(max, fragmentMax.value)
@@ -232,32 +325,57 @@ export const useStoryStore = defineStore('story', () => {
     fragmentMax.value = Math.max(nextMin, nextMax)
     persist()
   }
-  function setReasoningEffort(effort: ReasoningEffort) { reasoningEffort.value = effort; persist() }
+  function setReasoningEffort(effort: ReasoningEffort) { reasoningEffort.value = pickEnum(effort, REASONING_EFFORTS, reasoningEffort.value); persist() }
   function setFortuneEnabled(enabled: boolean) { fortuneEnabled.value = enabled; persist(); void project.patchSettings({ fortuneEnabled: enabled }) }
+  function setEncounterEnabled(enabled: boolean) { encounterEnabled.value = enabled; persist(); void project.patchSettings({ encounterEnabled: enabled }) }
+  function setEncounterFrequency(frequency: EncounterFrequency) { const next = pickEnum(frequency, ENCOUNTER_FREQUENCIES, encounterFrequency.value); encounterFrequency.value = next; persist(); void project.patchSettings({ encounterFrequency: next }) }
   function setEventEnabled(enabled: boolean) { eventEnabled.value = enabled; persist(); void project.patchSettings({ eventEnabled: enabled }) }
   function setCharacterEnabled(enabled: boolean) { characterEnabled.value = enabled; persist(); void project.patchSettings({ characterEnabled: enabled }) }
-  function setCharacterGender(gender: CharacterGenderMode) { characterGender.value = gender; persist(); void project.patchSettings({ characterGender: gender }) }
+  function setCharacterGender(gender: CharacterGenderMode) { const next = pickEnum(gender, CHARACTER_GENDERS, characterGender.value); characterGender.value = next; persist(); void project.patchSettings({ characterGender: next }) }
+  function setTragedyEnabled(enabled: boolean) { tragedyEnabled.value = enabled; persist(); void project.patchSettings({ tragedyEnabled: enabled }) }
+  function setPayoffEnabled(enabled: boolean) { payoffEnabled.value = enabled; persist(); void project.patchSettings({ payoffEnabled: enabled }) }
 
   async function hydrateProjectSettings() {
     await project.initialize()
     fortuneEnabled.value = project.settings.fortuneEnabled
+    encounterEnabled.value = project.settings.encounterEnabled
+    encounterFrequency.value = project.settings.encounterFrequency
     eventEnabled.value = project.settings.eventEnabled
     characterEnabled.value = project.settings.characterEnabled
     characterGender.value = project.settings.characterGender
+    tragedyEnabled.value = project.settings.tragedyEnabled
+    payoffEnabled.value = project.settings.payoffEnabled
     await keywordLibraries.initialize()
     persist()
   }
 
   function promptFor(text: string): string {
-    const mechanics = rollMechanics({
+    const preparedTurn = prepareUnifiedTurn({
+      agentMode: agentMode.value,
+      directorState: project.directorState,
+      settings: project.settings,
+      primaryScriptFocus: project.primaryScriptFocus,
       fortuneEnabled: fortuneEnabled.value,
+      encounterEnabled: encounterEnabled.value,
+      encounterFrequency: encounterFrequency.value,
       eventEnabled: eventEnabled.value,
       characterEnabled: characterEnabled.value,
       characterGender: characterGender.value,
-      eventLibrary: keywordLibraries.eventLibrary,
-      maleLibrary: keywordLibraries.maleLibrary,
-      femaleLibrary: keywordLibraries.femaleLibrary,
+      tragedyEnabled: tragedyEnabled.value,
+      payoffEnabled: payoffEnabled.value,
+      libraries: {
+        event: keywordLibraries.eventLibrary,
+        male: keywordLibraries.maleLibrary,
+        female: keywordLibraries.femaleLibrary,
+        tragedy: keywordLibraries.tragedyLibrary,
+        payoff: keywordLibraries.payoffLibrary,
+      },
     })
+    const { directorPlan, mechanics } = preparedTurn
+    if (directorPlan) {
+      pendingDirectorPlans.set(directorPlan.id, directorPlan)
+      while (pendingDirectorPlans.size > 16) pendingDirectorPlans.delete(pendingDirectorPlans.keys().next().value as string)
+    }
     return buildStoryPrompt({
       agentMode: agentMode.value,
       narrativeMode: narrativeMode.value,
@@ -266,6 +384,7 @@ export const useStoryStore = defineStore('story', () => {
       playerText: text,
       actionsMarker: ACTIONS_MARKER,
       stateMarker: STATE_MARKER,
+      director: directorPlan ? directorPlanPrompt(directorPlan, project.directorState) : undefined,
       mechanics: mechanics.block || undefined,
     })
   }
@@ -295,11 +414,18 @@ export const useStoryStore = defineStore('story', () => {
     assistant.content = content
     if (latest.value?.content === content) return null
     const now = Date.now()
-    const startsNewGroup = fragments.value.length % 5 === 0
+    // 是否开新分组只看「当前最后一组装了几个」，不看片段总数。用总数取模的话，
+    // 历史上任何一次增删（外部导入、手工整理、解析失败被跳过）都会让余数永久错位，
+    // 之后每组都装不满 5 个且不会自己回正——真机上实测 51 组里 32 组不是 5 个。
+    const latestGroup = latest.value?.group
+    const groupFragments = latestGroup ? fragments.value.filter(item => item.group === latestGroup) : []
+    const startsNewGroup = !latestGroup || groupFragments.length >= FRAGMENTS_PER_GROUP
     const group = startsNewGroup
-      ? nextGroupTimestamp(new Set(fragments.value.map(item => item.group)), latest.value?.group)
-      : (latest.value?.group ?? nextGroupTimestamp(new Set()))
-    const sequence = (fragments.value.filter(item => item.group === group).length + 1).toString().padStart(3, '0')
+      ? nextGroupTimestamp(new Set(fragments.value.map(item => item.group)), latestGroup)
+      : latestGroup
+    // 组内序号取「已有最大序号 + 1」而非「个数 + 1」：组内序号有缺口时（例如 001、002、004）
+    // 按个数算会得出 004 并静默覆盖已有文件。
+    const sequence = (startsNewGroup ? 1 : maxSequence(groupFragments) + 1).toString().padStart(3, '0')
     const filename = `${group}-${sequence}.md`
     const relativePath = `chapters/${group}/${filename}`
     const summary = shortSummary(content)
@@ -314,12 +440,51 @@ export const useStoryStore = defineStore('story', () => {
       suggestions: parsed.suggestions,
       sourceMessageId: assistant.id,
       synced: true,
+      suggestionsPersisted: true,
     }
-    const body = `---\nsummary: ${JSON.stringify(summary)}\ncreatedAt: ${new Date(now).toISOString()}\n---\n\n${content}\n`
+    const body = `---\nsummary: ${JSON.stringify(summary)}\ncreatedAt: ${new Date(now).toISOString()}\nsuggestions: ${JSON.stringify(parsed.suggestions)}\n---\n\n${content}\n`
+    const directorPlanId = parsed.delta.director?.planId
+    const queuedDirectorPlans = [...pendingDirectorPlans.values()]
+    const reconstructedDirectorPlan = project.settings.directorEnabled
+      ? prepareUnifiedTurn({
+        agentMode: 'story', directorState: project.directorState, settings: project.settings,
+        primaryScriptFocus: project.primaryScriptFocus,
+        fortuneEnabled: false, encounterEnabled: false, encounterFrequency: encounterFrequency.value,
+        eventEnabled: false, characterEnabled: false, characterGender: characterGender.value,
+        tragedyEnabled: false, payoffEnabled: false,
+        libraries: {
+          event: keywordLibraries.eventLibrary, male: keywordLibraries.maleLibrary,
+          female: keywordLibraries.femaleLibrary, tragedy: keywordLibraries.tragedyLibrary,
+          payoff: keywordLibraries.payoffLibrary,
+        },
+      }).directorPlan
+      : null
+    const directorPlan = (directorPlanId ? pendingDirectorPlans.get(directorPlanId) : undefined)
+      ?? queuedDirectorPlans[queuedDirectorPlans.length - 1]
+      ?? (reconstructedDirectorPlan?.id === directorPlanId ? reconstructedDirectorPlan : null)
+    const directorEvaluation = directorPlan && project.settings.directorEnabled
+      ? await project.prepareDirectorTurn(
+        content, parsed.delta.director, directorPlan, assistant.id, relativePath, parsed.delta,
+      )
+      : null
+    if (project.settings.directorEnabled && (!directorPlan || !directorEvaluation?.accepted || !directorEvaluation.planSatisfied)) {
+      if (directorPlan) pendingDirectorPlans.delete(directorPlan.id)
+      const reasons = directorEvaluation?.rejectedReasons?.slice(-3) ?? ['缺少与当前状态匹配的统一导演计划']
+      assistant.content = `本轮剧情未通过统一剧情控制校验，已阻止归档和状态推进。\n\n${reasons.map(item => `- ${item}`).join('\n')}\n\n请重新执行本轮；下一次生成仍使用未推进的主线状态。`
+      return null
+    }
     if (projectPath.value) await writeStoryFragment(sessionId, relativePath, body)
+    if (directorPlan && directorEvaluation) await project.updatePendingPhase('chapter_written')
     fragments.value.push(fragment)
-    try { await project.applyStoryDelta(parsed.delta) }
-    catch { await project.markMemoryPending().catch(() => {}) }
+    showLatestFragment()
+    if (directorPlan && directorEvaluation) {
+      await project.commitDirectorTurn(directorEvaluation, directorPlan, assistant.id, relativePath)
+      pendingDirectorPlans.delete(directorPlan.id)
+    }
+    try {
+      await project.applyStoryDelta(parsed.delta, directorEvaluation, directorPlan, content, relativePath)
+      if (directorPlan && directorEvaluation) await project.finalizeStoryTurn()
+    } catch { await project.markMemoryPending().catch(() => {}) }
     persist()
     return fragment
   }
@@ -329,11 +494,12 @@ export const useStoryStore = defineStore('story', () => {
     if (!fragment) return false
     const trimmed = content.trim()
     const summary = shortSummary(trimmed)
-    const body = `---\nsummary: ${JSON.stringify(summary)}\ncreatedAt: ${new Date(fragment.createdAt).toISOString()}\n---\n\n${trimmed}\n`
+    const body = `---\nsummary: ${JSON.stringify(summary)}\ncreatedAt: ${new Date(fragment.createdAt).toISOString()}\nsuggestions: ${JSON.stringify(fragment.suggestions)}\n---\n\n${trimmed}\n`
     if (projectPath.value) await writeStoryFragment(sessionId, fragment.path, body)
     fragment.content = trimmed
     fragment.summary = summary
     fragment.synced = true
+    fragment.suggestionsPersisted = true
     await project.markMemoryStale(fragment.path).catch(() => {})
     persist()
     return true
@@ -341,10 +507,11 @@ export const useStoryStore = defineStore('story', () => {
 
   async function syncFragments(sessionId: string): Promise<number> {
     let synced = 0
-    for (const fragment of fragments.value.filter(item => !item.synced)) {
-      const body = `---\nsummary: ${JSON.stringify(fragment.summary)}\ncreatedAt: ${new Date(fragment.createdAt).toISOString()}\n---\n\n${fragment.content.trim()}\n`
+    for (const fragment of fragments.value.filter(item => !item.synced || !item.suggestionsPersisted)) {
+      const body = `---\nsummary: ${JSON.stringify(fragment.summary)}\ncreatedAt: ${new Date(fragment.createdAt).toISOString()}\nsuggestions: ${JSON.stringify(fragment.suggestions)}\n---\n\n${fragment.content.trim()}\n`
       await writeStoryFragment(sessionId, fragment.path, body)
       fragment.synced = true
+      fragment.suggestionsPersisted = true
       synced++
     }
     if (synced > 0) persist()
@@ -363,6 +530,7 @@ export const useStoryStore = defineStore('story', () => {
     if (current !== projectPath.value) {
       projectPath.value = current
       fragments.value = []
+      showLatestFragment()
     }
     if (fragments.value.length > 0) return false
     const chaptersDir = current.replace(/\/+$/, '') + '/chapters'
@@ -393,8 +561,9 @@ export const useStoryStore = defineStore('story', () => {
           createdAt: parsed.createdAt,
           summary: parsed.summary || shortSummary(parsed.content),
           content: parsed.content,
-          suggestions: [],
+          suggestions: parsed.suggestions,
           synced: true,
+          suggestionsPersisted: true,
           sortKey: parsed.createdAt,
         })
       }
@@ -413,10 +582,13 @@ export const useStoryStore = defineStore('story', () => {
 
   void hydrateProjectSettings()
   return {
-    fragments, agentMode, narrativeMode, fragmentMin, fragmentMax, reasoningEffort, projectPath, olderExpanded,
-    fortuneEnabled, eventEnabled, characterEnabled, characterGender,
-    latest, latestFive, older, setAgentMode, setNarrativeMode, setFragmentLength, setReasoningEffort,
-    setFortuneEnabled, setEventEnabled, setCharacterEnabled, setCharacterGender,
+    fragments, agentMode, narrativeMode, fragmentMin, fragmentMax, reasoningEffort, projectPath, olderExpanded, liveViewRevision,
+    fortuneEnabled, encounterEnabled, encounterFrequency,
+    eventEnabled, characterEnabled, characterGender, tragedyEnabled, payoffEnabled,
+    latest, latestFive, older, viewedFragment, viewingHistory, turnCommitPending,
+    setAgentMode, viewFragment, showLatestFragment, setNarrativeMode, setFragmentLength, setReasoningEffort,
+    setFortuneEnabled, setEncounterEnabled, setEncounterFrequency,
+    setEventEnabled, setCharacterEnabled, setCharacterGender, setTragedyEnabled, setPayoffEnabled,
     promptFor, captureTurn, updateFragment, syncFragments, loadFragmentsFromProject, hydrateProjectSettings,
     parseStoryResponse,
   }

@@ -460,6 +460,26 @@ pub struct UserInputRequest {
 
 pub type UserInputResponse = BTreeMap<String, String>;
 
+/// Agent 侧的配置意图：引擎只负责把它送到前端并等回执，不解释 `arguments` 的内容。
+///
+/// 之所以保持不透明：校验规则全在前端的 store action 里（`normalizePlotMechanics` 的范围与
+/// 枚举收敛、`canApplyScriptStatus` 的状态机、剧本三级层级与引用完整性、词库的内置恢复）。
+/// 引擎若照抄一份，就会有两套规则各自演进，出分歧时也判断不出该以哪份为准。所以这里只有
+/// 「哪个工具 + 原样参数」，前端是唯一真相源。
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ConfigIntent {
+    /// 工具名（`storydex_config_set` 等），前端据此分派到对应的 store action。
+    pub tool: String,
+    pub arguments: Value,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ConfigOutcome {
+    pub ok: bool,
+    /// 成功时是给模型看的结果（读到的配置 JSON、写入后的摘要）；失败时是拒绝或报错的原因。
+    pub detail: String,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderStreamPhase {
     RequestStarted,
@@ -559,6 +579,14 @@ pub trait ApprovalHandler: Send + Sync {
     async fn approve(&self, call: &ToolCall, reason: &str) -> bool;
 
     async fn request_user_input(&self, _request: &UserInputRequest) -> Option<UserInputResponse> {
+        None
+    }
+
+    /// 把配置意图交给前端执行并等回执。
+    ///
+    /// 默认 `None`：没有界面的场景（终端 UI、测试、headless）不具备执行条件。工具据此明确报错，
+    /// 而不是静默当成成功——那会让模型以为配置改好了，接着按错误的前提往下写故事。
+    async fn request_config_intent(&self, _intent: &ConfigIntent) -> Option<ConfigOutcome> {
         None
     }
 }

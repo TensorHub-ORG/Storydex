@@ -79,10 +79,8 @@ async function save() {
 <style scoped>
 .page { display: flex; flex-direction: column; height: 100%; background: var(--page); }
 .body { flex: 1; overflow-y: auto; padding: 14px 12px calc(var(--safe-bottom) + 24px); }
-.card {
-  padding: 15px 14px 16px; border-radius: var(--r-card);
-  background: var(--bg); box-shadow: var(--shadow-1);
-}
+/* 底色 / 圆角 / 投影来自 global.css 的 .card。 */
+.card { padding: 15px 14px 16px; }
 .desc { padding: 0 4px 12px; font-size: 13px; line-height: 1.65; color: var(--text-2); }
 .fld { display: flex; flex-direction: column; gap: 6px; }
 .flabel { padding-left: 4px; font-size: 12.5px; color: var(--text-2); }

@@ -3,10 +3,14 @@ import { defineStore } from 'pinia'
 import { EVENT_KEYWORD_LIBRARY } from '@/story/eventKeywords'
 import { FEMALE_CHARACTER_KEYWORD_LIBRARY } from '@/story/femaleCharacterKeywords'
 import { MALE_CHARACTER_KEYWORD_LIBRARY } from '@/story/maleCharacterKeywords'
+import { PAYOFF_KEYWORD_LIBRARY } from '@/story/payoffKeywords'
+import { TRAGEDY_KEYWORD_LIBRARY } from '@/story/tragedyKeywords'
 import { currentProjectRoot, deleteProjectFile, exportProjectContent, readProjectJson, writeProjectJson } from '@/utils/projectFiles'
 
 export type KeywordLibrary = Record<string, string[]>
-export type KeywordLibraryKind = 'event' | 'male' | 'female'
+export type KeywordLibraryKind = 'event' | 'male' | 'female' | 'tragedy' | 'payoff'
+
+export const KEYWORD_LIBRARY_KINDS: KeywordLibraryKind[] = ['event', 'male', 'female', 'tragedy', 'payoff']
 
 const STORAGE_PREFIX = 'storydex.mobile.keyword-library.v1:'
 const MIGRATION_PREFIX = 'storydex.mobile.keyword-library.migrated.v2:'
@@ -19,6 +23,8 @@ const BUILTIN_LIBRARIES: Record<KeywordLibraryKind, KeywordLibrary> = {
   event: EVENT_KEYWORD_LIBRARY,
   male: MALE_CHARACTER_KEYWORD_LIBRARY,
   female: FEMALE_CHARACTER_KEYWORD_LIBRARY,
+  tragedy: TRAGEDY_KEYWORD_LIBRARY,
+  payoff: PAYOFF_KEYWORD_LIBRARY,
 }
 
 export function builtinKeywordLibrary(kind: KeywordLibraryKind): KeywordLibrary {
@@ -29,18 +35,24 @@ export const KEYWORD_LIBRARY_LABELS: Record<KeywordLibraryKind, string> = {
   event: '随机事件',
   male: '男性人物',
   female: '女性人物',
+  tragedy: '悲剧情节',
+  payoff: '爽点情节',
 }
 
 export const KEYWORD_LIBRARY_FILENAMES: Record<KeywordLibraryKind, string> = {
   event: 'storydex-random-events.json',
   male: 'storydex-random-characters-male.json',
   female: 'storydex-random-characters-female.json',
+  tragedy: 'storydex-random-tragedies.json',
+  payoff: 'storydex-random-payoffs.json',
 }
 
 const PROJECT_LIBRARY_FILES: Record<KeywordLibraryKind, string> = {
   event: '.storydex/random/events.json',
   male: '.storydex/random/characters-male.json',
   female: '.storydex/random/characters-female.json',
+  tragedy: '.storydex/random/tragedies.json',
+  payoff: '.storydex/random/payoffs.json',
 }
 
 export interface KeywordLibraryStats {
@@ -120,12 +132,16 @@ export const useKeywordLibraryStore = defineStore('keyword-libraries', () => {
     event: null,
     male: null,
     female: null,
+    tragedy: null,
+    payoff: null,
   })
   const loadedProject = ref('')
 
   const eventLibrary = computed(() => custom.value.event ?? BUILTIN_LIBRARIES.event)
   const maleLibrary = computed(() => custom.value.male ?? BUILTIN_LIBRARIES.male)
   const femaleLibrary = computed(() => custom.value.female ?? BUILTIN_LIBRARIES.female)
+  const tragedyLibrary = computed(() => custom.value.tragedy ?? BUILTIN_LIBRARIES.tragedy)
+  const payoffLibrary = computed(() => custom.value.payoff ?? BUILTIN_LIBRARIES.payoff)
 
   function active(kind: KeywordLibraryKind): KeywordLibrary {
     return custom.value[kind] ?? BUILTIN_LIBRARIES[kind]
@@ -145,14 +161,16 @@ export const useKeywordLibraryStore = defineStore('keyword-libraries', () => {
   async function initialize() {
     const root = currentProjectRoot()
     if (!root || loadedProject.value === root) return
-    const next: Record<KeywordLibraryKind, KeywordLibrary | null> = { event: null, male: null, female: null }
-    for (const kind of ['event', 'male', 'female'] as KeywordLibraryKind[]) {
+    const next: Record<KeywordLibraryKind, KeywordLibrary | null> = {
+      event: null, male: null, female: null, tragedy: null, payoff: null,
+    }
+    for (const kind of KEYWORD_LIBRARY_KINDS) {
       const projectValue = await readProjectJson<unknown>(PROJECT_LIBRARY_FILES[kind])
       if (projectValue) next[kind] = normalizeKeywordLibrary(projectValue).library
     }
     const migrationKey = MIGRATION_PREFIX + encodeURIComponent(root)
     if (!localStorage.getItem(migrationKey)) {
-      for (const kind of ['event', 'male', 'female'] as KeywordLibraryKind[]) {
+      for (const kind of KEYWORD_LIBRARY_KINDS) {
         if (!next[kind]) {
           const legacy = readCustom(kind)
           if (legacy) {
@@ -200,7 +218,8 @@ export const useKeywordLibraryStore = defineStore('keyword-libraries', () => {
 
   void initialize()
   return {
-    custom, eventLibrary, maleLibrary, femaleLibrary, active, stats, initialize,
+    custom, eventLibrary, maleLibrary, femaleLibrary, tragedyLibrary, payoffLibrary,
+    active, stats, initialize,
     importJson, replaceLibrary, restoreBuiltin, exportJson, exportCurrent,
   }
 })

@@ -8,10 +8,12 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useSessionStore } from '@/stores/session'
 import { useStoryStore, type AgentMode, type NarrativeMode } from '@/stores/story'
+import { useProjectStore } from '@/stores/project'
 import CoomiIcon from './CoomiIcon.vue'
 
 const session = useSessionStore()
 const story = useStoryStore()
+const project = useProjectStore()
 
 /** 斜杠指令：点击后填入输入框，可编辑后发送。 */
 const SLASH_COMMANDS = [
@@ -30,7 +32,8 @@ const transferProgress = ref(0)
 const textareaScrollable = ref(false)
 const hasNative = typeof window !== 'undefined' && !!window.CoomiAndroid
 
-const canSend = computed(() => text.value.trim().length > 0)
+const storyLocked = computed(() => story.agentMode === 'story' && project.consistency.required)
+const canSend = computed(() => text.value.trim().length > 0 && !storyLocked.value)
 const isJumpIn = computed(() => session.isBusy && canSend.value)
 const showStop = computed(() => session.isBusy && !canSend.value)
 const agentLabels: Record<AgentMode, string> = { story: '剧情', narrator: '旁白', agent: 'Agent' }
@@ -41,8 +44,11 @@ function autoGrow() {
   if (!el) return
   el.style.height = 'auto'
   const scrollHeight = el.scrollHeight
-  textareaScrollable.value = scrollHeight > 132
-  el.style.height = Math.min(scrollHeight, 132) + 'px'
+  /* 上限只写在 .input 的 max-height 里，这里回读。原先 132 在 JS 写两遍、CSS 再写一遍，
+     三处任改其一就会出现「滚动条已出现但还能继续长高」或反过来的错位。 */
+  const max = parseFloat(getComputedStyle(el).maxHeight) || Infinity
+  textareaScrollable.value = scrollHeight > max
+  el.style.height = Math.min(scrollHeight, max) + 'px'
 }
 
 async function submit() {
@@ -51,6 +57,11 @@ async function submit() {
   text.value = ''
   await nextTick()
   autoGrow()
+}
+
+async function rebuildConsistency() {
+  await session.rebuildStoryConsistency()
+  if (!project.consistency.required) textarea.value?.focus()
 }
 
 /** 主按钮：空着且在忙 = 停止，其余 = 发送 / 插队。 */
@@ -178,7 +189,14 @@ watch(text, () => {
       </div>
     </div>
 
-    <div class="field" :class="{ busy: session.isBusy }">
+    <div class="field" :class="{ busy: session.isBusy, locked: storyLocked }">
+      <div v-if="storyLocked" class="consistency-lock">
+        <span>历史章节已修改</span>
+        <button :disabled="project.consistency.updating || session.isBusy" @click="rebuildConsistency">
+          <CoomiIcon name="refresh" :size="14" />
+          {{ project.consistency.updating ? '更新中…' : '更新记忆与状态' }}
+        </button>
+      </div>
       <div class="input-clip">
         <textarea
           ref="textarea"
@@ -186,7 +204,8 @@ watch(text, () => {
           class="input"
           :class="{ scrollable: textareaScrollable }"
           rows="1"
-          :placeholder="session.isBusy ? '补充你的行动…' : story.agentMode === 'agent' ? '给 Agent 下达任务…' : '说出你的行动…'"
+          :disabled="storyLocked"
+          :placeholder="storyLocked ? '请先更新记忆与剧情状态，完成后才能继续剧情' : session.isBusy ? '补充你的行动…' : story.agentMode === 'agent' ? '给 Agent 下达任务…' : '说出你的行动…'"
           @input="autoGrow"
           @keydown="onKeydown"
         />
@@ -204,7 +223,7 @@ watch(text, () => {
 
         <span class="spacer" />
 
-        <button class="act" aria-label="快捷指令" @click="toggleQuick">
+        <button class="act" aria-label="快捷指令" :disabled="storyLocked" @click="toggleQuick">
           <CoomiIcon name="plusCircle" :size="21" />
         </button>
 
@@ -239,6 +258,11 @@ watch(text, () => {
 }
 .field:focus-within { border-color: var(--blue-border); background: var(--bg); }
 .field.busy { border-color: var(--border-strong); }
+.field.locked { border-color: var(--orange); background: var(--fill); }
+.consistency-lock { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 3px 4px 0 6px; color: var(--orange); font-size: 12px; font-weight: 600; }
+.consistency-lock span { flex: 1; min-width: 0; }
+.consistency-lock button { display: inline-flex; align-items: center; gap: 4px; min-height: 30px; padding: 0 9px; border: 1px solid var(--orange); border-radius: var(--r-sm); background: var(--bg); color: var(--orange); font-size: 12px; font-weight: 650; }
+.consistency-lock button:disabled { opacity: .5; }
 
 .input-clip { overflow: hidden; border-radius: 18px 18px 8px 8px; }
 .input {
@@ -258,22 +282,35 @@ watch(text, () => {
 .spacer { flex: 1; }
 
 .act {
-  display: grid; place-items: center; width: 34px; height: 34px;
+  position: relative;
+  display: grid; place-items: center; width: 36px; height: 36px;
   border: 0; border-radius: 50%; background: none; color: var(--text-2);
 }
 .act:active { background: var(--fill-press); }
+.act:disabled { opacity: .35; pointer-events: none; }
 
 .send {
+  position: relative;
   display: grid; place-items: center; flex-shrink: 0;
   width: 36px; height: 36px;
   border: 0; border-radius: 50%;
-  background: var(--blue); color: #fff;
+  background: var(--blue); color: var(--on-accent);
   transition: background .16s, transform .06s;
 }
 .send.jump { background: var(--orange); }
 .send.stop { background: var(--text); }
 .send:disabled { background: var(--border-strong); pointer-events: none; }
 .send:active { transform: scale(.92); }
+
+/* 这一排是全 App 点得最多的地方，但画出来的圆只有 36px、药丸只有 32px 高，
+   都不到 44px 的可触达下限。放大视觉尺寸会把输入区顶高，所以只用一层透明伪元素
+   把命中区域撑到 44px 高：左右各外扩 3px，正好把 6px 的 gap 平分掉——两边刚好
+   相接而不重叠，既不留死区也不会点到隔壁那个。 */
+.bar > button::after {
+  content: ''; position: absolute; inset: -4px -3px; border-radius: var(--r-pill);
+}
+.bar > .pill { position: relative; }
+.bar > .pill::after { inset: -6px -3px; }
 
 /* 指令面板浮层：可滚动卡片 */
 .quick-scrim { position: fixed; inset: 0; z-index: 1; }

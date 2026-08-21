@@ -25,17 +25,35 @@ export const PERMISSION_MODES: { mode: PermissionMode; label: string; desc: stri
   { mode: 'full', label: '放行', desc: '全部自动执行（仅信任场景）' },
 ]
 
-/** Mirrors the five desktop Storydex appearance presets. */
-export type ThemeMode = 'white' | 'default' | 'snow' | 'book' | 'dark'
+/** 外观档位。新增一档必须同步六处，漏掉任一处都会静默回退 snow：
+ *   1. 本类型 ThemeMode（若是深色还要进 DARK_THEMES）
+ *   2. THEME_MODES（THEME_CODES 由它派生，不用单独改）
+ *   3. global.css 的 :root[data-theme=…]
+ *   4. 原生 colors_coomi.xml 的调色板 + theme_coomi.xml 的 3 个 style（本体 / .Page / .Web）
+ *   5. 原生 CoomiTheme.java：MODE_* 常量、isValid、isDark、以及 baseTheme/pageTheme/webTheme/systemBarColor 四个 switch
+ *   6. 原生外观选择页 CoomiAppearanceActivity 的 rows/codes + activity_storydex_appearance.xml 的单选行 + strings_coomi.xml 的标签
+ *  第 5 处的 isValid 是硬闸门：不认这个码，CoomiTheme.setMode 会直接 return，网页选的档位在原生侧被静默丢弃。 */
+export type ThemeMode =
+  | 'white' | 'default' | 'snow' | 'book' | 'celadon' | 'linen'
+  | 'dark' | 'ink' | 'abyss' | 'ember'
+
+/** 是否深色档位。原生状态栏图标反色与 <meta name="theme-color"> 都按它取值。 */
+export const DARK_THEMES: ReadonlySet<ThemeMode> = new Set<ThemeMode>(['dark', 'ink', 'abyss', 'ember'])
+
 export const THEME_MODES: { mode: ThemeMode; label: string; desc: string }[] = [
   { mode: 'white', label: '纯白工作台', desc: '纯白画布与暖橙强调色' },
   { mode: 'default', label: '现代浅色', desc: '清爽浅色工作台' },
   { mode: 'snow', label: '经典蓝白', desc: '简洁明快的蓝白配色' },
   { mode: 'book', label: '沉浸书卷', desc: '适合小说阅读的暖纸色' },
+  { mode: 'celadon', label: '青瓷', desc: '低饱和青绿，久读不刺眼' },
+  { mode: 'linen', label: '亚麻', desc: '中性米灰，接近印刷纸' },
   { mode: 'dark', label: '纯净暗色', desc: '低亮度沉浸界面' },
+  { mode: 'ink', label: '墨玉', desc: '极深中性底配青玉强调色' },
+  { mode: 'abyss', label: '深海', desc: '靛蓝底配亮蓝强调色' },
+  { mode: 'ember', label: '炭褐', desc: '暖炭底配琥珀强调色' },
 ]
 
-const THEME_CODES: ThemeMode[] = ['white', 'default', 'snow', 'book', 'dark']
+const THEME_CODES: ThemeMode[] = THEME_MODES.map(item => item.mode)
 
 /** 取当前主题档位：优先 Android 原生偏好（JS 桥），其次 localStorage，默认跟随系统。 */
 export function readThemeMode(): ThemeMode {
@@ -50,9 +68,16 @@ export function readThemeMode(): ThemeMode {
   return THEME_CODES.includes(saved as ThemeMode) ? saved as ThemeMode : 'snow'
 }
 
-/** 写入 <html data-theme>，前端 global.css 据此切换暗色主题。 */
+/** 写入 <html data-theme>，前端 global.css 据此切换主题；同时把 <meta name="theme-color">
+ *  同步成该主题的实际底色，否则暗色主题下浏览器/系统那条色带仍是 index.html 里写死的白。 */
 export function applyTheme(mode: ThemeMode) {
-  document.documentElement.setAttribute('data-theme', mode)
+  const root = document.documentElement
+  root.setAttribute('data-theme', mode)
+  const meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')
+  if (!meta) return
+  // data-theme 刚写上，此时 getComputedStyle 已能读到该主题覆写后的 --bg。
+  const bg = getComputedStyle(root).getPropertyValue('--bg').trim()
+  if (bg) meta.content = bg
 }
 
 // 浏览器独立开发时的兜底数据（后端不可达时使用）
@@ -65,6 +90,7 @@ export const useConfigStore = defineStore('config', () => {
   const savedPermission = localStorage.getItem('coomi.permissionMode') as PermissionMode | null
   const permissionMode = ref<PermissionMode>(['ask', 'auto', 'full'].includes(savedPermission ?? '') ? savedPermission! : 'full')
   const planMode = ref(false)
+  const retainContextWindow = ref(localStorage.getItem('coomi.retainContextWindow') !== '0')
   const themeMode = ref<ThemeMode>(readThemeMode())
 
   const providers = ref<ProviderConfig[]>([])
@@ -114,17 +140,24 @@ export const useConfigStore = defineStore('config', () => {
     localStorage.setItem('coomi.model', model)
   }
   function setPermissionMode(mode: PermissionMode) {
+    // 构造时读 localStorage 有白名单校验，写入却没有：非法值会让下游的三路判断全落
+    // 到 else 分支。权限档位是安全相关字段，宁可拒绝也不能静默留一个未知值。
+    if (!PERMISSION_MODES.some(item => item.mode === mode)) throw new Error(`未知的权限档位：${mode}`)
     permissionMode.value = mode
     localStorage.setItem('coomi.permissionMode', mode)
   }
 
   /**
-   * 五档主题。应用后：
+   * 切换外观档位（当前 10 档，见 THEME_MODES）。应用后：
    * - 写入 <html data-theme>（前端样式即时切换）；
    * - Android WebView 内通知原生（CoomiAndroid.setThemeMode），原生据此改状态栏
    *   颜色并重新注入 data-theme；桌面浏览器直接由 applyTheme 生效。
+   *
+   * 非法档位会被拒绝而不是写进去：data-theme 写了个没有对应 :root[data-theme=…] 块的值，
+   * 样式会静默退回 :root 基础色（看起来像浅色主题坏了），排查时很难反推到这一步。
    */
   function setThemeMode(mode: ThemeMode) {
+    if (!THEME_CODES.includes(mode)) throw new Error(`未知的主题档位：${mode}`)
     themeMode.value = mode
     localStorage.setItem('coomi.themeMode', mode)
     applyTheme(mode)
@@ -133,13 +166,19 @@ export const useConfigStore = defineStore('config', () => {
       try { bridge.setThemeMode(mode) } catch { /* 忽略桥异常 */ }
     }
   }
+  /** 轮转权限档位。走 setPermissionMode 落 localStorage——此前这里只改 ref 不落盘，
+   *  用顶栏轮转出来的档位刷新后就丢了，而设置页里选的同一个档位却记得住。 */
   function cyclePermissionMode(): PermissionMode {
     const order: PermissionMode[] = ['ask', 'auto', 'full']
     const idx = order.indexOf(permissionMode.value)
-    permissionMode.value = order[(idx + 1) % order.length]
+    setPermissionMode(order[(idx + 1) % order.length])
     return permissionMode.value
   }
   function togglePlanMode() { planMode.value = !planMode.value }
+  function setRetainContextWindow(enabled: boolean) {
+    retainContextWindow.value = enabled
+    localStorage.setItem('coomi.retainContextWindow', enabled ? '1' : '0')
+  }
 
   /**
    * 全局会话记忆：关闭（默认）时 Coomi 无法读取任何历史会话文件；
@@ -297,9 +336,9 @@ export const useConfigStore = defineStore('config', () => {
   }
 
   return {
-    permissionMode, planMode, themeMode, globalMemory, customPrompt, providers, activeId, loading, usingMock, lastError,
+    permissionMode, planMode, retainContextWindow, themeMode, globalMemory, customPrompt, providers, activeId, loading, usingMock, lastError,
     currentProviderId, currentModel, currentProvider,
-    fetchProviders, selectModel, setPermissionMode, setThemeMode, cyclePermissionMode, togglePlanMode,
+    fetchProviders, selectModel, setPermissionMode, setThemeMode, cyclePermissionMode, togglePlanMode, setRetainContextWindow,
     toggleGlobalMemory, syncGlobalMemoryFromEngine, fetchCustomPrompt, saveCustomPrompt,
     upsertProvider, deleteProvider, activateProvider, copyProvider, revealProviderKey, discoverModels,
   }

@@ -31,6 +31,8 @@ pub use types::AutoCompactScope;
 pub use types::ChatMessage;
 pub use types::CompactionRequest;
 pub use types::CompactionResponse;
+pub use types::ConfigIntent;
+pub use types::ConfigOutcome;
 pub use types::ContextStatus;
 pub use types::ImageContent;
 pub use types::LoopState;

@@ -3,7 +3,7 @@
  * 当前故事项目的模式独立会话抽屉。
  * sessions store 会按 story / narrator / agent 隔离列表与搜索结果。
  */
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSessionStore } from '@/stores/session'
 import { useStoryStore, type StoryFragment } from '@/stores/story'
@@ -18,33 +18,23 @@ const sessions = useSessionsStore()
 const story = useStoryStore()
 
 const modeLabel = computed(() => ({ story: '剧情', narrator: '旁白', agent: 'Agent' })[story.agentMode])
-const drawerView = ref<'sessions' | 'fragments'>('sessions')
 
-// ── 剧情片段抽屉（story / narrator）──
-const editing = ref<StoryFragment | null>(null)
-const editText = ref('')
-const editError = ref('')
-const saving = ref(false)
+// 剧情模式搜索项目内已归档片段；另外两种模式搜索各自独立会话。
+const fragmentQuery = ref('')
+const filteredFragments = computed(() => {
+  const query = fragmentQuery.value.trim().toLocaleLowerCase()
+  const newest = [...story.fragments].reverse()
+  if (!query) return newest
+  return newest.filter(fragment => [fragment.filename, fragment.summary, fragment.content]
+    .some(value => value.toLocaleLowerCase().includes(query)))
+})
 
 function continueStory() { session.continueStory(); emit('close') }
 function standby() { session.standby(); emit('close') }
-function edit(fragment: StoryFragment) {
-  editing.value = fragment
-  editText.value = fragment.content
-  editError.value = ''
-}
-async function save() {
-  if (!editing.value) return
-  saving.value = true
-  editError.value = ''
-  try {
-    await story.updateFragment(editing.value.id, editText.value, session.sessionId)
-    editing.value = null
-  } catch (error) {
-    editError.value = error instanceof Error ? error.message : '保存失败，请稍后重试'
-  } finally {
-    saving.value = false
-  }
+function openFragment(fragment: StoryFragment) {
+  if (fragment.id === story.latest?.id) session.continueStory()
+  else story.viewFragment(fragment.id)
+  emit('close')
 }
 
 // ── 历史会话抽屉（agent）──
@@ -61,7 +51,6 @@ watch(() => props.open, v => {
     return
   }
   sessions.setCurrentMode(story.agentMode)
-  drawerView.value = 'sessions'
   sessions.refreshRunning()
 })
 
@@ -79,16 +68,24 @@ function startNew() {
 function closeMenu() { menuFor.value = null }
 
 /** WebView 里 window.prompt 默认被吞掉，所以重命名走行内输入框。 */
-async function beginRename() {
+function beginRename() {
   const m = menuFor.value
   if (!m) return
   renamingId.value = m.id
   renameText.value = m.title
   menuFor.value = null
-  await nextTick()
-  const el = document.querySelector<HTMLInputElement>('.drawer-root .rename')
-  el?.focus()
-  el?.select()
+}
+
+/**
+ * 输入框只在正在改名的那一行渲染，所以聚焦挂在它自己的 ref 上。
+ * 原先是 nextTick 之后 document.querySelector('.drawer-root .rename')——
+ * 跨组件边界按 class 名找元素，类名一改就静默失效（不会报错，只是不再聚焦），
+ * 而且抽屉关闭时仍留在 DOM 里（靠 transform 移出屏幕），选择器完全可能命中别处。
+ */
+function focusRename(el: unknown) {
+  if (!(el instanceof HTMLInputElement)) return
+  el.focus()
+  el.select()
 }
 
 function commitRename() {
@@ -124,7 +121,14 @@ function openDashboard() {
 
     <aside class="panel" role="dialog" :aria-label="`${modeLabel}模式会话历史`">
       <header class="dhead">
-        <div class="sfield">
+        <div v-if="story.agentMode === 'story'" class="sfield">
+          <CoomiIcon name="search" :size="17" />
+          <input v-model="fragmentQuery" type="text" placeholder="搜索剧情片段" enterkeyhint="search" />
+          <button v-if="fragmentQuery" class="clr" aria-label="清空" @click="fragmentQuery = ''">
+            <CoomiIcon name="close" :size="12" />
+          </button>
+        </div>
+        <div v-else class="sfield">
           <CoomiIcon name="search" :size="17" />
           <input v-model="sessions.query" type="text" :placeholder="`搜索${modeLabel}记录`" enterkeyhint="search" />
           <button v-if="sessions.query" class="clr" aria-label="清空" @click="sessions.query = ''">
@@ -138,17 +142,12 @@ function openDashboard() {
 
       <p class="mode-heading">{{ modeLabel }}模式 · {{ story.projectPath.split('/').pop() || '默认故事' }}</p>
 
-      <div v-if="story.agentMode !== 'agent'" class="drawer-tabs">
-        <button :class="{ on: drawerView === 'sessions' }" @click="drawerView = 'sessions'">本模式记录</button>
-        <button :class="{ on: drawerView === 'fragments' }" @click="drawerView = 'fragments'; story.loadFragmentsFromProject()">剧情片段</button>
-      </div>
-
-      <button v-if="drawerView === 'sessions'" class="newrow" @click="startNew">
+      <button v-if="story.agentMode !== 'story'" class="newrow" @click="startNew">
         <span class="nicon"><CoomiIcon name="pencil" :size="17" /></span>
         <span>开启新{{ modeLabel }}对话</span>
       </button>
 
-      <div v-if="drawerView === 'sessions'" class="list">
+      <div v-if="story.agentMode !== 'story'" class="list">
         <!-- 历史会话列表始终可见；「全局会话记忆」开关只控制模型能否读取这些记录。 -->
         <p v-if="isEmpty" class="empty">
           还没有历史会话。<br />随便说点什么，标题会用你的第一句话。
@@ -165,6 +164,7 @@ function openDashboard() {
             <div class="rmain">
               <input
                 v-if="renamingId === m.id"
+                :ref="focusRename"
                 v-model="renameText"
                 class="rename"
                 @click.stop
@@ -195,16 +195,25 @@ function openDashboard() {
         </div>
         <div class="list">
           <p v-if="story.fragments.length === 0" class="empty">剧情尚未开始。完成第一轮行动后，剧情片段会按顺序收进这里。</p>
-          <p v-else class="sec-label">最近五条</p>
-          <button v-for="fragment in story.latestFive" :key="fragment.id" class="fragment" @click="edit(fragment)">
-            <span class="filename">{{ fragment.filename }}</span><span class="summary">{{ fragment.summary }}</span><CoomiIcon name="pencil" :size="14" />
-          </button>
-          <template v-if="story.older.length">
+          <p v-else-if="filteredFragments.length === 0" class="empty">没有匹配的剧情片段。</p>
+          <template v-else-if="fragmentQuery">
+            <p class="sec-label">搜索结果 · {{ filteredFragments.length }}</p>
+            <button v-for="fragment in filteredFragments" :key="fragment.id" class="fragment" @click="openFragment(fragment)">
+              <span class="filename">{{ fragment.filename }}</span><span class="summary">{{ fragment.summary }}</span><CoomiIcon name="chevronRight" :size="14" />
+            </button>
+          </template>
+          <template v-else>
+            <p class="sec-label">最近五条</p>
+            <button v-for="fragment in story.latestFive" :key="fragment.id" class="fragment" @click="openFragment(fragment)">
+              <span class="filename">{{ fragment.filename }}</span><span class="summary">{{ fragment.summary }}</span><CoomiIcon name="chevronRight" :size="14" />
+            </button>
+          </template>
+          <template v-if="!fragmentQuery && story.older.length">
             <button class="older-toggle" @click="story.olderExpanded = !story.olderExpanded">
               <CoomiIcon :name="story.olderExpanded ? 'chevronDown' : 'chevronRight'" :size="15" /><span>更早的剧情片段（{{ story.older.length }}）</span>
             </button>
             <div v-if="story.olderExpanded" class="older-list">
-              <button v-for="fragment in story.older" :key="fragment.id" class="fragment" @click="edit(fragment)"><span class="filename">{{ fragment.filename }}</span><span class="summary">{{ fragment.summary }}</span></button>
+              <button v-for="fragment in story.older" :key="fragment.id" class="fragment" @click="openFragment(fragment)"><span class="filename">{{ fragment.filename }}</span><span class="summary">{{ fragment.summary }}</span></button>
             </div>
           </template>
         </div>
@@ -234,24 +243,15 @@ function openDashboard() {
       </div>
     </div>
 
-    <!-- 剧情片段编辑弹层（story / narrator） -->
-    <div v-if="editing" class="editor-mask" @click.self="editing = null">
-      <section class="editor-sheet">
-        <header><span>{{ editing.filename }}</span><button aria-label="关闭" @click="editing = null"><CoomiIcon name="close" :size="18" /></button></header>
-        <textarea v-model="editText" aria-label="编辑剧情片段" />
-        <p v-if="editError" class="edit-error">{{ editError }}</p>
-        <button class="save" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存修改' }}</button>
-      </section>
-    </div>
   </div>
 </template>
 
 <style scoped>
 .drawer-root { position: fixed; inset: 0; z-index: 60; pointer-events: none; }
 .drawer-root.open { pointer-events: auto; }
-.scrim { position: absolute; inset: 0; background: rgba(17,22,31,.34); opacity: 0; transition: opacity .28s ease; }
+.scrim { position: absolute; inset: 0; background: var(--scrim); opacity: 0; transition: opacity .28s ease; }
 .drawer-root.open .scrim { opacity: 1; }
-.panel { position: absolute; inset: 0 auto 0 0; display: flex; flex-direction: column; width: 84%; max-width: 350px; padding-top: var(--safe-top); background: var(--bg); box-shadow: var(--shadow-drawer); transform: translateX(-102%); transition: transform .3s cubic-bezier(.22,.68,.19,1); }
+.panel { position: absolute; inset: 0 auto 0 0; display: flex; flex-direction: column; width: 84%; max-width: 350px; padding-top: var(--safe-top); background: var(--bg); transform: translateX(-102%); transition: transform .3s cubic-bezier(.22,.68,.19,1); }
 .drawer-root.open .panel { transform: none; }
 
 /* 公共头部 */
@@ -286,7 +286,7 @@ function openDashboard() {
 .sfield input::placeholder { color: var(--text-3); }
 .clr {
   display: grid; place-items: center; width: 18px; height: 18px;
-  border: 0; border-radius: 50%; background: var(--border-strong); color: #fff;
+  border: 0; border-radius: 50%; background: var(--text-3); color: var(--bg);
 }
 .newrow {
   display: flex; align-items: center; gap: 10px;
@@ -332,13 +332,15 @@ function openDashboard() {
   border: 0; border-radius: 50%; background: none; color: var(--text-3);
 }
 .sheet-wrap {
+  /* 刻意不用 components/ui/BottomSheet：它是 position:fixed，而这一层必须限制在
+     抽屉面板内部（position:absolute + inset:0），点抽屉外的区域仍要能关整个抽屉。 */
   position: absolute; inset: 0; z-index: 3;
   display: flex; align-items: flex-end;
-  background: rgba(17, 22, 31, .34);
+  background: var(--scrim);
 }
 .sheet {
   width: 100%; padding: 4px 10px calc(10px + var(--safe-bottom));
-  background: var(--bg); border-radius: 18px 18px 0 0;
+  background: var(--bg-card); border-radius: var(--r-sheet) var(--r-sheet) 0 0;
   box-shadow: var(--shadow-sheet);
   animation: rise .22s cubic-bezier(.22, .68, .19, 1) both;
 }
@@ -380,13 +382,4 @@ function openDashboard() {
 .fragment :deep(svg) { color: var(--text-3); }
 .older-toggle { display: flex; align-items: center; gap: 6px; width: 100%; margin-top: 10px; padding: 9px 8px; color: var(--text-2); font-size: 13px; }
 .older-list { border-left: 1px solid var(--border); margin-left: 14px; padding-left: 4px; }
-.editor-mask { position: absolute; inset: 0; z-index: 3; display: flex; align-items: flex-end; background: rgba(17,22,31,.38); }
-.editor-sheet { display: flex; flex-direction: column; width: 100%; height: min(72vh, 620px); padding: 12px 14px calc(14px + var(--safe-bottom)); border-radius: 16px 16px 0 0; background: var(--bg); }
-.editor-sheet header { display: flex; align-items: center; min-height: 38px; font-family: var(--font-mono); font-size: 12px; color: var(--text-2); }
-.editor-sheet header span { flex: 1; }
-.editor-sheet header button { width: 36px; height: 36px; }
-.editor-sheet textarea { flex: 1; width: 100%; resize: none; padding: 12px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--fill); color: var(--text); font: 15px/1.75 var(--font-ui); }
-.edit-error { margin-top: 8px; color: var(--danger); font-size: 12.5px; }
-.save { min-height: 44px; margin-top: 10px; border-radius: var(--r-sm); background: var(--blue); color: white; font-size: 15px; font-weight: 650; }
-.save:disabled { opacity: .55; }
 </style>

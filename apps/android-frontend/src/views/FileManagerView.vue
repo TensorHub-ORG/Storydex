@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useSessionStore } from '@/stores/session'
 import PageHead from '@/components/PageHead.vue'
 import CoomiIcon from '@/components/CoomiIcon.vue'
+import BottomSheet from '@/components/ui/BottomSheet.vue'
 import { authedFetch, engineToken } from '@/bridge/http'
 
 interface Entry { name: string; is_dir: boolean; size: number; modified: number }
@@ -396,6 +397,7 @@ function setAsSessionDir() {
 
 function pickAsStoryProject() {
   if (!window.CoomiAndroid?.setStoryProjectPath) { notice.value = '当前环境不支持切换故事项目'; return }
+  session.preserveCurrentContext()
   const ok = window.CoomiAndroid.setStoryProjectPath(path.value)
   if (ok) { notice.value = '已切换故事项目'; setTimeout(goDashboard, 800) }
   else notice.value = '请进入故事根目录下的某个目录再选择'
@@ -477,57 +479,72 @@ onBeforeUnmount(clearPressTimer)
         </div>
       </div>
 
-      <div v-if="inputMode !== 'none'" class="sheet-mask" @click.self="inputMode = 'none'">
-        <div class="sheet compact-sheet">
-          <p class="sheet-title">{{ inputMode === 'rename' ? '重命名' : creating === 'dir' ? '新建文件夹' : '新建文件' }}</p>
-          <input v-model="inputValue" class="path-input" placeholder="名称" autofocus @keyup.enter="commitInput" />
-          <div class="sheet-actions"><button class="button ghost" @click="inputMode = 'none'">取消</button><button class="button primary" @click="commitInput">确定</button></div>
-        </div>
-      </div>
+      <BottomSheet
+        v-if="inputMode !== 'none'"
+        :grip="false"
+        max-width="560px"
+        :title="inputMode === 'rename' ? '重命名' : creating === 'dir' ? '新建文件夹' : '新建文件'"
+        @close="inputMode = 'none'"
+      >
+        <input v-model="inputValue" class="path-input" placeholder="名称" autofocus @keyup.enter="commitInput" />
+        <template #actions>
+          <button class="button ghost" @click="inputMode = 'none'">取消</button>
+          <button class="button primary" @click="commitInput">确定</button>
+        </template>
+      </BottomSheet>
 
-      <div v-if="deleteRequest" class="sheet-mask" @click.self="!deleteBusy && (deleteRequest = null)">
-        <div class="sheet compact-sheet" role="alertdialog" aria-modal="true" aria-label="确认永久删除">
-          <div class="delete-mark"><CoomiIcon name="trash" :size="20" /></div>
-          <p class="sheet-title">永久删除所选内容？</p>
-          <p class="delete-copy">
-            将删除 {{ deleteRequest.filter(item => !item.is_dir).length }} 个文件和
-            {{ deleteRequest.filter(item => item.is_dir).length }} 个文件夹。文件夹内的全部内容也会被删除，此操作无法恢复。
-          </p>
-          <div class="sheet-actions">
-            <button class="button ghost" :disabled="deleteBusy" @click="deleteRequest = null">取消</button>
-            <button class="button danger-fill" :disabled="deleteBusy" @click="confirmDelete">{{ deleteBusy ? '删除中…' : '永久删除' }}</button>
-          </div>
-        </div>
-      </div>
+      <!-- 删除进行中不许点遮罩关闭：关掉不会取消已经发出的删除请求，
+           界面却会显得「已经取消了」。 -->
+      <BottomSheet
+        v-if="deleteRequest"
+        :grip="false"
+        max-width="560px"
+        role="alertdialog"
+        aria-label="确认永久删除"
+        :dismissible="!deleteBusy"
+        @close="deleteRequest = null"
+      >
+        <div class="delete-mark"><CoomiIcon name="trash" :size="20" /></div>
+        <p class="sheet-title">永久删除所选内容？</p>
+        <p class="delete-copy">
+          将删除 {{ deleteRequest.filter(item => !item.is_dir).length }} 个文件和
+          {{ deleteRequest.filter(item => item.is_dir).length }} 个文件夹。文件夹内的全部内容也会被删除，此操作无法恢复。
+        </p>
+        <template #actions>
+          <button class="button ghost" :disabled="deleteBusy" @click="deleteRequest = null">取消</button>
+          <button class="button danger-fill" :disabled="deleteBusy" @click="confirmDelete">{{ deleteBusy ? '删除中…' : '永久删除' }}</button>
+        </template>
+      </BottomSheet>
 
-      <div v-if="conflictRequest" class="sheet-mask" @click.self="resolveConflict('cancel')">
-        <div class="sheet compact-sheet">
-          <p class="sheet-title">存在同名项目</p>
-          <p class="conflict-name">{{ conflictRequest.name }}</p>
-          <label class="apply-all"><input v-model="conflictApplyAll" type="checkbox" />应用到本次全部冲突</label>
-          <div class="conflict-actions">
-            <button @click="resolveConflict('skip')">跳过</button>
-            <button @click="resolveConflict('keep')">保留两份</button>
-            <button class="danger" @click="resolveConflict('replace')">完整覆盖</button>
-          </div>
-          <button class="cancel-conflict" @click="resolveConflict('cancel')">取消本次粘贴</button>
+      <BottomSheet
+        v-if="conflictRequest"
+        :grip="false"
+        max-width="560px"
+        title="存在同名项目"
+        @close="resolveConflict('cancel')"
+      >
+        <p class="conflict-name">{{ conflictRequest.name }}</p>
+        <label class="apply-all"><input v-model="conflictApplyAll" type="checkbox" />应用到本次全部冲突</label>
+        <div class="conflict-actions">
+          <button @click="resolveConflict('skip')">跳过</button>
+          <button @click="resolveConflict('keep')">保留两份</button>
+          <button class="danger" @click="resolveConflict('replace')">完整覆盖</button>
         </div>
-      </div>
+        <button class="cancel-conflict" @click="resolveConflict('cancel')">取消本次粘贴</button>
+      </BottomSheet>
 
-      <div v-if="previewOpen && previewEntry" class="sheet-mask" @click.self="previewOpen = false">
-        <div class="sheet preview-sheet">
-          <div class="preview-head">
-            <span class="preview-name">{{ previewEntry.name }}</span>
-            <button class="icon-btn" title="外部打开" @click="openExternal()"><CoomiIcon name="external" :size="15" /></button>
-            <button class="icon-btn" title="关闭" @click="previewOpen = false"><CoomiIcon name="close" :size="15" /></button>
-          </div>
-          <div class="preview-body">
-            <img v-if="isImage(previewEntry.name)" :src="previewSrc" class="preview-image" alt="" />
-            <pre v-else-if="isTextFile(previewEntry.name)" class="preview-text">{{ previewText }}</pre>
-            <div v-else class="preview-other"><p>该类型无法内联预览。</p><button class="button primary" @click="openExternal()">用其它应用打开</button></div>
-          </div>
+      <BottomSheet v-if="previewOpen && previewEntry" :grip="false" height="74vh" @close="previewOpen = false">
+        <template #head>
+          <span class="preview-name">{{ previewEntry.name }}</span>
+          <button class="icon-btn" title="外部打开" @click="openExternal()"><CoomiIcon name="external" :size="15" /></button>
+          <button class="icon-btn" title="关闭" @click="previewOpen = false"><CoomiIcon name="close" :size="15" /></button>
+        </template>
+        <div class="preview-body">
+          <img v-if="isImage(previewEntry.name)" :src="previewSrc" class="preview-image" alt="" />
+          <pre v-else-if="isTextFile(previewEntry.name)" class="preview-text">{{ previewText }}</pre>
+          <div v-else class="preview-other"><p>该类型无法内联预览。</p><button class="button primary" @click="openExternal()">用其它应用打开</button></div>
         </div>
-      </div>
+      </BottomSheet>
     </main>
   </div>
 </template>
@@ -551,14 +568,14 @@ onBeforeUnmount(clearPressTimer)
 .tool-action.pick { color: var(--blue); background: var(--blue-soft); }
 .delete-mark { display: grid; place-items: center; width: 42px; height: 42px; margin-bottom: 10px; border-radius: 50%; background: var(--danger-soft); color: var(--danger); }
 .delete-copy { margin: 6px 0 0; color: var(--text-3); font-size: 13px; line-height: 1.65; }
-.danger-fill { background: var(--danger); color: #fff; }
+.danger-fill { background: var(--danger); color: var(--on-accent); }
 .hint, .empty { padding: 20px 0; color: var(--text-3); font-size: 13px; text-align: center; }
 .file-list { display: flex; flex-direction: column; gap: 3px; }
 .file-item { overflow: hidden; border-radius: var(--r-md); background: var(--bg-card); }
 .file-row { display: flex; align-items: center; gap: 10px; min-height: 54px; padding: 8px 8px 8px 12px; touch-action: pan-y; }
 .file-row.selected { background: var(--blue-soft); }
 .file-row.expanded { background: var(--fill); }
-.selection-mark { display: grid; place-items: center; width: 20px; height: 20px; flex-shrink: 0; border: 1.5px solid var(--border-strong); border-radius: 50%; color: #fff; }
+.selection-mark { display: grid; place-items: center; width: 20px; height: 20px; flex-shrink: 0; border: 1.5px solid var(--border-strong); border-radius: 50%; color: var(--on-accent); }
 .selection-mark.on { border-color: var(--blue); background: var(--blue); }
 .file-icon { color: var(--text-3); flex-shrink: 0; }
 .file-row.selected .file-icon { color: var(--blue); }
@@ -569,27 +586,20 @@ onBeforeUnmount(clearPressTimer)
 .more-btn:active { background: var(--fill-strong); color: var(--text); }
 .inline-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; padding: 8px; border-top: 1px solid var(--border); background: var(--fill); }
 .inline-actions button { display: flex; align-items: center; justify-content: center; gap: 4px; min-width: 0; min-height: 36px; padding: 0 6px; border-radius: var(--r-sm); background: var(--bg); color: var(--text-2); font-size: 11.5px; }
-.sheet-mask { position: fixed; inset: 0; z-index: 60; display: flex; align-items: flex-end; background: rgba(0, 0, 0, .42); }
-.sheet { width: 100%; padding: 18px 16px calc(16px + var(--safe-bottom)); border-radius: 16px 16px 0 0; background: var(--bg-card); }
-.compact-sheet { max-width: 560px; margin: 0 auto; }
 .sheet-title { margin: 0 0 12px; color: var(--text); font-size: 16px; font-weight: 650; }
-.path-input { width: 100%; min-height: 44px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: var(--r-sm); background: var(--bg-input); color: var(--text); font-size: 14px; }
-.sheet-actions { display: flex; gap: 10px; margin-top: 16px; }
-.sheet-actions .button { flex: 1; }
+.path-input { width: 100%; min-height: 44px; margin-top: 12px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: var(--r-sm); background: var(--bg-input); color: var(--text); font-size: 14px; }
 .button { min-height: 40px; padding: 0 14px; border-radius: var(--r-sm); }
-.button.primary { background: var(--blue); color: #fff; }
+.button.primary { background: var(--blue); color: var(--on-accent); }
 .button.ghost { background: var(--fill-strong); color: var(--text); }
-.conflict-name { margin: -4px 0 14px; overflow: hidden; color: var(--text-2); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.conflict-name { margin: 10px 0 14px; overflow: hidden; color: var(--text-2); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .apply-all { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; color: var(--text-2); font-size: 13px; }
 .apply-all input { width: 18px; height: 18px; accent-color: var(--blue); }
 .conflict-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .conflict-actions button, .cancel-conflict { min-height: 42px; border-radius: var(--r-sm); background: var(--fill-strong); color: var(--text); font-size: 13px; }
 .conflict-actions .danger { color: var(--danger); background: var(--danger-soft); }
 .cancel-conflict { width: 100%; margin-top: 8px; background: transparent; color: var(--text-3); }
-.preview-sheet { height: 74vh; display: flex; flex-direction: column; }
-.preview-head { display: flex; align-items: center; gap: 7px; margin-bottom: 10px; }
-.preview-name { flex: 1; min-width: 0; overflow: hidden; color: var(--text); font-size: 14px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-.preview-body { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; align-items: center; }
+.preview-name { flex: 1; min-width: 0; align-self: center; overflow: hidden; color: var(--text); font-size: 14px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.preview-body { flex: 1; min-height: 0; margin-top: 10px; overflow: auto; display: flex; flex-direction: column; align-items: center; }
 .preview-image { max-width: 100%; max-height: 100%; border-radius: var(--r-sm); }
 .preview-text { width: 100%; margin: 0; padding: 10px; border-radius: var(--r-sm); background: var(--code-bg); color: var(--code-text); font-family: var(--font-mono); font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-all; }
 .preview-other { padding-top: 40px; color: var(--text-3); font-size: 13px; text-align: center; }

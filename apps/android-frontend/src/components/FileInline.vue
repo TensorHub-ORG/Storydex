@@ -7,6 +7,7 @@
 import { computed, ref } from 'vue'
 import { authedFetch, engineToken } from '@/bridge/http'
 import CoomiIcon from './CoomiIcon.vue'
+import BottomSheet from './ui/BottomSheet.vue'
 
 const props = defineProps<{ paths: string[] }>()
 
@@ -64,31 +65,29 @@ function copyPath() {
     </button>
   </div>
 
-  <div v-if="open" class="mask" @click.self="open = false">
-    <div class="sheet">
-      <div class="head">
-        <CoomiIcon name="fileRead" :size="16" />
-        <span class="name">{{ activeName }}</span>
-        <button class="x" @click="open = false"><CoomiIcon name="close" :size="15" /></button>
-      </div>
-      <p class="path">{{ activePath }}</p>
-      <p v-if="notice" class="notice">{{ notice }}</p>
+  <BottomSheet v-if="open" :grip="false" aria-label="文件操作" @close="open = false">
+    <div class="head">
+      <CoomiIcon name="fileRead" :size="16" />
+      <span class="name">{{ activeName }}</span>
+      <button class="x" aria-label="关闭" @click="open = false"><CoomiIcon name="close" :size="15" /></button>
+    </div>
+    <p class="path">{{ activePath }}</p>
+    <p v-if="notice" class="notice">{{ notice }}</p>
 
-      <div class="body">
-        <img v-if="isImage(activeName)" :src="previewSrc" class="img" alt="" />
-        <pre v-else-if="isTextFile(activeName)" class="text">{{ previewText }}</pre>
-        <div v-else class="other">
-          <p>该类型不支持内联预览。</p>
-        </div>
-      </div>
-
-      <div class="actions">
-        <button class="btn" @click="saveAs"><CoomiIcon name="download" :size="15" /><span>另存为</span></button>
-        <button class="btn" @click="openExternal"><CoomiIcon name="external" :size="15" /><span>用其它应用打开</span></button>
-        <button class="btn" @click="copyPath"><CoomiIcon name="link" :size="15" /><span>复制路径</span></button>
+    <div class="body">
+      <img v-if="isImage(activeName)" :src="previewSrc" class="img" alt="" />
+      <pre v-else-if="isTextFile(activeName)" class="text">{{ previewText }}</pre>
+      <div v-else class="other">
+        <p>该类型不支持内联预览。</p>
       </div>
     </div>
-  </div>
+
+    <template #actions>
+      <button class="btn" @click="saveAs"><CoomiIcon name="download" :size="15" /><span>另存为</span></button>
+      <button class="btn" @click="openExternal"><CoomiIcon name="external" :size="15" /><span>用其它应用打开</span></button>
+      <button class="btn" @click="copyPath"><CoomiIcon name="link" :size="15" /><span>复制路径</span></button>
+    </template>
+  </BottomSheet>
 </template>
 
 <style scoped>
@@ -101,13 +100,7 @@ function copyPath() {
 }
 .chip-name { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .arw { opacity: 0.6; }
-.mask { position: fixed; inset: 0; z-index: 70; background: rgba(0, 0, 0, 0.45); display: flex; align-items: flex-end; }
-.sheet {
-  width: 100%; background: var(--bg-card);
-  border-radius: 18px 18px 0 0;
-  padding: 16px 16px calc(14px + var(--safe-bottom));
-  display: flex; flex-direction: column;
-}
+/* 弹层外壳（遮罩、圆角、安全区内边距）来自 components/ui/BottomSheet。 */
 .head { display: flex; align-items: center; gap: 8px; color: var(--text); }
 .head .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14.5px; font-weight: 650; }
 .x { color: var(--text-3); padding: 4px; }
@@ -117,9 +110,9 @@ function copyPath() {
 .img { max-width: 100%; border-radius: var(--r-sm); }
 .text { margin: 0; padding: 10px; background: var(--code-bg); border-radius: var(--r-sm); font-family: var(--font-mono); font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-all; color: var(--code-text); }
 .other { text-align: center; color: var(--text-3); font-size: 13px; padding: 30px 0; }
-.actions { display: flex; gap: 8px; margin-top: 14px; }
-.actions .btn {
-  flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+/* 三个按钮等分由 BottomSheet 的 .actions 给出。 */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
   min-height: 42px; border-radius: var(--r-md);
   background: var(--fill-strong); color: var(--text-2); font-size: 12.5px; font-weight: 550;
 }

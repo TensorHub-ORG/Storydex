@@ -18,6 +18,7 @@ import type { AgentMode } from './story'
 
 const META_KEY = 'coomi.sessions.v1'
 const TRANSCRIPT_PREFIX = 'coomi.transcript.'
+const ACTIVE_CONTEXTS_KEY = 'coomi.active-contexts.v1'
 /** 只给最近的若干会话留时间线，避免把 localStorage 撑爆。 */
 const KEEP_TRANSCRIPTS = 12
 const MAX_ITEMS_PER_TRANSCRIPT = 400
@@ -85,6 +86,50 @@ export const useSessionsStore = defineStore('sessions', () => {
   const currentMode = ref<AgentMode>('story')
   /** 引擎侧正在后台执行的会话 id 集合（/api/sessions 的 running 字段）。 */
   const runningIds = ref<Set<string>>(new Set())
+
+  function contextKey(cwd: string, mode: AgentMode): string {
+    return `${cwd.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() || '__default__'}::${mode}`
+  }
+
+  function readActiveContexts(): Record<string, string> {
+    try {
+      const value = JSON.parse(localStorage.getItem(ACTIVE_CONTEXTS_KEY) ?? '{}')
+      return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+    } catch {
+      return {}
+    }
+  }
+
+  function activeFor(cwd: string, mode: AgentMode): string | undefined {
+    const id = readActiveContexts()[contextKey(cwd, mode)]
+    return typeof id === 'string' && id ? id : undefined
+  }
+
+  function latestFor(cwd: string, mode: AgentMode): SessionMeta | undefined {
+    const key = contextKey(cwd, mode)
+    return [...metas.value]
+      .filter(meta => contextKey(meta.cwd ?? '', meta.mode) === key)
+      .sort((left, right) => right.updatedAt - left.updatedAt)[0]
+  }
+
+  function rememberActive(id: string, cwd: string, mode: AgentMode) {
+    try {
+      const contexts = readActiveContexts()
+      contexts[contextKey(cwd, mode)] = id
+      localStorage.setItem(ACTIVE_CONTEXTS_KEY, JSON.stringify(contexts))
+    } catch { /* localStorage failure must not block the session. */ }
+  }
+
+  function forgetActive(id: string) {
+    try {
+      const contexts = readActiveContexts()
+      let changed = false
+      for (const [key, value] of Object.entries(contexts)) {
+        if (value === id) { delete contexts[key]; changed = true }
+      }
+      if (changed) localStorage.setItem(ACTIVE_CONTEXTS_KEY, JSON.stringify(contexts))
+    } catch { /* ignore */ }
+  }
 
   /** 从引擎刷新各会话的 running 状态 + 合并「最后执行时间」（列表排序依据）；引擎不可用时保持原状。 */
   async function refreshRunning() {
@@ -281,6 +326,7 @@ export const useSessionsStore = defineStore('sessions', () => {
       /* ignore */
     }
     persist()
+    forgetActive(id)
     // 同步删除引擎磁盘上的会话记录（权威源），否则下次 syncFromEngine 时“复活”。
     authedFetch(`/api/sessions/${id}`, { method: 'DELETE' }).catch(() => {})
   }
@@ -339,6 +385,19 @@ export const useSessionsStore = defineStore('sessions', () => {
       return Array.isArray(parsed) ? (parsed as Timelineitem[]) : []
     } catch {
       return []
+    }
+  }
+
+  function clearTranscript(id: string) {
+    try { localStorage.removeItem(TRANSCRIPT_PREFIX + id) } catch { /* ignore */ }
+    const meta = find(id)
+    if (meta) {
+      meta.title = '新对话'
+      meta.turns = 0
+      meta.summary = ''
+      meta.preview = ''
+      meta.updatedAt = Date.now()
+      persistMeta()
     }
   }
 
@@ -417,7 +476,8 @@ export const useSessionsStore = defineStore('sessions', () => {
     metas, query, sorted, filtered, groups, visibleCount, currentCwd, currentMode, setCurrentCwd, setCurrentMode,
     syncFromEngine,
     ensure, touch, rename, togglePin, remove, find, deriveTitle,
-    saveTranscript, loadTranscript, migrateId, clearAll,
+    saveTranscript, loadTranscript, clearTranscript, migrateId, clearAll,
+    activeFor, latestFor, rememberActive, forgetActive,
     refreshRunning, isRunning,
   }
 })

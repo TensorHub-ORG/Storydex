@@ -12,6 +12,7 @@ import { useSessionsStore, formatSessionTime, type SessionMeta } from '@/stores/
 import { useStoryStore } from '@/stores/story'
 import PageHead from '@/components/PageHead.vue'
 import CoomiIcon from '@/components/CoomiIcon.vue'
+import BottomSheet from '@/components/ui/BottomSheet.vue'
 
 const router = useRouter()
 const session = useSessionStore()
@@ -87,7 +88,7 @@ onMounted(() => {
 
         <template v-for="g in sessions.groups" :key="g.label">
           <p class="sec-label">{{ g.label }}</p>
-          <div class="group">
+          <div class="card group">
             <div v-for="m in g.items" :key="m.id" class="row" :class="{ cur: m.id === session.sessionId }">
               <button class="rmain" @click="open(m.id)">
                 <span class="rtitle">
@@ -110,43 +111,34 @@ onMounted(() => {
           当前模式的完整会话同时归档在故事项目的 .storydex/sessions 目录中。
         </p>
     </main>
-    <div v-if="menuFor" class="scrim" @click.self="menuFor = null">
-      <div class="sheet">
-        <div class="grip" />
-        <p class="stitle">{{ menuFor.title }}</p>
-        <button class="sact" @click="doPin">
-          <CoomiIcon name="pin" :size="17" /><span>{{ menuFor.pinned ? '取消置顶' : '置顶' }}</span>
-        </button>
-        <button class="sact danger" @click="askDelete = menuFor; menuFor = null">
-          <CoomiIcon name="trash" :size="17" /><span>删除会话</span>
-        </button>
-        <button class="sact plain" @click="menuFor = null"><span>取消</span></button>
-      </div>
-    </div>
+    <BottomSheet v-if="menuFor" @close="menuFor = null">
+      <p class="stitle">{{ menuFor.title }}</p>
+      <button class="sact" @click="doPin">
+        <CoomiIcon name="pin" :size="17" /><span>{{ menuFor.pinned ? '取消置顶' : '置顶' }}</span>
+      </button>
+      <button class="sact danger" @click="askDelete = menuFor; menuFor = null">
+        <CoomiIcon name="trash" :size="17" /><span>删除会话</span>
+      </button>
+      <button class="sact plain" @click="menuFor = null"><span>取消</span></button>
+    </BottomSheet>
 
-    <div v-if="askDelete" class="scrim" @click.self="askDelete = null">
-      <div class="sheet">
-        <div class="grip" />
-        <p class="stitle">删除这个会话？</p>
-        <p class="ssub">「{{ askDelete.title }}」的引擎记录与本机记录都会被删除，无法恢复。</p>
-        <div class="sacts">
-          <button class="btn" @click="askDelete = null">取消</button>
-          <button class="btn btn-danger" @click="confirmDelete">删除</button>
-        </div>
-      </div>
-    </div>
+    <BottomSheet v-if="askDelete" role="alertdialog" @close="askDelete = null">
+      <p class="stitle">删除这个会话？</p>
+      <p class="ssub">「{{ askDelete.title }}」的引擎记录与本机记录都会被删除，无法恢复。</p>
+      <template #actions>
+        <button class="btn" @click="askDelete = null">取消</button>
+        <button class="btn btn-danger" @click="confirmDelete">删除</button>
+      </template>
+    </BottomSheet>
 
-    <div v-if="askClear" class="scrim" @click.self="askClear = false">
-      <div class="sheet">
-        <div class="grip" />
-        <p class="stitle">清空 {{ modeLabel }}模式的 {{ sessions.visibleCount }} 条记录？</p>
-        <p class="ssub">本机的标题和对话内容都会删掉，无法恢复。</p>
-        <div class="sacts">
-          <button class="btn" @click="askClear = false">取消</button>
-          <button class="btn btn-danger" @click="doClear">清空</button>
-        </div>
-      </div>
-    </div>
+    <BottomSheet v-if="askClear" role="alertdialog" @close="askClear = false">
+      <p class="stitle">清空 {{ modeLabel }}模式的 {{ sessions.visibleCount }} 条记录？</p>
+      <p class="ssub">本机的标题和对话内容都会删掉，无法恢复。</p>
+      <template #actions>
+        <button class="btn" @click="askClear = false">取消</button>
+        <button class="btn btn-danger" @click="doClear">清空</button>
+      </template>
+    </BottomSheet>
 
   </div>
 </template>
@@ -169,7 +161,6 @@ onMounted(() => {
 .empty { padding: 26px 10px; text-align: center; font-size: 13.5px; line-height: 1.75; color: var(--text-3); }
 .sec-label { margin: 14px 0 0; }
 
-.group { border-radius: var(--r-card); background: var(--bg); box-shadow: var(--shadow-1); overflow: hidden; }
 .row { display: flex; align-items: stretch; }
 .row + .row { border-top: 1px solid var(--border); }
 .row.cur { background: var(--blue-soft); }
@@ -197,30 +188,17 @@ onMounted(() => {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .rmeta { display: flex; align-items: center; gap: 6px; margin-top: 2px; font-size: 12px; color: var(--text-3); }
-.badge { padding: 1px 7px; border-radius: var(--r-pill); background: var(--blue); color: #fff; font-size: 10.5px; font-weight: 650; }
+.badge { padding: 1px 7px; border-radius: var(--r-pill); background: var(--blue); color: var(--on-accent); font-size: 10.5px; font-weight: 650; }
 .more { display: grid; place-items: center; flex-shrink: 0; width: 44px; color: var(--text-3); }
 .more:active { background: var(--fill); }
 
 .wide { width: 100%; margin-top: 18px; }
 .note { margin-top: 14px; padding: 0 4px; font-size: 12px; line-height: 1.75; color: var(--text-3); }
-.scrim {
-  position: fixed; inset: 0; z-index: 70;
-  display: flex; align-items: flex-end;
-  background: rgba(17, 22, 31, .36); animation: fade .18s ease-out;
-}
-@keyframes fade { from { opacity: 0; } }
-.sheet {
-  width: 100%; padding: 6px 14px calc(var(--safe-bottom) + 14px);
-  border-radius: 22px 22px 0 0; background: var(--bg);
-  box-shadow: var(--shadow-sheet); animation: rise .26s cubic-bezier(.2, .8, .2, 1);
-}
-@keyframes rise { from { transform: translateY(100%); } }
-.grip { width: 38px; height: 4px; margin: 4px auto 12px; border-radius: 2px; background: var(--border-strong); }
 .stitle {
-  padding: 0 6px 10px; font-size: 14px; font-weight: 600; color: var(--text);
+  margin: 0; padding: 0 6px 10px; font-size: 14px; font-weight: 600; color: var(--text);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.ssub { padding: 0 6px; font-size: 13px; line-height: 1.6; color: var(--text-2); }
+.ssub { margin: 0; padding: 0 6px; font-size: 13px; line-height: 1.6; color: var(--text-2); }
 .sact {
   display: flex; align-items: center; gap: 11px;
   width: 100%; min-height: 50px; padding: 0 12px;
@@ -231,8 +209,6 @@ onMounted(() => {
 .sact :deep(svg) { color: var(--text-2); }
 .sact.danger, .sact.danger :deep(svg) { color: var(--danger); }
 .sact.plain { justify-content: center; margin-top: 4px; color: var(--text-2); font-weight: 550; }
-.sacts { display: flex; gap: 8px; margin-top: 16px; }
-.sacts .btn { flex: 1; }
 
 </style>
 

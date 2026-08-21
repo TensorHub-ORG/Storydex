@@ -416,6 +416,8 @@ public class CoomiService extends Service {
             mEngineProcess = builder.start();
             mEnginePort = port;
             mIsEngineRunning = true;
+            // 开关为开时把端口+令牌交给 PC 端（默认关，见 CoomiUsbBridge 的安全约定）。
+            CoomiUsbBridge.publish(this, port, token, getFilesDir().getAbsolutePath());
             reportDailyActive();
 
             Process process = mEngineProcess;
@@ -429,6 +431,8 @@ public class CoomiService extends Service {
                     if (mEngineProcess == process) {
                         mEngineProcess = null;
                         mIsEngineRunning = false;
+                        // 引擎自行退出（崩溃/被系统杀）时同样要收回已发布的令牌。
+                        CoomiUsbBridge.clear();
                     }
                 }
             }, "coomi-rs-waiter").start();
@@ -472,6 +476,8 @@ public class CoomiService extends Service {
     }
 
     private void stopEngineSync() {
+        // 引擎一停，已发布的端口+令牌立即失效，不留在共享存储里。
+        CoomiUsbBridge.clear();
         Process process = mEngineProcess;
         if (process != null) {
             process.destroy();
@@ -513,6 +519,21 @@ public class CoomiService extends Service {
     public boolean isUpdateInProgress() { return mUpdateInProgress; }
     public int getEnginePort() { return mEnginePort; }
 
+    /**
+     * 按当前开关与引擎状态同步桥文件。给仪表盘开关回调用：
+     * 开启时若引擎已在跑则立即发布，关闭时立即收回。
+     */
+    public void refreshUsbBridge() {
+        boolean enabled = CoomiUsbBridge.isEnabled(this);
+        if (!enabled) {
+            CoomiUsbBridge.clear();
+            return;
+        }
+        if (mEngineProcess != null && mEngineProcess.isAlive() && mEnginePort > 0) {
+            CoomiUsbBridge.publish(this, mEnginePort, mEngineToken, getFilesDir().getAbsolutePath());
+        }
+    }
+
     public static String readEngineLogTail(int count) {
         java.util.List<String> lines = new java.util.ArrayList<>();
         try (BufferedReader reader = new BufferedReader(new FileReader(CoomiConstants.ENGINE_LOG_PATH))) {
@@ -540,7 +561,12 @@ public class CoomiService extends Service {
         return CoomiConstants.DEFAULT_ENGINE_PORT;
     }
 
-    /** 生成 128 位十六进制随机令牌（Android 端与 WebView 共享，不落盘不写 JS）。 */
+    /**
+     * 生成 128 位十六进制随机令牌（Android 端与 WebView 共享，不写入 JS）。
+     *
+     * <p>每次引擎启动都重新生成，因此不存在长期有效的凭据。默认不落盘；仅当用户显式打开
+     * 「USB 调试桥」时，才会由 {@link CoomiUsbBridge} 写入共享存储供 PC 端读取。
+     */
     private static String generateToken() {
         byte[] bytes = new byte[64];
         new java.security.SecureRandom().nextBytes(bytes);

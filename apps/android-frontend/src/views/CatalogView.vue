@@ -8,6 +8,8 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import PageHead from '@/components/PageHead.vue'
 import CoomiIcon from '@/components/CoomiIcon.vue'
+import BottomSheet from '@/components/ui/BottomSheet.vue'
+import Segments from '@/components/ui/Segments.vue'
 import { authedFetch } from '@/bridge/http'
 
 const router = useRouter()
@@ -42,6 +44,10 @@ const tab = ref<Tab>('mcp')
 /** 页签内的视图：已安装（本机实际配置，含自建/导入）｜仓库（内置目录）。 */
 type Scope = 'installed' | 'catalog'
 const scope = ref<Scope>('catalog')
+const SCOPES: { key: Scope; label: string; icon: string }[] = [
+  { key: 'installed', label: '已安装', icon: 'check' },
+  { key: 'catalog', label: '仓库', icon: 'globe' },
+]
 
 interface RequiredParam { key: string; label: string; secret?: boolean }
 interface McpItem {
@@ -275,14 +281,7 @@ function goDashboard() {
     <PageHead title="拓展管理" @back="goDashboard" />
     <main class="body">
       <!-- 一级：已安装 | 仓库 -->
-      <div class="seg" role="tablist">
-        <button class="segitem" :class="{ on: scope === 'installed' }" @click="switchScope('installed')">
-          <CoomiIcon name="check" :size="14" />已安装
-        </button>
-        <button class="segitem" :class="{ on: scope === 'catalog' }" @click="switchScope('catalog')">
-          <CoomiIcon name="globe" :size="14" />仓库
-        </button>
-      </div>
+      <Segments class="seg" :items="SCOPES" :value="scope" size="sm" @pick="switchScope" />
 
       <!-- 能力分类 -->
       <div class="tabs">
@@ -377,88 +376,83 @@ function goDashboard() {
         </div>
       </template>
 
-      <!-- 彻底删除确认（管理页卸载 = 停用可恢复，删除 = 彻底删除） -->
-      <div v-if="askDelete" class="sheet-mask" @click.self="askDelete = null">
-        <div class="sheet">
-          <div class="grip" />
-          <div class="stitle">
-            <CoomiIcon :name="askDelete.kind === 'mcp' ? 'plug' : 'wrench'" :size="17" />
-            彻底删除{{ askDelete.kind === 'mcp' ? '通用工具' : '创作能力' }}「{{ askDelete.item.name }}」？
-          </div>
-          <p class="sdesc">
-            {{ askDelete.kind === 'mcp'
-              ? '将从 config/mcp_servers.json 中移除该服务（不可恢复）。若只是想暂时不用，请改用「停用」。'
-              : '将删除已安装的 Skill 目录与配置记录（不可恢复）。若只是想暂时不用，请改用「停用」。' }}
-          </p>
-          <div class="sheet-actions">
-            <button class="btn ghost" @click="askDelete = null">取消</button>
-            <button class="btn danger-solid" :disabled="busy !== null" @click="deleteItem">确认彻底删除</button>
-          </div>
+      <!-- 彻底删除确认（管理页卸载 = 停用可恢复，删除 = 彻底删除）。
+           删除进行中不许点遮罩关闭：关掉不会撤销已经发出的 DELETE。 -->
+      <BottomSheet
+        v-if="askDelete"
+        variant="card"
+        role="alertdialog"
+        :dismissible="busy === null"
+        @close="askDelete = null"
+      >
+        <div class="stitle">
+          <CoomiIcon :name="askDelete.kind === 'mcp' ? 'plug' : 'wrench'" :size="17" />
+          彻底删除{{ askDelete.kind === 'mcp' ? '通用工具' : '创作能力' }}「{{ askDelete.item.name }}」？
         </div>
-      </div>
+        <p class="sdesc">
+          {{ askDelete.kind === 'mcp'
+            ? '将从 config/mcp_servers.json 中移除该服务（不可恢复）。若只是想暂时不用，请改用「停用」。'
+            : '将删除已安装的 Skill 目录与配置记录（不可恢复）。若只是想暂时不用，请改用「停用」。' }}
+        </p>
+        <template #actions>
+          <button class="btn ghost" @click="askDelete = null">取消</button>
+          <button class="btn danger-solid" :disabled="busy !== null" @click="deleteItem">确认彻底删除</button>
+        </template>
+      </BottomSheet>
 
       <!-- MCP 安装确认 -->
-      <div v-if="askMcp" class="sheet-mask" @click.self="askMcp = null">
-        <div class="sheet">
-          <div class="grip" />
-          <div class="stitle"><CoomiIcon name="plug" :size="17" />安装通用工具「{{ askMcp.name }}」？</div>
-          <p class="sdesc">{{ askMcp.description }}</p>
-          <div class="sinfo">
-            <span><CoomiIcon name="link" :size="13" />{{ askMcp.transport }}</span>
-            <span><CoomiIcon name="folder" :size="13" />写入本地工具配置</span>
-            <span><CoomiIcon name="refresh" :size="13" />重启引擎或新开会话后生效</span>
-          </div>
-          <div class="sheet-actions">
-            <button class="btn ghost" @click="askMcp = null">取消</button>
-            <button class="btn primary" @click="proceedMcp">继续配置</button>
-          </div>
+      <BottomSheet v-if="askMcp" variant="card" @close="askMcp = null">
+        <div class="stitle"><CoomiIcon name="plug" :size="17" />安装通用工具「{{ askMcp.name }}」？</div>
+        <p class="sdesc">{{ askMcp.description }}</p>
+        <div class="sinfo">
+          <span><CoomiIcon name="link" :size="13" />{{ askMcp.transport }}</span>
+          <span><CoomiIcon name="folder" :size="13" />写入本地工具配置</span>
+          <span><CoomiIcon name="refresh" :size="13" />重启引擎或新开会话后生效</span>
         </div>
-      </div>
+        <template #actions>
+          <button class="btn ghost" @click="askMcp = null">取消</button>
+          <button class="btn primary" @click="proceedMcp">继续配置</button>
+        </template>
+      </BottomSheet>
 
       <!-- Skill 安装确认 -->
-      <div v-if="askSkill" class="sheet-mask" @click.self="askSkill = null">
-        <div class="sheet">
-          <div class="grip" />
-          <div class="stitle"><CoomiIcon name="wrench" :size="17" />安装创作能力「{{ askSkill.name }}」？</div>
-          <p class="sdesc">{{ askSkill.description }}</p>
-          <div class="sinfo">
-            <span v-if="askSkill.repository"><CoomiIcon name="globe" :size="13" />{{ askSkill.repository }}</span>
-            <span><CoomiIcon name="folder" :size="13" />安装到创作能力目录</span>
-            <span><CoomiIcon name="refresh" :size="13" />重启引擎或新开会话后生效</span>
-          </div>
-          <div class="sheet-actions">
-            <button class="btn ghost" @click="askSkill = null">取消</button>
-            <button class="btn primary" :disabled="busy !== null" @click="proceedSkill">
-              {{ busy === askSkill.id ? '安装中…' : '确认安装' }}
-            </button>
-          </div>
+      <BottomSheet v-if="askSkill" variant="card" :dismissible="busy === null" @close="askSkill = null">
+        <div class="stitle"><CoomiIcon name="wrench" :size="17" />安装创作能力「{{ askSkill.name }}」？</div>
+        <p class="sdesc">{{ askSkill.description }}</p>
+        <div class="sinfo">
+          <span v-if="askSkill.repository"><CoomiIcon name="globe" :size="13" />{{ askSkill.repository }}</span>
+          <span><CoomiIcon name="folder" :size="13" />安装到创作能力目录</span>
+          <span><CoomiIcon name="refresh" :size="13" />重启引擎或新开会话后生效</span>
         </div>
-      </div>
+        <template #actions>
+          <button class="btn ghost" @click="askSkill = null">取消</button>
+          <button class="btn primary" :disabled="busy !== null" @click="proceedSkill">
+            {{ busy === askSkill.id ? '安装中…' : '确认安装' }}
+          </button>
+        </template>
+      </BottomSheet>
 
       <!-- MCP 安装参数表单 -->
-      <div v-if="installingMcp" class="sheet-mask" @click.self="closeInstallForm">
-        <div class="sheet">
-          <div class="grip" />
-          <div class="stitle">配置 {{ installingMcp.name }}</div>
-          <p class="sdesc">{{ installingMcp.description }}</p>
-          <label v-for="p in installingMcp.required_parameters" :key="p.key" class="field">
-            <span>{{ p.label }}<em v-if="!p.secret" class="req">必填</em></span>
-            <input
-              v-model="installValues[p.key]"
-              :type="p.secret ? 'password' : 'text'"
-              :placeholder="p.key"
-              autocomplete="off"
-            />
-          </label>
-          <p v-if="installingMcp.required_parameters.length === 0" class="sdesc">该工具无需额外配置，直接安装即可。</p>
-          <div class="sheet-actions">
-            <button class="btn ghost" @click="closeInstallForm">取消</button>
-            <button class="btn primary" :disabled="busy !== null || !installReady" @click="installMcp">
-              {{ busy === installingMcp.id ? '安装中…' : installReady ? '安装' : '请填写必填项' }}
-            </button>
-          </div>
-        </div>
-      </div>
+      <BottomSheet v-if="installingMcp" variant="card" :dismissible="busy === null" @close="closeInstallForm">
+        <div class="stitle">配置 {{ installingMcp.name }}</div>
+        <p class="sdesc">{{ installingMcp.description }}</p>
+        <label v-for="p in installingMcp.required_parameters" :key="p.key" class="field">
+          <span>{{ p.label }}<em v-if="!p.secret" class="req">必填</em></span>
+          <input
+            v-model="installValues[p.key]"
+            :type="p.secret ? 'password' : 'text'"
+            :placeholder="p.key"
+            autocomplete="off"
+          />
+        </label>
+        <p v-if="installingMcp.required_parameters.length === 0" class="sdesc">该工具无需额外配置，直接安装即可。</p>
+        <template #actions>
+          <button class="btn ghost" @click="closeInstallForm">取消</button>
+          <button class="btn primary" :disabled="busy !== null || !installReady" @click="installMcp">
+            {{ busy === installingMcp.id ? '安装中…' : installReady ? '安装' : '请填写必填项' }}
+          </button>
+        </template>
+      </BottomSheet>
     </main>
   </div>
 </template>
@@ -471,17 +465,8 @@ function goDashboard() {
   -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain;
 }
 .tabs { display: flex; gap: 8px; margin-bottom: 14px; }
-.seg {
-  display: flex; gap: 2px; margin-bottom: 12px; padding: 3px;
-  border-radius: var(--r-pill); background: var(--fill);
-  align-self: flex-start;
-}
-.segitem {
-  display: inline-flex; align-items: center; gap: 5px;
-  height: 30px; padding: 0 13px; border: 0; border-radius: var(--r-pill);
-  background: none; font-size: 12.5px; font-weight: 600; color: var(--text-3);
-}
-.segitem.on { background: var(--bg); color: var(--blue); box-shadow: var(--shadow-1); }
+/* 外观来自 components/ui/Segments，这里只给它和下面页签之间的间距。 */
+.seg { margin-bottom: 12px; }
 .tab {
   flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px;
   min-height: 42px; border-radius: var(--r-md);
@@ -494,22 +479,22 @@ function goDashboard() {
   display: inline-flex; align-items: center; justify-content: center;
   background: var(--fill); font-size: 11px; font-weight: 650;
 }
-.tab.on .cnt { background: var(--blue); color: #fff; }
+.tab.on .cnt { background: var(--blue); color: var(--on-accent); }
 
 .notice {
   margin: 0 0 12px; padding: 10px 12px; border-radius: var(--r-md);
   background: var(--fill); font-size: 13px; line-height: 1.6; color: var(--text);
 }
-.notice.err { background: var(--danger-soft, #ffeceb); color: var(--danger, #d43d2e); }
+.notice.err { background: var(--danger-soft); color: var(--danger); }
 .hint { margin: 18px 0; text-align: center; font-size: 13px; color: var(--text-3); }
 
 .cards { display: flex; flex-direction: column; gap: 8px; }
 .core-hint { margin:0 0 10px; color:var(--text-3); font-size:12px; line-height:1.6; }
 .core-card { flex-wrap:nowrap; }.core-copy { display:flex; min-width:0; flex:1; flex-direction:column; gap:3px; }.core-copy b { font-size:13.5px; }.core-copy small { color:var(--text-3); font-size:11.5px; line-height:1.45; }
+/* 底色 / 圆角 / 投影来自 global.css 的 .card。 */
 .card {
   display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
-  padding: 10px 12px; border-radius: var(--r-card);
-  background: var(--bg); box-shadow: var(--shadow-1);
+  padding: 10px 12px;
 }
 /* 卡片头部：整行可点击，折叠时只显示名称。 */
 .card-head {
@@ -527,7 +512,7 @@ function goDashboard() {
   flex-shrink: 0; padding: 1.5px 8px; border-radius: var(--r-pill);
   font-size: 10.5px; font-weight: 650;
 }
-.badge.ok { background: var(--ok-soft, #e6f4ea); color: var(--ok, #2e9e5b); }
+.badge.ok { background: var(--ok-soft); color: var(--ok); }
 .badge.off { background: var(--fill); color: var(--text-2); }
 .badge.plain { background: var(--fill); color: var(--text-3); }
 .chev { flex-shrink: 0; color: var(--text-3); transition: transform .18s; }
@@ -550,26 +535,14 @@ function goDashboard() {
 .dops { display: flex; gap: 8px; margin-top: 9px; }
 .act {
   flex-shrink: 0; min-width: 62px; height: 34px; padding: 0 14px; border-radius: var(--r-pill);
-  background: var(--blue); color: #fff; font-size: 13px; font-weight: 600;
+  background: var(--blue); color: var(--on-accent); font-size: 13px; font-weight: 600;
 }
 .act:active { opacity: 0.85; }
 .act:disabled { opacity: 0.5; }
 .act.danger { background: var(--danger-soft); color: var(--danger); }
-.done { flex-shrink: 0; width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; border-radius: 50%; background: var(--ok-soft, #e6f4ea); color: var(--ok, #2e9e5b); }
+.done { flex-shrink: 0; width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; border-radius: 50%; background: var(--ok-soft); color: var(--ok); }
 
-/* ── 弹层 ── */
-.sheet-mask {
-  position: fixed; inset: 0; z-index: 90;
-  display: flex; align-items: flex-end; justify-content: center;
-  background: rgba(0, 0, 0, 0.45);
-  padding: 12px;
-}
-.sheet {
-  width: 100%; max-width: 460px; padding: 10px 18px 18px;
-  border-radius: var(--r-card); background: var(--bg);
-  box-shadow: var(--shadow-2);
-}
-.grip { width: 36px; height: 4px; margin: 0 auto 12px; border-radius: 2px; background: var(--fill-strong); }
+/* ── 弹层内容（外壳与遮罩由 components/ui/BottomSheet 提供）── */
 .stitle {
   display: flex; align-items: center; gap: 8px;
   font-size: 15.5px; font-weight: 650; color: var(--text);
@@ -587,11 +560,10 @@ function goDashboard() {
   height: 42px; padding: 0 12px; border-radius: var(--r-md); border: 1px solid var(--border);
   background: var(--bg-input); color: var(--text); font-size: 15px;
 }
-.sheet-actions { display: flex; gap: 10px; margin-top: 18px; }
-.sheet-actions .btn { flex: 1; }
+/* 按钮等分由 BottomSheet 的 .actions 统一给出，这里只描述外观。 */
 .btn { min-height: 42px; border-radius: var(--r-md); font-size: 14.5px; font-weight: 600; }
-.btn.primary { background: var(--blue); color: #fff; }
+.btn.primary { background: var(--blue); color: var(--on-accent); }
 .btn.ghost { background: var(--fill-strong); color: var(--text); }
-.btn.danger-solid { background: var(--danger, #d43d2e); color: #fff; }
+.btn.danger-solid { background: var(--danger); color: var(--on-accent); }
 .btn:disabled { opacity: 0.6; }
 </style>

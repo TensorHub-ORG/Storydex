@@ -94,7 +94,7 @@ function goDashboard() {
       </div>
 
       <p class="sec-label">运行时</p>
-      <div class="group">
+      <div class="card group">
         <div v-for="r in rows" :key="r.k" class="kv">
           <span class="k">{{ r.k }}</span>
           <span class="v" :class="{ mono: r.mono }">{{ r.v }}</span>
@@ -135,7 +135,6 @@ function goDashboard() {
 .hdesc { font-size: 12.8px; line-height: 1.55; color: var(--text-2); }
 
 .sec-label { margin: 16px 0 0; }
-.group { border-radius: var(--r-card); background: var(--bg); box-shadow: var(--shadow-1); overflow: hidden; }
 .kv { display: flex; align-items: baseline; gap: 12px; padding: 12px 14px; font-size: 13.8px; }
 .kv + .kv { border-top: 1px solid var(--border); }
 .kv .k { flex-shrink: 0; min-width: 82px; color: var(--text-2); }

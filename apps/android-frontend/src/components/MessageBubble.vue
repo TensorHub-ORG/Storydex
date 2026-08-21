@@ -140,7 +140,7 @@ async function copyAll() {
 .bubble {
   max-width: 84%; padding: 10px 15px;
   border-radius: 19px 19px 7px 19px;
-  background: var(--blue); color: #fff;
+  background: var(--blue); color: var(--on-accent);
   font-size: 15.5px; line-height: 1.55; word-break: break-word;
   white-space: pre-wrap;
 }

@@ -10,6 +10,8 @@ import { useConnectionStore } from './connection'
 import { useConfigStore } from './config'
 import { useSessionsStore } from './sessions'
 import { useStoryStore, type ReasoningEffort } from './story'
+import { useProjectStore } from './project'
+import { configIntentMutates, executeConfigIntent } from '@/story/configIntents'
 import type { AssistantMessage, LoopProgress, QuestionCard, ReasoningBlock, RunState, Timelineitem, ToolCard, ToolDiagnosticTrace } from './viewModel'
 
 export const useSessionStore = defineStore('session', () => {
@@ -17,11 +19,15 @@ export const useSessionStore = defineStore('session', () => {
   const config = useConfigStore()
   const sessions = useSessionsStore()
   const story = useStoryStore()
+  const project = useProjectStore()
   sessions.setCurrentMode(story.agentMode)
   if (story.projectPath) sessions.setCurrentCwd(story.projectPath)
 
-  const sessionId = ref(createSessionId())
-  const timeline = ref<Timelineitem[]>([])
+  const initialSessionId = config.retainContextWindow
+    ? sessions.activeFor(story.projectPath, story.agentMode) ?? createSessionId()
+    : createSessionId()
+  const sessionId = ref(initialSessionId)
+  const timeline = ref<Timelineitem[]>(config.retainContextWindow ? sessions.loadTranscript(initialSessionId) : [])
   const runState = ref<RunState>('idle')
   const usage = ref<{
     total: number; input: number; output: number; contextRatio: number
@@ -39,6 +45,12 @@ export const useSessionStore = defineStore('session', () => {
   let connectedSessionId = ''
   let persistTimer: ReturnType<typeof setTimeout> | null = null
   let turnToolTrace: ToolDiagnosticTrace[] = []
+  /**
+   * 本回合里 Agent 是否改过配置。改完不能立刻重装上下文：引擎对 `reset_story_context` 的
+   * 处理里，任务在跑就直接拒（web.rs 的 "cannot reset a running story context"），
+   * 而这些改动全发生在 Agent 自己的回合内。所以记下来，到 turn_end 再重装。
+   */
+  let configContextDirty = false
   const transport = shallowRef<Transport | null>(null)
 
   const isBusy = computed(() => runState.value !== 'idle')
@@ -83,6 +95,7 @@ export const useSessionStore = defineStore('session', () => {
     const trimmed = (GUIDE_TITLES[key] ?? 'Storydex 指南').trim()
     // 首条用户消息作为会话标题，抽屉里就不会全是「新对话」。
     const isFirst = !timeline.value.some(t => t.kind === 'user')
+    sessions.rememberActive(sessionId.value, story.projectPath, story.agentMode)
     if (isFirst) sessions.touch(sessionId.value, { title: sessions.deriveTitle(trimmed) })
     timeline.value.push({ kind: 'user', id: nextId(), content: trimmed })
     runState.value = 'thinking'
@@ -113,6 +126,13 @@ export const useSessionStore = defineStore('session', () => {
     if (items.length === 0) return
     sessions.touch(sessionId.value, { turns: timeline.value.filter(t => t.kind === 'user').length, cwd: story.projectPath, mode: story.agentMode })
     sessions.saveTranscript(sessionId.value, timeline.value)
+  }
+
+  function preserveCurrentContext() {
+    flushPersistence()
+    if (config.retainContextWindow && timeline.value.some(item => item.kind !== 'notice')) {
+      sessions.rememberActive(sessionId.value, story.projectPath, story.agentMode)
+    }
   }
 
   /** 换 sessionId 后必须重连：WS 的路径里带着 session id。 */
@@ -209,6 +229,9 @@ export const useSessionStore = defineStore('session', () => {
         timeline.value.push({ kind: 'question', callId: ev.call_id, question: ev.question, options: ev.options, allowFreeText: ev.allow_free_text ?? true, answered: false })
         runState.value = 'awaiting_question'
         break
+      case 'storydex_config_intent':
+        void runConfigIntent(ev.call_id, ev.tool, ev.arguments ?? {})
+        break
       case 'file_transfer_request':
         if (ev.operation === 'import') {
           window.CoomiAndroid?.importFilesForRequest?.(ev.request_id)
@@ -255,7 +278,7 @@ export const useSessionStore = defineStore('session', () => {
         loop.value = { ...loop.value, active: true, totalSteps: ev.total_steps, currentStep: ev.step_index, currentDescription: ev.step_description }
         break
       case 'turn_end':
-        endAssistantStream(); cancelRunningTools(); connection.setRetry(null); runState.value = 'idle'
+        endAssistantStream(); cancelRunningTools(); connection.setRetry(null); runState.value = 'executing'
         {
           const failures = turnToolTrace.filter(item => item.status === 'error').length
           if (failures >= 3) {
@@ -267,10 +290,15 @@ export const useSessionStore = defineStore('session', () => {
           }
           turnToolTrace = []
         }
+        if (configContextDirty) {
+          // Agent 改过配置：重装上下文，下一轮的系统提示词才带上新的设置 / 剧本 / 记忆。
+          configContextDirty = false
+          resetStoryContext()
+        }
         void story.captureTurn(timeline.value, sessionId.value)
           .then(fragment => { if (fragment && story.fragments.length % 10 === 0) resetStoryContext() })
           .catch(error => pushNotice('error', error instanceof Error ? error.message : '剧情片段写入失败'))
-          .finally(persistSoon)
+          .finally(() => { runState.value = 'idle'; persistSoon() })
         break
       case 'session_state': {
         // 重连后引擎告知本会话是否仍在后台执行（切走会话后任务继续跑）。
@@ -322,7 +350,16 @@ export const useSessionStore = defineStore('session', () => {
   function sendMessage(text: string) {
     const trimmed = text.trim()
     if (!trimmed) return
+    if (story.agentMode === 'story' && story.turnCommitPending) {
+      pushNotice('warn', '上一轮剧情状态仍在恢复或提交中，暂时不能开始新一轮。')
+      return
+    }
+    if (story.agentMode === 'story' && project.consistency.required) {
+      pushNotice('warn', '历史章节已修改，请先更新记忆与剧情状态。')
+      return
+    }
     const agentPrompt = story.promptFor(trimmed)
+    sessions.rememberActive(sessionId.value, story.projectPath, story.agentMode)
     // 首条用户消息作为会话标题，抽屉里就不会全是「新对话」。
     const isFirst = !timeline.value.some(t => t.kind === 'user')
     if (isFirst) sessions.touch(sessionId.value, { title: sessions.deriveTitle(trimmed) })
@@ -350,6 +387,19 @@ export const useSessionStore = defineStore('session', () => {
     transport.value?.send({ command: 'answer_question', call_id: callId, answer })
     if (runState.value === 'awaiting_question') runState.value = 'thinking'
   }
+  /**
+   * 执行 Agent 下发的配置意图，并把结果回给引擎。
+   *
+   * 直接调 store action，不走 SettingsView 的 `mutate()`：那个包装会在 `session.isBusy` 时
+   * 拒绝执行，而本函数只在 Agent 自己的回合里被调用，`isBusy` 必然为真——套上去就死锁。
+   *
+   * 结果一律回执，成败都回：引擎发出事件后是阻塞等回执的，不回就白等 300 秒超时。
+   */
+  async function runConfigIntent(callId: string, tool: string, args: Record<string, unknown>) {
+    const result = await executeConfigIntent(tool, args)
+    if (result.ok && configIntentMutates(tool)) configContextDirty = true
+    transport.value?.send({ command: 'resolve_config_intent', call_id: callId, ok: result.ok, detail: result.detail })
+  }
   function setPermissionMode(mode: 'ask' | 'auto' | 'full') { config.setPermissionMode(mode); transport.value?.send({ command: 'set_permission_mode', mode }) }
   function togglePlanMode() { const entering = !config.planMode; config.togglePlanMode(); transport.value?.send({ command: entering ? 'enter_plan_mode' : 'exit_plan_mode' }) }
   function selectModel(providerId: string, model: string) { config.selectModel(providerId, model); transport.value?.send({ command: 'select_model', provider_id: providerId, model }) }
@@ -358,6 +408,49 @@ export const useSessionStore = defineStore('session', () => {
     transport.value?.send({ command: 'set_reasoning_effort', effort })
   }
   function resetStoryContext() { transport.value?.send({ command: 'reset_story_context' }) }
+  function clearContextWindow() {
+    if (isBusy.value) return false
+    resetStoryContext()
+    endAssistantStream()
+    timeline.value = []
+    usage.value = null
+    loop.value = { active: false, currentStep: 0, totalSteps: 0, status: '' }
+    runState.value = 'idle'
+    sessions.clearTranscript(sessionId.value)
+    sessions.rememberActive(sessionId.value, story.projectPath, story.agentMode)
+    return true
+  }
+
+  async function rebuildStoryConsistency(): Promise<boolean> {
+    if (isBusy.value || project.consistency.updating || !story.projectPath) return false
+    await project.beginConsistencyRebuild()
+    try {
+      const response = await authedFetch('/api/storydex/rebuild-consistency', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          path: story.projectPath,
+          providerId: config.currentProviderId,
+          model: config.currentModel,
+          reasoningEffort: story.reasoningEffort,
+        }),
+      })
+      if (!response.ok) {
+        let detail = `HTTP ${response.status}`
+        try { detail = (await response.json())?.error ?? detail } catch { /* response may be plain text */ }
+        throw new Error(detail)
+      }
+      await project.initialize(true)
+      if (project.error) throw new Error(project.error)
+      pushNotice('success', '记忆与剧情状态已根据项目章节更新，可以继续推进剧情。')
+      return true
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      await project.failConsistencyRebuild(message).catch(() => {})
+      pushNotice('error', `更新失败：${message}`)
+      return false
+    }
+  }
   function completeFileTransfer(requestId: string, paths: string[]) {
     transport.value?.send({ command: 'file_transfer_result', request_id: requestId, paths })
   }
@@ -367,17 +460,19 @@ export const useSessionStore = defineStore('session', () => {
     endAssistantStream(); timeline.value = []; usage.value = null
     loop.value = { active: false, currentStep: 0, totalSteps: 0, status: '' }; runState.value = 'idle'
     sessionId.value = createSessionId()
+    if (config.retainContextWindow) sessions.rememberActive(sessionId.value, story.projectPath, story.agentMode)
     connect()
     if (story.projectPath) void setSessionCwd(story.projectPath)
   }
 
-  /** 主模式互切必须换引擎会话，确保上下文窗口与旧模式完全隔离。 */
-  function switchAgentMode(mode: import('./story').AgentMode) {
+  /** 三种模式使用独立引擎会话；开启保留后恢复各自上一次真实上下文。 */
+  async function switchAgentMode(mode: import('./story').AgentMode) {
     if (mode === story.agentMode) return
     if (isBusy.value) transport.value?.send({ command: 'cancel' })
     endAssistantStream()
     cancelRunningTools()
     flushPersistence()
+    if (config.retainContextWindow) sessions.rememberActive(sessionId.value, story.projectPath, story.agentMode)
     story.setAgentMode(mode)
     sessions.setCurrentMode(mode)
     config.setPermissionMode(mode === 'agent' ? 'full' : 'auto')
@@ -385,7 +480,12 @@ export const useSessionStore = defineStore('session', () => {
     usage.value = null
     loop.value = { active: false, currentStep: 0, totalSteps: 0, status: '' }
     runState.value = 'idle'
-    sessionId.value = createSessionId()
+    const restored = await restoreRetainedContext(mode)
+    if (!restored) sessionId.value = createSessionId()
+    if (mode === 'story') {
+      await story.loadFragmentsFromProject()
+      continueStory()
+    }
     connect()
     if (story.projectPath) void setSessionCwd(story.projectPath)
   }
@@ -394,6 +494,7 @@ export const useSessionStore = defineStore('session', () => {
   function continueStory() {
     endAssistantStream()
     runState.value = 'idle'
+    story.showLatestFragment()
     const fragment = story.latest
     timeline.value = fragment
       ? [{ kind: 'assistant', id: fragment.sourceMessageId ?? nextId(), content: fragment.content, streaming: false }]
@@ -403,6 +504,7 @@ export const useSessionStore = defineStore('session', () => {
   /** 返回剧情首页：清空当前展示，不换会话、不中断后台任务。 */
   function standby() {
     endAssistantStream()
+    story.showLatestFragment()
     timeline.value = []
     usage.value = null
     loop.value = { active: false, currentStep: 0, totalSteps: 0, status: '' }
@@ -494,6 +596,28 @@ export const useSessionStore = defineStore('session', () => {
     return items
   }
 
+  /** Restore the authoritative engine context for one project and mode. */
+  async function restoreRetainedContext(mode: import('./story').AgentMode = story.agentMode): Promise<boolean> {
+    if (!config.retainContextWindow) return false
+    await sessions.syncFromEngine()
+    const mappedId = sessions.activeFor(story.projectPath, mode)
+    const mapped = mappedId ? sessions.find(mappedId) : undefined
+    const normalized = (value: string) => value.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+    const mappedMatches = mapped?.mode === mode
+      && normalized(mapped.cwd ?? '') === normalized(story.projectPath)
+    const target = mappedMatches ? mapped : sessions.latestFor(story.projectPath, mode)
+    if (!target) return false
+
+    disconnect()
+    sessionId.value = target.id
+    timeline.value = []
+    usage.value = null
+    const restoredFromEngine = await restoreFromEngine(target.id)
+    if (!restoredFromEngine) timeline.value = sessions.loadTranscript(target.id)
+    sessions.rememberActive(target.id, story.projectPath, mode)
+    return true
+  }
+
   /**
    * 打开一条历史会话：优先从引擎磁盘拉完整历史（权威源，修复“会话消失/串话”），
    * 引擎不可用才回退本机 localStorage 记录。
@@ -507,6 +631,7 @@ export const useSessionStore = defineStore('session', () => {
     runState.value = 'idle'
     const targetId = isUuid(id) ? id : sessions.migrateId(id, createSessionId())
     sessionId.value = targetId
+    if (config.retainContextWindow) sessions.rememberActive(targetId, story.projectPath, story.agentMode)
     const restoredFromEngine = await restoreFromEngine(targetId)
     if (!restoredFromEngine) {
       const restored = sessions.loadTranscript(targetId)
@@ -619,7 +744,7 @@ export const useSessionStore = defineStore('session', () => {
     }
   }
 
-  return { sessionId, timeline, runState, usage, cwd, loop, isBusy, pendingApproval, pendingQuestion, connect, disconnect, sendMessage, cancel, approve, answerQuestion, setPermissionMode, togglePlanMode, selectModel, setReasoningEffort, refreshProjectUsage, resetStoryContext, completeFileTransfer, newSession, switchAgentMode, continueStory, standby, openSession, deleteSession, setSessionCwd, sendGuide, consentToolFailureFeedback, finishToolFailureFeedback }
+  return { sessionId, timeline, runState, usage, cwd, loop, isBusy, pendingApproval, pendingQuestion, connect, disconnect, sendMessage, cancel, approve, answerQuestion, setPermissionMode, togglePlanMode, selectModel, setReasoningEffort, refreshProjectUsage, resetStoryContext, clearContextWindow, rebuildStoryConsistency, preserveCurrentContext, completeFileTransfer, newSession, switchAgentMode, restoreRetainedContext, continueStory, standby, openSession, deleteSession, setSessionCwd, sendGuide, consentToolFailureFeedback, finishToolFailureFeedback }
 })
 
 function fmtTokens(n: number): string { return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n) }
