@@ -226,7 +226,7 @@ fn main() {
         {
             if label == "main" {
                 api.prevent_close();
-                let _ = app_handle.exit(0);
+                app_handle.exit(0);
             }
         }
 
