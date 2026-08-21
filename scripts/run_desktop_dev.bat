@@ -3,28 +3,23 @@ setlocal EnableExtensions
 chcp 65001 >nul
 
 set "ROOT=%~dp0.."
-set "BOOTSTRAP_SCRIPT=%ROOT%\scripts\bootstrap_python39.ps1"
-set "PORT_SELECTOR=%ROOT%\scripts\select_available_port.ps1"
-set "PYTHON_EXE=%ROOT%\.python39\Scripts\python.exe"
 set "FRONTEND_DIR=%ROOT%\apps\frontend"
 set "DESKTOP_DIR=%ROOT%\apps\desktop"
+set "RUNTIME_MANIFEST=%DESKTOP_DIR%\agent-runtime\Cargo.toml"
+set "RUNTIME_EXE=%DESKTOP_DIR%\agent-runtime\target\debug\storydex-agentd.exe"
 
 echo [Storydex] Desktop dev bootstrap...
 echo.
 
-echo [Storydex] Cleaning stale dev processes (ports 5173, 18081)...
-taskkill /F /IM electron.exe >nul 2>&1
-powershell -NoProfile -Command "$ports = 5173, 18081; foreach ($port in $ports) { Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { try { Stop-Process -Id $_ -Force -ErrorAction Stop } catch {} } }"
-powershell -NoProfile -Command "Start-Sleep -Seconds 2"
+echo [Storydex] Cleaning stale frontend dev process (port 5173)...
+powershell -NoProfile -Command "$connection = Get-NetTCPConnection -State Listen -LocalPort 5173 -ErrorAction SilentlyContinue; $connection | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { try { Stop-Process -Id $_ -Force -ErrorAction Stop } catch {} }" >nul 2>&1
+powershell -NoProfile -Command "Start-Sleep -Seconds 1" >nul 2>&1
 
-echo.
-echo [Storydex] Preparing project-local Python 3.9 runtime...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%BOOTSTRAP_SCRIPT%" -InstallRequirements || goto :error
-
-if not exist "%PYTHON_EXE%" (
-  echo [Storydex] ERROR: Project-local Python 3.9 was not created.
-  echo [Storydex] Expected: %PYTHON_EXE%
-  echo [Storydex] Try deleting the .python39 folder and re-running.
+echo [Storydex] Checking Rust toolchain...
+where cargo >nul 2>&1
+if errorlevel 1 (
+  echo [Storydex] ERROR: cargo was not found on PATH.
+  echo [Storydex] Install the Rust toolchain and restart this launcher.
   goto :error
 )
 
@@ -32,57 +27,44 @@ echo.
 call :ensure_node_deps "%FRONTEND_DIR%" "frontend" || goto :error
 call :ensure_node_deps "%DESKTOP_DIR%" "desktop" || goto :error
 
-set "PYTHONNOUSERSITE=1"
-set "PYTHONUTF8=1"
-set "PYTHONIOENCODING=utf-8"
-set "PYTHONHOME="
-set "STORYDEX_PYTHON=%PYTHON_EXE%"
-set "STORYDEX_EMBED_PYTHON=%ROOT%\.python39"
+if not exist "%RUNTIME_MANIFEST%" (
+  echo [Storydex] ERROR: Rust sidecar manifest not found: %RUNTIME_MANIFEST%
+  goto :error
+)
+
 echo.
-echo [Storydex] Using backend python: %STORYDEX_PYTHON%
+echo [Storydex] Building Storydex Rust sidecar...
+cd /d "%DESKTOP_DIR%" || goto :error
+call cargo build --manifest-path "%RUNTIME_MANIFEST%" --locked -p storydex-agentd || goto :error
+if not exist "%RUNTIME_EXE%" (
+  echo [Storydex] ERROR: Rust sidecar build did not create:
+  echo [Storydex] %RUNTIME_EXE%
+  goto :error
+)
 
 if /I "%~1"=="--prepare-only" (
   echo.
-  echo [Storydex] Desktop dev dependencies are ready ^(--prepare-only^).
+  echo [Storydex] Desktop dev dependencies and Rust sidecar are ready ^(--prepare-only^).
   exit /b 0
 )
 
 echo.
-echo [Storydex] Building latest frontend bundle...
-cd /d "%DESKTOP_DIR%" || goto :error
-call npm run build:frontend || goto :error
-
-echo.
-echo [Storydex] Building Storydex Coomi Rust bridge...
-call npm run build:coomi-runtime || goto :error
-
-echo.
-echo [Storydex] Syncing latest desktop app assets...
-call npm run sync:assets || goto :error
-
-set "STORYDEX_FRONTEND_PORT="
-for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%PORT_SELECTOR%" -PreferredPort 5173`) do set "STORYDEX_FRONTEND_PORT=%%P"
-if not defined STORYDEX_FRONTEND_PORT (
-  echo [Storydex] ERROR: No available frontend development port was found.
-  goto :error
-)
-set "STORYDEX_DESKTOP_URL=http://127.0.0.1:%STORYDEX_FRONTEND_PORT%"
-
-echo.
-echo [Storydex] Launching desktop development app...
-echo [Storydex] Frontend: %STORYDEX_DESKTOP_URL%
-echo [Storydex] Backend : http://127.0.0.1:18081
+echo [Storydex] Launching Tauri desktop development app...
+echo [Storydex] Frontend: http://127.0.0.1:5173
+echo [Storydex] Backend : dynamically assigned by storydex-agentd
 echo.
 
-cd /d "%DESKTOP_DIR%" || goto :error
 call npm run dev
-exit /b %errorlevel%
+if errorlevel 1 goto :error
+exit /b 0
 
 :error
+set "EXIT_CODE=%ERRORLEVEL%"
+if "%EXIT_CODE%"=="0" set "EXIT_CODE=1"
 echo.
 echo [Storydex] Desktop dev startup failed.
 echo [Storydex] Check the error messages above for details.
-exit /b 1
+exit /b %EXIT_CODE%
 
 :ensure_node_deps
 set "NPM_DIR=%~1"

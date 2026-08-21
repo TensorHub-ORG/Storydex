@@ -1,9 +1,19 @@
 type TauriEventModule = typeof import("@tauri-apps/api/event");
 
 export function isTauriRuntime(): boolean {
-  return typeof window !== "undefined"
-    && (window.location.protocol === "tauri:" || window.location.hostname === "tauri.localhost")
-    && Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  const internals = (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+  if (!internals) {
+    return false;
+  }
+
+  return window.location.protocol === "tauri:"
+    || window.location.hostname === "tauri.localhost"
+    || (window.location.protocol === "http:"
+      && (window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost"));
 }
 
 export async function installTauriDesktopBridge(): Promise<void> {

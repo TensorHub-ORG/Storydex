@@ -15,8 +15,13 @@ test("Tauri Stable has an isolated build descriptor and minimum capability", () 
   const capability = JSON.parse(read("capabilities/default.json"));
   const previewCapability = JSON.parse(read("capabilities/preview.json"));
   const desktopPackage = JSON.parse(fs.readFileSync(path.join(desktopRoot, "package.json"), "utf8"));
+  const launcher = fs.readFileSync(
+    path.resolve(desktopRoot, "..", "..", "scripts", "run_desktop_dev.bat"),
+    "utf8"
+  );
   assert.equal(config.identifier, "cn.tensorhub.storydex");
   assert.equal(config.build.frontendDist, "../../frontend/dist");
+  assert.equal(config.build.beforeDevCommand, "npm --prefix ../frontend run dev");
   assert.deepEqual(config.app.windows, []);
   assert.equal(config.app.withGlobalTauri, false);
   assert.match(config.app.security.csp, /connect-src[^;]*ipc:/);
@@ -32,6 +37,12 @@ test("Tauri Stable has an isolated build descriptor and minimum capability", () 
   assert.match(desktopPackage.scripts["check:tauri-preview"], /check:tauri/);
   assert.match(desktopPackage.scripts["build:tauri-preview"], /build:desktop/);
   assert.match(desktopPackage.scripts["smoke:tauri-preview"], /smoke:tauri/);
+  assert.match(launcher, /cargo build[^\r\n]*storydex-agentd/);
+  assert.match(launcher, /call npm run dev/);
+  assert.doesNotMatch(
+    launcher,
+    /bootstrap_python39|build:coomi-runtime|sync:assets|electron\.exe|select_available_port|127\.0\.0\.1:18081/i
+  );
 });
 
 test("Tauri Stable build input never points at legacy runtime assets", () => {

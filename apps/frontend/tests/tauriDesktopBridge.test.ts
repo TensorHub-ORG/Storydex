@@ -80,6 +80,21 @@ describe("Tauri desktop bridges", () => {
     expect(detachPreview).toHaveBeenCalledTimes(1);
   });
 
+  it("recognizes the loopback URL used by Tauri development", () => {
+    window.location.href = "http://example.test/";
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: { invoke: vi.fn() }
+    });
+    expect(isTauriRuntime()).toBe(false);
+
+    window.location.href = "http://127.0.0.1:5173/";
+    expect(isTauriRuntime()).toBe(true);
+
+    window.location.href = "http://example.test/";
+    expect(isTauriRuntime()).toBe(false);
+  });
+
   it("checks, downloads, installs, and reports updater state through the Tauri plugin", async () => {
     const bridge = installTauriWindow();
     const install = vi.fn().mockResolvedValue(undefined);
