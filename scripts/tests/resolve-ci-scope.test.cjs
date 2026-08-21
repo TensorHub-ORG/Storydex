@@ -69,13 +69,25 @@ test("desktop and documentation changes stay scoped", () => {
   assert.equal(docs.pc_runtime, false);
 });
 
-test("workflow, classifier, unknown, empty, and forced scopes fail safe", () => {
+test("CI policy, unknown, empty, and forced scopes follow their intended safety profiles", () => {
   const unknown = classifyChangedPaths(["new-component/main.ts"]);
   assert.deepEqual(unknown.unknownPaths, ["new-component/main.ts"]);
 
+  const ciPolicy = classifyChangedPaths([".github/workflows/quality-gate.yml"]);
+  assert.equal(ciPolicy.backend, false);
+  assert.equal(ciPolicy.frontend, false);
+  assert.equal(ciPolicy.desktop, false);
+  assert.equal(ciPolicy.android, false);
+  assert.equal(ciPolicy.coomi, false);
+  assert.equal(ciPolicy.pc_runtime, false);
+  assert.equal(ciPolicy.docsOnly, false);
+  assert.equal(ciPolicy.reason, "ci-policy-only");
+
+  const agentRules = classifyChangedPaths(["AGENTS.md"]);
+  assert.equal(agentRules.docsOnly, true);
+  assert.equal(agentRules.reason, "documentation-only");
+
   for (const result of [
-    classifyChangedPaths([".github/workflows/quality-gate.yml"]),
-    classifyChangedPaths(["scripts/resolve_ci_scope.cjs"]),
     unknown,
     classifyChangedPaths([]),
     classifyChangedPaths(["README.md"], { forceAll: true }),

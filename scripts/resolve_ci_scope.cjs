@@ -12,12 +12,24 @@ function normalizePath(value) {
 
 function isDocumentationOnly(filePath) {
   return (
-    filePath === ".gitattributes"
+    filePath === "AGENTS.md"
+    || filePath === ".gitattributes"
     || filePath === ".gitignore"
     || filePath === "LICENSE"
     || filePath.startsWith("LICENSE.")
     || /^README(?:\.[^/]+)?$/i.test(filePath)
     || filePath.startsWith("docs/")
+  );
+}
+
+function isCiPolicyOnly(filePath) {
+  return (
+    filePath.startsWith(".github/")
+    || filePath === "scripts/resolve_ci_scope.cjs"
+    || filePath === "scripts/run_pre_push_ci.ps1"
+    || filePath === "scripts/tests/ci-preflight.test.cjs"
+    || filePath === "scripts/tests/check-coverage.test.cjs"
+    || filePath === "scripts/tests/resolve-ci-scope.test.cjs"
   );
 }
 
@@ -33,6 +45,7 @@ function classifyChangedPaths(inputPaths, options = {}) {
     pc_runtime: false,
   };
   const unknownPaths = [];
+  let ciPolicyOnly = false;
 
   const enableAll = () => {
     scope.backend = true;
@@ -55,8 +68,8 @@ function classifyChangedPaths(inputPaths, options = {}) {
   }
 
   for (const filePath of paths) {
-    if (filePath.startsWith(".github/")) {
-      enableAll();
+    if (isCiPolicyOnly(filePath)) {
+      ciPolicyOnly = true;
       continue;
     }
     if (isDocumentationOnly(filePath)) {
@@ -124,10 +137,7 @@ function classifyChangedPaths(inputPaths, options = {}) {
       matched = true;
     }
 
-    if (filePath === "scripts/resolve_ci_scope.cjs" || filePath === "scripts/tests/resolve-ci-scope.test.cjs") {
-      enableAll();
-      matched = true;
-    } else if (filePath.startsWith("scripts/")) {
+    if (filePath.startsWith("scripts/")) {
       const sourcePolicyOnly = (
         filePath === "scripts/validate_text_encoding.cjs"
         || filePath === "scripts/validate_version_consistency.cjs"
@@ -147,12 +157,15 @@ function classifyChangedPaths(inputPaths, options = {}) {
   }
 
   const selected = scope.backend || scope.frontend || scope.desktop || scope.android || scope.coomi || scope.pc_runtime;
+  const reason = unknownPaths.length > 0
+    ? "unknown-path-fail-safe"
+    : (ciPolicyOnly && !selected ? "ci-policy-only" : (!selected ? "documentation-only" : "path-classified"));
   return {
     ...scope,
-    docsOnly: !selected,
+    docsOnly: !selected && !ciPolicyOnly,
     changedCount: paths.length,
     unknownPaths,
-    reason: unknownPaths.length > 0 ? "unknown-path-fail-safe" : (!selected ? "documentation-only" : "path-classified"),
+    reason,
   };
 }
 

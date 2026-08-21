@@ -40,39 +40,13 @@ jobs:
       - name: Test CI policies
         run: node --test scripts/tests/resolve-ci-scope.test.cjs scripts/tests/ci-preflight.test.cjs
 
-  windows-tests:
-    name: Windows development tests
+  windows-quality-gate:
+    name: Windows affected-component checks
     if: github.ref == 'refs/heads/dev/windows' || github.base_ref == 'dev/windows'
-    runs-on: windows-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@1.95.0
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            apps/desktop/agent-runtime -> target
-            apps/desktop/tauri-preview -> target
-      - name: Install pinned Rust dependency auditor
-        run: cargo install cargo-deny --version 0.20.2 --locked
-      - name: Audit Rust dependencies
-        shell: pwsh
-        run: ./scripts/run_rust_dependency_audit.ps1
-      - name: Test Windows Agent runtime
-        run: cargo test --manifest-path apps/desktop/agent-runtime/Cargo.toml --locked --workspace
-      - name: Check Tauri Stable shell
-        run: cargo check --manifest-path apps/desktop/tauri-preview/Cargo.toml --locked
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "20"
-          cache: npm
-          cache-dependency-path: apps/desktop/package-lock.json
-      - name: Install desktop dependencies
-        run: npm ci --prefer-offline --no-audit --fund=false
-        working-directory: apps/desktop
-      - name: Test desktop shell
-        run: npm run test:unit
-        working-directory: apps/desktop
+    uses: ./.github/workflows/quality-gate.yml
+    with:
+      full: false
+      run_packaged_checks: false
 
   android-tests:
     name: Android development tests

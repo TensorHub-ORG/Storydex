@@ -166,7 +166,8 @@ test("standard CI scopes quality jobs while full CI retains its compatibility ma
 
   const ci = fs.readFileSync(path.resolve(__dirname, "..", "..", ".github", "workflows", "ci.yml"), "utf8");
   const release = fs.readFileSync(path.resolve(__dirname, "..", "..", ".github", "workflows", "release-windows.yml"), "utf8");
-  assert.match(ci, /full:\s*\$\{\{ inputs\.full \|\| github\.ref ===? 'refs\/heads\/main' \|\| github\.base_ref ===? 'main' \}\}/);
+  assert.match(ci, /full:\s*\$\{\{ inputs\.full \}\}/);
+  assert.doesNotMatch(ci, /github\.ref ===? 'refs\/heads\/main'|github\.base_ref ===? 'main'/);
   assert.match(release, /enforce_coverage:\s*true\s+full:\s*true/);
 });
 

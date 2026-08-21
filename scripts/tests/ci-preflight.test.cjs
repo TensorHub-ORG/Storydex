@@ -61,24 +61,29 @@ test("Rust dependency audit covers the Agent workspace and the Windows Tauri run
   assert.doesNotMatch(audit, /--exclude|advisories\.ignore/);
 });
 
-test("development branches use lightweight CI while main keeps the remote full gate", () => {
+test("normal CI stays scoped while full CI remains explicit for release validation", () => {
   const guard = read("scripts/run_pre_push_ci.ps1");
   const ci = read(".github/workflows/ci.yml");
   const developmentCi = read(".github/workflows/dev-ci.yml");
   assert.match(guard, /full local pre-push gate has been retired/);
   assert.match(ci, /pull_request:\s*\n\s*branches: \[main\]/);
   assert.match(ci, /push:\s*\n\s*branches: \[main\]/);
+  assert.match(ci, /full:\s*\$\{\{ inputs\.full \}\}/);
+  assert.doesNotMatch(ci, /github\.ref\s*==\s*'refs\/heads\/main'|github\.base_ref\s*==\s*'main'/);
+  const qualityGate = read(".github/workflows/quality-gate.yml");
+  assert.match(qualityGate, /if \[\[ "\$FULL" == "true" \]\]/);
+  assert.match(qualityGate, /EVENT_NAME.*workflow_dispatch[\s\S]*?git rev-parse .*\^/);
   assert.match(developmentCi, /dev-flowby/);
   assert.match(developmentCi, /dev\/windows/);
   assert.match(developmentCi, /dev\/android/);
   assert.match(developmentCi, /Run basic repository checks/);
   assert.match(developmentCi, /Test CI policies/);
-  assert.match(developmentCi, /windows-tests:[\s\S]*?runs-on: windows-latest/);
+  assert.match(developmentCi, /windows-quality-gate:[\s\S]*?uses: \.\/\.github\/workflows\/quality-gate\.yml/);
+  assert.match(developmentCi, /windows-quality-gate:[\s\S]*?full: false[\s\S]*?run_packaged_checks: false/);
   assert.match(developmentCi, /android-tests:[\s\S]*?runs-on: ubuntu-latest/);
-  assert.match(developmentCi, /cargo test --manifest-path apps\/desktop\/agent-runtime\/Cargo\.toml/);
   assert.match(developmentCi, /cargo test --manifest-path apps\/android\/agent-runtime\/Cargo\.toml/);
-  assert.doesNotMatch(developmentCi, /pytest|coverage|electron-e2e|package:win/);
-  assert.match(developmentCi, /Check Tauri Stable shell/);
+  assert.doesNotMatch(developmentCi, /Install pinned Rust dependency auditor|Test Windows Agent runtime|Check Tauri Stable shell|package:win/);
+  assert.match(qualityGate, /tauri-e2e:[\s\S]*?if:\s*inputs\.full && inputs\.run_packaged_checks/);
 });
 
 test("Agent runtimes are owned by their platforms without cross-source dependencies", () => {
@@ -125,6 +130,10 @@ test("hook installer is repository local and agent rules require remote success"
   assert.match(rules, /不运行 Backend/);
   assert.match(rules, /GitHub Actions/);
   assert.match(rules, /success/);
+  assert.match(rules, /普通 push 和 pull request 不运行打包或 GUI E2E/);
+  assert.match(rules, /默认监控最多 15 分钟/);
+  assert.match(rules, /run URL 和当前状态/);
+  assert.match(rules, /用户明确要求持续等待/);
 });
 
 test("website overlay deployments invalidate cached Windows download links", () => {

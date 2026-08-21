@@ -67,13 +67,16 @@ jobs:
           base=""
           head="$CURRENT_SHA"
 
-          if [[ "$FULL" == "true" || "$EVENT_NAME" == "workflow_dispatch" ]]; then
+          if [[ "$FULL" == "true" ]]; then
             force_all=true
           elif [[ "$EVENT_NAME" == "pull_request" ]]; then
             base="$PR_BASE_SHA"
             head="$PR_HEAD_SHA"
           elif [[ "$EVENT_NAME" == "push" ]]; then
             base="$PUSH_BEFORE_SHA"
+          elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            # A manual run without the full switch checks the current commit only.
+            base="$(git rev-parse "${head}^" 2>/dev/null || true)"
           else
             force_all=true
           fi
