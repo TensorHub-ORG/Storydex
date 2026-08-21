@@ -89,6 +89,9 @@ test("Tauri Stable build input never points at legacy runtime assets", () => {
   assert.match(source, /runtime_info/);
   assert.match(source, /WebviewWindowBuilder/);
   assert.match(source, /data_directory/);
+  assert.match(source, /WindowEvent::CloseRequested/);
+  assert.match(source, /prevent_close/);
+  assert.match(source, /app_handle\.exit\(0\)/);
   assert.match(sidecar, /backendAuthToken/);
   assert.match(sidecar, /X-Storydex-Runtime-Token|Authorization: Bearer/);
   assert.match(sidecar, /\/api\/v1\/sys\/health/);

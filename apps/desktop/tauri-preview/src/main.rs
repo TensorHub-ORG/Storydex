@@ -218,6 +218,18 @@ fn main() {
         .expect("error while building Storydex Tauri desktop shell");
 
     app.run(|app_handle, event| {
+        if let tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::CloseRequested { api, .. },
+            ..
+        } = &event
+        {
+            if label == "main" {
+                api.prevent_close();
+                let _ = app_handle.exit(0);
+            }
+        }
+
         if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
             if let Some(runtime) = app_handle.try_state::<Arc<sidecar::SidecarRuntime>>() {
                 runtime.shutdown(Duration::from_secs(6));
