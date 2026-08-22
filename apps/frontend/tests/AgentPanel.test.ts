@@ -682,19 +682,22 @@ describe("AgentPanel", () => {
         option: "废材逆袭",
         label: "废材逆袭",
         other_text: null
-      }
+      },
+      { sessionId: "default", expectedTraceId: "", workspaceRoot: "C:/isolated/story" }
     );
     expect(api.resolveAgentCoomiApproval).toHaveBeenNthCalledWith(
       2,
       "tone-approval",
       "answer",
-      expect.objectContaining({ answer: "史诗宏大", value: "史诗宏大" })
+      expect.objectContaining({ answer: "史诗宏大", value: "史诗宏大" }),
+      { sessionId: "default", expectedTraceId: "", workspaceRoot: "C:/isolated/story" }
     );
     expect(api.resolveAgentCoomiApproval).toHaveBeenNthCalledWith(
       3,
       "length-approval",
       "answer",
-      expect.objectContaining({ answer: "长篇", value: "长篇" })
+      expect.objectContaining({ answer: "长篇", value: "长篇" }),
+      { sessionId: "default", expectedTraceId: "", workspaceRoot: "C:/isolated/story" }
     );
     wrapper.unmount();
   });

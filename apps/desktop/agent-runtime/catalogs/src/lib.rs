@@ -157,12 +157,12 @@ impl CatalogInstaller {
         if config_path.exists() {
             let bytes = fs::read(&config_path)
                 .with_context(|| format!("failed to read {}", config_path.display()))?;
-            if let Ok(mut document) = serde_json::from_slice::<Value>(&bytes) {
-                if let Some(skills) = document.get_mut("skills").and_then(Value::as_object_mut) {
-                    skills.remove(id);
-                    fs::write(&config_path, serde_json::to_vec_pretty(&document)?)
-                        .with_context(|| format!("failed to write {}", config_path.display()))?;
-                }
+            if let Ok(mut document) = serde_json::from_slice::<Value>(&bytes)
+                && let Some(skills) = document.get_mut("skills").and_then(Value::as_object_mut)
+            {
+                skills.remove(id);
+                fs::write(&config_path, serde_json::to_vec_pretty(&document)?)
+                    .with_context(|| format!("failed to write {}", config_path.display()))?;
             }
         }
         Ok(destination)

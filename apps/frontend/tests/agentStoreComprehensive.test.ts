@@ -56,7 +56,7 @@ beforeEach(() => {
   api.fetchAgentHistory.mockResolvedValue(envelope({ items: [] }));
   api.cycleAgentCoomiPermission.mockResolvedValue(envelope({ permissionMode: "read_only", permissionLabel: "Read" }));
   api.setAgentCoomiPermission.mockResolvedValue(envelope({ permissionMode: "full_access", permissionLabel: "Full" }));
-  api.resolveAgentCoomiApproval.mockResolvedValue(envelope({ ok: true }));
+  api.resolveAgentCoomiApproval.mockResolvedValue(envelope({ accepted: true }));
   api.clearConversation.mockResolvedValue(envelope({ cleared: true }));
   api.deleteAgentSession.mockResolvedValue(envelope({ deleted: true }));
   api.submitAgentRunCommitDecision.mockResolvedValue(envelope({ created: false, reason: "skipped", changedFiles: [] }));
@@ -117,7 +117,9 @@ describe("agent store lifecycle and normalization", () => {
     await store.resolvePendingApproval("answer", { text: "yes" }, "b");
     expect(store.pendingApprovals.map((item) => item.approvalId)).toEqual(["a"]);
     api.resolveAgentCoomiApproval.mockRejectedValueOnce(new Error("failed"));
-    await store.resolvePendingApproval("deny"); expect(store.lastError).toBe("failed");
+    await store.resolvePendingApproval("deny");
+    expect(store.lastError).toBe("failed");
+    expect(store.pendingApprovals.map((item) => item.approvalId)).toEqual(["a"]);
   });
 
   it("loads templates with caching, invalid selection, missing endpoint, and errors", async () => {

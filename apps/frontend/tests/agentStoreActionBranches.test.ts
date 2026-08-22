@@ -392,7 +392,7 @@ describe("agent store action fallbacks with an empty workspace", () => {
     store.pendingApprovals = [{ approvalId: "a" }] as never;
     store.followupPaused = true;
     store.followupPauseReason = "permission_request";
-    api.resolveAgentCoomiApproval.mockResolvedValueOnce(envelope({ ok: true }));
+    api.resolveAgentCoomiApproval.mockResolvedValueOnce(envelope({ accepted: true }));
     const resume = vi.spyOn(store, "resumeFollowups").mockResolvedValue(undefined);
     await store.resolvePendingApproval("allow");
     expect(resume).toHaveBeenCalledTimes(1);

@@ -116,29 +116,6 @@ fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-fn observe_provider_stream(
-    observer: &dyn ModelStreamObserver,
-    attempt: usize,
-    phase: ProviderStreamPhase,
-    started: Instant,
-    request_bytes: u64,
-    response_bytes: u64,
-    max_output_tokens: u64,
-    parallel_tool_calls: Option<bool>,
-    http_status: u16,
-) {
-    observer.on_provider_stream(&ProviderStreamEvent {
-        attempt,
-        phase,
-        elapsed_ms: elapsed_ms(started),
-        request_bytes,
-        response_bytes,
-        max_output_tokens,
-        parallel_tool_calls,
-        http_status,
-    });
-}
-
 fn apply_parallel_tool_calls(body: &mut Value, enabled: bool, has_tools: bool) {
     if enabled && has_tools {
         body["parallel_tool_calls"] = Value::Bool(true);
@@ -403,17 +380,16 @@ impl HttpModelProvider {
                 .as_u64()
                 .unwrap_or(PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS);
             let parallel_tool_calls = body.get("parallel_tool_calls").and_then(Value::as_bool);
-            observe_provider_stream(
+            ProviderStreamObservation {
                 observer,
-                attempt_number,
-                ProviderStreamPhase::RequestStarted,
-                attempt_started,
+                attempt: attempt_number,
+                started: attempt_started,
                 request_bytes,
-                0,
                 max_output_tokens,
                 parallel_tool_calls,
-                0,
-            );
+                http_status: 0,
+            }
+            .emit(ProviderStreamPhase::RequestStarted, 0);
             let (response, effective_body) = match tokio::time::timeout(
                 PROVIDER_RESPONSE_HEAD_TIMEOUT,
                 self.send_openai_chat(&endpoint, &body, required_tool.as_deref()),
@@ -452,34 +428,25 @@ impl HttpModelProvider {
                 .as_u64()
                 .unwrap_or(PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS);
             let parallel_tool_calls = body.get("parallel_tool_calls").and_then(Value::as_bool);
-            observe_provider_stream(
+            let observation = ProviderStreamObservation {
                 observer,
-                attempt_number,
-                ProviderStreamPhase::ResponseHead,
-                attempt_started,
+                attempt: attempt_number,
+                started: attempt_started,
                 request_bytes,
-                0,
                 max_output_tokens,
                 parallel_tool_calls,
-                status.as_u16(),
-            );
+                http_status: status.as_u16(),
+            };
+            observation.emit(ProviderStreamPhase::ResponseHead, 0);
             if !status.is_success() {
                 return checked_json(response)
                     .await
                     .map(|_| ModelResponse::default());
             }
             let mut state = ChatStreamState::default();
-            match read_sse_observed(
-                response,
-                observer,
-                attempt_number,
-                attempt_started,
-                request_bytes,
-                max_output_tokens,
-                parallel_tool_calls,
-                status.as_u16(),
-                |value| state.consume(&value, observer),
-            )
+            match read_sse_observed(response, observation, |value| {
+                state.consume(&value, observer)
+            })
             .await
             {
                 Ok(())
@@ -816,17 +783,16 @@ impl HttpModelProvider {
                 .as_u64()
                 .unwrap_or(PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS);
             let parallel_tool_calls = body.get("parallel_tool_calls").and_then(Value::as_bool);
-            observe_provider_stream(
+            ProviderStreamObservation {
                 observer,
-                attempt_number,
-                ProviderStreamPhase::RequestStarted,
-                attempt_started,
+                attempt: attempt_number,
+                started: attempt_started,
                 request_bytes,
-                0,
                 max_output_tokens,
                 parallel_tool_calls,
-                0,
-            );
+                http_status: 0,
+            }
+            .emit(ProviderStreamPhase::RequestStarted, 0);
             let response = match tokio::time::timeout(
                 PROVIDER_RESPONSE_HEAD_TIMEOUT,
                 self.authenticated(self.client.post(&endpoint))
@@ -877,34 +843,25 @@ impl HttpModelProvider {
                 .as_u64()
                 .unwrap_or(PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS);
             let parallel_tool_calls = body.get("parallel_tool_calls").and_then(Value::as_bool);
-            observe_provider_stream(
+            let observation = ProviderStreamObservation {
                 observer,
-                attempt_number,
-                ProviderStreamPhase::ResponseHead,
-                attempt_started,
+                attempt: attempt_number,
+                started: attempt_started,
                 request_bytes,
-                0,
                 max_output_tokens,
                 parallel_tool_calls,
-                status.as_u16(),
-            );
+                http_status: status.as_u16(),
+            };
+            observation.emit(ProviderStreamPhase::ResponseHead, 0);
             if !status.is_success() {
                 return checked_json(response)
                     .await
                     .map(|_| ModelResponse::default());
             }
             let mut state = ResponsesStreamState::default();
-            match read_sse_observed(
-                response,
-                observer,
-                attempt_number,
-                attempt_started,
-                request_bytes,
-                max_output_tokens,
-                parallel_tool_calls,
-                status.as_u16(),
-                |value| state.consume(&value, observer),
-            )
+            match read_sse_observed(response, observation, |value| {
+                state.consume(&value, observer)
+            })
             .await
             {
                 Ok(())
@@ -2372,17 +2329,16 @@ struct ProviderStreamObservation<'a> {
 
 impl ProviderStreamObservation<'_> {
     fn emit(&self, phase: ProviderStreamPhase, response_bytes: u64) {
-        observe_provider_stream(
-            self.observer,
-            self.attempt,
+        self.observer.on_provider_stream(&ProviderStreamEvent {
+            attempt: self.attempt,
             phase,
-            self.started,
-            self.request_bytes,
+            elapsed_ms: elapsed_ms(self.started),
+            request_bytes: self.request_bytes,
             response_bytes,
-            self.max_output_tokens,
-            self.parallel_tool_calls,
-            self.http_status,
-        );
+            max_output_tokens: self.max_output_tokens,
+            parallel_tool_calls: self.parallel_tool_calls,
+            http_status: self.http_status,
+        });
     }
 }
 
@@ -2392,24 +2348,9 @@ async fn read_sse(response: Response, consume: impl FnMut(Value) -> Result<()>) 
 
 async fn read_sse_observed(
     response: Response,
-    observer: &dyn ModelStreamObserver,
-    attempt: usize,
-    started: Instant,
-    request_bytes: u64,
-    max_output_tokens: u64,
-    parallel_tool_calls: Option<bool>,
-    http_status: u16,
+    observation: ProviderStreamObservation<'_>,
     consume: impl FnMut(Value) -> Result<()>,
 ) -> Result<()> {
-    let observation = ProviderStreamObservation {
-        observer,
-        attempt,
-        started,
-        request_bytes,
-        max_output_tokens,
-        parallel_tool_calls,
-        http_status,
-    };
     read_sse_inner(response, Some(&observation), consume).await
 }
 
@@ -3512,15 +3453,14 @@ fn openai_message_id_fallback(body: &Value) -> Option<Value> {
 fn openai_messages(messages: &[ChatMessage]) -> Result<Vec<Value>> {
     let mut output = Vec::new();
     for message in messages {
-        if !message.provider_items.is_empty() {
-            if let Some(provider_message) = message
+        if !message.provider_items.is_empty()
+            && let Some(provider_message) = message
                 .provider_items
                 .iter()
                 .find(|item| is_openai_chat_assistant_message(item))
-            {
-                output.push(provider_message.clone());
-                continue;
-            }
+        {
+            output.push(provider_message.clone());
+            continue;
         }
         if message.role == Role::Assistant
             && message.content.is_empty()

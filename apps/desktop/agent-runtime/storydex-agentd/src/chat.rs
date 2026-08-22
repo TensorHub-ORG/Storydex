@@ -6,6 +6,7 @@ use crate::replacement::{
     ExecutionRecordInput, ReplacementError, ReplacementTransaction, change_ledger_from_events,
     persist_execution_record_with_events,
 };
+use crate::workspace;
 use anyhow::Context;
 use axum::Json;
 use axum::body::Body;
@@ -249,9 +250,7 @@ pub async fn chat_stream(
     }
     let workspace = match resolve_workspace(&state, &payload.workspace_root) {
         Ok(path) => path,
-        Err((status, code, message)) => {
-            return error_response(status, code, message).into_response();
-        }
+        Err(response) => return response,
     };
     if let Err(error) =
         crate::agent_control::apply_chat_policy(&state, &workspace, &session_id, &mut payload)
@@ -432,15 +431,9 @@ pub async fn stop_execution(
             .into_response();
         }
     };
-    let workspace = if payload.workspace_root.trim().is_empty() {
-        None
-    } else {
-        match resolve_workspace(&state, &payload.workspace_root) {
-            Ok(path) => Some(path),
-            Err((status, code, message)) => {
-                return error_response(status, code, message).into_response();
-            }
-        }
+    let workspace = match resolve_workspace(&state, &payload.workspace_root) {
+        Ok(path) => Some(path),
+        Err(response) => return response,
     };
     let result = state.execution_registry().cancel(
         &payload.session_id,
@@ -487,15 +480,9 @@ pub async fn resolve_approval(
             .into_response();
         }
     };
-    let workspace = if payload.workspace_root.trim().is_empty() {
-        None
-    } else {
-        match resolve_workspace(&state, &payload.workspace_root) {
-            Ok(path) => Some(path),
-            Err((status, code, message)) => {
-                return error_response(status, code, message).into_response();
-            }
-        }
+    let workspace = match resolve_workspace(&state, &payload.workspace_root) {
+        Ok(path) => Some(path),
+        Err(response) => return response,
     };
     let value = approval_control_value(&payload.decision, &payload.response);
     let result = state.execution_registry().resolve(
@@ -557,9 +544,7 @@ pub async fn list_followups(
     let started_at = Instant::now();
     let workspace = match resolve_workspace(&state, &query.workspace_root) {
         Ok(path) => path,
-        Err((status, code, message)) => {
-            return error_response(status, code, message).into_response();
-        }
+        Err(response) => return response,
     };
     match state.followup_store().list(&workspace, &query.session_id) {
         Ok(mailbox) => Json(
@@ -591,9 +576,7 @@ pub async fn enqueue_followup(
     };
     let workspace = match resolve_workspace(&state, &payload.workspace_root) {
         Ok(path) => path,
-        Err((status, code, message)) => {
-            return error_response(status, code, message).into_response();
-        }
+        Err(response) => return response,
     };
     let expected_trace = if payload.expected_trace_id.trim().is_empty() {
         payload.active_trace_id.as_str()
@@ -657,9 +640,7 @@ pub async fn update_followup(
     };
     let workspace = match resolve_workspace(&state, &payload.workspace_root) {
         Ok(path) => path,
-        Err((status, code, message)) => {
-            return error_response(status, code, message).into_response();
-        }
+        Err(response) => return response,
     };
     let message = match state.followup_store().update(
         &workspace,
@@ -706,9 +687,7 @@ pub async fn delete_followup(
     let started_at = Instant::now();
     let workspace = match resolve_workspace(&state, &query.workspace_root) {
         Ok(path) => path,
-        Err((status, code, message)) => {
-            return error_response(status, code, message).into_response();
-        }
+        Err(response) => return response,
     };
     let message =
         match state
@@ -747,9 +726,7 @@ pub async fn steer_followup(
     };
     let workspace = match resolve_workspace(&state, &payload.workspace_root) {
         Ok(path) => path,
-        Err((status, code, message)) => {
-            return error_response(status, code, message).into_response();
-        }
+        Err(response) => return response,
     };
     let message = match state.followup_store().request_steer(
         &workspace,
@@ -798,9 +775,7 @@ pub async fn resume_followups(
     };
     let workspace = match resolve_workspace(&state, &payload.workspace_root) {
         Ok(path) => path,
-        Err((status, code, message)) => {
-            return error_response(status, code, message).into_response();
-        }
+        Err(response) => return response,
     };
     match state
         .followup_store()
@@ -1238,43 +1213,9 @@ fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn resolve_workspace(
-    state: &AppState,
-    raw: &str,
-) -> Result<PathBuf, (StatusCode, &'static str, &'static str)> {
-    let Some(allowed_root) = state.refactor_root() else {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "refactor_workspace_not_configured",
-            "Refactor Agent workspace root is not configured.",
-        ));
-    };
-    let candidate = PathBuf::from(raw.trim());
-    if raw.trim().is_empty() {
-        return Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "invalid_workspace",
-            "Refactor Agent workspaceRoot is required.",
-        ));
-    }
-    let resolved = match candidate.canonicalize() {
-        Ok(path) if path.is_dir() => path,
-        _ => {
-            return Err((
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "invalid_workspace",
-                "Refactor Agent workspaceRoot must be an existing directory.",
-            ));
-        }
-    };
-    if !resolved.starts_with(allowed_root) {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "workspace_outside_refactor_root",
-            "Refactor Agent workspaceRoot is outside the configured fixture root.",
-        ));
-    }
-    Ok(resolved)
+#[allow(clippy::result_large_err)]
+fn resolve_workspace(state: &AppState, raw: &str) -> Result<PathBuf, Response<Body>> {
+    workspace::resolve_workspace_for_request(state, raw)
 }
 
 async fn run_chat(execution: ChatExecution) {
@@ -3204,7 +3145,18 @@ async fn send_done(sender: &mpsc::Sender<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
     use tempfile::tempdir;
+
+    async fn response_error_code(response: Response<Body>) -> String {
+        let bytes = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("read response body");
+        serde_json::from_slice::<Value>(&bytes).expect("decode response JSON")["error"]["code"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    }
 
     #[test]
     fn bridge_translation_preserves_read_tool_and_provider_mode() {
@@ -3236,10 +3188,11 @@ mod tests {
         assert!(translated.1.get("text").is_none());
     }
 
-    #[test]
-    fn workspace_resolution_requires_configured_fixture_root() {
+    #[tokio::test]
+    async fn workspace_resolution_requires_configured_fixture_root() {
         let directory = tempdir().expect("tempdir");
         let workspace = directory.path().join("workspace");
+        let outside = tempdir().expect("outside");
         std::fs::create_dir_all(&workspace).expect("workspace");
         let state = AppState::with_paths(
             "token",
@@ -3252,6 +3205,69 @@ mod tests {
         assert_eq!(
             resolve_workspace(&state, &workspace.to_string_lossy()).expect("root"),
             workspace.canonicalize().expect("canonical")
+        );
+        let response = resolve_workspace(&state, &outside.path().to_string_lossy())
+            .expect_err("outside workspace must be rejected");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response_error_code(response).await,
+            "workspace_outside_refactor_root"
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_resolution_requires_desktop_selection_without_fixture_root() {
+        let directory = tempdir().expect("tempdir");
+        let state = AppState::with_paths(
+            "token",
+            directory.path().join("home"),
+            directory.path().join("bridge"),
+            None,
+            None,
+        )
+        .expect("state");
+        let response = resolve_workspace(&state, "").expect_err("selection is required");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_error_code(response).await,
+            "workspace_not_selected"
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_resolution_uses_only_the_desktop_selected_project() {
+        let directory = tempdir().expect("tempdir");
+        let workspace = directory.path().join("workspace");
+        let other = directory.path().join("other");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::create_dir_all(&other).expect("other workspace");
+        let state = AppState::with_paths(
+            "token",
+            directory.path().join("home"),
+            directory.path().join("bridge"),
+            None,
+            None,
+        )
+        .expect("state");
+        state
+            .select_workspace(workspace.canonicalize().expect("canonical workspace"))
+            .expect("select workspace");
+
+        assert_eq!(
+            resolve_workspace(&state, "").expect("selected workspace"),
+            workspace.canonicalize().expect("canonical workspace")
+        );
+        assert_eq!(
+            resolve_workspace(&state, &workspace.to_string_lossy()).expect("matching workspace"),
+            workspace.canonicalize().expect("canonical workspace")
+        );
+
+        let response = resolve_workspace(&state, &other.to_string_lossy())
+            .expect_err("unselected workspace must be rejected");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response_error_code(response).await,
+            "workspace_not_selected"
         );
     }
 

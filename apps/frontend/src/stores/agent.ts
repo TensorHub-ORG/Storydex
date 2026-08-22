@@ -439,9 +439,21 @@ export const useAgentStore = defineStore("agent", {
       if (!approval) {
         return;
       }
-      this.pendingApprovals = this.pendingApprovals.filter((item) => item.approvalId !== approval.approvalId);
+      const workspaceStore = useWorkspaceStore();
       try {
-        await resolveAgentCoomiApproval(approval.approvalId, decision, response);
+        const result = await resolveAgentCoomiApproval(approval.approvalId, decision, response, {
+          sessionId: this.currentSessionId || "default",
+          expectedTraceId: this.currentTraceId,
+          workspaceRoot: workspaceStore.currentProject?.workspaceRoot || workspaceStore.health?.workspaceRoot || ""
+        });
+        if (result.data.accepted !== true && result.data.resolved !== true) {
+          throw new Error(
+            result.data.reason
+              ? `Coomi approval was not accepted: ${result.data.reason}`
+              : "Coomi approval was not accepted."
+          );
+        }
+        this.pendingApprovals = this.pendingApprovals.filter((item) => item.approvalId !== approval.approvalId);
         if (decision !== "cancel" && this.followupPaused && this.followupPauseReason === "permission_request") {
           await this.resumeFollowups();
         }

@@ -1017,7 +1017,7 @@ enum RuntimeEvent {
     },
     TurnFinished {
         generation: u64,
-        session: Session,
+        session: Box<Session>,
         error: Option<String>,
     },
     CatalogInstalled {
@@ -1267,7 +1267,7 @@ fn start_agent_turn(
         .await;
         let _ = task_tx.send(RuntimeEvent::TurnFinished {
             generation,
-            session,
+            session: Box::new(session),
             error: result.err().map(|error| format!("{error:#}")),
         });
     });
@@ -1354,7 +1354,7 @@ fn start_manual_compaction(app: &mut TuiState, runtime_tx: mpsc::UnboundedSender
         .await;
         let _ = task_tx.send(RuntimeEvent::TurnFinished {
             generation,
-            session,
+            session: Box::new(session),
             error: result.err().map(|error| format!("{error:#}")),
         });
     });
@@ -1672,7 +1672,7 @@ fn handle_runtime_event(app: &mut TuiState, runtime_event: RuntimeEvent) {
             app.active_abort = None;
             app.pending_approval = None;
             app.pending_user_input = None;
-            app.session = session;
+            app.session = *session;
             match SessionStore::new(&app.home).save(&app.session) {
                 Ok(()) => {}
                 Err(save_error) => {

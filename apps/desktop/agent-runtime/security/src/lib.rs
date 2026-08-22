@@ -107,18 +107,18 @@ impl SecurityPolicy {
                         .to_ascii_lowercase(),
                 );
             }
-            if let (Some(parent), Some(name)) = (normalized.parent(), normalized.file_name()) {
-                if let Some(home_name) = parent.file_name() {
-                    let relative =
-                        format!("{}/{}", home_name.to_string_lossy(), name.to_string_lossy())
-                            .to_ascii_lowercase();
-                    self.blocked_aliases.extend([
-                        relative.clone(),
-                        format!("~/{relative}"),
-                        format!("$home/{relative}"),
-                        format!("${{home}}/{relative}"),
-                    ]);
-                }
+            if let (Some(parent), Some(name)) = (normalized.parent(), normalized.file_name())
+                && let Some(home_name) = parent.file_name()
+            {
+                let relative =
+                    format!("{}/{}", home_name.to_string_lossy(), name.to_string_lossy())
+                        .to_ascii_lowercase();
+                self.blocked_aliases.extend([
+                    relative.clone(),
+                    format!("~/{relative}"),
+                    format!("$home/{relative}"),
+                    format!("${{home}}/{relative}"),
+                ]);
             }
         }
         self.blocked.sort();

@@ -510,11 +510,26 @@ export async function setAgentCoomiPermission(
 export async function resolveAgentCoomiApproval(
   approvalId: string,
   decision: "allow" | "deny" | "cancel" | "answer",
-  approvalResponse?: Record<string, unknown>
-): Promise<ApiResult<{ accepted: boolean; approvalId: string; decision: string }>> {
-  const response = await apiClient.post<ApiEnvelope<{ accepted: boolean; approvalId: string; decision: string }>>(
+  approvalResponse?: Record<string, unknown>,
+  control?: { sessionId?: string; expectedTraceId?: string; workspaceRoot?: string }
+): Promise<ApiResult<{ accepted?: boolean; resolved?: boolean; approvalId?: string; requestId?: string; decision?: string; reason?: string }>> {
+  const response = await apiClient.post<ApiEnvelope<{
+    accepted?: boolean;
+    resolved?: boolean;
+    approvalId?: string;
+    requestId?: string;
+    decision?: string;
+    reason?: string;
+  }>>(
     "/agent/coomi/approval",
-    { approvalId, decision, response: approvalResponse || {} }
+    {
+      approvalId,
+      decision,
+      response: approvalResponse || {},
+      sessionId: control?.sessionId || "default",
+      expectedTraceId: control?.expectedTraceId || "",
+      workspaceRoot: control?.workspaceRoot || ""
+    }
   );
 
   try {

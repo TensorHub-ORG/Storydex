@@ -1616,6 +1616,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workspace_switch_and_project_creation_are_blocked_during_active_execution() {
+        let root = tempdir().expect("root");
+        let workspace = root.path().join("workspace");
+        let other = root.path().join("other");
+        let created = root.path().join("created-during-run");
+        let home = root.path().join("coomi-home");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::create_dir_all(&other).expect("other workspace");
+        std::fs::create_dir_all(&home).expect("coomi home");
+        let workspace = workspace.canonicalize().expect("canonical workspace");
+        let state = AppState::with_paths(
+            "test-token",
+            home,
+            root.path().join("bridge"),
+            Some(root.path().to_path_buf()),
+            None,
+        )
+        .expect("state");
+        state
+            .select_workspace(workspace.clone())
+            .expect("select workspace");
+        let (control_sender, _control_receiver) = tokio::sync::mpsc::channel(1);
+        let active_guard = state
+            .execution_registry()
+            .register(
+                "active-trace".to_owned(),
+                "active-session".to_owned(),
+                workspace.clone(),
+                execution::ExecutionCancellation::default(),
+                control_sender,
+            )
+            .expect("active execution");
+
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/workspace/project/open",
+                json!({"projectPath": other.to_string_lossy()}),
+            ))
+            .await
+            .expect("switch response");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(response_json(response).await["error"]["code"], "agent_busy");
+        assert_eq!(state.current_workspace(), Some(workspace.clone()));
+
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/workspace/project/create",
+                json!({"projectPath": created.to_string_lossy(), "architecture": "free"}),
+            ))
+            .await
+            .expect("create response");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(response_json(response).await["error"]["code"], "agent_busy");
+        assert!(!created.exists());
+
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/workspace/project/open",
+                json!({"projectPath": workspace.to_string_lossy()}),
+            ))
+            .await
+            .expect("idempotent open response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        drop(active_guard);
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/workspace/project/open",
+                json!({"projectPath": other.to_string_lossy()}),
+            ))
+            .await
+            .expect("switch after execution response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(state.current_workspace(), other.canonicalize().ok());
+    }
+
+    #[tokio::test]
     async fn help_and_preset_routes_persist_stable_compatible_candidate_state() {
         use base64::Engine;
 

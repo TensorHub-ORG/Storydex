@@ -300,6 +300,30 @@ fn ensure_boundary(state: &AppState, candidate: &Path) -> Result<(), Response> {
     Ok(())
 }
 
+fn ensure_workspace_switch_allowed(state: &AppState, workspace: &Path) -> Result<(), Response> {
+    if let Some(active) = state.execution_registry().active()
+        && active.workspace_root != workspace
+    {
+        return Err(workspace_error(
+            StatusCode::CONFLICT,
+            "agent_busy",
+            "Stop the active Storydex Agent execution before switching projects.",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_workspace_mutation_allowed(state: &AppState) -> Result<(), Response> {
+    if state.execution_registry().active().is_some() {
+        return Err(workspace_error(
+            StatusCode::CONFLICT,
+            "agent_busy",
+            "Stop the active Storydex Agent execution before creating or initializing a project.",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_project_path(
     state: &AppState,
     raw: &str,
@@ -864,6 +888,9 @@ pub(crate) async fn open_project(
         Ok(workspace) => workspace,
         Err(response) => return response,
     };
+    if let Err(response) = ensure_workspace_switch_allowed(&state, &workspace) {
+        return response;
+    }
     if let Err(error) = record_recent_project(&state, &workspace) {
         return io_error("Persisting the recent project", error);
     }
@@ -886,6 +913,9 @@ pub(crate) async fn create_project(
         Ok(target) => target,
         Err(response) => return response,
     };
+    if let Err(response) = ensure_workspace_mutation_allowed(&state) {
+        return response;
+    }
     if let Err(error) = fs::create_dir_all(&target) {
         return io_error("Creating the project directory", error);
     }
@@ -937,6 +967,9 @@ pub(crate) async fn initialize_project(
             Err(response) => return response,
         }
     };
+    if let Err(response) = ensure_workspace_mutation_allowed(&state) {
+        return response;
+    }
     let architecture = if request.architecture.trim() == "free" {
         "free"
     } else {
