@@ -63,6 +63,7 @@ function releaseNotes() {
 
 requireFile(path.join(targetRoot, "storydex-tauri.exe"), "Tauri executable");
 requireFile(path.join(targetRoot, "storydex-agentd.exe"), "Rust sidecar");
+requireFile(path.join(targetRoot, "storydex-coomi-bridge.exe"), "Coomi bridge");
 const mingitRoot = path.join(desktopRoot, "tauri-preview", "resources", "mingit");
 const installerName = `Storydex_${version}_x64-setup.exe`;
 const installer = findSingle(
@@ -79,6 +80,10 @@ if (!signature || !/^[A-Za-z0-9+/=]+$/.test(signature)) {
 resetDirectory(candidateRoot);
 fs.copyFileSync(path.join(targetRoot, "storydex-tauri.exe"), path.join(candidateRoot, "Storydex.exe"));
 fs.copyFileSync(path.join(targetRoot, "storydex-agentd.exe"), path.join(candidateRoot, "storydex-agentd.exe"));
+fs.copyFileSync(
+  path.join(targetRoot, "storydex-coomi-bridge.exe"),
+  path.join(candidateRoot, "storydex-coomi-bridge.exe")
+);
 copyDirectory(mingitRoot, path.join(candidateRoot, "mingit"));
 
 resetDirectory(releaseRoot);

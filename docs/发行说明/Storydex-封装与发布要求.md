@@ -136,6 +136,7 @@ npm --prefix apps/desktop run package:win
 ```text
 Storydex.exe
 storydex-agentd.exe
+storydex-coomi-bridge.exe
 mingit/cmd/git.exe
 ```
 
@@ -187,7 +188,7 @@ https://updates.septemc.com/storydex/windows/latest.json
 自动化成功不等于生产发布完成。Windows 首个 Tauri Stable 版本至少验证：
 
 - 全新安装、首次启动、打开项目和退出清理；
-- 便携包冷启动及 `Storydex.exe`、`storydex-agentd.exe`、MinGit 完整性；
+- 便携包冷启动及 `Storydex.exe`、`storydex-agentd.exe`、`storydex-coomi-bridge.exe`、MinGit 完整性；
 - 正常 HTTP/SSE Agent 主链路和关键文件/Git/WIKI 操作；
 - 应用内检查、下载、签名验证、安装和重启；
 - 旧 Electron Stable 到 Tauri 的真实安装升级；

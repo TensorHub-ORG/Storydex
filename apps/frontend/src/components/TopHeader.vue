@@ -1,11 +1,6 @@
 <template>
   <header class="top-header">
     <div class="top-header-left">
-      <div class="topbar-brand no-drag" title="Storydex">
-        <img :src="storydexIcon" alt="Storydex" class="topbar-brand-icon" />
-        <span class="topbar-brand-name">Storydex</span>
-      </div>
-
       <div ref="projectMenuRef" class="file-menu-wrap no-drag">
         <button
           class="file-menu-trigger menu-bar-item"
@@ -284,7 +279,6 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import storydexIcon from "@/assets/storydex_icon_01.png";
 import { useProjectLauncher } from "@/composables/useProjectLauncher";
 import { searchWorkspace } from "@/api/workspace";
 import { useUiStore } from "@/stores/ui";

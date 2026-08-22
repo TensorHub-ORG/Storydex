@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 
 const SIDECAR_NAME: &str = "storydex-agentd";
+const COOMI_BRIDGE_NAME: &str = "storydex-coomi-bridge";
 const DESKTOP_RUNTIME_NAME: &str = "storydex-tauri";
 const READY_TIMEOUT: Duration = Duration::from_secs(15);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -76,6 +77,7 @@ pub struct SidecarRuntime {
 impl SidecarRuntime {
     pub fn start(app: &tauri::App) -> Result<Arc<Self>> {
         let sidecar_path = resolve_sidecar_path()?;
+        let bridge_path = resolve_bridge_path(&sidecar_path)?;
         let runtime_paths = resolve_runtime_paths(app)?;
         fs::create_dir_all(&runtime_paths.runtime_home).with_context(|| {
             format!("failed to create {}", runtime_paths.runtime_home.display())
@@ -115,6 +117,7 @@ impl SidecarRuntime {
                     .parent()
                     .context("sidecar path has no parent directory")?,
             )
+            .env("STORYDEX_COOMI_BRIDGE", &bridge_path)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -436,6 +439,26 @@ fn ensure_sidecar_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn resolve_bridge_path(sidecar_path: &Path) -> Result<PathBuf> {
+    let parent = sidecar_path
+        .parent()
+        .context("sidecar path has no parent directory")?;
+    let bridge = parent.join(bridge_file_name());
+    ensure_bridge_path(&bridge)?;
+    bridge
+        .canonicalize()
+        .with_context(|| format!("failed to resolve {}", bridge.display()))
+}
+
+fn ensure_bridge_path(path: &Path) -> Result<()> {
+    ensure!(
+        path.is_file(),
+        "bundled {COOMI_BRIDGE_NAME} was not found: {}",
+        path.display()
+    );
+    Ok(())
+}
+
 #[cfg(windows)]
 fn sidecar_file_name() -> &'static str {
     "storydex-agentd.exe"
@@ -444,6 +467,16 @@ fn sidecar_file_name() -> &'static str {
 #[cfg(not(windows))]
 fn sidecar_file_name() -> &'static str {
     SIDECAR_NAME
+}
+
+#[cfg(windows)]
+fn bridge_file_name() -> &'static str {
+    "storydex-coomi-bridge.exe"
+}
+
+#[cfg(not(windows))]
+fn bridge_file_name() -> &'static str {
+    COOMI_BRIDGE_NAME
 }
 
 fn read_ready(
@@ -768,5 +801,30 @@ mod tests {
             validate_test_root(Path::new(env!("CARGO_MANIFEST_DIR")), &temporary_root).is_err()
         );
         fs::remove_dir_all(candidate).expect("remove candidate test root");
+    }
+
+    #[test]
+    fn sidecar_requires_the_coomi_bridge_beside_the_agentd_binary() {
+        let candidate = env::temp_dir().join(format!(
+            "storydex-tauri-bridge-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("timestamp")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&candidate).expect("candidate bridge test root");
+        let sidecar = candidate.join(sidecar_file_name());
+        File::create(&sidecar).expect("candidate sidecar");
+
+        assert!(resolve_bridge_path(&sidecar).is_err());
+
+        let bridge = candidate.join(bridge_file_name());
+        File::create(&bridge).expect("candidate bridge");
+        assert_eq!(
+            resolve_bridge_path(&sidecar).expect("resolved bridge"),
+            bridge.canonicalize().expect("canonical bridge")
+        );
+
+        fs::remove_dir_all(candidate).expect("remove candidate bridge test root");
     }
 }

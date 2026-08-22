@@ -19,7 +19,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
-    "icon": ["../../../assets/Storydex_icon/storydex_icon_01.png"],
+    "icon": ["../../../assets/Storydex_icon/storydex_icon_01.ico"],
     "licenseFile": "../build/installer-license.zh-CN.txt",
     "createUpdaterArtifacts": true,
     "windows": {

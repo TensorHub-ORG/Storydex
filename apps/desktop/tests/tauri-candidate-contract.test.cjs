@@ -37,7 +37,8 @@ test("Tauri Stable has an isolated build descriptor and minimum capability", () 
   assert.match(desktopPackage.scripts["check:tauri-preview"], /check:tauri/);
   assert.match(desktopPackage.scripts["build:tauri-preview"], /build:desktop/);
   assert.match(desktopPackage.scripts["smoke:tauri-preview"], /smoke:tauri/);
-  assert.match(launcher, /cargo build[^\r\n]*storydex-agentd/);
+  assert.match(launcher, /cargo build[^\r\n]*storydex-agentd[^\r\n]*storydex-coomi-bridge/);
+  assert.match(launcher, /storydex-coomi-bridge\.exe/);
   assert.match(launcher, /call npm run dev/);
   assert.doesNotMatch(
     launcher,
@@ -59,9 +60,12 @@ test("Tauri Stable build input never points at legacy runtime assets", () => {
   assert.match(prepare, /Join-Path \$previewRoot "\.\.\\\.\.\\\.\."/);
   assert.doesNotMatch(prepare, /Join-Path \$previewRoot "\.\.\\\.\.\\\.\.\\\.\."/);
   assert.match(prepare, /storydex-agentd\.exe/);
+  assert.match(prepare, /storydex-coomi-bridge\.exe/);
+  assert.match(prepare, /-p storydex-agentd -p storydex-coomi-bridge/);
   assert.match(prepare, /--locked/);
   const packageScript = read("scripts/package-preview.ps1");
   assert.match(packageScript, /externalBin/);
+  assert.match(packageScript, /binaries\/storydex-coomi-bridge/);
   assert.match(packageScript, /tauri\.generated\.conf\.json/);
   assert.match(packageScript, /prepare-preview\.ps1/);
   assert.match(packageScript, /beforeBuildCommand/);
@@ -81,6 +85,8 @@ test("Tauri Stable build input never points at legacy runtime assets", () => {
   assert.match(smokeScript, /STORYDEX_AGENT_PROVIDER_REPLAY_FIXTURE/);
   assert.match(smokeScript, /STORYDEX_TAURI_TEST_ROOT/);
   assert.match(smokeScript, /Invoke-RestMethod/);
+  assert.match(smokeScript, /storydex-coomi-bridge\.exe/);
+  assert.match(smokeScript, /--version/);
   assert.match(smokeScript, /CloseMainWindow/);
   assert.match(smokeScript, /Wait-ForProcessExit/);
   assert.match(smokeScript, /Remove-DirectoryWithRetry/);
@@ -93,6 +99,8 @@ test("Tauri Stable build input never points at legacy runtime assets", () => {
   assert.match(source, /prevent_close/);
   assert.match(source, /app_handle\.exit\(0\)/);
   assert.match(sidecar, /backendAuthToken/);
+  assert.match(sidecar, /STORYDEX_COOMI_BRIDGE/);
+  assert.match(sidecar, /resolve_bridge_path/);
   assert.match(sidecar, /X-Storydex-Runtime-Token|Authorization: Bearer/);
   assert.match(sidecar, /\/api\/v1\/sys\/health/);
   assert.match(sidecar, /\/api\/v1\/sys\/shutdown/);

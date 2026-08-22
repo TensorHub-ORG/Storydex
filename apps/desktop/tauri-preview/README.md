@@ -13,11 +13,11 @@ Tauri Core 启动打包的 `storydex-agentd`，等待其返回动态 loopback �
 ```powershell
 npm ci --prefix apps/frontend
 npm ci --prefix apps/desktop
-cargo build --manifest-path apps/desktop/agent-runtime/Cargo.toml --locked -p storydex-agentd
+cargo build --manifest-path apps/desktop/agent-runtime/Cargo.toml --locked -p storydex-agentd -p storydex-coomi-bridge
 npm --prefix apps/desktop run dev
 ```
 
-debug 模式默认读取 `apps/desktop/agent-runtime/target/debug/storydex-agentd.exe`。`STORYDEX_TAURI_SIDECAR_PATH` 仅用于显式指定隔离测试二进制。
+debug 模式默认读取 `apps/desktop/agent-runtime/target/debug/storydex-agentd.exe`，并要求同目录存在 `storydex-coomi-bridge.exe`。`STORYDEX_TAURI_SIDECAR_PATH` 仅用于显式指定隔离测试二进制；指定的 sidecar 旁边也必须放置 bridge。
 
 ## 打包
 
@@ -31,11 +31,12 @@ npm --prefix apps/desktop run package:win
 
 虽然脚本名仍包含 `preview`，它们现在服务于 Stable。重命名属于独立机械清理任务，不影响运行时身份或发布契约。
 
-正式 staging 只包含：
+正式 staging 包含：
 
 ```text
 Storydex.exe
 storydex-agentd.exe
+storydex-coomi-bridge.exe
 mingit/
 ```
 

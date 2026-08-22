@@ -76,10 +76,16 @@ if ([string]::IsNullOrWhiteSpace($CandidateRoot)) {
 $candidatePath = [System.IO.Path]::GetFullPath($CandidateRoot)
 $previewExecutable = Join-Path $candidatePath "Storydex.exe"
 $sidecarExecutable = Join-Path $candidatePath "storydex-agentd.exe"
-foreach ($requiredFile in @($previewExecutable, $sidecarExecutable)) {
+$bridgeExecutable = Join-Path $candidatePath "storydex-coomi-bridge.exe"
+foreach ($requiredFile in @($previewExecutable, $sidecarExecutable, $bridgeExecutable)) {
     if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
         throw "Tauri preview smoke requires packaged candidate file: $requiredFile"
     }
+}
+
+$bridgeVersionOutput = (& $bridgeExecutable --version 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $bridgeVersionOutput -notmatch "^storydex-coomi-bridge\s+\S+") {
+    throw "Packaged storydex-coomi-bridge identity check failed: $bridgeVersionOutput"
 }
 
 $systemTemporaryRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())

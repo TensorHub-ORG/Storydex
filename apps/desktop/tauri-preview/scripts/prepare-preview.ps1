@@ -3,7 +3,8 @@ $ErrorActionPreference = "Stop"
 $previewRoot = (Resolve-Path (Join-Path $PSScriptRoot ".." )).Path
 $repoRoot = (Resolve-Path (Join-Path $previewRoot "..\..\.." )).Path
 $runtimeManifest = Join-Path $repoRoot "apps\desktop\agent-runtime\Cargo.toml"
-$runtimeBinary = Join-Path $repoRoot "apps\desktop\agent-runtime\target\release\storydex-agentd.exe"
+$agentdBinary = Join-Path $repoRoot "apps\desktop\agent-runtime\target\release\storydex-agentd.exe"
+$bridgeBinary = Join-Path $repoRoot "apps\desktop\agent-runtime\target\release\storydex-coomi-bridge.exe"
 $binariesRoot = Join-Path $previewRoot "binaries"
 $resourcesRoot = Join-Path $previewRoot "resources"
 $mingitSource = if ($env:STORYDEX_MINGIT_SOURCE) { [System.IO.Path]::GetFullPath($env:STORYDEX_MINGIT_SOURCE) } else { Join-Path $repoRoot "apps\desktop\vendor\mingit" }
@@ -23,10 +24,16 @@ if (-not (Test-Path -LiteralPath $mingitSource -PathType Container)) {
     throw "Bundled MinGit source was not found: $mingitSource"
 }
 
-Write-Host "[Storydex] Building isolated Rust sidecar for Tauri desktop..."
-& cargo build --manifest-path $runtimeManifest --release --locked -p storydex-agentd
-if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $runtimeBinary)) {
-    throw "storydex-agentd release build did not produce $runtimeBinary"
+Write-Host "[Storydex] Building isolated Rust runtime for Tauri desktop..."
+& cargo build --manifest-path $runtimeManifest --release --locked -p storydex-agentd -p storydex-coomi-bridge
+if ($LASTEXITCODE -ne 0) {
+    throw "Storydex Rust runtime release build failed."
+}
+if (-not (Test-Path -LiteralPath $agentdBinary -PathType Leaf)) {
+    throw "storydex-agentd release build did not produce $agentdBinary"
+}
+if (-not (Test-Path -LiteralPath $bridgeBinary -PathType Leaf)) {
+    throw "storydex-coomi-bridge release build did not produce $bridgeBinary"
 }
 
 $targetLine = & rustc -vV | Select-String -Pattern "^host:" | Select-Object -First 1
@@ -37,7 +44,9 @@ $targetTriple = $targetLine.ToString() -replace "^host:\s*", ""
 
 New-Item -ItemType Directory -Force -Path $binariesRoot | Out-Null
 $sidecarPath = Join-Path $binariesRoot "storydex-agentd-$targetTriple.exe"
-Copy-Item -LiteralPath $runtimeBinary -Destination $sidecarPath -Force
+$bridgePath = Join-Path $binariesRoot "storydex-coomi-bridge-$targetTriple.exe"
+Copy-Item -LiteralPath $agentdBinary -Destination $sidecarPath -Force
+Copy-Item -LiteralPath $bridgeBinary -Destination $bridgePath -Force
 
 if (Test-Path -LiteralPath $mingitTarget) {
     Remove-Item -LiteralPath $mingitTarget -Recurse -Force
@@ -52,4 +61,5 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "[Storydex] Prepared sidecar: $sidecarPath"
+Write-Host "[Storydex] Prepared Coomi bridge: $bridgePath"
 Write-Host "[Storydex] Prepared frontend: $(Join-Path $frontendRoot 'dist')"

@@ -17,11 +17,11 @@
 ```powershell
 npm ci --prefix apps/frontend
 npm ci --prefix apps/desktop
-cargo build --manifest-path apps/desktop/agent-runtime/Cargo.toml --locked -p storydex-agentd
+cargo build --manifest-path apps/desktop/agent-runtime/Cargo.toml --locked -p storydex-agentd -p storydex-coomi-bridge
 npm --prefix apps/desktop run dev
 ```
 
-Tauri debug 进程会从 `apps/desktop/agent-runtime/target/debug/` 找到 `storydex-agentd.exe`。也可以通过 `STORYDEX_TAURI_SIDECAR_PATH` 显式指定同名测试二进制；该变量不用于正式封装。
+Tauri debug 进程会从 `apps/desktop/agent-runtime/target/debug/` 找到 `storydex-agentd.exe` 及其同目录的 `storydex-coomi-bridge.exe`。也可以通过 `STORYDEX_TAURI_SIDECAR_PATH` 显式指定同名测试二进制；指定的 sidecar 旁边也必须放置 bridge，该变量不用于正式封装。
 
 ## 聚焦检查
 
@@ -57,9 +57,9 @@ npm --prefix apps/desktop run package:win
 
 构建流程会：
 
-1. 构建 release `storydex-agentd` 和 Vue 生产资源；
+1. 构建 release `storydex-agentd`、`storydex-coomi-bridge` 和 Vue 生产资源；
 2. 使用固定的 Tauri CLI 生成 NSIS 及 `.sig`；
-3. 建立只含 `Storydex.exe`、`storydex-agentd.exe` 和 `mingit/` 的 staging；
+3. 建立含 `Storydex.exe`、`storydex-agentd.exe`、`storydex-coomi-bridge.exe` 和 `mingit/` 的 staging；
 4. 生成 `latest.json` 和 `Storydex-win-portable.zip`；
 5. 执行 Rust-only 资产策略和更新产物校验。
 
@@ -90,7 +90,7 @@ https://updates.septemc.com/storydex/windows/latest.json
 
 `apps/desktop/candidate/runtime-policy.json` 约束正式 staging：
 
-- 必须包含 `Storydex.exe`、`storydex-agentd.exe` 和 MinGit；
+- 必须包含 `Storydex.exe`、`storydex-agentd.exe`、`storydex-coomi-bridge.exe` 和 MinGit；
 - 不得包含 Python、FastAPI/Uvicorn、Electron、Node/npm 或包管理器运行时；
 - 不得包含凭证、日志、测试结果或指向仓库外真实用户项目的链接；
 - staging 不得与源码根、旧 Electron 根或 release 根错误重叠。

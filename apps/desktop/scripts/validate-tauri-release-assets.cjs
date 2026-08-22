@@ -2,6 +2,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 const { inspectCandidateRoot, loadPolicy } = require("./validate-rust-candidate-assets.cjs");
 
 const desktopRoot = path.resolve(__dirname, "..");
@@ -34,8 +35,19 @@ const report = inspectCandidateRoot(candidateRoot, {
 if (!report.ok) {
   throw new Error(`Tauri runtime asset policy failed: ${JSON.stringify(report.violations)}`);
 }
-for (const name of ["Storydex.exe", "storydex-agentd.exe", path.join("mingit", "cmd", "git.exe")]) {
+for (const name of [
+  "Storydex.exe",
+  "storydex-agentd.exe",
+  "storydex-coomi-bridge.exe",
+  path.join("mingit", "cmd", "git.exe")
+]) {
   if (!fs.existsSync(path.join(candidateRoot, name))) throw new Error(`missing Tauri runtime asset: ${name}`);
+}
+const bridgePath = path.join(candidateRoot, "storydex-coomi-bridge.exe");
+const bridgeVersion = spawnSync(bridgePath, ["--version"], { encoding: "utf8", windowsHide: true });
+const bridgeOutput = `${bridgeVersion.stdout || ""}${bridgeVersion.stderr || ""}`.trim();
+if (bridgeVersion.status !== 0 || !/^storydex-coomi-bridge\s+\S+/i.test(bridgeOutput)) {
+  throw new Error(`Tauri Coomi bridge identity check failed: ${bridgeOutput || bridgeVersion.error?.message || "no output"}`);
 }
 
 console.log(`[Storydex Desktop] Tauri release assets are valid for v${version}.`);

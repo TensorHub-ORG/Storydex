@@ -29,13 +29,14 @@ test("candidate policy accepts Rust sidecar and static frontend assets", () => {
   withCandidateFixture(({ projectRoot, candidateRoot }) => {
     fs.mkdirSync(path.join(candidateRoot, "binaries"));
     fs.writeFileSync(path.join(candidateRoot, "binaries", "storydex-agentd-x86_64-pc-windows-msvc.exe"), "rust sidecar");
+    fs.writeFileSync(path.join(candidateRoot, "binaries", "storydex-coomi-bridge-x86_64-pc-windows-msvc.exe"), "rust bridge");
     fs.mkdirSync(path.join(candidateRoot, "dist"));
     fs.writeFileSync(path.join(candidateRoot, "dist", "index.html"), "<!doctype html>");
     fs.writeFileSync(path.join(candidateRoot, "dist", "app.js"), "console.log('tauri');");
 
     const report = inspectCandidateRoot(candidateRoot, { projectRoot, policy: policyForTests() });
     assert.equal(report.ok, true);
-    assert.equal(report.filesScanned, 3);
+    assert.equal(report.filesScanned, 4);
     assert.deepEqual(report.violations, []);
   });
 });

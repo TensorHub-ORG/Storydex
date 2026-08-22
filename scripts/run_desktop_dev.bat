@@ -6,7 +6,8 @@ set "ROOT=%~dp0.."
 set "FRONTEND_DIR=%ROOT%\apps\frontend"
 set "DESKTOP_DIR=%ROOT%\apps\desktop"
 set "RUNTIME_MANIFEST=%DESKTOP_DIR%\agent-runtime\Cargo.toml"
-set "RUNTIME_EXE=%DESKTOP_DIR%\agent-runtime\target\debug\storydex-agentd.exe"
+set "RUNTIME_AGENTD_EXE=%DESKTOP_DIR%\agent-runtime\target\debug\storydex-agentd.exe"
+set "RUNTIME_BRIDGE_EXE=%DESKTOP_DIR%\agent-runtime\target\debug\storydex-coomi-bridge.exe"
 
 echo [Storydex] Desktop dev bootstrap...
 echo.
@@ -33,18 +34,23 @@ if not exist "%RUNTIME_MANIFEST%" (
 )
 
 echo.
-echo [Storydex] Building Storydex Rust sidecar...
+echo [Storydex] Building Storydex Rust runtime...
 cd /d "%DESKTOP_DIR%" || goto :error
-call cargo build --manifest-path "%RUNTIME_MANIFEST%" --locked -p storydex-agentd || goto :error
-if not exist "%RUNTIME_EXE%" (
-  echo [Storydex] ERROR: Rust sidecar build did not create:
-  echo [Storydex] %RUNTIME_EXE%
+call cargo build --manifest-path "%RUNTIME_MANIFEST%" --locked -p storydex-agentd -p storydex-coomi-bridge || goto :error
+if not exist "%RUNTIME_AGENTD_EXE%" (
+  echo [Storydex] ERROR: Rust runtime build did not create:
+  echo [Storydex] %RUNTIME_AGENTD_EXE%
+  goto :error
+)
+if not exist "%RUNTIME_BRIDGE_EXE%" (
+  echo [Storydex] ERROR: Rust runtime build did not create:
+  echo [Storydex] %RUNTIME_BRIDGE_EXE%
   goto :error
 )
 
 if /I "%~1"=="--prepare-only" (
   echo.
-  echo [Storydex] Desktop dev dependencies and Rust sidecar are ready ^(--prepare-only^).
+  echo [Storydex] Desktop dev dependencies and Rust runtime are ready ^(--prepare-only^).
   exit /b 0
 )
 

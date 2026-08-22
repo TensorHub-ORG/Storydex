@@ -20,6 +20,7 @@ test("Stable desktop scripts use Tauri and no longer expose Electron as a packag
 test("Tauri release contract requires signed updater artifacts and a Rust-only candidate", () => {
   const config = JSON.parse(fs.readFileSync(path.join(previewRoot, "tauri.conf.json"), "utf8"));
   const packageScript = read("tauri-preview/scripts/package-preview.ps1");
+  const prepareScript = read("tauri-preview/scripts/prepare-preview.ps1");
   const artifactScript = read("scripts/prepare-tauri-artifacts.cjs");
   const validator = read("scripts/validate-tauri-release-assets.cjs");
   assert.equal(config.identifier, "cn.tensorhub.storydex");
@@ -30,6 +31,10 @@ test("Tauri release contract requires signed updater artifacts and a Rust-only c
   assert.match(packageScript, /STORYDEX_TAURI_UPDATER_PUBKEY/);
   assert.match(packageScript, /npx --no-install tauri build --ci/);
   assert.match(packageScript, /TAURI_SIGNING_PRIVATE_KEY_PATH/);
+  assert.match(packageScript, /binaries\/storydex-agentd/);
+  assert.match(packageScript, /binaries\/storydex-coomi-bridge/);
+  assert.match(prepareScript, /-p storydex-agentd -p storydex-coomi-bridge/);
+  assert.match(prepareScript, /storydex-coomi-bridge\.exe/);
   assert.match(artifactScript, /latest\.json/);
   assert.match(artifactScript, /updaterSignature/);
   assert.match(artifactScript, /\.sig/);
@@ -37,7 +42,10 @@ test("Tauri release contract requires signed updater artifacts and a Rust-only c
   assert.match(artifactScript, /\.sig/);
   assert.match(validator, /windows-x86_64/);
   assert.match(validator, /inspectCandidateRoot/);
+  assert.match(validator, /storydex-coomi-bridge\.exe/);
+  assert.match(validator, /spawnSync\(bridgePath, \["--version"\]/);
   assert.match(validator, /Storydex-win-portable\.zip/);
+  assert.deepEqual(config.bundle.icon, ["../../../assets/Storydex_icon/storydex_icon_01.ico"]);
   assert.doesNotMatch(artifactScript, /python|electron|node_modules/i);
 });
 

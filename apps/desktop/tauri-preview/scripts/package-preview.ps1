@@ -37,7 +37,10 @@ if (-not [string]::IsNullOrWhiteSpace($certificateThumbprint)) {
     $config.bundle.windows | Add-Member -NotePropertyName timestampUrl -NotePropertyValue "http://timestamp.digicert.com" -Force
 }
 $config.build.beforeBuildCommand = "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encodedPrepareCommand"
-$config.bundle | Add-Member -NotePropertyName externalBin -NotePropertyValue @("binaries/storydex-agentd") -Force
+$config.bundle | Add-Member -NotePropertyName externalBin -NotePropertyValue @(
+    "binaries/storydex-agentd",
+    "binaries/storydex-coomi-bridge"
+) -Force
 $config.bundle | Add-Member -NotePropertyName resources -NotePropertyValue @{ "resources/mingit" = "mingit" } -Force
 $generatedConfig = $config | ConvertTo-Json -Depth 20
 $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
