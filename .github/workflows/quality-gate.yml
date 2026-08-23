@@ -99,7 +99,7 @@ jobs:
               || ! git cat-file -e "${head}^{commit}" 2>/dev/null; then
               force_all=true
             else
-              git diff --name-only --no-renames "$base" "$head" -- > "$changed_file"
+              git -c core.quotePath=false diff --name-only --no-renames "$base" "$head" -- > "$changed_file"
               if [[ ! -s "$changed_file" ]]; then
                 windows_only=false
               else

@@ -74,6 +74,7 @@ test("normal CI stays scoped while full CI remains explicit for release validati
   const qualityGate = read(".github/workflows/quality-gate.yml");
   assert.match(qualityGate, /if \[\[ "\$FULL" == "true" \]\]/);
   assert.match(qualityGate, /EVENT_NAME.*workflow_dispatch[\s\S]*?git rev-parse .*\^/);
+  assert.match(qualityGate, /git -c core\.quotePath=false diff --name-only/);
   assert.match(developmentCi, /dev-flowby/);
   assert.match(developmentCi, /dev\/windows/);
   assert.match(developmentCi, /dev\/android/);
