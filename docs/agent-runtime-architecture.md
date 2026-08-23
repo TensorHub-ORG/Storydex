@@ -54,7 +54,7 @@ consent → analyzing → ready → uploading → complete
 
 ## 6. 分支与源码所有权
 
-- `main` 保存 Windows 和 Android 的稳定实现，并执行完整质量门禁。
+- `main` 保存 Windows 和 Android 的稳定实现，并按改动范围执行组件门禁；相同 SHA 已通过 `dev/windows` 时复用 Windows 结果，完整跨平台矩阵改为显式运行。
 - `dev/windows` 只集成 Windows 桌面端改动，先通过 Windows Development CI，再进入 `main`。
 - Windows runtime 不得依赖 `apps/android/agent-runtime`，Android runtime 不得依赖 `apps/desktop/agent-runtime`。
 - `apps/backend` 不再属于 Windows Stable runtime，仍服务于兼容脚本、差分测试、部分完整 CI 和人工回滚。

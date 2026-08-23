@@ -140,7 +140,7 @@ Storydex/
 本仓库当前只在公开说明中定义两条主线：
 
 - `dev/windows`：Windows 桌面端日常开发和聚焦验证，先通过 Development CI。
-- `main`：稳定集成和正式发布，必须通过完整质量门禁。
+- `main`：稳定集成；普通改动按路径执行组件检查，同一 SHA 已通过 `dev/windows` 时复用 Windows 结果。
 
 准备合入 `main` 的 Windows 改动应先在 `dev/windows` 验证，再以同一交付内容进入 `main`。其他远端分支和历史引用不在本次仓库治理范围内，本项目不会因本次文档整理删除或改写它们。
 
@@ -161,7 +161,7 @@ npm --prefix apps/desktop run check:tauri
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_pre_push_ci.ps1
 ```
 
-这个入口只检查编码、冲突标记、版本一致性和 whitespace；全组件测试、打包和 E2E 由 GitHub Actions 按改动范围执行。需要完整本地验证时，人工运行 `scripts/run_full_test_suite.ps1 -Mode Fast|Full|Release`。
+这个入口只检查编码、冲突标记、版本一致性和 whitespace；组件测试由 GitHub Actions 按改动范围执行。打包资产检查通过 CI 手动输入 `packaged=true` 或 Windows 发布 dry-run 触发，Tauri GUI E2E 不作为 CI 门禁。需要完整本地验证时，人工运行 `scripts/run_full_test_suite.ps1 -Mode Fast|Full|Release`。
 
 ## 贡献与安全
 

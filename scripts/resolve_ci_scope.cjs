@@ -33,6 +33,10 @@ function isCiPolicyOnly(filePath) {
   );
 }
 
+function isFeedbackPath(filePath) {
+  return filePath.startsWith("deploy/storydex-feedback/");
+}
+
 function classifyChangedPaths(inputPaths, options = {}) {
   const forceAll = options.forceAll === true;
   const paths = [...new Set(inputPaths.map(normalizePath).filter(Boolean))];
@@ -43,6 +47,7 @@ function classifyChangedPaths(inputPaths, options = {}) {
     android: false,
     coomi: false,
     pc_runtime: false,
+    feedback: false,
   };
   const unknownPaths = [];
   let ciPolicyOnly = false;
@@ -54,6 +59,7 @@ function classifyChangedPaths(inputPaths, options = {}) {
     scope.android = true;
     scope.coomi = true;
     scope.pc_runtime = true;
+    scope.feedback = true;
   };
 
   if (forceAll || paths.length === 0) {
@@ -77,6 +83,11 @@ function classifyChangedPaths(inputPaths, options = {}) {
     }
 
     let matched = false;
+
+    if (isFeedbackPath(filePath)) {
+      scope.feedback = true;
+      matched = true;
+    }
 
     if (filePath === "coverage-baseline.json" || filePath === "scripts/check_coverage.cjs" || filePath === "scripts/tests/check-coverage.test.cjs") {
       scope.backend = true;
@@ -145,6 +156,25 @@ function classifyChangedPaths(inputPaths, options = {}) {
       if (sourcePolicyOnly) {
         matched = true;
       }
+
+      if (
+        filePath === "scripts/run_rust_dependency_audit.ps1"
+        || filePath === "scripts/verify_coomi_runtime.py"
+        || filePath === "scripts/generate_rust_backend_interface_inventory.cjs"
+      ) {
+        scope.coomi = true;
+        scope.pc_runtime = true;
+        matched = true;
+      }
+
+      if (
+        filePath === "scripts/prepare_tauri_release_bundle.ps1"
+        || filePath === "scripts/prepare_release_bundle.ps1"
+        || filePath === "scripts/generate_release_metadata.cjs"
+      ) {
+        scope.desktop = true;
+        matched = true;
+      }
     }
 
     if (!matched) {
@@ -156,7 +186,7 @@ function classifyChangedPaths(inputPaths, options = {}) {
     enableAll();
   }
 
-  const selected = scope.backend || scope.frontend || scope.desktop || scope.android || scope.coomi || scope.pc_runtime;
+  const selected = scope.backend || scope.frontend || scope.desktop || scope.android || scope.coomi || scope.pc_runtime || scope.feedback;
   const reason = unknownPaths.length > 0
     ? "unknown-path-fail-safe"
     : (ciPolicyOnly && !selected ? "ci-policy-only" : (!selected ? "documentation-only" : "path-classified"));
@@ -194,6 +224,7 @@ function writeGithubOutputs(filePath, result) {
     android: result.android,
     coomi: result.coomi,
     pc_runtime: result.pc_runtime,
+    feedback: result.feedback,
     docs_only: result.docsOnly,
     changed_count: result.changedCount,
     reason: result.reason,

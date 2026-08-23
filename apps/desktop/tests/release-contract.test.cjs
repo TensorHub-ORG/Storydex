@@ -96,10 +96,10 @@ test("local and CI release bundling share the optimized archive pipeline", () =>
   const bundleScript = fs.readFileSync(path.join(projectRoot, "scripts", "prepare_release_bundle.ps1"), "utf8");
   const metadataScript = fs.readFileSync(path.join(projectRoot, "scripts", "generate_release_metadata.cjs"), "utf8");
   assert.match(workflow, /prepare_release_bundle\.ps1/);
-  assert.match(workflow, /run_packaged_checks:\s*false/);
-  assert.match(workflow, /Run packaged Electron E2E on release artifact[\s\S]*npm run test:e2e/);
+  assert.match(workflow, /windows_release:\s*true/);
+  assert.doesNotMatch(workflow, /smoke:tauri/);
   assert.match(qualityGate, /run_packaged_checks:/);
-  assert.match(qualityGate, /inputs\.full && inputs\.run_packaged_checks/);
+  assert.match(qualityGate, /desktop-package-check:[\s\S]*?inputs\.run_packaged_checks/);
   assert.doesNotMatch(workflow, /Compress-Archive|Get-FileHash/);
   assert.match(bundleScript, /ZipFile\]::CreateFromDirectory/);
   assert.match(bundleScript, /\[string\]\$CompressionLevel = "Fastest"/);
@@ -219,4 +219,3 @@ test("Windows releases sign when credentials are configured and otherwise report
   assert.match(workflow, /Status\s*-ne\s*\"Valid\"/);
   assert.match(workflow, /publisherName/);
 });
-

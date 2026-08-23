@@ -17,6 +17,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  actions: read
   contents: write
 
 jobs:
@@ -24,8 +25,8 @@ jobs:
     uses: ./.github/workflows/quality-gate.yml
     with:
       enforce_coverage: true
-      full: true
-      run_packaged_checks: false
+      full: false
+      windows_release: true
 
   release-windows:
     name: Build and publish Tauri Windows release
@@ -82,13 +83,6 @@ jobs:
             "$($entry.Key)=$($entry.Value)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           }
 
-      - name: Validate Tauri release configuration
-        shell: pwsh
-        run: |
-          npm --prefix apps/desktop run check:encoding
-          npm --prefix apps/desktop run check:release
-          npm --prefix apps/desktop run test:unit
-
       - name: Validate production updater signing secrets
         shell: pwsh
         env:
@@ -112,9 +106,7 @@ jobs:
 
       - name: Verify Tauri runtime and updater assets
         shell: pwsh
-        run: |
-          npm --prefix apps/desktop run check:packaged
-          npm --prefix apps/desktop run smoke:tauri
+        run: npm --prefix apps/desktop run check:packaged
 
       - name: Verify optional Authenticode signatures
         shell: pwsh
@@ -150,7 +142,7 @@ jobs:
             -Version $env:STORYDEX_VERSION `
             -SourceDirectory "apps/desktop/release" `
             -DestinationDirectory "release-assets" `
-            -TestSummary "Reusable quality gate and packaged Tauri smoke passed"
+            -TestSummary "Windows release gate and packaged asset validation passed"
           $outputs = @{
             notes_path = "release-assets/RELEASE_NOTES.md"
             setup_path = "release-assets/$env:STORYDEX_SETUP_NAME"

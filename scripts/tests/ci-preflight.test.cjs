@@ -69,6 +69,7 @@ test("normal CI stays scoped while full CI remains explicit for release validati
   assert.match(ci, /pull_request:\s*\n\s*branches: \[main\]/);
   assert.match(ci, /push:\s*\n\s*branches: \[main\]/);
   assert.match(ci, /full:\s*\$\{\{ inputs\.full\s*==\s*true \}\}/);
+  assert.match(ci, /run_packaged_checks:\s*\$\{\{ inputs\.packaged\s*==\s*true \}\}/);
   assert.doesNotMatch(ci, /github\.ref\s*==\s*'refs\/heads\/main'|github\.base_ref\s*==\s*'main'/);
   const qualityGate = read(".github/workflows/quality-gate.yml");
   assert.match(qualityGate, /if \[\[ "\$FULL" == "true" \]\]/);
@@ -79,11 +80,19 @@ test("normal CI stays scoped while full CI remains explicit for release validati
   assert.match(developmentCi, /Run basic repository checks/);
   assert.match(developmentCi, /Test CI policies/);
   assert.match(developmentCi, /windows-quality-gate:[\s\S]*?uses: \.\/\.github\/workflows\/quality-gate\.yml/);
-  assert.match(developmentCi, /windows-quality-gate:[\s\S]*?full: false[\s\S]*?run_packaged_checks: false/);
+  assert.match(developmentCi, /windows-quality-gate:[\s\S]*?full: false/);
   assert.match(developmentCi, /android-tests:[\s\S]*?runs-on: ubuntu-latest/);
   assert.match(developmentCi, /cargo test --manifest-path apps\/android\/agent-runtime\/Cargo\.toml/);
   assert.doesNotMatch(developmentCi, /Install pinned Rust dependency auditor|Test Windows Agent runtime|Check Tauri Stable shell|package:win/);
-  assert.match(qualityGate, /tauri-e2e:[\s\S]*?if:\s*inputs\.full && inputs\.run_packaged_checks/);
+  assert.match(qualityGate, /desktop-package-check:[\s\S]*?if:\s*inputs\.run_packaged_checks/);
+  assert.doesNotMatch(qualityGate, /^  tauri-e2e:/m);
+  assert.match(qualityGate, /component checks reused from dev\/windows/);
+  assert.match(qualityGate, /reused-windows-checks:[\s\S]*?upstream_verified == 'true'/);
+  assert.match(qualityGate, /case "\$changed_path" in[\s\S]*?apps\/frontend\/\*[\s\S]*?apps\/desktop\/\*/);
+  assert.match(qualityGate, /actions\/workflows\/dev-ci\.yml\/runs/);
+  const release = read(".github/workflows/release-windows.yml");
+  assert.match(release, /windows_release:\s*true/);
+  assert.doesNotMatch(release, /smoke:tauri/);
 });
 
 test("Agent runtimes are owned by their platforms without cross-source dependencies", () => {

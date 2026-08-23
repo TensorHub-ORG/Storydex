@@ -8,7 +8,12 @@ on:
   workflow_dispatch:
     inputs:
       full:
-        description: Run the full cross-platform, packaging, and packaged Tauri lifecycle gate
+        description: Run the complete cross-platform component matrix
+        required: true
+        default: false
+        type: boolean
+      packaged:
+        description: Build and validate the Windows package without GUI E2E
         required: true
         default: false
         type: boolean
@@ -18,6 +23,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -25,6 +31,6 @@ jobs:
     uses: ./.github/workflows/quality-gate.yml
     with:
       # Ordinary pushes and pull requests use affected-component checks.
-      # Full CI stays explicit for release validation and manual runs.
+      # Full CI and the optional package check stay explicit for release validation and manual runs.
       full: ${{ inputs.full == true }}
-
+      run_packaged_checks: ${{ inputs.packaged == true }}

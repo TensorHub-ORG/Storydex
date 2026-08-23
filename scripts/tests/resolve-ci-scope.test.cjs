@@ -16,6 +16,7 @@ test("frontend-only changes run only frontend quality checks", () => {
     android: false,
     coomi: false,
     pc_runtime: false,
+    feedback: false,
     docsOnly: false,
     changedCount: 2,
     unknownPaths: [],
@@ -31,6 +32,7 @@ test("ordinary backend changes keep full Python checks without unrelated Rust wo
   assert.equal(result.android, false);
   assert.equal(result.coomi, false);
   assert.equal(result.pc_runtime, false);
+  assert.equal(result.feedback, false);
 });
 
 test("PC runtime changes use focused runtime checks without backend coverage", () => {
@@ -67,6 +69,23 @@ test("desktop and documentation changes stay scoped", () => {
   assert.equal(docs.desktop, false);
   assert.equal(docs.android, false);
   assert.equal(docs.pc_runtime, false);
+  assert.equal(docs.feedback, false);
+});
+
+test("feedback and release helper changes run only their owning checks", () => {
+  const feedback = classifyChangedPaths(["deploy/storydex-feedback/server.py"]);
+  assert.equal(feedback.feedback, true);
+  assert.equal(feedback.backend, false);
+  assert.equal(feedback.frontend, false);
+  assert.equal(feedback.desktop, false);
+  assert.equal(feedback.android, false);
+  assert.equal(feedback.pc_runtime, false);
+
+  const release = classifyChangedPaths(["scripts/prepare_tauri_release_bundle.ps1"]);
+  assert.equal(release.desktop, true);
+  assert.equal(release.backend, false);
+  assert.equal(release.android, false);
+  assert.equal(release.feedback, false);
 });
 
 test("CI policy, unknown, empty, and forced scopes follow their intended safety profiles", () => {
@@ -80,6 +99,7 @@ test("CI policy, unknown, empty, and forced scopes follow their intended safety 
   assert.equal(ciPolicy.android, false);
   assert.equal(ciPolicy.coomi, false);
   assert.equal(ciPolicy.pc_runtime, false);
+  assert.equal(ciPolicy.feedback, false);
   assert.equal(ciPolicy.docsOnly, false);
   assert.equal(ciPolicy.reason, "ci-policy-only");
 
@@ -98,5 +118,6 @@ test("CI policy, unknown, empty, and forced scopes follow their intended safety 
     assert.equal(result.android, true);
     assert.equal(result.coomi, true);
     assert.equal(result.pc_runtime, true);
+    assert.equal(result.feedback, true);
   }
 });

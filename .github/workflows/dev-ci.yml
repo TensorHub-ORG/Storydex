@@ -17,6 +17,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
+  actions: read
   contents: read
 
 env:
@@ -46,7 +47,6 @@ jobs:
     uses: ./.github/workflows/quality-gate.yml
     with:
       full: false
-      run_packaged_checks: false
 
   android-tests:
     name: Android development tests

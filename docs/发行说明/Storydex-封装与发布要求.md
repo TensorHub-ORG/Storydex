@@ -64,12 +64,12 @@ npm --prefix apps/desktop run check:tauri
 ### 2.2 GitHub Actions
 
 - `dev/windows` 的 Windows 改动必须通过 Windows Development CI；
-- `main` 与正式发布 workflow 必须通过完整质量门禁；
+- `main` 按改动范围执行组件门禁；同一 SHA 已通过 `dev/windows` 时可复用 Windows 结果；正式发布 workflow 使用 Windows 专项门禁；
 - push 后必须监控对应 HEAD 的工作流到最终 `success`，失败时修复具体 job/step 根因。
 
 本文只定义 `dev/windows` → `main` 的 Windows 集成路径；Android 发布仍按对应 workflow 的检查执行，不在此扩展其他分支治理规则。
 
-`.github/workflows/release-windows.yml` 复用完整 `quality-gate.yml`，然后只对该 release job 生成的 Tauri 产物执行资产校验和 packaged lifecycle smoke。不得用另一份本地或早期构建冒充最终发布产物。
+`.github/workflows/release-windows.yml` 复用 `quality-gate.yml` 的 Windows 专项配置，然后只对该 release job 生成的 Tauri 产物执行签名和资产校验。Tauri GUI lifecycle smoke 不再作为 CI 或发布阻断项；不得用另一份本地或早期构建冒充最终发布产物。
 
 本地 `scripts/run_full_test_suite.ps1 -Mode Fast|Full|Release` 仅保留为人工完整验证入口，不是普通 push 前置条件。
 
@@ -148,10 +148,10 @@ Vue 资源由 Tauri 打包；使用指南和指令模板由 `storydex-agentd` �
 
 标签 push 或手动触发 `.github/workflows/release-windows.yml`：
 
-1. 运行完整可复用质量门禁；
+1. 运行 Windows 专项质量门禁；
 2. 校验版本和 Tauri release 配置；
 3. 读取 updater 密钥，构建 NSIS、`.sig`、`latest.json` 和便携包；
-4. 校验最小 Rust runtime，并执行 packaged Tauri lifecycle smoke；
+4. 校验最小 Rust runtime、更新签名、安装包和便携包资产；
 5. 如配置 Authenticode 指纹，额外验证 `Storydex.exe` 和安装包签名；
 6. 生成 release bundle、校验值、依赖清单和构建 manifest；
 7. dry-run 只上传短期 Actions artifact；正式模式创建 GitHub Release 并同步 VPS 更新源。

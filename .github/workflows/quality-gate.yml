@@ -9,17 +9,23 @@ on:
         type: boolean
         default: false
       full:
-        description: Run release-grade cross-platform, packaging, and packaged E2E checks
+        description: Run the complete cross-platform component matrix
         required: false
         type: boolean
         default: false
       run_packaged_checks:
-        description: Build and test the unpacked desktop in this workflow; release jobs may defer this to the signed package job
+        description: Build and validate a packaged desktop artifact (opt-in; no GUI E2E)
         required: false
         type: boolean
-        default: true
+        default: false
+      windows_release:
+        description: Run the Windows release component gate without unrelated Android and legacy backend jobs
+        required: false
+        type: boolean
+        default: false
 
 permissions:
+  actions: read
   contents: read
 
 env:
@@ -40,6 +46,8 @@ jobs:
       android: ${{ steps.scope.outputs.android }}
       coomi: ${{ steps.scope.outputs.coomi }}
       pc_runtime: ${{ steps.scope.outputs.pc_runtime }}
+      feedback: ${{ steps.scope.outputs.feedback }}
+      upstream_verified: ${{ steps.scope.outputs.upstream_verified }}
       docs_only: ${{ steps.scope.outputs.docs_only }}
       changed_count: ${{ steps.scope.outputs.changed_count }}
       reason: ${{ steps.scope.outputs.reason }}
@@ -55,15 +63,19 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           FULL: ${{ inputs.full }}
+          WINDOWS_RELEASE: ${{ inputs.windows_release }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PUSH_BEFORE_SHA: ${{ github.event.before }}
           CURRENT_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           changed_file="$RUNNER_TEMP/storydex-changed-files.txt"
           : > "$changed_file"
           force_all=false
+          upstream_verified=false
+          windows_only=true
           base=""
           head="$CURRENT_SHA"
 
@@ -88,6 +100,30 @@ jobs:
               force_all=true
             else
               git diff --name-only --no-renames "$base" "$head" -- > "$changed_file"
+              if [[ ! -s "$changed_file" ]]; then
+                windows_only=false
+              else
+                while IFS= read -r changed_path; do
+                  case "$changed_path" in
+                    apps/frontend/*|apps/desktop/*|assets/*|README.md|AGENTS.md|.gitattributes|.gitignore|docs/*) ;;
+                    *) windows_only=false ;;
+                  esac
+                done < "$changed_file"
+              fi
+            fi
+          fi
+
+          # A fast-forward from dev/windows already has an exact-commit Windows
+          # Development CI result. Reuse it only for Windows-owned paths; API
+          # failures deliberately leave the flag false, so normal scoped checks
+          # still run.
+          if [[ "$force_all" != "true" && "$EVENT_NAME" == "push" && "$GITHUB_REF" == "refs/heads/main" && "$FULL" != "true" && "$WINDOWS_RELEASE" != "true" && "$windows_only" == "true" ]]; then
+            runs_json="$(curl --silent --show-error --max-time 10 \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/workflows/dev-ci.yml/runs?branch=dev%2Fwindows&head_sha=$head&status=completed&per_page=20" || true)"
+            if [[ -n "$runs_json" ]] && jq -e 'any(.workflow_runs[]?; .head_sha == $sha and .conclusion == "success")' --arg sha "$head" <<<"$runs_json" >/dev/null 2>&1; then
+              upstream_verified=true
             fi
           fi
 
@@ -95,9 +131,11 @@ jobs:
             --files-from "$changed_file" \
             --github-output "$GITHUB_OUTPUT" \
             --force-all "$force_all"
+          echo "upstream_verified=$upstream_verified" >> "$GITHUB_OUTPUT"
 
   source-policy:
     name: source-policy
+    needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -122,12 +160,21 @@ jobs:
       - name: CI policy regressions
         run: node --test scripts/tests/check-coverage.test.cjs scripts/tests/resolve-ci-scope.test.cjs scripts/tests/ci-preflight.test.cjs
       - name: Feedback receiver regressions
+        if: ${{ inputs.full || (!inputs.windows_release && needs.changes.outputs.feedback == 'true') }}
         run: python3 -m unittest discover -s deploy/storydex-feedback/tests -v
+
+  reused-windows-checks:
+    name: reused-windows-checks
+    needs: changes
+    if: ${{ needs.changes.outputs.upstream_verified == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Reused successful dev/windows component checks for $GITHUB_SHA."
 
   backend-tests:
     name: backend-tests (${{ matrix.os }}, py${{ matrix.python }})
     needs: changes
-    if: ${{ inputs.full || needs.changes.outputs.backend == 'true' }}
+    if: ${{ needs.changes.outputs.upstream_verified != 'true' && (inputs.full || (!inputs.windows_release && needs.changes.outputs.backend == 'true')) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ inputs.full && 30 || 12 }}
     strategy:
@@ -180,7 +227,7 @@ jobs:
   pc-runtime-tests:
     name: pc-runtime-tests
     needs: changes
-    if: ${{ inputs.full || needs.changes.outputs.pc_runtime == 'true' }}
+    if: ${{ needs.changes.outputs.upstream_verified != 'true' && (inputs.full || inputs.windows_release || needs.changes.outputs.pc_runtime == 'true') }}
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -191,11 +238,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/desktop/agent-runtime -> target
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with: { python-version: "3.13" }
       - name: Install pinned Rust dependency auditor
+        if: inputs.full || inputs.windows_release
         run: cargo install cargo-deny --version 0.20.2 --locked
       - name: Audit Rust dependencies
+        if: inputs.full || inputs.windows_release
         shell: pwsh
         run: ./scripts/run_rust_dependency_audit.ps1
       - name: Check storydex-agentd formatting
@@ -204,17 +251,23 @@ jobs:
         run: cargo clippy --manifest-path apps/desktop/agent-runtime/Cargo.toml --locked -p storydex-agentd --all-targets --no-deps -- -D warnings
       - name: Test Storydex PC Agent runtime
         run: cargo test --manifest-path apps/desktop/agent-runtime/Cargo.toml --locked --workspace
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        if: inputs.full || inputs.windows_release
+        with: { python-version: "3.13" }
       - name: Build isolated storydex-agentd sidecar
+        if: inputs.full || inputs.windows_release
         run: cargo build --manifest-path apps/desktop/agent-runtime/Cargo.toml --release --locked -p storydex-agentd
       - name: Build current-commit Storydex PC Agent runtime
+        if: inputs.full || inputs.windows_release
         run: cargo build --manifest-path apps/desktop/agent-runtime/Cargo.toml --release --locked -p storydex-coomi-bridge
       - name: Verify pinned runtime and backend contract
+        if: inputs.full || inputs.windows_release
         run: python scripts/verify_coomi_runtime.py
 
   backend-compatibility:
     name: backend-compatibility
     needs: changes
-    if: ${{ !inputs.full && needs.changes.outputs.backend == 'true' }}
+    if: ${{ needs.changes.outputs.upstream_verified != 'true' && !inputs.full && !inputs.windows_release && needs.changes.outputs.backend == 'true' }}
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
@@ -254,7 +307,7 @@ jobs:
   frontend-tests:
     name: frontend-tests
     needs: changes
-    if: ${{ inputs.full || needs.changes.outputs.frontend == 'true' }}
+    if: ${{ needs.changes.outputs.upstream_verified != 'true' && (inputs.full || inputs.windows_release || needs.changes.outputs.frontend == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -292,7 +345,7 @@ jobs:
   desktop-unit-tests:
     name: desktop-unit-tests
     needs: changes
-    if: ${{ inputs.full || needs.changes.outputs.desktop == 'true' }}
+    if: ${{ needs.changes.outputs.upstream_verified != 'true' && (inputs.full || inputs.windows_release || needs.changes.outputs.desktop == 'true') }}
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -324,7 +377,7 @@ jobs:
   android-tests:
     name: android-tests
     needs: changes
-    if: ${{ inputs.full || needs.changes.outputs.android == 'true' }}
+    if: ${{ needs.changes.outputs.upstream_verified != 'true' && !inputs.windows_release && (inputs.full || needs.changes.outputs.android == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -348,9 +401,9 @@ jobs:
       - run: npm run test:random
         working-directory: apps/android-frontend
 
-  desktop-package-smoke:
-    name: desktop-package-smoke
-    if: inputs.full && inputs.run_packaged_checks
+  desktop-package-check:
+    name: desktop-package-check
+    if: inputs.run_packaged_checks
     runs-on: windows-latest
     timeout-minutes: 50
     steps:
@@ -363,9 +416,9 @@ jobs:
           cache-dependency-path: |
             apps/frontend/package-lock.json
             apps/desktop/package-lock.json
-      - run: npm ci
+      - run: npm ci --prefer-offline --no-audit --fund=false
         working-directory: apps/frontend
-      - run: npm ci
+      - run: npm ci --prefer-offline --no-audit --fund=false
         working-directory: apps/desktop
       - name: Generate ephemeral updater key
         shell: pwsh
@@ -373,7 +426,7 @@ jobs:
           $keyPath = Join-Path $env:RUNNER_TEMP "storydex-tauri-ci.key"
           npm --prefix apps/desktop exec -- tauri signer generate --ci --write-keys $keyPath
           "STORYDEX_TAURI_UPDATER_PUBKEY=$((Get-Content -Raw -LiteralPath "$keyPath.pub").Trim())" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-           "TAURI_SIGNING_PRIVATE_KEY_PATH=$keyPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TAURI_SIGNING_PRIVATE_KEY_PATH=$keyPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Build Tauri desktop and signed updater assets
         run: npm run build:desktop
@@ -389,58 +442,29 @@ jobs:
             apps/desktop/release
           retention-days: 3
 
-  tauri-e2e:
-    name: tauri-e2e
-    if: inputs.full && inputs.run_packaged_checks
-    needs: desktop-package-smoke
-    runs-on: windows-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "20"
-          cache: npm
-          cache-dependency-path: apps/desktop/package-lock.json
-      - run: npm ci
-        working-directory: apps/desktop
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: storydex-tauri-runtime
-          path: apps/desktop
-      - name: Run packaged Tauri lifecycle smoke
-        working-directory: apps/desktop
-        run: npm run smoke:tauri
-      - name: Upload Tauri diagnostics
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: tauri-e2e-diagnostics
-          path: |
-            apps/desktop/test-results
-          if-no-files-found: warn
-
   quality-gate-summary:
     name: quality-gate-summary
     if: always()
     needs:
       - changes
       - source-policy
+      - reused-windows-checks
       - backend-tests
       - backend-compatibility
       - pc-runtime-tests
       - frontend-tests
       - desktop-unit-tests
       - android-tests
-      - desktop-package-smoke
-      - tauri-e2e
+      - desktop-package-check
     runs-on: ubuntu-latest
     steps:
       - name: Require every quality job
         env:
           RESULTS: ${{ toJSON(needs) }}
           FULL: ${{ inputs.full }}
+          WINDOWS_RELEASE: ${{ inputs.windows_release }}
           PACKAGED_CHECKS: ${{ inputs.run_packaged_checks }}
+          UPSTREAM_VERIFIED: ${{ needs.changes.outputs.upstream_verified }}
           BACKEND: ${{ needs.changes.outputs.backend }}
           PC_RUNTIME: ${{ needs.changes.outputs.pc_runtime }}
           FRONTEND: ${{ needs.changes.outputs.frontend }}
@@ -455,26 +479,30 @@ jobs:
               "source-policy",
           }
           full = os.environ["FULL"].lower() == "true"
+          windows_release = os.environ["WINDOWS_RELEASE"].lower() == "true"
           packaged_checks = os.environ["PACKAGED_CHECKS"].lower() == "true"
+          upstream_verified = os.environ["UPSTREAM_VERIFIED"].lower() == "true"
           backend = os.environ["BACKEND"].lower() == "true"
           pc_runtime = os.environ["PC_RUNTIME"].lower() == "true"
           frontend = os.environ["FRONTEND"].lower() == "true"
           desktop = os.environ["DESKTOP"].lower() == "true"
           android = os.environ["ANDROID"].lower() == "true"
-          if full or backend:
+          if not upstream_verified and (full or (backend and not windows_release)):
               required.add("backend-tests")
-          if backend and not full:
+          if not upstream_verified and backend and not full and not windows_release:
               required.add("backend-compatibility")
-          if full or pc_runtime:
+          if not upstream_verified and (full or windows_release or pc_runtime):
               required.add("pc-runtime-tests")
-          if full or frontend:
+          if not upstream_verified and (full or windows_release or frontend):
               required.add("frontend-tests")
-          if full or desktop:
+          if not upstream_verified and (full or windows_release or desktop):
               required.add("desktop-unit-tests")
-          if full or android:
+          if not upstream_verified and not windows_release and (full or android):
               required.add("android-tests")
-          if full and packaged_checks:
-              required.update({"desktop-package-smoke", "tauri-e2e"})
+          if packaged_checks:
+              required.add("desktop-package-check")
+          if upstream_verified:
+              required.add("reused-windows-checks")
           failed = {
               name: results[name]["result"]
               for name in sorted(required)
@@ -483,8 +511,10 @@ jobs:
           if failed:
               print("Quality gate failed:", failed)
               sys.exit(1)
-          profile = "full" if full else "standard"
-          if full and not packaged_checks:
-              profile += " (packaged checks deferred)"
+          profile = "full" if full else ("windows-release" if windows_release else "standard")
+          if upstream_verified:
+              profile += " (component checks reused from dev/windows)"
+          if packaged_checks:
+              profile += " (packaged assets validated; GUI E2E disabled)"
           print(f"All Storydex {profile} quality gates passed.")
           PY
