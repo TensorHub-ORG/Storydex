@@ -177,7 +177,7 @@ fn default_permission_mode() -> String {
 }
 
 fn default_capability_mode() -> String {
-    "read_only".to_owned()
+    String::new()
 }
 
 fn default_followup_mode() -> String {
@@ -916,11 +916,17 @@ fn validate_refactor_request(
             "sourceFollowupExpectedTraceId requires sourceFollowupMessageId.",
         ));
     }
+    // The streaming/control entry points compile an omitted capability before
+    // validation. Treat an empty value as the safe read-only shape as well so
+    // direct callers and older integrations remain valid while the bridge
+    // still receives an explicit compiled capability on the real path.
     let capability = payload.capability_mode.trim().to_ascii_lowercase();
-    if !matches!(
-        capability.as_str(),
-        "read_only" | "scoped_write" | "workspace_write"
-    ) {
+    let capability = if capability.is_empty() {
+        "read_only"
+    } else {
+        capability.as_str()
+    };
+    if !matches!(capability, "read_only" | "scoped_write" | "workspace_write") {
         return Err((
             "invalid_request",
             "Agent capabilityMode must be read_only, scoped_write, or workspace_write.",
@@ -2741,12 +2747,18 @@ fn bridge_request(
             })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let read_only = payload.capability_mode == "read_only";
-    let base_system_prompt = if read_only {
-        "You are the read-only Refactor Agent for Storydex. Use only read-only tools and do not modify project files."
+    let writes_authorized = payload.writes_allowed
+        && matches!(
+            payload.capability_mode.trim(),
+            "scoped_write" | "workspace_write"
+        );
+    const COOMI_IDENTITY_PROMPT: &str = "You are Coomi, the Storydex Agent. Your identity remains Coomi regardless of the permission mode or turn capability.";
+    let capability_boundary = if writes_authorized {
+        "This turn may modify only paths authorized by the compiled turn capability. Preserve unrelated work and report only verified results."
     } else {
-        "You are the fixture-scoped Refactor Agent for Storydex. Modify only paths authorized by the compiled turn capability."
+        "This turn has no project-write authority. Use only tools allowed by the compiled turn capability and do not modify project files. Describe this as the current tool boundary, never as a different agent role."
     };
+    let base_system_prompt = format!("{COOMI_IDENTITY_PROMPT}\n\n{capability_boundary}");
     let system_prompt = payload
         .compiled_preset
         .as_deref()
@@ -3481,6 +3493,75 @@ mod tests {
             request["allowedWriteRoots"],
             json!([allowed.canonicalize().expect("canonical allowed root")])
         );
+    }
+
+    #[test]
+    fn bridge_prompt_keeps_coomi_identity_across_permissions_and_turn_capabilities() {
+        let directory = tempdir().expect("tempdir");
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let workspace = workspace.canonicalize().expect("canonical workspace");
+        let state = AppState::with_paths(
+            "token",
+            directory.path().join("home"),
+            directory.path().join("bridge"),
+            Some(workspace.clone()),
+            None,
+        )
+        .expect("state");
+
+        for permission_mode in ["ask_approval", "approve_for_me", "full_access", "plan_mode"] {
+            let read_only: ChatStreamRequest = serde_json::from_value(json!({
+                "prompt": "你好，你是谁",
+                "permissionMode": permission_mode,
+                "capabilityMode": "read_only"
+            }))
+            .expect("read-only request");
+            let read_only_request = bridge_request(
+                &state,
+                &read_only,
+                &workspace,
+                &format!("{permission_mode}-read-only"),
+                None,
+            )
+            .expect("read-only bridge request");
+            let read_only_prompt = read_only_request["systemPrompt"]
+                .as_str()
+                .expect("read-only system prompt");
+            assert!(read_only_prompt.contains("You are Coomi, the Storydex Agent."));
+            assert!(read_only_prompt.contains("identity remains Coomi"));
+            assert!(read_only_prompt.contains("current tool boundary"));
+            assert!(!read_only_prompt.contains("read-only Refactor Agent"));
+            assert!(!read_only_prompt.contains("fixture-scoped Refactor Agent"));
+            assert_eq!(read_only_request["permissionMode"], permission_mode);
+        }
+
+        for permission_mode in ["ask_approval", "approve_for_me", "full_access"] {
+            let writable: ChatStreamRequest = serde_json::from_value(json!({
+                "prompt": "请修改 README.md",
+                "permissionMode": permission_mode,
+                "capabilityMode": "workspace_write",
+                "writesAllowed": true,
+                "coreWritesAllowed": true
+            }))
+            .expect("writable request");
+            let writable_request = bridge_request(
+                &state,
+                &writable,
+                &workspace,
+                &format!("{permission_mode}-writable"),
+                None,
+            )
+            .expect("writable bridge request");
+            let writable_prompt = writable_request["systemPrompt"]
+                .as_str()
+                .expect("writable system prompt");
+            assert!(writable_prompt.contains("You are Coomi, the Storydex Agent."));
+            assert!(writable_prompt.contains("identity remains Coomi"));
+            assert!(!writable_prompt.contains("read-only Refactor Agent"));
+            assert!(!writable_prompt.contains("fixture-scoped Refactor Agent"));
+            assert_eq!(writable_request["permissionMode"], permission_mode);
+        }
     }
 
     #[test]

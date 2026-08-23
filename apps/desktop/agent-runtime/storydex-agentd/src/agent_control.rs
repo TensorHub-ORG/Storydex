@@ -364,7 +364,7 @@ fn validate_permission(mode: &str) -> bool {
 }
 
 fn has_explicit_write_policy(payload: &ChatStreamRequest) -> bool {
-    payload.capability_mode != "read_only"
+    !payload.capability_mode.trim().is_empty()
         || payload.writes_allowed
         || payload.core_writes_allowed.is_some()
         || !payload.allowed_write_roots.is_empty()
@@ -583,12 +583,30 @@ pub(crate) fn inferred_write_intent(prompt: &str) -> bool {
 }
 
 fn apply_inferred_capability(payload: &mut ChatStreamRequest) {
-    if has_explicit_write_policy(payload) || !inferred_write_intent(&payload.prompt) {
+    if has_explicit_write_policy(payload) {
+        if payload.capability_mode.trim().is_empty() {
+            payload.capability_mode = if payload.writes_allowed {
+                if payload.allowed_write_roots.is_empty() {
+                    "workspace_write"
+                } else {
+                    "scoped_write"
+                }
+            } else {
+                "read_only"
+            }
+            .to_owned();
+        }
         return;
     }
-    payload.capability_mode = "workspace_write".to_owned();
-    payload.writes_allowed = true;
-    payload.core_writes_allowed = Some(true);
+    let writes_allowed = inferred_write_intent(&payload.prompt);
+    payload.capability_mode = if writes_allowed {
+        "workspace_write"
+    } else {
+        "read_only"
+    }
+    .to_owned();
+    payload.writes_allowed = writes_allowed;
+    payload.core_writes_allowed = Some(writes_allowed);
     payload.allowed_write_roots.clear();
 }
 
@@ -2849,6 +2867,116 @@ mod tests {
         ] {
             assert!(inferred_write_intent(prompt), "{prompt}");
         }
+    }
+
+    #[test]
+    fn omitted_turn_capability_is_compiled_without_overriding_explicit_boundaries() {
+        let mut greeting: ChatStreamRequest = serde_json::from_value(json!({
+            "prompt": "你好，你是谁"
+        }))
+        .expect("greeting request");
+        assert!(greeting.capability_mode.is_empty());
+        apply_inferred_capability(&mut greeting);
+        assert_eq!(greeting.capability_mode, "read_only");
+        assert!(!greeting.writes_allowed);
+        assert_eq!(greeting.core_writes_allowed, Some(false));
+
+        let mut write_request: ChatStreamRequest = serde_json::from_value(json!({
+            "prompt": "请修复 src/lib.rs 中的错误"
+        }))
+        .expect("write request");
+        apply_inferred_capability(&mut write_request);
+        assert_eq!(write_request.capability_mode, "workspace_write");
+        assert!(write_request.writes_allowed);
+        assert_eq!(write_request.core_writes_allowed, Some(true));
+
+        let mut explicit_read_only: ChatStreamRequest = serde_json::from_value(json!({
+            "prompt": "请修复 src/lib.rs 中的错误",
+            "capabilityMode": "read_only"
+        }))
+        .expect("explicit read-only request");
+        apply_inferred_capability(&mut explicit_read_only);
+        assert_eq!(explicit_read_only.capability_mode, "read_only");
+        assert!(!explicit_read_only.writes_allowed);
+        assert_eq!(explicit_read_only.core_writes_allowed, None);
+
+        let mut legacy_write_fields: ChatStreamRequest = serde_json::from_value(json!({
+            "prompt": "update the file",
+            "writesAllowed": true
+        }))
+        .expect("legacy write request");
+        apply_inferred_capability(&mut legacy_write_fields);
+        assert_eq!(legacy_write_fields.capability_mode, "workspace_write");
+        assert!(legacy_write_fields.writes_allowed);
+    }
+
+    #[test]
+    fn chat_policy_preserves_base_permission_while_compiling_each_turn_boundary() {
+        let directory = tempdir().expect("tempdir");
+        let workspace = directory.path().join("workspace");
+        let home = directory.path().join("home");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::create_dir_all(&home).expect("home");
+        let workspace = workspace.canonicalize().expect("canonical workspace");
+        let state = AppState::with_paths(
+            "token",
+            &home,
+            directory.path().join("bridge"),
+            Some(workspace.clone()),
+            None,
+        )
+        .expect("state");
+
+        for permission_mode in ["ask_approval", "approve_for_me", "full_access"] {
+            save_control_config(
+                &state,
+                &RuntimeControlConfig {
+                    permission_mode: permission_mode.to_owned(),
+                    plan_modes: BTreeMap::new(),
+                },
+            )
+            .expect("base permission config");
+
+            let mut greeting: ChatStreamRequest = serde_json::from_value(json!({
+                "prompt": "你好，你是谁"
+            }))
+            .expect("greeting request");
+            apply_chat_policy(&state, &workspace, "session", &mut greeting)
+                .expect("greeting chat policy");
+            assert_eq!(greeting.permission_mode, permission_mode);
+            assert_eq!(greeting.capability_mode, "read_only");
+
+            let mut write_request: ChatStreamRequest = serde_json::from_value(json!({
+                "prompt": "请修复 src/lib.rs 中的错误"
+            }))
+            .expect("write request");
+            apply_chat_policy(&state, &workspace, "session", &mut write_request)
+                .expect("write chat policy");
+            assert_eq!(write_request.permission_mode, permission_mode);
+            assert_eq!(write_request.capability_mode, "workspace_write");
+            assert!(write_request.writes_allowed);
+        }
+
+        let mut plan_modes = BTreeMap::new();
+        plan_modes.insert(control_key(&workspace, "session"), true);
+        save_control_config(
+            &state,
+            &RuntimeControlConfig {
+                permission_mode: "full_access".to_owned(),
+                plan_modes,
+            },
+        )
+        .expect("plan-mode config");
+        let mut plan_request: ChatStreamRequest = serde_json::from_value(json!({
+            "prompt": "请修复 src/lib.rs 中的错误"
+        }))
+        .expect("plan-mode request");
+        apply_chat_policy(&state, &workspace, "session", &mut plan_request)
+            .expect("plan-mode policy");
+        assert_eq!(plan_request.permission_mode, "plan_mode");
+        assert_eq!(plan_request.capability_mode, "read_only");
+        assert!(!plan_request.writes_allowed);
+        assert_eq!(plan_request.core_writes_allowed, Some(false));
     }
 
     #[test]
