@@ -610,6 +610,20 @@ fn apply_inferred_capability(payload: &mut ChatStreamRequest) {
     payload.allowed_write_roots.clear();
 }
 
+fn apply_configured_capability(payload: &mut ChatStreamRequest, permission_mode: &str) {
+    // Full Access is an explicit session choice. When the caller does not
+    // provide a narrower turn contract, keep the workspace writable instead
+    // of downgrading the turn based on fragile prompt keyword inference.
+    if permission_mode == "full_access" && !has_explicit_write_policy(payload) {
+        payload.capability_mode = "workspace_write".to_owned();
+        payload.writes_allowed = true;
+        payload.core_writes_allowed = Some(true);
+        payload.allowed_write_roots.clear();
+        return;
+    }
+    apply_inferred_capability(payload);
+}
+
 fn control_config_path(state: &AppState) -> PathBuf {
     crate::system::global_root(state)
         .join("config")
@@ -839,8 +853,8 @@ pub(crate) fn apply_chat_policy(
         payload.core_writes_allowed = Some(false);
         payload.allowed_write_roots.clear();
     } else {
-        payload.permission_mode = config.permission_mode;
-        apply_inferred_capability(payload);
+        payload.permission_mode = config.permission_mode.clone();
+        apply_configured_capability(payload, &config.permission_mode);
     }
     Ok(())
 }
@@ -881,7 +895,13 @@ pub(crate) async fn chat(
     if let Ok(value) = session_id.parse() {
         forwarded.insert("x-session-id", value);
     }
-    let response = chat::chat_stream(State(state.clone()), forwarded, Ok(Json(payload))).await;
+    let response = chat::chat_stream(
+        State(state.clone()),
+        forwarded,
+        Query(chat::ChatQuery::default()),
+        Ok(Json(payload)),
+    )
+    .await;
     if !response.status().is_success() {
         return response;
     }
@@ -2927,7 +2947,7 @@ mod tests {
         )
         .expect("state");
 
-        for permission_mode in ["ask_approval", "approve_for_me", "full_access"] {
+        for permission_mode in ["ask_approval", "approve_for_me"] {
             save_control_config(
                 &state,
                 &RuntimeControlConfig {
@@ -2956,6 +2976,36 @@ mod tests {
             assert_eq!(write_request.capability_mode, "workspace_write");
             assert!(write_request.writes_allowed);
         }
+
+        let mut full_access_greeting: ChatStreamRequest = serde_json::from_value(json!({
+            "prompt": "你好，你是谁"
+        }))
+        .expect("full-access greeting request");
+        save_control_config(
+            &state,
+            &RuntimeControlConfig {
+                permission_mode: "full_access".to_owned(),
+                plan_modes: BTreeMap::new(),
+            },
+        )
+        .expect("full-access config");
+        apply_chat_policy(&state, &workspace, "session", &mut full_access_greeting)
+            .expect("full-access chat policy");
+        assert_eq!(full_access_greeting.permission_mode, "full_access");
+        assert_eq!(full_access_greeting.capability_mode, "workspace_write");
+        assert!(full_access_greeting.writes_allowed);
+        assert_eq!(full_access_greeting.core_writes_allowed, Some(true));
+
+        let mut explicit_read_only: ChatStreamRequest = serde_json::from_value(json!({
+            "prompt": "请只读分析，不要修改任何文件",
+            "capabilityMode": "read_only"
+        }))
+        .expect("explicit read-only full-access request");
+        apply_chat_policy(&state, &workspace, "session", &mut explicit_read_only)
+            .expect("explicit read-only chat policy");
+        assert_eq!(explicit_read_only.permission_mode, "full_access");
+        assert_eq!(explicit_read_only.capability_mode, "read_only");
+        assert!(!explicit_read_only.writes_allowed);
 
         let mut plan_modes = BTreeMap::new();
         plan_modes.insert(control_key(&workspace, "session"), true);

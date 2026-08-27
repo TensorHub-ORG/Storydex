@@ -160,6 +160,13 @@ pub struct FollowupQuery {
     workspace_root: String,
 }
 
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ChatQuery {
+    #[serde(default)]
+    session_id: String,
+}
+
 fn default_reasoning_effort() -> String {
     "high".to_owned()
 }
@@ -213,6 +220,7 @@ struct ChatExecution {
 pub async fn chat_stream(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<ChatQuery>,
     payload: Result<Json<ChatStreamRequest>, JsonRejection>,
 ) -> Response<Body> {
     let Json(mut payload) = match payload {
@@ -229,9 +237,7 @@ pub async fn chat_stream(
     let trace_id = header_value(&headers, "x-trace-id")
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| Uuid::new_v4().to_string());
-    let session_id = header_value(&headers, "x-session-id")
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "default".to_owned());
+    let session_id = resolve_chat_session_id(&headers, &query);
     if payload.prompt.trim().is_empty() {
         return error_response(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -413,6 +419,16 @@ pub async fn chat_stream(
         )
         .into_response(),
     }
+}
+
+fn resolve_chat_session_id(headers: &HeaderMap, query: &ChatQuery) -> String {
+    header_value(headers, "x-session-id")
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            let value = query.session_id.trim();
+            (!value.is_empty()).then_some(value.to_owned())
+        })
+        .unwrap_or_else(|| "default".to_owned())
 }
 
 pub async fn stop_execution(
@@ -3355,6 +3371,26 @@ mod tests {
     }
 
     #[test]
+    fn chat_stream_session_id_uses_query_when_header_is_absent() {
+        let query = ChatQuery {
+            session_id: "query-session".to_owned(),
+        };
+        let headers = HeaderMap::new();
+        assert_eq!(resolve_chat_session_id(&headers, &query), "query-session");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-session-id", "header-session".parse().expect("header"));
+        assert_eq!(resolve_chat_session_id(&headers, &query), "header-session");
+
+        let empty_query = ChatQuery::default();
+        let empty_headers = HeaderMap::new();
+        assert_eq!(
+            resolve_chat_session_id(&empty_headers, &empty_query),
+            "default"
+        );
+    }
+
+    #[test]
     fn story_operation_routes_creation_continuation_and_existing_rewrites() {
         let create: ChatStreamRequest = serde_json::from_value(json!({
             "prompt": "生成故事的下一章",
@@ -3558,6 +3594,8 @@ mod tests {
                 .expect("writable system prompt");
             assert!(writable_prompt.contains("You are Coomi, the Storydex Agent."));
             assert!(writable_prompt.contains("identity remains Coomi"));
+            assert!(writable_prompt.contains("This turn may modify only paths authorized"));
+            assert!(!writable_prompt.contains("This turn has no project-write authority"));
             assert!(!writable_prompt.contains("read-only Refactor Agent"));
             assert!(!writable_prompt.contains("fixture-scoped Refactor Agent"));
             assert_eq!(writable_request["permissionMode"], permission_mode);
