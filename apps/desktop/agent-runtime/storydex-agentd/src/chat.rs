@@ -2441,12 +2441,16 @@ async fn run_bridge(context: BridgeRunContext<'_>) -> anyhow::Result<()> {
                 if kind == "tool_request" {
                     let request_id = packet.get("data").and_then(|data| data.get("requestId")).and_then(Value::as_str).unwrap_or_default();
                     if !request_id.is_empty() {
-                        send_bridge_resolve(
-                            &mut stdin,
-                            request_id,
-                            "Refactor Agent does not dispatch custom tools.",
-                        )
-                        .await;
+                        let call = packet
+                            .get("data")
+                            .and_then(|data| data.get("call"))
+                            .cloned()
+                            .unwrap_or_else(|| json!({}));
+                        let value = dispatch_storydex_tool(state, workspace, &call).await;
+                        if !send_bridge_resolve_value(&mut stdin, request_id, value).await {
+                            cancellation.cancel("bridge_tool_resolution_failed");
+                            break;
+                        }
                     }
                     continue;
                 }
@@ -2801,7 +2805,7 @@ fn bridge_request(
         "writesAllowed": payload.writes_allowed,
         "coreWritesAllowed": payload.core_writes_allowed.unwrap_or(payload.writes_allowed),
         "allowedWriteRoots": allowed_write_roots,
-        "toolSpecs": [],
+        "toolSpecs": storydex_tool_specs(),
         "mutatingToolNames": [],
     });
     if let Some(path) = state.replay_fixture() {
@@ -2811,6 +2815,161 @@ fn bridge_request(
         request["runtimeSessionId"] = Value::String(runtime_id.to_string());
     }
     Ok(request)
+}
+
+/// Return the Storydex-owned tools that the Rust agentd can dispatch locally.
+///
+/// The bridge deliberately knows nothing about the HTTP/project boundary: it
+/// only forwards a tool request over its control pipe.  Keeping the registry
+/// here makes the advertised surface match the dispatcher and avoids exposing
+/// tools that would otherwise be acknowledged with a fake failure.
+fn storydex_tool_specs() -> Value {
+    json!([
+        {
+            "name": "StorydexWikiQuery",
+            "description": "Query the project WIKI knowledge graph by keyword, entry, or node and return evidence-grounded entries and relationship neighbors.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Keyword search over WIKI entries, nodes, and edges."
+                    },
+                    "nodeId": {
+                        "type": "string",
+                        "description": "Expand this graph node's relationship neighborhood."
+                    },
+                    "entryId": {
+                        "type": "string",
+                        "description": "Fetch this WIKI entry and its linked nodes."
+                    },
+                    "depth": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 2,
+                        "description": "Neighborhood expansion depth (default 1)."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 30,
+                        "description": "Maximum number of graph nodes to return (default 12)."
+                    },
+                    "workspaceRoot": {
+                        "type": "string",
+                        "description": "Optional active workspace root; external paths are rejected."
+                    }
+                },
+                "additionalProperties": false
+            }
+        }
+    ])
+}
+
+const STORYDEX_TOOL_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
+async fn dispatch_storydex_tool(state: &AppState, workspace: &Path, call: &Value) -> Value {
+    let name = call
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let arguments = call.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    if name != "StorydexWikiQuery" {
+        return json!({
+            "success": false,
+            "output": format!("Unknown Storydex tool: {name}"),
+        });
+    }
+
+    match dispatch_storydex_wiki_query(state, workspace, &arguments).await {
+        Ok(output) => json!({"success": true, "output": output}),
+        Err(error) => json!({"success": false, "output": format!("{error:#}")}),
+    }
+}
+
+async fn dispatch_storydex_wiki_query(
+    state: &AppState,
+    workspace: &Path,
+    arguments: &Value,
+) -> anyhow::Result<String> {
+    let arguments = arguments
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("StorydexWikiQuery arguments must be an object"))?;
+    let value_string = |key: &str| {
+        arguments
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_owned()
+    };
+    let query = value_string("query");
+    let node_id = value_string("nodeId");
+    let entry_id = value_string("entryId");
+    anyhow::ensure!(
+        !query.is_empty() || !node_id.is_empty() || !entry_id.is_empty(),
+        "one of query/nodeId/entryId is required"
+    );
+    if let Some(requested_root) = arguments
+        .get("workspaceRoot")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let requested_root = PathBuf::from(requested_root)
+            .canonicalize()
+            .with_context(|| format!("workspaceRoot does not exist: {requested_root}"))?;
+        anyhow::ensure!(
+            requested_root == workspace,
+            "StorydexWikiQuery workspaceRoot does not match the active workspace"
+        );
+    }
+    let depth = arguments
+        .get("depth")
+        .and_then(Value::as_u64)
+        .unwrap_or(1)
+        .clamp(1, 2) as usize;
+    let limit = arguments
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(12)
+        .clamp(1, 30) as usize;
+    let query = crate::project::WikiGraphQuery {
+        workspace_root: workspace.to_string_lossy().into_owned(),
+        q: query,
+        category: String::new(),
+        entry_id,
+        node_id,
+        depth,
+        limit,
+        offset: 0,
+        include_review: false,
+    };
+    let response = crate::project::wiki_graph(State(state.clone()), Query(query)).await;
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), STORYDEX_TOOL_RESPONSE_BYTES)
+        .await
+        .context("failed to read StorydexWikiQuery response")?;
+    let envelope: Value = serde_json::from_slice(&body)
+        .context("StorydexWikiQuery returned invalid project response JSON")?;
+    if !status.is_success() || envelope.get("ok").and_then(Value::as_bool) != Some(true) {
+        let message = envelope
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("Storydex WIKI query failed");
+        anyhow::bail!(message.to_owned());
+    }
+    let mut data = envelope.get("data").cloned().unwrap_or_else(|| json!({}));
+    if let Some(object) = data.as_object_mut() {
+        object.insert("ok".to_owned(), Value::Bool(true));
+        object.insert(
+            "workspaceRoot".to_owned(),
+            Value::String(workspace.to_string_lossy().into_owned()),
+        );
+    }
+    serde_json::to_string_pretty(&data).context("failed to encode StorydexWikiQuery result")
 }
 
 async fn send_bridge_control(
@@ -2828,19 +2987,6 @@ async fn send_bridge_control(
     };
     let _ = stdin.write_all(line.as_bytes()).await;
     let _ = stdin.flush().await;
-}
-
-async fn send_bridge_resolve(
-    stdin: &mut tokio::process::ChildStdin,
-    request_id: &str,
-    message: &str,
-) {
-    let _ = send_bridge_resolve_value(
-        stdin,
-        request_id,
-        json!({"success": false, "output": message}),
-    )
-    .await;
 }
 
 async fn send_bridge_resolve_value(
@@ -3600,6 +3746,85 @@ mod tests {
             assert!(!writable_prompt.contains("fixture-scoped Refactor Agent"));
             assert_eq!(writable_request["permissionMode"], permission_mode);
         }
+    }
+
+    #[test]
+    fn bridge_request_advertises_only_storydex_tools_with_a_local_dispatcher() {
+        let directory = tempdir().expect("tempdir");
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let workspace = workspace.canonicalize().expect("canonical workspace");
+        let state = AppState::with_paths(
+            "token",
+            directory.path().join("home"),
+            directory.path().join("bridge"),
+            Some(workspace.clone()),
+            None,
+        )
+        .expect("state");
+        let payload: ChatStreamRequest = serde_json::from_value(json!({
+            "prompt": "query the project WIKI",
+            "capabilityMode": "read_only",
+            "writesAllowed": false
+        }))
+        .expect("request");
+
+        let request =
+            bridge_request(&state, &payload, &workspace, "session", None).expect("bridge request");
+        assert_eq!(
+            request["toolSpecs"]
+                .as_array()
+                .expect("tool specs")
+                .iter()
+                .map(|spec| spec["name"].as_str().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            vec!["StorydexWikiQuery"]
+        );
+        assert_eq!(request["mutatingToolNames"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn storydex_wiki_query_dispatches_through_the_rust_project_route() {
+        let directory = tempdir().expect("tempdir");
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("chapters")).expect("chapters");
+        std::fs::write(
+            workspace.join("chapters/001.md"),
+            "# Dawn\n\nHero reaches the river. WIKI_DISPATCH_MARKER\n",
+        )
+        .expect("chapter");
+        let workspace = workspace.canonicalize().expect("canonical workspace");
+        let state = AppState::with_paths(
+            "token",
+            directory.path().join("home"),
+            directory.path().join("bridge"),
+            Some(directory.path().to_path_buf()),
+            None,
+        )
+        .expect("state");
+
+        let resolved = dispatch_storydex_tool(
+            &state,
+            &workspace,
+            &json!({
+                "name": "StorydexWikiQuery",
+                "arguments": {"query": "Hero", "limit": 3}
+            }),
+        )
+        .await;
+        assert_eq!(resolved["success"], true);
+        let output = resolved["output"].as_str().expect("structured output");
+        let result: Value = serde_json::from_str(output).expect("decode WIKI output");
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["mode"], "search");
+        assert!(result["entries"].as_array().is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry
+                    .get("summary")
+                    .and_then(Value::as_str)
+                    .is_some_and(|summary| summary.contains("Hero"))
+            })
+        }));
     }
 
     #[test]
