@@ -695,7 +695,7 @@ impl CoreTools {
 
     fn list_skills(&self) -> ToolResult {
         let Some(directory) = &self.skills_directory else {
-            return ToolResult::error("Skill directory is not configured");
+            return ToolResult::success("no installed skills");
         };
         let Ok(entries) = std::fs::read_dir(directory) else {
             return ToolResult::success("no installed skills");
@@ -714,6 +714,19 @@ impl CoreTools {
         } else {
             ToolResult::success(names.join("\n"))
         }
+    }
+
+    fn has_enabled_skills(&self) -> bool {
+        let Some(directory) = &self.skills_directory else {
+            return false;
+        };
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return false;
+        };
+        entries.flatten().any(|entry| {
+            entry.path().join("SKILL.md").is_file()
+                && self.skill_is_enabled(&entry.file_name().to_string_lossy())
+        })
     }
 
     async fn read_skill(&self, arguments: &Value) -> ToolResult {
@@ -1472,7 +1485,11 @@ impl ToolRuntime for CoreTools {
                 }),
             },
         ];
-        if self.skills_directory.is_some() {
+        // Do not advertise on-demand Skill tools when the configured directory
+        // is absent or contains no enabled Skills.  The bridge creates this
+        // path for every session, so checking only `is_some()` exposed tools
+        // that could never succeed and encouraged avoidable model retries.
+        if self.has_enabled_skills() {
             specs.extend([
                 ToolSpec {
                     name: "list_skills".into(),
@@ -2172,6 +2189,47 @@ mod tests {
             )
             .await;
         assert_eq!(result, ToolResult::success("Review carefully."));
+    }
+
+    #[test]
+    fn does_not_advertise_skill_tools_without_an_enabled_skill() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        let skills = tempfile::tempdir().expect("temporary skills");
+        let policy =
+            SecurityPolicy::new(workspace.path(), AccessMode::ReadOnly).expect("security policy");
+
+        let missing = CoreTools::new(workspace.path().to_path_buf(), policy.clone())
+            .with_skills_directory(skills.path().join("missing"));
+        assert!(
+            !missing
+                .specs()
+                .iter()
+                .any(|spec| matches!(spec.name.as_str(), "list_skills" | "read_skill"))
+        );
+
+        let disabled = skills.path().join("disabled");
+        std::fs::create_dir(&disabled).expect("create disabled Skill directory");
+        std::fs::write(disabled.join("SKILL.md"), "Disabled instructions")
+            .expect("write disabled Skill");
+        std::fs::create_dir_all(skills.path().parent().unwrap().join("config"))
+            .expect("create Skill config");
+        std::fs::write(
+            skills.path().parent().unwrap().join("config/skills.json"),
+            r#"{"skills":{"disabled":{"enabled":false}}}"#,
+        )
+        .expect("write Skill config");
+        let tools = CoreTools::new(workspace.path().to_path_buf(), policy)
+            .with_skills_directory(skills.path().to_path_buf());
+        assert!(
+            !tools
+                .specs()
+                .iter()
+                .any(|spec| matches!(spec.name.as_str(), "list_skills" | "read_skill"))
+        );
+        assert_eq!(
+            tools.list_skills(),
+            ToolResult::success("no installed skills")
+        );
     }
 
     #[tokio::test]
