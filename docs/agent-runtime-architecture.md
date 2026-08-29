@@ -1,6 +1,6 @@
 # Storydex Agent 双平台 Rust 架构
 
-更新日期：2026-08-20
+更新日期：2026-08-29
 
 本文是贡献者和维护者参考，不是普通用户操作手册。它描述当前源码边界；迁移过程中的诊断、交接和一次性实验不作为公开架构文档保存。
 
@@ -15,7 +15,7 @@ Storydex 从同一套经过项目适配的 Coomi Rust 基线派生出两个独�
 
 两个 workspace 分别维护版本和 `Cargo.lock`。Provider、engine、security、tools 的通用稳定性修复需要分别验证后同步；提示词、入口 crate、交互协议和平台工具不得混用。
 
-Windows Stable 已使用 Tauri 2 启动独立 `storydex-agentd`。旧 Electron/Python 源码不参与默认 Stable 构建、打包或更新；兼容脚本、差分测试、部分完整 CI 和人工回滚仍会在支持窗口内引用它们。
+Windows Stable 使用 Tauri 2 启动独立 `storydex-agentd`。Electron 桌面运行时和 Python Agent 代码已从产品路径移除；`apps/backend` 仅作为非 Stable 的后端兼容与测试边界保留。
 
 ## 2. Windows 桌面端职责
 
@@ -57,7 +57,7 @@ consent → analyzing → ready → uploading → complete
 - `main` 保存 Windows 和 Android 的稳定实现，并按改动范围执行组件门禁；相同 SHA 已通过 `dev/windows` 时复用 Windows 结果，完整跨平台矩阵改为显式运行。
 - `dev/windows` 只集成 Windows 桌面端改动，先通过 Windows Development CI，再进入 `main`。
 - Windows runtime 不得依赖 `apps/android/agent-runtime`，Android runtime 不得依赖 `apps/desktop/agent-runtime`。
-- `apps/backend` 不再属于 Windows Stable runtime，仍服务于兼容脚本、差分测试、部分完整 CI 和人工回滚。
+- `apps/backend` 不再属于 Windows Stable runtime，也不提供 Agent 产品入口；需要 Python 的兼容测试必须显式运行，不能由桌面启动链路拉起。
 - Provider 事件、反馈载荷和 session 版本等跨端要求通过文档、Schema 和契约 fixture 同步。
 
 平台主要所有权如下：

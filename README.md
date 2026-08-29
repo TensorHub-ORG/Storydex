@@ -37,7 +37,7 @@
 
 Storydex 面向需要长期维护世界观、角色关系和章节连续性的小说作者。它以本地文件为事实源，把写作、资料整理、Agent 协作和版本控制放进同一个桌面工作台：你可以先查证项目资料，再让 Agent 生成或修改内容，并在提交前审阅 Diff。
 
-Windows 当前源码主线的默认桌面链路是 `Vue → Tauri 2 → storydex-agentd → Coomi Rust`。仓库仍保留 Python/FastAPI、Electron 以及旧启动脚本和兼容测试，用于迁移期间的差分验证、兼容支持和人工回滚；它们不是当前 Tauri Stable 安装包的默认运行时。已发布版本的具体资产格式以对应的 [GitHub Release](https://github.com/TensorHub-ORG/Storydex/releases) 为准，README 不复制逐版本历史说明。
+Windows 当前源码主线的唯一桌面链路是 `Vue → Tauri 2 → storydex-agentd → Coomi Rust`。Python/FastAPI 仅保留非 Stable 的后端兼容与测试边界，不提供 Agent 产品入口；Electron 桌面运行时和旧打包入口已移除。已发布版本的具体资产格式以对应的 [GitHub Release](https://github.com/TensorHub-ORG/Storydex/releases) 为准，README 不复制逐版本历史说明。
 
 ## 核心能力
 
@@ -120,7 +120,7 @@ Storydex/
 ├─ apps/desktop/                 # Tauri 2 Windows 桌面应用
 │  ├─ agent-runtime/             # storydex-agentd 与 Coomi Rust runtime
 │  └─ tauri-preview/             # 当前 Tauri Stable 源码（迁移期目录名）
-├─ apps/backend/                 # 旧 Python 兼容、差分和回滚参考
+├─ apps/backend/                 # 非 Stable 的 Python 后端兼容与测试边界
 ├─ apps/android/                 # Android 原生应用与独立 Rust runtime
 ├─ apps/android-frontend/        # Android WebView 前端
 ├─ assets/                       # LOGO、图标和展示资源

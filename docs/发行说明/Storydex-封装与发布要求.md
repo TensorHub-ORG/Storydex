@@ -1,6 +1,6 @@
 # Storydex 封装与发布要求
 
-更新日期：2026-08-20
+更新日期：2026-08-29
 
 本文是贡献者和发布维护者参考，规定当前 Storydex 正式版本的版本管理、质量门禁、发行产物、更新源和回滚要求。历史 Electron/Python 发布规则不适用于新版本；已发布版本的用户变更记录以 GitHub Releases 为准，内部迁移记录不随公开仓库保存。
 
@@ -191,7 +191,7 @@ https://updates.septemc.com/storydex/windows/latest.json
 - 便携包冷启动及 `Storydex.exe`、`storydex-agentd.exe`、`storydex-coomi-bridge.exe`、MinGit 完整性；
 - 正常 HTTP/SSE Agent 主链路和关键文件/Git/WIKI 操作；
 - 应用内检查、下载、签名验证、安装和重启；
-- 旧 Electron Stable 到 Tauri 的真实安装升级；
+- 从上一已发布版本到当前 Tauri Stable 的真实安装升级（若上一版本仍为 Electron，需在隔离测试机验证迁移）；
 - 下载失败、签名失败或安装失败后的可恢复性；
 - 使用上一个已签名版本进行人工回滚；
 - 升级和回滚后同一测试项目的数据、会话和 Git 状态兼容；
@@ -206,7 +206,7 @@ https://updates.septemc.com/storydex/windows/latest.json
 - VPS 同步失败：保持旧 `latest.json` 不变，补齐新资产后再原子切换。
 - 新版本存在阻断问题：将 `latest.json` 原子恢复到上一可用签名版本，并明确发布状态；后续使用新的修订版本，不覆盖已发布二进制。
 - updater 私钥疑似泄露：立即停止发布，评估密钥轮换兼容方案；不得简单生成新密钥后继续推送，因为旧客户端只信任已内置公钥。
-- Tauri 回滚支持窗口结束并经用户确认后，才能删除旧 Python/Electron 源码和专属 CI。
+- 当前源码不再保留 Electron 桌面运行时、Python Agent 入口或旧打包专属 CI；历史版本升级/回滚验证只针对已发布资产，不得把历史兼容路径重新加入默认构建。
 
 ## 9. Android APK
 

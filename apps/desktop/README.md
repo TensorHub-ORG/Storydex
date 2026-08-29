@@ -93,7 +93,7 @@ https://updates.septemc.com/storydex/windows/latest.json
 - 必须包含 `Storydex.exe`、`storydex-agentd.exe`、`storydex-coomi-bridge.exe` 和 MinGit；
 - 不得包含 Python、FastAPI/Uvicorn、Electron、Node/npm 或包管理器运行时；
 - 不得包含凭证、日志、测试结果或指向仓库外真实用户项目的链接；
-- staging 不得与源码根、旧 Electron 根或 release 根错误重叠。
+- staging 不得与源码根、旧兼容运行时根或 release 根错误重叠。
 
 手工检查入口：
 
