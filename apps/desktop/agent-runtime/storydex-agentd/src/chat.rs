@@ -1602,10 +1602,10 @@ fn assess_turn_intent(payload: &ChatStreamRequest, workspace: &Path) -> TurnInte
         .or_else(|| payload.clarification_target.clone());
 
     let mut candidates = HashSet::new();
-    if let Some(path) = target_path.as_deref() {
-        if let Some(artifact) = artifact_for_path(path) {
-            candidates.insert(artifact);
-        }
+    if let Some(path) = target_path.as_deref()
+        && let Some(artifact) = artifact_for_path(path)
+    {
+        candidates.insert(artifact);
     }
     if candidates.is_empty() {
         if contains_any_signal(
@@ -1886,6 +1886,16 @@ enum ClarificationWaitResult {
     TimedOut,
 }
 
+struct ClarificationContext<'a> {
+    state: &'a AppState,
+    trace_id: &'a str,
+    session_id: &'a str,
+    sender: &'a mpsc::Sender<String>,
+    cancellation: &'a ExecutionCancellation,
+    control_receiver: &'a mut mpsc::Receiver<ExecutionControl>,
+    trace_events: &'a mut Vec<(String, Value)>,
+}
+
 fn clarification_answer(value: &Value, question_id: &str) -> Option<String> {
     if let Some(answers) = value.get("answers").and_then(Value::as_object) {
         if let Some(answer) = answers.get(question_id).and_then(Value::as_str) {
@@ -1943,19 +1953,14 @@ fn normalize_clarification_artifact(answer: &str) -> Option<&'static str> {
 }
 
 async fn wait_for_clarification(
-    state: &AppState,
     assessment: &TurnIntentAssessment,
-    trace_id: &str,
-    session_id: &str,
-    sender: &mpsc::Sender<String>,
-    cancellation: &ExecutionCancellation,
-    control_receiver: &mut mpsc::Receiver<ExecutionControl>,
-    trace_events: &mut Vec<(String, Value)>,
+    context: ClarificationContext<'_>,
 ) -> ClarificationWaitResult {
     let request_id = Uuid::new_v4().to_string();
-    if !state
+    if !context
+        .state
         .execution_registry()
-        .register_request(trace_id, &request_id)
+        .register_request(context.trace_id, &request_id)
     {
         return ClarificationWaitResult::Cancelled("control_unavailable".to_owned());
     }
@@ -1976,23 +1981,30 @@ async fn wait_for_clarification(
         "header": question.get("header").cloned().unwrap_or_else(|| json!("更新对象")),
         "question": question.get("question").cloned().unwrap_or_else(|| json!("请选择更新对象。")),
         "options": question.get("options").cloned().unwrap_or_else(|| json!([])),
-        "allowText": question.get("allowText").cloned().unwrap_or_else(|| json!(false)),
+        "allowText": question.get("allowText").cloned().unwrap_or(Value::Bool(false)),
         "multiSelect": false,
         "questionIndex": 0,
         "questionTotal": 1,
         "request": request,
     });
-    let event_data = with_event_identity("PermissionRequest", data, trace_id, session_id);
-    trace_events.push(("PermissionRequest".to_owned(), event_data.clone()));
-    if !send_event_value(sender, "PermissionRequest", event_data).await {
+    let event_data = with_event_identity(
+        "PermissionRequest",
+        data,
+        context.trace_id,
+        context.session_id,
+    );
+    context
+        .trace_events
+        .push(("PermissionRequest".to_owned(), event_data.clone()));
+    if !send_event_value(context.sender, "PermissionRequest", event_data).await {
         return ClarificationWaitResult::Cancelled("client_disconnected".to_owned());
     }
 
     let received = tokio::time::timeout(CLARIFICATION_TIMEOUT, async {
         loop {
             tokio::select! {
-                _ = cancellation.cancelled() => return None,
-                control = control_receiver.recv() => match control {
+                _ = context.cancellation.cancelled() => return None,
+                control = context.control_receiver.recv() => match control {
                     Some(ExecutionControl::Resolve { request_id: resolved_id, value }) if resolved_id == request_id => return Some(value),
                     Some(ExecutionControl::Resolve { .. }) => continue,
                     None => return None,
@@ -2005,7 +2017,7 @@ async fn wait_for_clarification(
         Ok(value) => value,
         Err(_) => return ClarificationWaitResult::TimedOut,
     }) else {
-        return ClarificationWaitResult::Cancelled(cancellation.reason());
+        return ClarificationWaitResult::Cancelled(context.cancellation.reason());
     };
     let Some(answer) = clarification_answer(&value, "update_target_kind") else {
         return ClarificationWaitResult::Cancelled("user_cancelled".to_owned());
@@ -2156,15 +2168,18 @@ async fn run_chat(execution: ChatExecution) {
         return;
     }
     if turn_contract.get("status").and_then(Value::as_str) == Some("needs_user_input") {
+        let clarification_context = ClarificationContext {
+            state: &state,
+            trace_id: &trace_id,
+            session_id: &session_id,
+            sender: &sender,
+            cancellation: &cancellation,
+            control_receiver: &mut control_receiver,
+            trace_events: &mut trace_events,
+        };
         match wait_for_clarification(
-            &state,
             &assess_turn_intent(&payload, &workspace),
-            &trace_id,
-            &session_id,
-            &sender,
-            &cancellation,
-            &mut control_receiver,
-            &mut trace_events,
+            clarification_context,
         )
         .await
         {
@@ -3869,10 +3884,11 @@ fn bridge_allowed_read_paths(
     };
     let target_is_file = assessment.target_scope == "file";
     let target = assessment.target_value.trim();
-    if target_is_file && !target.is_empty() {
-        if let Ok(relative) = workspace::normalize_relative(target) {
-            add_path(workspace.join(relative));
-        }
+    if target_is_file
+        && !target.is_empty()
+        && let Ok(relative) = workspace::normalize_relative(target)
+    {
+        add_path(workspace.join(relative));
     }
     let lower = payload.prompt.to_ascii_lowercase();
     let roots = [
@@ -4230,8 +4246,8 @@ fn translate_bridge_event(
                     "header": data.get("header").cloned().or_else(|| first_question.get("header").cloned()).unwrap_or_else(|| json!("需要你的选择")),
                     "question": data.get("question").cloned().or_else(|| first_question.get("question").cloned()).unwrap_or_else(|| json!("请选择一个选项。")),
                     "options": data.get("options").cloned().or_else(|| first_question.get("options").cloned()).unwrap_or_else(|| json!([])),
-                    "allowText": data.get("allowText").cloned().unwrap_or_else(|| json!(false)),
-                    "multiSelect": data.get("multiSelect").cloned().unwrap_or_else(|| json!(false)),
+                    "allowText": data.get("allowText").cloned().unwrap_or(Value::Bool(false)),
+                    "multiSelect": data.get("multiSelect").cloned().unwrap_or(Value::Bool(false)),
                     "questionIndex": data.get("questionIndex").cloned().unwrap_or_else(|| json!(0)),
                     "questionTotal": data.get("questionTotal").cloned().unwrap_or_else(|| json!(1)),
                     "request": request
