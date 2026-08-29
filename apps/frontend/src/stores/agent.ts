@@ -3594,8 +3594,18 @@ function normalizePendingApproval(packet: AgentStreamPacket): AgentPendingApprov
   if (!approvalId) {
     return null;
   }
-  const kind = asString((packet as unknown as Record<string, unknown>).kind) || undefined;
-  const rawOptions = Array.isArray(packet.options) ? packet.options : [];
+  const packetRecord = packet as unknown as Record<string, unknown>;
+  const kind = asString(packetRecord.kind) || undefined;
+  const request = toRecord(packetRecord.request);
+  const requestQuestions = request?.["questions"];
+  const firstQuestion = Array.isArray(requestQuestions)
+    ? toRecord(requestQuestions[0])
+    : null;
+  const rawOptions = Array.isArray(packet.options)
+    ? packet.options
+    : Array.isArray(firstQuestion?.options)
+      ? firstQuestion.options
+      : [];
   const options: AgentPendingApproval["options"] = [];
   for (const option of rawOptions) {
     const record = toRecord(option);
@@ -3611,14 +3621,17 @@ function normalizePendingApproval(packet: AgentStreamPacket): AgentPendingApprov
       isRecommended: asBoolean(record?.isRecommended) ?? asBoolean(record?.is_recommended) ?? false
     });
   }
-  const packetRecord = packet as unknown as Record<string, unknown>;
+  const header = asString(packetRecord.header) || asString(firstQuestion?.header) || "权限确认";
+  const question = asString(packetRecord.question)
+    || asString(firstQuestion?.question)
+    || "允许 Coomi 执行这个操作吗？";
   const questionIndex = firstNumber(packetRecord, ["questionIndex", "question_index"]);
   const questionTotal = firstNumber(packetRecord, ["questionTotal", "question_total"]);
   return {
     approvalId,
     kind,
-    header: String(packet.header || "权限确认"),
-    question: String(packet.question || "允许 Coomi 执行这个操作吗？"),
+    header,
+    question,
     options: options.length
       ? options
       : kind === "question"
@@ -3627,8 +3640,12 @@ function normalizePendingApproval(packet: AgentStreamPacket): AgentPendingApprov
           { label: "允许", value: "allow", description: "仅批准本次工具调用。", isRecommended: true },
           { label: "拒绝", value: "deny", description: "将拒绝结果返回给 Coomi。" }
         ],
-    allowText: asBoolean((packet as unknown as Record<string, unknown>).allowText) ?? false,
-    multiSelect: asBoolean((packet as unknown as Record<string, unknown>).multiSelect) ?? false,
+    allowText: asBoolean(packetRecord.allowText)
+      ?? asBoolean(firstQuestion?.allowText)
+      ?? false,
+    multiSelect: asBoolean(packetRecord.multiSelect)
+      ?? asBoolean(firstQuestion?.multiSelect)
+      ?? false,
     questionIndex: questionIndex ?? undefined,
     questionTotal: questionTotal ?? undefined
   };

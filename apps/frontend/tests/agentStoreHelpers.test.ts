@@ -452,6 +452,23 @@ describe("agent store deterministic helpers", () => {
     expect(u.normalizePendingApproval(packet({}))).toBeNull();
     const approval = u.normalizePendingApproval(packet({ approval_id: "a", kind: "question", options: [{ label: "Yes" }, { value: "no" }, null], questions: [{ question: "Q" }] }));
     expect(approval?.approvalId).toBe("a");
+    const nested = u.normalizePendingApproval(packet({
+      approvalId: "nested",
+      kind: "question",
+      request: {
+        questions: [{
+          header: "更新对象",
+          question: "选择对象",
+          options: [{ label: "角色卡", value: "character_card" }]
+        }]
+      }
+    }));
+    expect(nested).toMatchObject({
+      approvalId: "nested",
+      header: "更新对象",
+      question: "选择对象",
+      options: [{ value: "character_card" }]
+    });
     const prompt = u.normalizeCommitPrompt(packet({ message: "commit", changedFiles: ["a"], changedFileCount: 1 }), "t", "s");
     expect(u.buildCommitDecisionPacket(prompt, packet({ created: true })).traceId).toBe("t");
   });

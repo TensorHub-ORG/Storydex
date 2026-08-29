@@ -399,6 +399,30 @@ const WRITE_INTENT_SIGNALS: &[&str] = &[
     "调整",
     "重写",
     "改写",
+    "编辑",
+    "完善",
+    "优化",
+    "润色",
+    "补充",
+    "扩写",
+    "重构",
+    "编写",
+    "撰写",
+    "制作",
+    "设计",
+    "写一个",
+    "写一张",
+    "写一份",
+    "写一篇",
+    "写一段",
+    "写一条",
+    "写角色卡",
+    "写人物卡",
+    "写世界书",
+    "写世界观",
+    "写章节",
+    "写正文",
+    "写故事",
     "续写",
     "创建",
     "新增",
@@ -2872,6 +2896,8 @@ mod tests {
             "请解释如何修改代码",
             "请说明怎样更新章节",
             "帮我分析如何重写这个文件",
+            "请讲解如何设计世界书",
+            "请说明写角色卡的方法",
             "please explain how to update this chapter",
             "不要修改代码",
             "请勿删除章节",
@@ -2881,6 +2907,8 @@ mod tests {
         for prompt in [
             "请修改代码并保存",
             "请重写当前章节",
+            "请写一张角色卡并保存",
+            "请设计世界书并写入文件",
             "please update this chapter",
             "请分析问题并修改代码",
             "不要只解释，但请直接修改代码",
@@ -3027,6 +3055,28 @@ mod tests {
         assert_eq!(plan_request.capability_mode, "read_only");
         assert!(!plan_request.writes_allowed);
         assert_eq!(plan_request.core_writes_allowed, Some(false));
+    }
+
+    #[test]
+    fn natural_story_asset_write_phrases_enable_writes_without_promoting_advice() {
+        for prompt in ["写角色卡", "设计世界书", "编写一份人物卡"] {
+            let mut request: ChatStreamRequest = serde_json::from_value(json!({
+                "prompt": prompt
+            }))
+            .expect("asset write request");
+            apply_inferred_capability(&mut request);
+            assert_eq!(request.capability_mode, "workspace_write", "{prompt}");
+            assert!(request.writes_allowed, "{prompt}");
+        }
+        for prompt in ["如何写角色卡", "请讲解如何设计世界书"] {
+            let mut request: ChatStreamRequest = serde_json::from_value(json!({
+                "prompt": prompt
+            }))
+            .expect("asset advice request");
+            apply_inferred_capability(&mut request);
+            assert_eq!(request.capability_mode, "read_only", "{prompt}");
+            assert!(!request.writes_allowed, "{prompt}");
+        }
     }
 
     #[test]

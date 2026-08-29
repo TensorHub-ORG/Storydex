@@ -334,6 +334,7 @@ export interface AgentStreamPacket {
   approval_id?: string;
   approvalId?: string;
   kind?: string;
+  request?: Record<string, unknown>;
   question?: string;
   header?: string;
   options?: AgentApprovalOption[];

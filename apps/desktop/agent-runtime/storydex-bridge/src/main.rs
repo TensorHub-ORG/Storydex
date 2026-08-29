@@ -13,7 +13,7 @@ use coomi_services::{
 use coomi_tools::{AgentScheduler, CoreTools};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -185,6 +185,15 @@ struct BridgeRequest {
     tool_specs: Vec<ToolSpec>,
     #[serde(default)]
     mutating_tool_names: Vec<String>,
+    /// Optional per-turn allowlist assembled by Storydex agentd.  `None`
+    /// preserves the bridge's historical full capability surface for callers
+    /// outside the Storydex chat route.
+    #[serde(default)]
+    allowed_tool_names: Option<Vec<String>>,
+    #[serde(default)]
+    max_tool_rounds: Option<usize>,
+    #[serde(default)]
+    allowed_read_paths: Option<Vec<PathBuf>>,
     #[serde(default)]
     writes_allowed: bool,
     #[serde(default)]
@@ -351,14 +360,53 @@ impl ApprovalHandler for StorydexApproval {
     }
 
     async fn request_user_input(&self, request: &UserInputRequest) -> Option<UserInputResponse> {
-        let request_id = Uuid::new_v4().to_string();
-        let receiver = self.controls.register(request_id.clone());
-        self.emitter.event(
-            "user_input_request",
-            json!({"requestId": request_id, "request": request}),
-        );
-        let value = receiver.await.ok()?;
-        serde_json::from_value(value.get("answers")?.clone()).ok()
+        // The desktop UI models approvals as a queue.  Emit one question per
+        // request id so every answer can be resolved independently, then
+        // combine the scalar/legacy answer shapes back into the engine's map.
+        let mut answers = BTreeMap::new();
+        let total = request.questions.len();
+        for (index, question) in request.questions.iter().enumerate() {
+            let request_id = Uuid::new_v4().to_string();
+            let receiver = self.controls.register(request_id.clone());
+            self.emitter.event(
+                "user_input_request",
+                json!({
+                    "requestId": request_id,
+                    "request": {
+                        "questions": [question],
+                        "autoResolutionMs": request.auto_resolution_ms,
+                    },
+                    "questionIndex": index,
+                    "questionTotal": total,
+                    "header": question.header,
+                    "question": question.question,
+                    "options": question.options,
+                    "allowText": false,
+                    "multiSelect": false,
+                }),
+            );
+            let value = receiver.await.ok()?;
+            if let Some(map) = value.get("answers").and_then(Value::as_object) {
+                for (key, answer) in map {
+                    if let Some(answer) = answer
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    {
+                        answers.insert(key.clone(), answer.to_owned());
+                    }
+                }
+            }
+            let scalar = ["other_text", "answer", "value", "option", "label"]
+                .iter()
+                .find_map(|key| value.get(*key).and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            if let Some(answer) = scalar {
+                answers.insert(question.id.clone(), answer.to_owned());
+            }
+        }
+        Some(answers)
     }
 }
 
@@ -371,6 +419,8 @@ struct StorydexTools {
     custom_specs: Vec<ToolSpec>,
     custom_names: HashSet<String>,
     mutating_custom_names: HashSet<String>,
+    allowed_tool_names: Option<HashSet<String>>,
+    allowed_read_paths: Option<Vec<PathBuf>>,
     plan_mode_active: Arc<AtomicBool>,
     base_permission_mode: String,
     emitter: Emitter,
@@ -383,14 +433,17 @@ impl ToolRuntime for StorydexTools {
         let plan_mode_active = self.plan_mode_active.load(Ordering::Acquire);
         let mut specs = self.core.specs();
         specs.retain(|spec| {
-            core_tool_allowed(self.capability, self.core_writes_allowed, &spec.name)
+            self.tool_name_allowed(&spec.name)
+                && core_tool_allowed(self.capability, self.core_writes_allowed, &spec.name)
                 && (!plan_mode_active || is_plan_safe_core_tool(&spec.name))
         });
         specs.extend(self.custom_specs.iter().filter_map(|spec| {
             let mutating = self.mutating_custom_names.contains(&spec.name);
-            (!mutating || (self.writes_allowed && !plan_mode_active)).then(|| spec.clone())
+            (self.tool_name_allowed(&spec.name)
+                && (!mutating || (self.writes_allowed && !plan_mode_active)))
+                .then(|| spec.clone())
         }));
-        if plan_mode_active {
+        if plan_mode_active && self.tool_name_allowed("exit_plan_mode") {
             specs.push(ToolSpec {
                 name: "exit_plan_mode".into(),
                 description: "Exit Storydex plan/read-only mode and continue this turn using the configured permission mode. Call this when planning is complete and the user's task now requires execution or file changes.".into(),
@@ -427,6 +480,12 @@ impl ToolRuntime for StorydexTools {
             return ToolResult::success(
                 "Plan mode disabled. Continue only within the compiled turn capability and configured Storydex permission mode.",
             );
+        }
+        if !self.tool_name_allowed(&call.name) {
+            return ToolResult::error("Storydex turn tool allowlist blocks this tool");
+        }
+        if !self.read_path_allowed(call) {
+            return ToolResult::error("Storydex turn read boundary blocks this path");
         }
         if !self.custom_names.contains(&call.name) {
             if let Some(error) = self.rejected_core_call(call) {
@@ -478,7 +537,39 @@ impl ToolRuntime for StorydexTools {
 }
 
 impl StorydexTools {
+    fn tool_name_allowed(&self, name: &str) -> bool {
+        self.allowed_tool_names
+            .as_ref()
+            .is_none_or(|allowed| allowed.contains(name))
+    }
+
+    fn read_path_allowed(&self, call: &ToolCall) -> bool {
+        let Some(paths) = self.allowed_read_paths.as_ref() else {
+            return true;
+        };
+        if !matches!(
+            call.name.as_str(),
+            "read_file" | "search" | "grep_files" | "list_dir"
+        ) {
+            return true;
+        }
+        let Some(raw_path) = call.arguments.get("path").and_then(Value::as_str) else {
+            return false;
+        };
+        let Ok(candidate) = self.policy.resolve_path(raw_path) else {
+            return false;
+        };
+        let read_file = call.name == "read_file";
+        paths.iter().any(|allowed| {
+            candidate == *allowed
+                || (candidate.starts_with(allowed) && (!read_file || allowed.is_dir()))
+        })
+    }
+
     fn rejected_core_call(&self, call: &ToolCall) -> Option<String> {
+        if !self.tool_name_allowed(&call.name) {
+            return Some("Storydex turn tool allowlist blocks this tool".into());
+        }
         let plan_mode_active = self.plan_mode_active.load(Ordering::Acquire);
         if plan_mode_active && !is_plan_safe_core_tool(&call.name) {
             return Some(
@@ -807,9 +898,10 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
             .core_writes_allowed
             .unwrap_or(request.writes_allowed);
     let access_mode = capability.access_mode(base_access_mode);
+    let minimal_context = request.allowed_tool_names.is_some();
     let mut system_prompt = if request.system_prompt.trim().is_empty() {
         format!(
-            "You are Coomi Desktop for Storydex, a local-first professional workspace for long-form fiction creators. Treat the author as the creative authority. Before drafting, revising, reviewing, or changing project state, inspect the relevant manuscript, character, world, timeline, preset, and memory evidence. Distinguish quoted canon from inference, surface continuity conflicts, and preserve the author's voice, point of view, pacing, and explicit constraints. Prefer Storydex narrative tools over generic file mutation, keep every write reviewable and scoped, preserve unrelated work, and report only verified results. Never silently invent canon, overwrite an author's decision, or expose private manuscript content outside the local workspace.\n\nStorydex workspace: {}",
+            "You are Coomi Desktop for Storydex. Treat the author as the creative authority. Work only on the requested task. Inspect the directly relevant target first (prefer an explicit path or the active file); do not browse the whole workspace or reread unchanged files. Preserve quoted canon, voice, and explicit constraints. For writes, change only authorized paths, verify the target once, and stop. For read-only turns, never write. Do not use memory, loops, delegation, web search, or image tools unless the user explicitly requests them. Never invent canon or overwrite an author's decision. Report only verified results.\n\nStorydex workspace: {}",
             cwd.display()
         )
     } else {
@@ -819,15 +911,16 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
     let instructions = coomi_engine::discover_project_instructions(&cwd)?;
     if !instructions.trim().is_empty() {
         system_prompt.push_str("\n\nProject instructions:\n");
-        system_prompt.push_str(&instructions);
+        let limit = if minimal_context { 4_000 } else { 12_000 };
+        system_prompt.push_str(&instructions.chars().take(limit).collect::<String>());
     }
     let instructions_init_ms = instructions_started.elapsed().as_secs_f64() * 1000.0;
     let memory_started = Instant::now();
     let memory = Arc::new(MemoryManager::new(&home, &cwd));
     let memory_context = memory.prompt_context();
-    if !memory_context.trim().is_empty() {
+    if !minimal_context && !memory_context.trim().is_empty() {
         system_prompt.push_str("\n\nPersistent Storydex Coomi memory:\n");
-        system_prompt.push_str(&memory_context);
+        system_prompt.push_str(&memory_context.chars().take(12_000).collect::<String>());
     }
     let memory_init_ms = memory_started.elapsed().as_secs_f64() * 1000.0;
     let security_started = Instant::now();
@@ -864,6 +957,11 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
         .map(|tool| tool.name.clone())
         .collect();
     let mutating_custom_names = request.mutating_tool_names.into_iter().collect();
+    let allowed_tool_names = request
+        .allowed_tool_names
+        .as_ref()
+        .map(|names| names.iter().cloned().collect::<HashSet<_>>());
+    let allowed_read_paths = request.allowed_read_paths.clone();
     let controls = Arc::new(ControlHub::default());
     start_control_reader(Arc::clone(&controls), emitter.clone());
     let tools = StorydexTools {
@@ -875,6 +973,8 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
         custom_specs: request.tool_specs,
         custom_names,
         mutating_custom_names,
+        allowed_tool_names,
+        allowed_read_paths,
         plan_mode_active: Arc::clone(&plan_mode_active),
         base_permission_mode: base_permission_mode.clone(),
         emitter: emitter.clone(),
@@ -910,6 +1010,7 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
         SessionCheckpointBuffer::new(store.clone(), CHECKPOINT_MIN_WRITE_INTERVAL);
     let agent = Agent::new(system_prompt)
         .with_reasoning_effort(request.reasoning_effort)
+        .with_max_tool_rounds(request.max_tool_rounds.unwrap_or(100))
         .with_checkpoint_sink(checkpoint_buffer.clone());
     emitter.event(
         "runtime_initialized",
