@@ -3,8 +3,7 @@ use crate::AppState;
 use crate::error_response;
 use crate::execution::{ExecutionCancellation, ExecutionControl};
 use crate::replacement::{
-    ExecutionRecordInput, ReplacementError, ReplacementTransaction, change_ledger_from_events,
-    persist_execution_record_with_events,
+    ExecutionRecordInput, ReplacementError, ReplacementTransaction, persist_execution_record_with_events,
 };
 use crate::workspace;
 use anyhow::Context;
@@ -2061,7 +2060,9 @@ fn build_turn_contract(payload: &ChatStreamRequest, workspace: &Path) -> anyhow:
             "capabilityMode": payload.capability_mode,
             "directFileWrites": payload.core_writes_allowed.unwrap_or(payload.writes_allowed),
             "pendingWriteApproval": false,
-            "localGitAutoCommit": true,
+            "localGitAutoCommit": false,
+            "localGitCommitMode": "explicit",
+            "hiddenCheckpoint": "execution_record",
             "allowedWriteRoots": asset_roots,
             "remotePush": false,
             "highRiskChangeRequiresNotice": true,
@@ -2460,18 +2461,6 @@ async fn run_bridge(context: BridgeRunContext<'_>) -> anyhow::Result<()> {
                         && !transaction.is_accepted()
                     {
                         transaction.accept()?;
-                    }
-                    if event_name == "AgentCompleted" {
-                        emit_git_commit_prompt(
-                            state,
-                            workspace,
-                            sender,
-                            trace_events,
-                            trace_id,
-                            session_id,
-                            Some((&event_name, &data)),
-                        )
-                        .await?;
                     }
                     if event_name == "AgentCompleted" || event_name == "AgentError" || event_name == "AgentCancelled" {
                         child_terminal = true;
@@ -3204,69 +3193,6 @@ pub(crate) fn with_event_identity(
         .entry("sessionId")
         .or_insert_with(|| json!(session_id));
     Value::Object(object)
-}
-
-pub(crate) async fn emit_git_commit_prompt(
-    state: &AppState,
-    workspace: &Path,
-    sender: &mpsc::Sender<String>,
-    trace_events: &mut Vec<(String, Value)>,
-    trace_id: &str,
-    session_id: &str,
-    pending_terminal: Option<(&str, &Value)>,
-) -> anyhow::Result<bool> {
-    if trace_events
-        .iter()
-        .any(|(name, _)| name == "GitCommitPrompt")
-    {
-        return Ok(false);
-    }
-    let mut observed = trace_events.clone();
-    if let Some((name, data)) = pending_terminal {
-        observed.push((name.to_owned(), data.clone()));
-    }
-    let ledger = change_ledger_from_events(workspace, session_id, trace_id, &observed);
-    let changed_files = ledger
-        .get("changedFiles")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let commit_hash = ledger
-        .get("commitHash")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if changed_files.is_empty() || !commit_hash.is_empty() {
-        return Ok(false);
-    }
-    state
-        .followup_store()
-        .pause(workspace, session_id, "git_commit_prompt")
-        .map_err(|error| anyhow::anyhow!(error.message))?;
-    let payload = with_event_identity(
-        "GitCommitPrompt",
-        json!({
-            "created": false,
-            "status": "pending",
-            "reason": "pending_commit",
-            "message": "检测到未提交修改，请选择创建本地版本或保留工作区修改。",
-            "workspaceRoot": workspace,
-            "changedFiles": changed_files,
-            "changedFileCount": changed_files.len(),
-            "added": 0,
-            "removed": 0,
-            "diffSource": "working_tree",
-            "commitHash": "",
-            "shortHash": "",
-        }),
-        trace_id,
-        session_id,
-    );
-    anyhow::ensure!(
-        send_event_value(sender, "GitCommitPrompt", payload.clone()).await,
-        "Agent SSE sender closed before Git commit prompt"
-    );
-    trace_events.push(("GitCommitPrompt".to_owned(), payload));
-    Ok(true)
 }
 
 async fn send_terminal_error(

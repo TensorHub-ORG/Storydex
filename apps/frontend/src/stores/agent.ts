@@ -475,7 +475,7 @@ export const useAgentStore = defineStore("agent", {
       this.isCommittingGit = true;
       let resumeQueueAfterDecision = false;
       this.commitActionLabel =
-        mode === "auto" ? "正在生成提交说明" : mode === "manual" ? "正在创建本地版本" : "正在保留未提交修改";
+        mode === "auto" ? "正在创建本地版本" : mode === "manual" ? "正在创建本地版本" : "正在保留未提交修改";
       if (commitProgressTimer !== null) {
         window.clearTimeout(commitProgressTimer);
         commitProgressTimer = null;
@@ -483,13 +483,6 @@ export const useAgentStore = defineStore("agent", {
       if (commitActionClearTimer !== null) {
         window.clearTimeout(commitActionClearTimer);
         commitActionClearTimer = null;
-      }
-      if (mode === "auto") {
-        commitProgressTimer = window.setTimeout(() => {
-          if (this.isCommittingGit) {
-            this.commitActionLabel = "正在创建本地版本";
-          }
-        }, 2100);
       }
       this.lastError = "";
       try {
@@ -511,31 +504,6 @@ export const useAgentStore = defineStore("agent", {
         this.commitActionLabel = mode === "skip" ? "已保留未提交修改" : "本地版本已创建";
         void useGitStore().refreshSummary({ silent: true });
       } catch (error: unknown) {
-        if (mode === "auto" && shouldRetryCommitWithFallbackMessage(error)) {
-          try {
-            const result = await submitAgentRunCommitDecision(
-              prompt.traceId,
-              {
-                mode: "manual",
-                message: fallbackCommitMessage(prompt),
-                sessionId: prompt.sessionId
-              },
-              prompt.sessionId
-            );
-            this.applyStreamPacket(prompt.traceId, buildCommitDecisionPacket(prompt, result.data));
-            this.pendingCommitPrompt = null;
-            resumeQueueAfterDecision = this.followupPaused && this.followupPauseReason === "git_commit_prompt";
-            if (Boolean(result.data.created)) {
-              this.clearLiveChanges();
-            }
-            this.commitActionLabel = "本地版本已创建";
-            void useGitStore().refreshSummary({ silent: true });
-            return;
-          } catch (retryError: unknown) {
-            this.lastError = describeTransportError(retryError, "提交小说项目修改失败。");
-            return;
-          }
-        }
         this.lastError = describeTransportError(error, "提交小说项目修改失败。");
       } finally {
         if (commitProgressTimer !== null) {
@@ -2332,6 +2300,12 @@ function summarizeTurnContractPacket(packet: AgentStreamPacket): string {
   const selectedTemplateName = firstString(selectedTemplateDetail, ["name"]);
   const invalidTemplate = firstString(turnPlan, ["invalidChapterTemplate"]);
   const nextSegmentPath = firstString(turnPlan, ["nextSegmentPath"]);
+  const localGitCommitMode = firstString(executionPolicy, ["localGitCommitMode"]);
+  const localGitLabel = localGitCommitMode === "explicit"
+    ? "按需提交"
+    : Boolean(executionPolicy.localGitAutoCommit)
+      ? "自动提交"
+      : "未开启";
   const status = String(packet.status || "ready");
   const operationTypeLabels: Record<string, string> = {
     create_new: "生成新内容",
@@ -2359,7 +2333,7 @@ function summarizeTurnContractPacket(packet: AgentStreamPacket): string {
           `章目标：${chapterWordCountTarget} 字`,
           `可接受：${acceptWordCountMin}-${acceptWordCountMax} 字`
         ]),
-    `小说项目 Git：${Boolean(executionPolicy.localGitAutoCommit) ? "自动提交" : "未开启"}`
+    `小说项目 Git：${localGitLabel}`
   );
   if (tierMode) {
     pieces.push(`档位观测：${calibrationStatus || "cold_start"}`);
@@ -3266,27 +3240,6 @@ function buildCommitDecisionPacket(prompt: AgentPendingCommitPrompt, data: Agent
   };
 }
 
-function fallbackCommitMessage(prompt: AgentPendingCommitPrompt): string {
-  const count = Math.max(0, Math.round(Number(prompt.changedFileCount || prompt.changedFiles.length || 0)));
-  return count > 0 ? `agent: update project files (${count} files)` : "agent: update project files";
-}
-
-function shouldRetryCommitWithFallbackMessage(error: unknown): boolean {
-  if (error instanceof AgentApiError && error.code === "commit_message_generation_failed") {
-    return true;
-  }
-
-  const root = asRecord(error);
-  const response = asRecord(root.response);
-  const responseData = asRecord(response.data);
-  const envelopeError = asRecord(responseData.error);
-  const details = asRecord(envelopeError.details);
-  const status = Number(response.status || 0);
-  const code = String(envelopeError.code || "");
-  const message = `${String(envelopeError.message || "")} ${String(details.message || "")} ${String(root.message || "")}`;
-  return code === "commit_message_generation_failed" || (status === 502 && /commit message/i.test(message));
-}
-
 function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
 }
@@ -3957,8 +3910,6 @@ export const __agentStoreTestUtils = import.meta.env.MODE === "test" ? {
   normalizeChangeLedger,
   normalizeCommitPrompt,
   buildCommitDecisionPacket,
-  fallbackCommitMessage,
-  shouldRetryCommitWithFallbackMessage,
   asRecord,
   mergeChangeLedgerPaths,
   isWriteLikeToolPacket,

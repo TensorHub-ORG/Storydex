@@ -364,6 +364,18 @@ pub fn persist_execution_record_with_events(input: ExecutionRecordInput<'_>) -> 
         })
         .collect::<Vec<_>>();
     let change_ledger = change_ledger_from_events(workspace, session_id, trace_id, events);
+    let changed_files = change_ledger
+        .get("changedFiles")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let checkpoint_status = if changed_files.is_empty() {
+        "not_needed"
+    } else if status.eq_ignore_ascii_case("completed") {
+        "saved"
+    } else {
+        "captured"
+    };
     let record = json!({
         "traceId": trace_id,
         "sessionId": normalized_session_id(session_id),
@@ -377,6 +389,14 @@ pub fn persist_execution_record_with_events(input: ExecutionRecordInput<'_>) -> 
         "llmModel": model,
         "events": trace_events,
         "changeLedger": change_ledger,
+        "checkpoint": {
+            "kind": "hidden",
+            "status": checkpoint_status,
+            "source": "execution_record",
+            "changedFiles": changed_files,
+            "changedFileCount": changed_files.len(),
+            "updatedAt": now,
+        },
         "tasks": [],
         "audit": [],
         "createdAt": now,

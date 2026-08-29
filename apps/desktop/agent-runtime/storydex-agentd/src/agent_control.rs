@@ -3138,13 +3138,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn successful_write_emits_git_prompt_before_terminal_and_pauses_followups() {
+    async fn successful_write_persists_hidden_checkpoint_without_prompt_or_pause() {
         let root = tempdir().expect("root");
         let workspace = root.path().join("workspace");
         let home = root.path().join("home");
         fs::create_dir_all(&workspace).expect("workspace");
         fs::create_dir_all(&home).expect("home");
         let workspace = workspace.canonicalize().expect("canonical workspace");
+        let events = vec![
+            (
+                "ToolDone".to_owned(),
+                chat::with_event_identity(
+                    "ToolDone",
+                    json!({
+                        "tool_name": "write_file",
+                        "is_error": false,
+                        "arguments": {"path": "chapters/001.md"}
+                    }),
+                    "trace",
+                    "session",
+                ),
+            ),
+            (
+                "AgentCompleted".to_owned(),
+                chat::with_event_identity(
+                    "AgentCompleted",
+                    json!({"status": "success"}),
+                    "trace",
+                    "session",
+                ),
+            ),
+        ];
+        replacement::persist_execution_record_with_events(replacement::ExecutionRecordInput {
+            workspace: &workspace,
+            session_id: "session",
+            trace_id: "trace",
+            prompt: "continue writing",
+            status: "completed",
+            events: &events,
+            reply: "done",
+            provider_id: "provider",
+            model: "model",
+        })
+        .expect("persist hidden checkpoint");
+
+        let record = replacement::read_record(&workspace, "session", "trace")
+            .expect("read record")
+            .expect("record");
+        assert_eq!(record["checkpoint"]["kind"], "hidden");
+        assert_eq!(record["checkpoint"]["status"], "saved");
+        assert_eq!(
+            record["checkpoint"]["changedFiles"],
+            json!(["chapters/001.md"])
+        );
+        assert_eq!(
+            record["changeLedger"]["changedFiles"],
+            json!(["chapters/001.md"])
+        );
+
         let state = AppState::with_paths(
             "token",
             home,
@@ -3153,56 +3204,12 @@ mod tests {
             None,
         )
         .expect("state");
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
-        let mut events = vec![(
-            "ToolDone".to_owned(),
-            chat::with_event_identity(
-                "ToolDone",
-                json!({
-                    "tool_name": "write_file",
-                    "is_error": false,
-                    "arguments": {"path": "chapters/001.md"}
-                }),
-                "trace",
-                "session",
-            ),
-        )];
-        let terminal = chat::with_event_identity(
-            "AgentCompleted",
-            json!({"status": "success"}),
-            "trace",
-            "session",
-        );
-        assert!(
-            chat::emit_git_commit_prompt(
-                &state,
-                &workspace,
-                &sender,
-                &mut events,
-                "trace",
-                "session",
-                Some(("AgentCompleted", &terminal)),
-            )
-            .await
-            .expect("commit prompt")
-        );
-        events.push(("AgentCompleted".to_owned(), terminal));
-        assert_eq!(events[1].0, "GitCommitPrompt");
-        assert_eq!(events[2].0, "AgentCompleted");
-        assert_eq!(events[1].1["changedFiles"], json!(["chapters/001.md"]));
-        assert!(
-            receiver
-                .recv()
-                .await
-                .expect("prompt frame")
-                .starts_with("event: GitCommitPrompt\n")
-        );
         let mailbox = state
             .followup_store()
             .list(&workspace, "session")
             .expect("mailbox");
-        assert!(mailbox.paused);
-        assert_eq!(mailbox.pause_reason, "git_commit_prompt");
+        assert!(!mailbox.paused);
+        assert!(mailbox.pause_reason.is_empty());
     }
 
     #[tokio::test]

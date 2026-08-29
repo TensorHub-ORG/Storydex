@@ -244,20 +244,16 @@ describe("agent packet state machine", () => {
 });
 
 describe("commit and cancellation behavior", () => {
-  it("uses auto fallback, reports retry failure, and clears progress timers", async () => {
+  it("uses the deterministic auto commit endpoint without retrying through a fallback message", async () => {
     const store = useAgentStore();
     store.executionHistory = [run()];
     store.pendingCommitPrompt = { traceId: "trace", sessionId: "session", workspaceRoot: "C:/isolated/story", message: "commit", changedFiles: ["a"], changedFileCount: 1, added: 1, removed: 0 };
     let rejectInitial!: (reason: unknown) => void;
-    api.submitAgentRunCommitDecision.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectInitial = reject; }))
-      .mockResolvedValueOnce(envelope({ created: true, commitHash: "abc", changedFiles: ["a"] }));
+    api.submitAgentRunCommitDecision.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectInitial = reject; }));
     const pending = store.resolvePendingCommitPrompt("auto");
-    await vi.advanceTimersByTimeAsync(2200); expect(store.commitActionLabel).toBeTruthy();
-    rejectInitial({ response: { status: 502, data: { error: { message: "commit message generation failed" } } } });
-    await pending; expect(api.submitAgentRunCommitDecision).toHaveBeenCalledTimes(2);
-    store.pendingCommitPrompt = { traceId: "trace", sessionId: "session", workspaceRoot: "root", message: "commit", changedFiles: [], changedFileCount: 0, added: 0, removed: 0 };
-    api.submitAgentRunCommitDecision.mockRejectedValueOnce({ response: { status: 502, data: { error: { message: "commit message generation failed" } } } }).mockRejectedValueOnce(new Error("retry failed"));
-    await store.resolvePendingCommitPrompt("auto"); expect(store.lastError).toBe("retry failed");
+    rejectInitial(new Error("commit failed"));
+    await pending; expect(api.submitAgentRunCommitDecision).toHaveBeenCalledTimes(1);
+    expect(store.lastError).toBe("commit failed");
     store.pendingCommitPrompt = null; await store.resolvePendingCommitPrompt("skip");
     vi.runAllTimers(); expect(store.isCommittingGit).toBe(false);
   });

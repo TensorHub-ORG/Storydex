@@ -373,8 +373,8 @@
           :disabled="agentStore.isCommittingGit"
           @click="handleCommitPromptAuto"
         >
-          <span>确认提交，并自动生成提交信息</span>
-          <small>调用一次 LLM 生成提交信息后提交</small>
+          <span>确认提交（使用确定性说明）</span>
+          <small>使用可追踪的确定性提交说明直接创建本地版本</small>
         </button>
         <button
           type="button"

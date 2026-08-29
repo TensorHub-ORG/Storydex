@@ -2,7 +2,6 @@ use crate::AppState;
 use crate::chat::ChatStreamRequest;
 use crate::chat::ProviderIdentity;
 use crate::chat::StoryGenerationOptions;
-use crate::chat::emit_git_commit_prompt;
 use crate::chat::with_event_identity;
 use crate::length_tier_calibration::{
     CalibrationSampleInput, ShortCalibrationSummary, read_tier_summary, record_tier_sample,
@@ -513,16 +512,6 @@ pub(crate) async fn run_modify_existing(
         session_id,
     )
     .await?;
-    emit_git_commit_prompt(
-        state,
-        workspace,
-        sender,
-        trace_events,
-        trace_id,
-        session_id,
-        None,
-    )
-    .await?;
     emit(
         sender,
         trace_events,
@@ -949,16 +938,6 @@ pub(crate) async fn run_create_new(
         }),
         trace_id,
         session_id,
-    )
-    .await?;
-    emit_git_commit_prompt(
-        state,
-        workspace,
-        sender,
-        trace_events,
-        trace_id,
-        session_id,
-        None,
     )
     .await?;
     emit(

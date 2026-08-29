@@ -165,13 +165,14 @@ describe("agent store deterministic helpers", () => {
     const contract = packet({
       status: "ready", intentFrame: { primary: "story" },
       turnPlan: { fragmentCount: 2, fragmentWordCount: 1200, requiresChapterTemplateSelection: true, invalidChapterTemplate: "bad", nextSegmentPath: "chapters/2.md" },
-      executionPolicy: { directFileWrites: true, localGitAutoCommit: true }, updatePolicy: { autoUpdateVariables: true, autoUpdateWiki: false },
+      executionPolicy: { directFileWrites: true, localGitAutoCommit: false, localGitCommitMode: "explicit" }, updatePolicy: { autoUpdateVariables: true, autoUpdateWiki: false },
       skillRegistry: { skillCount: 2 }, toolRegistry: { toolCount: 3 },
       contextAssembly: { budget: { blockCount: 4, totalChars: 500 }, sources: [{ kind: "chapter", count: 2 }, {}, null], notes: ["preset_compile_failed: demo", "other"] }
     });
     expect(u.summarizeTurnContractPacket(contract)).toContain("chapters/2.md");
     expect(u.summarizeTurnContractPacket(contract)).toContain("章目标：1200 字");
     expect(u.summarizeTurnContractPacket(contract)).toContain("可接受：840-1560 字");
+    expect(u.summarizeTurnContractPacket(contract)).toContain("小说项目 Git：按需提交");
     const calibratedSummary = u.summarizeTurnContractPacket(packet({
       status: "ready",
       turnPlan: {
@@ -453,11 +454,6 @@ describe("agent store deterministic helpers", () => {
     expect(approval?.approvalId).toBe("a");
     const prompt = u.normalizeCommitPrompt(packet({ message: "commit", changedFiles: ["a"], changedFileCount: 1 }), "t", "s");
     expect(u.buildCommitDecisionPacket(prompt, packet({ created: true })).traceId).toBe("t");
-    expect(u.fallbackCommitMessage(prompt)).toContain("1 files");
-    expect(u.fallbackCommitMessage({ ...prompt, changedFiles: [], changedFileCount: 0 })).toBe("agent: update project files");
-    expect(u.shouldRetryCommitWithFallbackMessage(new AgentApiError("bad", "commit_message_generation_failed"))).toBe(true);
-    expect(u.shouldRetryCommitWithFallbackMessage({ response: { status: 502, data: { error: { message: "commit message failed" } } } })).toBe(true);
-    expect(u.shouldRetryCommitWithFallbackMessage(new Error("other"))).toBe(false);
   });
 
   it("extracts and secures changed paths from nested tools and previews", () => {
