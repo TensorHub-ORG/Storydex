@@ -2,7 +2,7 @@
 
 该目录是当前 Windows Stable 桌面壳源码。`tauri-preview` 是迁移期遗留目录名；默认 `dev`、`build:desktop`、`package:win` 和正式 Windows Release 均已指向这里。
 
-仓库中仍存在 Electron/Python 兼容代码、旧启动脚本和相应测试，但它们不进入这里生成的 Tauri Stable staging。
+Python 后端的兼容/测试代码仍可在独立边界运行，但 Electron/Python 桌面启动、打包和运行时已不再属于仓库产品路径，也不会进入这里生成的 Tauri Stable staging。
 
 Tauri Core 启动打包的 `storydex-agentd`，等待其返回动态 loopback 端口和随机运行令牌，验证 `/api/v1/sys/health` 后创建 Vue 主窗口。渲染层只获得最小 `window.storydexDesktop` 适配和 updater capability，不获得任意 shell 或文件系统权限。
 

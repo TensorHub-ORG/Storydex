@@ -17,7 +17,6 @@
     "test:unit": "node --test tests/rust-candidate-assets.test.cjs tests/tauri-candidate-contract.test.cjs tests/tauri-release-contract.test.cjs ../../scripts/tests/generate-release-metadata.test.cjs ../../scripts/tests/rust-backend-interface-inventory.test.cjs",
     "test:smoke": "npm run smoke:tauri",
     "test:e2e": "npm run smoke:tauri",
-    "test:update-feed": "node --test tests/tauri-release-contract.test.cjs",
     "build:desktop": "powershell -NoProfile -ExecutionPolicy Bypass -File tauri-preview/scripts/package-preview.ps1",
     "package:win": "npm run build:desktop",
     "build:tauri-preview": "npm run build:desktop",

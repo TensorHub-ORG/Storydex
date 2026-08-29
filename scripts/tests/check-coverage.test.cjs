@@ -130,7 +130,7 @@ test("advisory mode reports regressions without failing standard CI", (t) => {
   assert.match(releaseResult.stderr, /Coverage gate failed for frontend \(release\)/);
 });
 
-test("standard CI scopes quality jobs while full CI retains its compatibility matrix", () => {
+test("standard CI scopes quality jobs while full CI retains its runtime checks", () => {
   const workflow = fs.readFileSync(path.resolve(__dirname, "..", "..", ".github", "workflows", "quality-gate.yml"), "utf8");
   assert.match(workflow, /changes:\s*[\s\S]*?resolve_ci_scope\.cjs/);
   assert.match(workflow, /backend-tests:\s*[\s\S]*?needs:\s*changes\s+[\s\S]*?needs\.changes\.outputs\.backend/);
@@ -150,15 +150,14 @@ test("standard CI scopes quality jobs while full CI retains its compatibility ma
   assert.match(backendJob, /-m "not coomi_runtime"/);
   assert.match(workflow, /pc-runtime-tests:[\s\S]*?Verify pinned runtime and backend contract[\s\S]*?verify_coomi_runtime\.py/);
   assert.match(workflow, /backend-tests:\s*[\s\S]*?timeout-minutes:\s*\$\{\{ inputs\.full && 30 \|\| 12 \}\}/);
-  assert.match(workflow, /backend-compatibility:\s*[\s\S]*?timeout-minutes:\s*10/);
-  assert.equal((workflow.match(/--timeout=120/g) || []).length, 2);
+  assert.equal((workflow.match(/--timeout=120/g) || []).length, 1);
   assert.doesNotMatch(workflow, /without unchanged Coomi runtime/);
-  assert.match(workflow, /backend-compatibility:\s*[\s\S]*?test_agent_stream_responsiveness\.py[\s\S]*?test_storydex_runtime_fixes\.py/);
+  assert.doesNotMatch(workflow, /backend-compatibility|test_agent_stream_responsiveness\.py|test_agent_git_autocommit_service\.py|test_storydex_intent_service\.py/);
   assert.doesNotMatch(workflow, /^  integration-tests:/m);
   assert.match(workflow, /BACKEND:\s*\$\{\{ needs\.changes\.outputs\.backend \}\}/);
   assert.match(workflow, /PC_RUNTIME:\s*\$\{\{ needs\.changes\.outputs\.pc_runtime \}\}/);
   assert.match(workflow, /if not upstream_verified and \(full or windows_release or pc_runtime\):\s*required\.add\("pc-runtime-tests"\)/);
-  assert.match(workflow, /if not upstream_verified and backend and not full and not windows_release:\s*required\.add\("backend-compatibility"\)/);
+  assert.doesNotMatch(workflow, /required\.add\("backend-compatibility"\)/);
   assert.match(workflow, /desktop-package-check:\s*[\s\S]*?if:\s*inputs\.run_packaged_checks/);
   assert.doesNotMatch(workflow, /^  tauri-e2e:/m);
   assert.match(workflow, /Generate ephemeral updater key/);

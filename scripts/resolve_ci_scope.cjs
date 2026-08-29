@@ -169,7 +169,6 @@ function classifyChangedPaths(inputPaths, options = {}) {
 
       if (
         filePath === "scripts/prepare_tauri_release_bundle.ps1"
-        || filePath === "scripts/prepare_release_bundle.ps1"
         || filePath === "scripts/generate_release_metadata.cjs"
       ) {
         scope.desktop = true;

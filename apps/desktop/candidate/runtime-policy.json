@@ -54,7 +54,6 @@
     ".node"
   ],
   "stableRoots": [
-    "apps/desktop/electron",
     "apps/desktop/app",
     "apps/desktop/node_modules",
     "apps/desktop/release"

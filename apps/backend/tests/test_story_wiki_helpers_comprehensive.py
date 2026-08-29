@@ -20,7 +20,7 @@ def _source(path, text, kind="chapter"):
     return {"relativePath": path, "title": Path(path).stem, "kind": kind, "text": text}
 
 
-def test_schema_normalization_and_reports_cover_malformed_agent_payloads(service):
+def test_schema_normalization_covers_malformed_payloads(service):
     assert not service._has_current_category_schema({})
     current_schema = {
         "schemaVersion": PROJECTION_SCHEMA_VERSION,
@@ -45,23 +45,6 @@ def test_schema_normalization_and_reports_cover_malformed_agent_payloads(service
     assert service._normalize_wiki_category(None) == "overview"
     assert service._normalize_wiki_category("unknown") == "overview"
 
-    report = service._build_review_report(
-        {"entries": [{"id": "a", "needsReview": True}, None], "graph": {"nodes": [1], "edges": [1, 2]}},
-        agent_result={"attempted": 1, "completed": 0, "traceId": "t"},
-        agent_payload={"review": {"issues": "bad", "recommendations": ["fix"]}},
-    )
-    assert report["needsReviewEntryIds"] == ["a"]
-    assert report["issues"] == [] and report["recommendations"] == ["fix"]
-    assert service._workflow_generation_mode("generate_wiki", agent=False) == "local evidence-grounded"
-    assert service._workflow_generation_mode("generate_wiki", agent=True) == "local evidence-grounded + agent prose"
-    assert service._workflow_generation_mode("update_wiki", agent=True) == "local evidence-grounded + agent prose"
-    assert service._workflow_generation_mode("refresh_wiki_graph", agent=True) == "local evidence-grounded graph refresh"
-    assert service._workflow_generation_mode("review_wiki", agent=True) == "local evidence-grounded + agent review"
-    assert service._workflow_generation_mode("repair_wiki", agent=True) == "local evidence-grounded + agent prose"
-    assert service._workflow_generation_mode("other", agent=True) == "local evidence-grounded + agent prose"
-    assert "2" in service._workflow_summary("update_wiki", "ok", ["a", "b"])
-    assert "WIKI" in service._workflow_summary("review_wiki", "ok", [])
-    assert "other" in service._workflow_summary("other", "ok", [])
     assert service._summary_from_entries([{}, {"summary": " summary "}]) == "summary"
     assert service._summary_from_entries([])
     assert service._confidence("bad") == 0.68
@@ -321,48 +304,6 @@ def test_query_graph_all_modes_and_merge_branches(service, tmp_path, monkeypatch
     assert service.changed_source_paths(tmp_path, sources=current_sources, previous_index=previous) == ["chapters/1.md", "chapters/2.md"]
     assert service.changed_source_paths(tmp_path, sources=[], previous_index={"sources": []}) == []
 
-    normalized = service.normalize_payload({"projectName": "Demo", "summary": "Only summary", "entries": "bad", "graph": "bad", "version": 0}, root=tmp_path, workflow="repair_wiki")
-    assert normalized["generator"] == "agent-wiki-repair"
-    assert normalized["entries"][0]["needsReview"] and normalized["graph"]["nodes"][0]["id"] == "project:root"
-    normalized2 = service.normalize_payload({"entries": [{"id": "e", "title": "E", "category": "plot"}], "graph": {"nodes": [{"id": "n"}], "edges": []}, "sourceStats": {"x": 1}}, root=tmp_path, workflow="generate_wiki")
-    assert normalized2["sourceStats"] == {"x": 1}
-
-    base = {
-        "entries": [
-            {"id": "same", "summary": "old", "details": ["old"], "sourcePaths": ["old.md"]},
-            {"id": "removed", "summary": "gone", "sourcePaths": ["removed.md"]},
-            {"id": "kept", "summary": "kept", "sourcePaths": []},
-        ],
-        "graph": {
-            "nodes": [{"id": "same-node", "entryId": "same"}, {"id": "removed-node", "entryId": "removed"}],
-            "edges": [
-                {"source": "same-node", "target": "removed-node", "label": "old", "type": "fact"},
-                {"source": "same-node", "target": "removed-node", "label": "co", "coOccurrence": True, "evidence": "chapter.md"},
-            ],
-        },
-    }
-    incoming = {
-        "summary": "incoming",
-        "entries": [{"id": "same", "summary": "new", "details": ["new"], "sourcePaths": ["old.md"]}, {"id": "new", "summary": "new"}, {}, None],
-        "graph": {
-            "nodes": [{"id": "same-node", "entryId": "same", "label": "updated"}, {"id": "new-node", "entryId": "new"}, {}, None],
-            "edges": [{"source": "same-node", "target": "new-node", "label": "co2", "coOccurrence": True, "evidence": "chapter.md"}],
-        },
-        "_replaceFactEdges": True,
-    }
-    merged = service.merge_payloads(base, incoming, removed_source_paths=["removed.md"], mark_conflicts=True)
-    assert {e["id"] for e in merged["entries"]} == {"same", "kept", "new"}
-    assert next(e for e in merged["entries"] if e["id"] == "same")["needsReview"]
-    assert {n["id"] for n in merged["graph"]["nodes"]} == {"same-node", "new-node"}
-    assert [e["label"] for e in merged["graph"]["edges"]] == ["co2"]
-    graph_only = service.merge_payloads(base, {"graph": {}}, graph_only=True)
-    assert graph_only["entries"] == base["entries"]
-    assert service._entry_conflicts({"summary": "a"}, {"summary": "b"})
-    assert service._entry_conflicts({"details": ["a"]}, {"details": ["b"]})
-    assert not service._entry_conflicts({"summary": ""}, {"summary": "b"})
-    assert not service._entry_fully_removed({"sourcePaths": []}, {"a"})
-    assert not service._entry_fully_removed({"sourcePaths": ["a", "b"]}, {"a"})
-    assert service._entry_fully_removed({"sourcePaths": ["a"]}, {"a"})
     assert service._node_orphaned_by_removal({"entryId": ""}, {"x"}) is False
     assert service._node_orphaned_by_removal({"entryId": "x"}, {"x"}) is False
     assert service._node_orphaned_by_removal({"entryId": "gone"}, {"x"}) is True

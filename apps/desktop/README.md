@@ -1,6 +1,6 @@
 # Storydex Desktop（Tauri 2）
 
-该目录提供 Storydex Windows 正式桌面应用。当前默认开发、构建、打包和更新入口均为 Tauri 2；`storydex-agentd` 是独立 Rust sidecar。旧 `electron/` 源码不进入默认 Stable 产物，但仓库内的兼容脚本、旧链路测试和部分完整 CI 仍会引用 Electron/Python，直到回滚支持窗口正式结束。
+该目录提供 Storydex Windows 正式桌面应用。当前默认开发、构建、打包和更新入口均为 Tauri 2；`storydex-agentd` 是独立 Rust sidecar。旧 Electron/Python 桌面运行时已从仓库运行路径移除，Python 后端仅作为兼容/测试边界保留。
 
 ## 目录说明
 
@@ -8,7 +8,7 @@
 - `agent-runtime/`：`storydex-agentd`、Coomi Rust 及 Storydex 领域服务。
 - `candidate/staging/`：打包后的最小运行目录，受 Git 忽略。
 - `release/`：本地 NSIS、updater 和便携包产物，受 Git 忽略。
-- `electron/`：旧 Electron 实现，供兼容测试、迁移差分和人工回滚使用。
+- `scripts/build-coomi-runtime.cjs`：构建 Rust Coomi bridge 并记录可追踪的构建身份。
 
 ## 开发模式
 

@@ -12,7 +12,6 @@ from core import feature_flags
 from services import retrieval_service
 from services.content_catalog_service import get_content_catalog_service
 from services.content_pipeline_service import ContentPipelineService
-from services.context_policy import ContextPolicy
 from services.retrieval_service import (
     INDEX_ERROR,
     INDEX_OK,
@@ -22,8 +21,6 @@ from services.retrieval_service import (
     reset_retrieval_cache,
 )
 from services.story_project_service import get_story_project_service
-from services.storydex_agent_tools import StorydexProjectSearchTool
-from services.storydex_context_assembler_service import StorydexContextAssemblerService
 
 
 def _write_exact(path: Path, text: str) -> str:
@@ -155,137 +152,12 @@ def test_failed_full_build_keeps_last_complete_index_and_exposes_error(tmp_path,
     assert service.search_detailed("explode-during-build")["resultState"] == "hits"
 
 
-def test_project_search_distinguishes_complete_no_hits_from_index_error(tmp_path) -> None:
-    _write_exact(tmp_path / "chapters" / "001.md", "known-search-token\n")
-    reset_retrieval_cache()
-    ContentPipelineService().process_workspace(tmp_path)
-    tool = StorydexProjectSearchTool(workspace_root=tmp_path)
-
-    no_hit = tool.run({"query": "missinguniquex99"})
-    no_hit_payload = json.loads(no_hit.output)
-    assert no_hit.success is True
-    assert no_hit_payload["status"] == INDEX_OK
-    assert no_hit_payload["resultState"] == "no_hits"
-
-    service = get_retrieval_service(tmp_path)
-    conn = sqlite3.connect(service.db_path)
-    try:
-        conn.execute("DROP TABLE chunks")
-        conn.commit()
-    finally:
-        conn.close()
-
-    failed = tool.run({"query": "known-search-token"})
-    failed_payload = json.loads(failed.output)
-    assert failed.success is False
-    assert failed_payload["ok"] is False
-    assert failed_payload["status"] == INDEX_ERROR
-    assert failed_payload["resultState"] == "unavailable"
-    assert failed_payload["results"] == []
 
 
-def test_project_search_surfaces_published_index_error_without_query_refresh(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    outcome = {
-        "status": INDEX_ERROR,
-        "resultState": "unavailable",
-        "hits": [],
-        "candidatePaths": [],
-        "index": {"status": INDEX_ERROR, "generation": "sha256:last-good"},
-        "error": "published-index-error",
-    }
-    fake_service = SimpleNamespace(
-        watch_files=lambda: (_ for _ in ()).throw(
-            AssertionError("query path must not refresh retrieval sources")
-        ),
-        search_detailed=lambda *_args, **_kwargs: outcome,
-    )
-    monkeypatch.setattr(retrieval_service, "get_retrieval_service", lambda _root: fake_service)
-
-    result = StorydexProjectSearchTool(workspace_root=tmp_path).run({"query": "anything"})
-    payload = json.loads(result.output)
-
-    assert result.success is False
-    assert payload["status"] == INDEX_ERROR
-    assert payload["resultState"] == "unavailable"
-    assert payload["error"] == "published-index-error"
 
 
-def test_project_search_reads_published_index_without_refreshing_in_query_path(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    outcome = {
-        "status": INDEX_OK,
-        "resultState": "no_hits",
-        "hits": [],
-        "candidatePaths": [],
-        "index": {"status": INDEX_OK, "generation": "sha256:published"},
-        "error": "",
-    }
-    fake_service = SimpleNamespace(
-        watch_files=lambda: (_ for _ in ()).throw(
-            AssertionError("query path must not refresh retrieval sources")
-        ),
-        search_detailed=lambda *_args, **_kwargs: outcome,
-    )
-    monkeypatch.setattr(retrieval_service, "get_retrieval_service", lambda _root: fake_service)
-
-    result = StorydexProjectSearchTool(workspace_root=tmp_path).run({"query": "anything"})
-    payload = json.loads(result.output)
-
-    assert result.success is True
-    assert payload["status"] == INDEX_OK
-    assert payload["resultState"] == "no_hits"
 
 
-def test_passive_retrieval_error_is_visible_in_block_notes_and_context_trace(tmp_path, monkeypatch) -> None:
-    index = {
-        "status": INDEX_ERROR,
-        "schemaVersion": 3,
-        "generation": "sha256:last-good",
-        "coverage": {"documentCount": 2, "chunkCount": 7},
-        "lastError": "forced-passive-index-error",
-    }
-    fake_service = SimpleNamespace(
-        watch_files=lambda: (_ for _ in ()).throw(
-            AssertionError("query path must not refresh retrieval sources")
-        ),
-        search_detailed=lambda *_args, **_kwargs: {
-            "status": INDEX_ERROR,
-            "resultState": "unavailable",
-            "hits": [],
-            "candidatePaths": [],
-            "index": index,
-            "error": "forced-passive-index-error",
-        },
-    )
-    monkeypatch.setattr(feature_flags, "get_flags", lambda: SimpleNamespace(get_bool=lambda _name: True))
-    monkeypatch.setattr(retrieval_service, "get_retrieval_service", lambda _root: fake_service)
-    policy = ContextPolicy(
-        base_story_context=False,
-        story_structured_memory=False,
-        passive_fts=True,
-        wiki_context=False,
-        coomi_memory=False,
-        active_retrieval_tools=False,
-    )
-    assembler = StorydexContextAssemblerService(get_story_project_service())
-
-    assembly = assembler.assemble(tmp_path, prompt="核对『暮色钥印』", policy=policy)
-
-    source = next(
-        item
-        for item in assembly["contextTrace"]["sources"]
-        if item["kind"] == "related_passages"
-    )
-    block = next(item for item in assembly["promptBlocks"] if item["id"] == "related_passages")
-    assert source["retrieval"]["status"] == INDEX_ERROR
-    assert source["retrieval"]["generation"] == "sha256:last-good"
-    assert "do not interpret" in block["content"]
-    assert any("related_passages_index_error" in note for note in assembly["notes"])
 
 
 def test_chunk_ranking_returns_best_chunk_per_path_before_candidate_limit(tmp_path) -> None:

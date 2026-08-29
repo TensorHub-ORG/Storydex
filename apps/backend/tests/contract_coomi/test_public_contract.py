@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pytest
 
-from services.coomi_agent_service import _CoomiEventTranslator, _create_storydex_tool_registry
 from services.coomi_bridge_client import (
     _decode_lines,
     _wire_messages,
@@ -29,28 +28,3 @@ def test_jsonl_and_wire_contract_preserve_tool_history() -> None:
 def test_invalid_jsonl_is_rejected() -> None:
     with pytest.raises(Exception, match="Invalid JSONL"):
         _decode_lines(b"not-json\n")
-
-
-def test_bridge_events_translate_to_storydex_public_shapes() -> None:
-    translator = _CoomiEventTranslator(session_id="contract-session")
-    assert translator.translate({"type": "reasoning_delta", "data": {"text": "hidden"}}) is None
-    start = translator.translate(
-        {"type": "tool_started", "data": {"call": {"id": "c1", "name": "Read", "arguments": {}}}}
-    )
-    done = translator.translate(
-        {
-            "type": "tool_finished",
-            "data": {"call": {"id": "c1", "name": "Read"}, "result": {"success": True, "output": "ok"}},
-        }
-    )
-    assert start is not None and start[0] == "ToolStart"
-    assert done is not None and done[0] == "ToolDone"
-    assert done[1]["tool_call_id"] == "c1"
-    assert done[1]["is_error"] is False
-
-
-def test_storydex_domain_registry_is_independent_of_python_coomi(tmp_path) -> None:
-    registry = _create_storydex_tool_registry(tmp_path)
-    names = {tool.name for tool in registry.list_tools()}
-    assert {"StorydexProjectSearch", "StorydexWikiQuery", "StorydexApplyStoryIncrement"} <= names
-    assert all(spec["name"].startswith("Storydex") for spec in registry.specs())

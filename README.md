@@ -73,8 +73,6 @@ npm --prefix apps/desktop run dev
 .\scripts\run_desktop_dev.bat
 ```
 
-`run_fullstack_dev.bat` 仅保留为迁移期兼容别名，不再启动 Python/FastAPI。
-
 ## 文档
 
 ### 面向用户

@@ -27,7 +27,7 @@ describe("Coomi streaming API contract", () => {
     window.storydexDesktop = {
       platform: "win32",
       backendAuthToken: "runtime-secret",
-      versions: { electron: "", chrome: "WebView2", node: "" }
+      versions: { tauri: "2.0.5" }
     };
     const body = sse({ type: "RunAccepted", traceId: "t" }) + sse({ type: "TextChunk", content: "hi" }) + sse({ type: "AgentCompleted" }) + sse({ type: "done" });
     const response = streamResponse([body.slice(0, 17), body.slice(17)]);

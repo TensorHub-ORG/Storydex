@@ -10,9 +10,6 @@ interface StorydexDesktopBridge {
   isTitleBarOverlaySupported?: boolean;
   versions?: {
     tauri?: string;
-    electron?: string;
-    chrome?: string;
-    node?: string;
   };
   setTitleBarTheme?: (theme: { color: string; symbolColor: string }) => Promise<{
     applied: boolean;

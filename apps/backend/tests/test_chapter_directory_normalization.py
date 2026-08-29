@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import os
 
-from services.storydex_agent_tools import StorydexApplyStoryIncrementTool
 from services.story_project_service import get_story_project_service
 
 
@@ -263,39 +262,6 @@ def test_generated_increment_auto_applies_memory_without_apply_variables_flag(tm
     assert items["items"][0]["name"] == "harbor key"
 
 
-def test_storydex_tool_entrypoint_auto_applies_generated_memory(tmp_path):
-    tool = StorydexApplyStoryIncrementTool(workspace_root=tmp_path)
-    result = json.loads(
-        tool.run(
-            {
-                "segmentPath": "chapters/Chapter1/001.md",
-                "segmentText": "The hero recognizes the guide at the harbor.",
-                "variableThoughts": "The fragment explicitly establishes the location.",
-                "variableUpdates": [
-                    {
-                        "op": "set",
-                        "path": "plot.location",
-                        "value": "harbor",
-                        "evidence": "The fragment says the hero is at the harbor.",
-                    }
-                ],
-                "factUpdates": [
-                    {
-                        "subject": "hero",
-                        "predicate": "knows",
-                        "object": "guide",
-                        "evidence": "The fragment says the hero recognizes the guide.",
-                    }
-                ],
-            }
-        ).output
-    )
-
-    assert result["applied"]["variables"] is True
-    assert result["applied"]["facts"] is True
-    assert result["fragments"][0]["snapshotWritten"] is True
-    assert not any(item["type"] == "update_variables" for item in result["requiredDecisions"])
-    assert get_story_project_service().collect_story_diagnostics(tmp_path) == {}
 
 
 def test_explicit_false_still_defers_generated_memory_updates(tmp_path):

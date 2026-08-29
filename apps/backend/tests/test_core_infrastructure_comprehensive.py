@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from core import bounded_text_io, feature_flags
-from services import execution_log_service, global_config_service, job_queue, secure_storage_service
+from services import global_config_service, job_queue, secure_storage_service
 
 
 def test_bounded_text_reads_small_large_head_tail_and_missing_stat(monkeypatch, tmp_path):
@@ -68,52 +68,6 @@ def test_feature_flags_project_environment_defaults_snapshot_and_cache(monkeypat
     feature_flags.reset_cache()
 
 
-def test_execution_log_sanitization_session_context_and_unique_paths(monkeypatch, tmp_path):
-    assert execution_log_service.sanitize_execution_log_payload(None) is None
-    assert execution_log_service.sanitize_execution_log_payload("x" * 130000).endswith("...")
-    deep = value = {}
-    for _ in range(10):
-        value["x"] = {}
-        value = value["x"]
-    assert "truncated" in str(execution_log_service.sanitize_execution_log_payload(deep))
-    many = execution_log_service.sanitize_execution_log_payload(list(range(520)))
-    assert len(many) == 513 and "more" in many[-1]
-    mapping = execution_log_service.sanitize_execution_log_payload({str(i): i for i in range(520)})
-    assert mapping["__truncated_items__"] == 8
-    assert execution_log_service.sanitize_execution_log_payload(object())
-
-    path = tmp_path / "logs/run.jsonl"
-    session = execution_log_service.ExecutionLogSession(
-        path=path, trace_id="t", session_id="s", request_kind="agent", workspace_root="/w", storydex_root="/w/.storydex"
-    )
-    session.bind(empty="", none=None, value={"x": 1})
-    session.write("started", {"secret": "safe"}, trace={"duration": 1})
-    session.write("done")
-    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-    assert [row["sequence"] for row in rows] == [1, 2]
-    assert rows[0]["metadata"] == {"value": {"x": 1}} and rows[0]["trace"]["duration"] == 1
-    assert execution_log_service.get_current_execution_log_session() is None
-    with execution_log_service.use_execution_log_session(session):
-        assert execution_log_service.get_current_execution_log_session() is session
-    assert execution_log_service.get_current_execution_log_session() is None
-
-    log_dir = tmp_path / "unique"
-    log_dir.mkdir()
-    first = execution_log_service._build_unique_log_path(log_dir)
-    first.write_text("", encoding="utf-8")
-    second = execution_log_service._build_unique_log_path(log_dir)
-    assert second != first
-
-    fake_project = types.SimpleNamespace(
-        storydex_root=tmp_path / ".storydex",
-        agent_root=tmp_path / ".storydex" / ".agent",
-        workspace_root=tmp_path,
-    )
-    import services.project_service as project_module
-    monkeypatch.setattr(project_module, "get_project_service", lambda: fake_project)
-    created = execution_log_service.create_execution_log_session(trace_id=" t ", session_id="", request_kind="", metadata={"a": 1})
-    assert created.session_id == "default" and created.request_kind == "agent_run" and created.metadata == {"a": 1}
-    assert created.path.parent == tmp_path / ".storydex" / ".agent" / "logs"
 
 
 def test_secure_storage_roundtrip_validation_tampering_and_helpers(monkeypatch, tmp_path):

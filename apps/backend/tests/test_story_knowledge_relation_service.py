@@ -11,7 +11,6 @@ from services.story_knowledge_relation_service import (
     StoryKnowledgeRelationService,
 )
 from services.story_project_service import StoryProjectService
-from services.storydex_agent_tools import StorydexApplyKnowledgeUpdateTool
 from services.story_wiki_service import StoryWikiService
 
 
@@ -295,98 +294,6 @@ def test_prepare_keeps_distinct_unknown_ids_fail_closed(tmp_path: Path) -> None:
     assert exc.value.code == "knowledge_entity_not_found"
 
 
-def test_agent_tool_enforces_turn_operation_and_server_identity(tmp_path: Path) -> None:
-    service = StoryKnowledgeRelationService()
-    subject = _entity(service, tmp_path, "Tidebeast", ".storydex/worldbook/Tidebeast.md")
-    obj = _entity(service, tmp_path, "Nightstar", ".storydex/worldbook/Nightstar.md")
-    first_contract = {
-        "sessionId": "session-knowledge",
-        "traceId": "trace-prepare",
-        "providerId": "test-provider",
-        "model": "test-model",
-        "knowledgeWritePolicy": {
-            "mode": "explicit_binding",
-            "confirmationRequired": True,
-            "confirmed": False,
-        },
-    }
-    first_tool = StorydexApplyKnowledgeUpdateTool(
-        workspace_root=tmp_path,
-        turn_contract=first_contract,
-    )
-
-    forged = first_tool.run(
-        {
-            "operation": "prepare_explicit",
-            "providerId": "forged-provider",
-            "relations": [
-                {
-                    "subjectId": subject["entityId"],
-                    "predicate": "栖息于",
-                    "objectId": obj["entityId"],
-                }
-            ],
-        }
-    )
-    assert forged.success is False
-    assert json.loads(forged.output)["code"] == "knowledge_contract_mismatch"
-
-    prepared_result = first_tool.run(
-        {
-            "operation": "prepare_explicit",
-            "relations": [
-                {
-                    "subjectId": subject["entityId"],
-                    "predicate": "栖息于",
-                    "objectId": obj["entityId"],
-                }
-            ],
-        }
-    )
-    assert prepared_result.success is True
-    prepared = json.loads(prepared_result.output)
-    plan = json.loads(
-        (service.plans_root(tmp_path) / f"{prepared['planId']}.json").read_text(encoding="utf-8")
-    )
-    assert plan["sessionId"] == "session-knowledge"
-    assert plan["traceId"] == "trace-prepare"
-    assert plan["providerId"] == "test-provider"
-    assert plan["model"] == "test-model"
-
-    early_apply = first_tool.run(
-        {
-            "operation": "apply_explicit",
-            "planId": prepared["planId"],
-            "expectedFingerprint": prepared["fingerprint"],
-        }
-    )
-    assert early_apply.success is False
-    assert json.loads(early_apply.output)["code"] == "knowledge_operation_not_allowed"
-
-    confirmed_tool = StorydexApplyKnowledgeUpdateTool(
-        workspace_root=tmp_path,
-        turn_contract={
-            **first_contract,
-            "traceId": "trace-confirm",
-            "knowledgeWritePolicy": {
-                "mode": "explicit_binding",
-                "confirmationRequired": True,
-                "confirmed": True,
-            },
-        },
-    )
-    applied_result = confirmed_tool.run(
-        {
-            "operation": "apply_explicit",
-            "planId": prepared["planId"],
-            "expectedFingerprint": prepared["fingerprint"],
-        }
-    )
-    assert applied_result.success is True
-    fact = service.load_facts(tmp_path)["facts"][0]
-    assert fact["provenance"]["providerId"] == "test-provider"
-    assert fact["provenance"]["model"] == "test-model"
-    assert fact["traceId"] == "trace-confirm"
 
 
 def test_json_character_uses_relation_sidecar(

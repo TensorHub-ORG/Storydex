@@ -42,7 +42,7 @@ test("Tauri Stable has an isolated build descriptor and minimum capability", () 
   assert.match(launcher, /call npm run dev/);
   assert.doesNotMatch(
     launcher,
-    /bootstrap_python39|build:coomi-runtime|sync:assets|electron\.exe|select_available_port|127\.0\.0\.1:18081/i
+    /python|fastapi|uvicorn|electron\.exe|127\.0\.0\.1:18081/i
   );
 });
 

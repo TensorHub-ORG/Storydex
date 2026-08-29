@@ -1,4 +1,3 @@
-import asyncio
 import copy
 import json
 import os
@@ -344,167 +343,6 @@ def test_relationship_projection_requires_known_endpoint_and_asserted_semantics(
     assert not any(edge.get("relationType") == "unknown" for edge in payload["graph"]["edges"])
 
 
-def test_relationship_query_accepts_agent_domain_edge_types_without_structural_edges(tmp_path, monkeypatch):
-    """Regression for the agent-evidence-grounded/agent_reviewed 13/21 projection."""
-    chapter_path = "chapters/第1章 雨夜旧水厂/001.md"
-    chapter = tmp_path / chapter_path
-    chapter.parent.mkdir(parents=True)
-    chapter.write_text(
-        "沈砚把陆遥往自己身边拉近，压低声音说：\"从现在开始，你跟着我\"。陆遥点头跟随。\n",
-        encoding="utf-8",
-    )
-
-    entries = [
-        {"id": "overview:project", "title": "项目总览", "category": "overview", "sourcePaths": []},
-        {"id": "plot:mainline", "title": "主线", "category": "plot", "sourcePaths": [chapter_path]},
-        {"id": "chapter:001", "title": "雨夜旧水厂", "category": "plot", "sourcePaths": [chapter_path]},
-        {"id": "entity-001", "title": "沈砚", "category": "characters", "sourcePaths": [chapter_path]},
-        {"id": "entity-002", "title": "陆遥", "category": "characters", "sourcePaths": [chapter_path]},
-        {"id": "entity-003", "title": "灰塔", "category": "setting", "sourcePaths": [chapter_path]},
-        {"id": "entity-004", "title": "匿名报信者", "category": "characters", "sourcePaths": [chapter_path]},
-        {"id": "item-001", "title": "北门铜钥匙", "category": "setting", "sourcePaths": [chapter_path]},
-        {"id": "location-001", "title": "三河镇旧水厂", "category": "setting", "sourcePaths": [chapter_path]},
-        {"id": "location-002", "title": "三河镇", "category": "setting", "sourcePaths": [chapter_path]},
-        {"id": "foreshadow-001", "title": "三角形符号", "category": "plot", "sourcePaths": [chapter_path]},
-        {"id": "foreshadow-002", "title": "沈砚亦是目标", "category": "plot", "sourcePaths": [chapter_path]},
-        {"id": "foreshadow-003", "title": "报信者身份", "category": "plot", "sourcePaths": [chapter_path]},
-    ]
-    node_specs = [
-        ("project:root", "test0802", "project", "overview:project"),
-        ("plot:mainline", "主线", "event", "plot:mainline"),
-        ("chapter:001", "雨夜旧水厂", "chapter", "chapter:001"),
-        ("entity-001", "沈砚", "character", "entity-001"),
-        ("entity-002", "陆遥", "character", "entity-002"),
-        ("entity-003", "灰塔", "faction", "entity-003"),
-        ("entity-004", "匿名报信者", "character", "entity-004"),
-        ("item-001", "北门铜钥匙", "item", "item-001"),
-        ("location-001", "三河镇旧水厂", "location", "location-001"),
-        ("location-002", "三河镇", "location", "location-002"),
-        ("foreshadow-001", "三角形符号", "foreshadow", "foreshadow-001"),
-        ("foreshadow-002", "沈砚亦是目标", "foreshadow", "foreshadow-002"),
-        ("foreshadow-003", "报信者身份", "foreshadow", "foreshadow-003"),
-    ]
-    category_by_entry = {entry["id"]: entry["category"] for entry in entries}
-    nodes = [
-        {
-            "id": node_id,
-            "label": label,
-            "type": node_type,
-            "category": category_by_entry[entry_id],
-            "entryId": entry_id,
-        }
-        for node_id, label, node_type, entry_id in node_specs
-    ]
-
-    def graph_edge(source, target, edge_type, label, *, evidence="结构证据", needs_review=False):
-        return {
-            "source": source,
-            "target": target,
-            "type": edge_type,
-            "label": label,
-            "evidence": evidence,
-            "sourcePath": chapter_path,
-            "needsReview": needs_review,
-        }
-
-    edges = [
-        graph_edge("project:root", "plot:mainline", "plot", "推进"),
-        graph_edge("plot:mainline", "chapter:001", "timeline", "章节"),
-        graph_edge("chapter:001", "entity-001", "appearance", "登场"),
-        graph_edge("chapter:001", "entity-002", "appearance", "登场"),
-        graph_edge("chapter:001", "entity-003", "appearance", "间接登场"),
-        graph_edge("chapter:001", "item-001", "introduction", "引入"),
-        graph_edge("chapter:001", "location-001", "setting", "场景"),
-        graph_edge(
-            "entity-001",
-            "entity-002",
-            "ally",
-            "暂时合作",
-            evidence="001.md 第7行：'从现在开始，你跟着我'；陆遥点头跟随",
-        ),
-        graph_edge(
-            "entity-001",
-            "entity-003",
-            "hostile",
-            "敌对",
-            evidence="001.md 第3行：'我恰好不喜欢他们'",
-        ),
-        graph_edge(
-            "entity-002",
-            "entity-003",
-            "hostile",
-            "被追踪",
-            evidence="001.md 第5行：'三天前有人开始追我。他们自称灰塔'",
-        ),
-        graph_edge("entity-001", "item-001", "possession", "持有"),
-        graph_edge("entity-002", "item-001", "discovery", "发现"),
-        graph_edge("entity-003", "item-001", "pursuit", "追寻"),
-        graph_edge("entity-001", "entity-004", "communication", "收到消息", needs_review=True),
-        graph_edge("entity-004", "entity-003", "suspected_link", "可能关联", needs_review=True),
-        graph_edge("entity-001", "location-001", "location", "行动于"),
-        graph_edge("entity-002", "location-001", "location", "被困于"),
-        graph_edge("location-001", "location-002", "spatial", "位于北边"),
-        graph_edge("item-001", "foreshadow-001", "foreshadowing", "关联伏笔"),
-        graph_edge("entity-001", "foreshadow-002", "foreshadowing", "关联伏笔"),
-        graph_edge("entity-004", "foreshadow-003", "foreshadowing", "关联伏笔", needs_review=True),
-    ]
-    payload = {
-        "schemaVersion": 2,
-        "categorySchemaVersion": WIKI_CATEGORY_SCHEMA_VERSION,
-        "generator": "agent-deep-analysis",
-        "generationMode": "agent-evidence-grounded",
-        "llmStatus": "agent_reviewed",
-        "graphPolicy": {"agentGraphAccepted": True},
-        "knowledgeRevision": 3,
-        "builtFromRevision": 3,
-        "entries": entries,
-        "graph": {"nodes": nodes, "edges": edges},
-    }
-    assert len(nodes) == 13
-    assert len(edges) == 21
-
-    service = StoryWikiService()
-    monkeypatch.setattr(service, "read_or_build", lambda _root: payload)
-
-    relation_view = service.query_graph(tmp_path, category="relationships")
-
-    assert {node["id"] for node in relation_view["graph"]["nodes"]} == {
-        "entity-001", "entity-002", "entity-004",
-    }
-    assert {entry["id"] for entry in relation_view["entries"]} == {
-        "entity-001", "entity-002", "entity-004",
-    }
-    assert len(relation_view["graph"]["edges"]) == 1
-    relation_edge = relation_view["graph"]["edges"][0]
-    assert relation_edge["type"] == "relationship"
-    assert relation_edge["relationType"] == "alliance"
-    assert relation_edge["status"] == "asserted"
-    assert relation_edge["needsReview"] is False
-    assert "沈砚" in relation_edge["evidence"] and "陆遥" in relation_edge["evidence"]
-    assert not {
-        "plot", "timeline", "appearance", "introduction", "setting", "possession",
-        "discovery", "pursuit", "location", "spatial", "foreshadowing",
-    }.intersection(edge["type"] for edge in relation_view["graph"]["edges"])
-    assert relation_view["total"] == {
-        "entryCount": 3,
-        "nodeCount": 3,
-        "edgeCount": 1,
-        "confirmedEdgeCount": 1,
-        "reviewRequiredEdgeCount": 0,
-        "connectedNodeCount": 2,
-        "isolatedNodeCount": 1,
-    }
-
-    payload["graphPolicy"]["agentGraphAccepted"] = False
-    unaccepted_view = service.query_graph(tmp_path, category="relationships")
-    assert unaccepted_view["graph"]["edges"] == []
-
-    payload["graphPolicy"]["agentGraphAccepted"] = True
-    edges[7]["evidence"] = "001.md 第7行：'正文中不存在的合作承诺'"
-    ungrounded_view = service.query_graph(tmp_path, category="relationships")
-    assert ungrounded_view["graph"]["edges"] == []
-
-
 def test_rebuild_does_not_guess_character_names_or_create_placeholder_topics(tmp_path):
     chapters = tmp_path / "chapters"
     chapters.mkdir()
@@ -520,150 +358,6 @@ def test_rebuild_does_not_guess_character_names_or_create_placeholder_topics(tmp
 
     assert not any(node.get("type") == "character" for node in nodes)
     assert placeholder_ids.isdisjoint({node.get("id") for node in nodes})
-
-
-def test_agent_graph_is_ignored_and_graph_refresh_uses_no_provider_call(tmp_path):
-    cards = tmp_path / ".storydex" / "characters"
-    cards.mkdir(parents=True)
-    cards.joinpath("Alice.md").write_text(
-        "# Alice\n\n> 稳定实体ID: `char:alice`\n\n## 关系网络\n- Bob（char:bob）：朋友\n",
-        encoding="utf-8",
-    )
-    cards.joinpath("Bob.md").write_text(
-        "# Bob\n\n> 稳定实体ID: `char:bob`\n",
-        encoding="utf-8",
-    )
-    service = StoryWikiService()
-
-    async def malicious_runner(**_kwargs):
-        return {
-            "completed": True,
-            "reply": json.dumps({
-                "summary": "agent summary",
-                "entries": [{
-                    "id": "character:eve",
-                    "title": "Eve",
-                    "category": "characters",
-                        "sourcePaths": [],
-                }],
-                    # v3 Agent 契约禁止返回 graph.nodes/edges；正式图谱只
-                    # 由本地证据和候选审阅账本投影。
-                    "graph": {},
-                "entityCandidates": [],
-                "relationCandidates": [],
-                "review": {},
-            }, ensure_ascii=False),
-            "events": [],
-            "traceId": "agent-malicious",
-        }
-
-    generated = asyncio.run(service.run_agent_workflow(
-        tmp_path,
-        workflow="generate_wiki",
-        agent_runner=malicious_runner,
-    ))
-    graph = generated["wiki"]["graph"]
-    assert generated["agentCompleted"] is True
-    assert generated["wiki"]["graphPolicy"]["agentGraphAccepted"] is False
-    assert "character:eve" not in {node["id"] for node in graph["nodes"]}
-    assert len([edge for edge in graph["edges"] if edge.get("type") == "relationship"]) == 1
-
-    refresh_calls = 0
-
-    async def forbidden_refresh_runner(**_kwargs):
-        nonlocal refresh_calls
-        refresh_calls += 1
-        raise AssertionError("refresh must not call the provider")
-
-    refreshed = asyncio.run(service.run_agent_workflow(
-        tmp_path,
-        workflow="refresh_wiki_graph",
-        agent_runner=forbidden_refresh_runner,
-    ))
-    assert refresh_calls == 0
-    assert refreshed["agentAttempted"] is False
-    assert refreshed["fallbackUsed"] is False
-
-
-def test_agent_candidate_projection_is_immediately_current_after_ledger_write(tmp_path):
-    worldbook = tmp_path / ".storydex" / "worldbook"
-    chapter = tmp_path / "chapters" / "001.md"
-    worldbook.mkdir(parents=True)
-    chapter.parent.mkdir(parents=True)
-    worldbook.joinpath("潮汐兽.md").write_text("# 潮汐兽\n", encoding="utf-8")
-    worldbook.joinpath("夜港星.md").write_text("# 夜港星\n", encoding="utf-8")
-    quote = "潮汐兽长期栖息在夜港星浅海。"
-    chapter.write_text(quote + "\n", encoding="utf-8")
-
-    relation_service = StoryKnowledgeRelationService()
-    subject = relation_service.ensure_entity(
-        tmp_path,
-        "潮汐兽",
-        source_path=".storydex/worldbook/潮汐兽.md",
-        kind="setting",
-    )
-    obj = relation_service.ensure_entity(
-        tmp_path,
-        "夜港星",
-        source_path=".storydex/worldbook/夜港星.md",
-        kind="setting",
-    )
-    service = StoryWikiService()
-    service.rebuild(tmp_path)
-
-    async def candidate_runner(**_kwargs):
-        return {
-            "completed": True,
-            "reply": json.dumps(
-                {
-                    "entries": [],
-                    "entityCandidates": [],
-                    "relationCandidates": [
-                        {
-                            "subjectId": subject["entityId"],
-                            "predicate": "栖息于",
-                            "objectId": obj["entityId"],
-                            "sourceRefs": [
-                                {
-                                    "path": "chapters/001.md",
-                                    "quote": quote,
-                                    "role": "chapter_evidence",
-                                }
-                            ],
-                        }
-                    ],
-                    "review": {},
-                },
-                ensure_ascii=False,
-            ),
-            "events": [],
-            "traceId": "agent-candidate",
-            "providerId": "test-provider",
-            "model": "test-model",
-        }
-
-    generated = asyncio.run(
-        service.run_agent_workflow(
-            tmp_path,
-            workflow="generate_wiki",
-            agent_runner=candidate_runner,
-        )
-    )
-    assert generated["candidateSubmission"]["acceptedCount"] == 1
-    expected_checksum = service._source_set_checksum(service._collect_sources(tmp_path))
-    assert generated["wiki"]["sourceSetChecksum"] == expected_checksum
-
-    revision = generated["wiki"]["knowledgeRevision"]
-    reloaded = service.read_or_build(tmp_path)
-    assert reloaded["knowledgeRevision"] == revision
-    assert reloaded["sourceSetChecksum"] == expected_checksum
-    graph = service.query_graph(tmp_path, category="setting", include_review=True)
-    assert graph["total"]["nodeCount"] == 2
-    assert graph["total"]["edgeCount"] == 1
-    assert graph["total"]["confirmedEdgeCount"] == 0
-    assert graph["total"]["reviewRequiredEdgeCount"] == 1
-    assert graph["total"]["isolatedNodeCount"] == 2
-    assert any(edge.get("reviewStatus") == "review_required" for edge in graph["graph"]["edges"])
 
 
 def test_confirmed_fact_with_deleted_quote_is_removed_without_discarding_projection(tmp_path):
@@ -1244,9 +938,7 @@ def test_invalid_projection_quarantines_bad_objects_and_keeps_publishing(tmp_pat
             tmp_path,
             candidate,
             workflow="test_invalid_projection",
-            status="completed",
-            agent_result=None,
-            sources=sources,
+            status="completed",            sources=sources,
             changed_paths=[],
         )
         persisted = json.loads(service.wiki_json_path(tmp_path).read_text(encoding="utf-8"))
@@ -1301,9 +993,7 @@ def test_blocking_revision_mismatch_keeps_last_good_projection(tmp_path):
             tmp_path,
             broken,
             workflow="test_blocking_diagnostic",
-            status="completed",
-            agent_result=None,
-            sources=sources,
+            status="completed",            sources=sources,
             changed_paths=[],
         )
     finally:
@@ -1393,9 +1083,7 @@ def test_invalid_previous_projection_is_never_served_as_is(tmp_path):
         tmp_path,
         invalid_candidate,
         workflow="test_invalid_projection",
-        status="completed",
-        agent_result=None,
-        sources=sources,
+        status="completed",        sources=sources,
         changed_paths=[],
     )
 
@@ -1778,9 +1466,7 @@ def test_ungrounded_relationship_edge_is_dropped_without_losing_the_graph(tmp_pa
         tmp_path,
         candidate,
         workflow="test_quarantine",
-        status="completed",
-        agent_result=None,
-        sources=sources,
+        status="completed",        sources=sources,
         changed_paths=[],
     )
 

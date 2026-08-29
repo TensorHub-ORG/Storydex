@@ -1,9 +1,9 @@
 "use strict";
 
-// Build a deterministic inventory of legacy FastAPI routes, Vue API consumers,
-// and the Axum routes exposed by the Rust Stable backend. The inventory is
-// descriptive only: it never starts a service, reads a user project, or treats
-// an unconsumed legacy route as a required migration.
+// Build a deterministic inventory of historical Python routes, Vue API
+// consumers, and the Axum routes exposed by the Rust Stable backend. The
+// inventory is descriptive only: it never starts a service, reads a user
+// project, or treats an unconsumed Python route as a required migration.
 
 const fs = require("node:fs");
 const path = require("node:path");
@@ -413,7 +413,7 @@ function buildInventory() {
     generatedBy: "scripts/generate_rust_backend_interface_inventory.cjs",
     stableBoundary: {
       runtime: "Tauri 2 + storydex-agentd + Rust Coomi",
-      legacyRuntime: "Electron + Python/FastAPI retained for compatibility scripts, differential tests, selected full CI jobs, and manual rollback",
+      legacyRuntime: "Python/FastAPI routes are scanned for historical comparison only; Electron and Python are not launched by the Stable or release paths",
       realUserProjects: "never read by inventory or replay checks"
     },
     counts: {
@@ -421,6 +421,7 @@ function buildInventory() {
       frontendConsumers: frontendConsumers.length,
       rustRoutes: rustRoutes.length,
       frontendConsumersWithoutPythonRoute: frontendCoverage.filter((item) => !item.pythonRoutePresent).length,
+      frontendConsumersWithPythonRoute: frontendCoverage.filter((item) => item.pythonRoutePresent).length,
       frontendConsumersImplementedInRust: frontendCoverage.filter((item) => item.rustRoutePresent).length,
       frontendConsumersPendingInRust: frontendCoverage.filter((item) => !item.rustRoutePresent).length,
       contractsImplemented: contracts.filter((item) => item.status === "implemented").length,

@@ -264,46 +264,6 @@ jobs:
         if: inputs.full || inputs.windows_release
         run: python scripts/verify_coomi_runtime.py
 
-  backend-compatibility:
-    name: backend-compatibility
-    needs: changes
-    if: ${{ needs.changes.outputs.upstream_verified != 'true' && !inputs.full && !inputs.windows_release && needs.changes.outputs.backend == 'true' }}
-    runs-on: windows-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.9"
-          cache: pip
-          cache-dependency-path: |
-            requirements.lock
-            apps/backend/requirements-test.lock
-      - run: python -m pip install --require-hashes -r requirements.lock
-      - run: python -m pip install -r apps/backend/requirements-test.txt
-      - name: Compile and import all backend modules on packaged Python
-        working-directory: apps/backend
-        run: |
-          python -m compileall -q api core services
-          python -c "import main; assert main.app.title"
-      - name: Session, SSE, Git, and runtime integration regressions
-        working-directory: apps/backend
-        run: >-
-          python -m pytest -q
-          --timeout=120
-          tests/test_agent_stream_responsiveness.py
-          tests/test_agent_git_autocommit_service.py
-          tests/test_storydex_intent_service.py
-          tests/test_storydex_runtime_fixes.py
-          --junitxml=test-results/integration.xml
-      - name: Upload compatibility and integration report
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: backend-compatibility-results
-          path: apps/backend/test-results
-          if-no-files-found: warn
-
   frontend-tests:
     name: frontend-tests
     needs: changes
@@ -450,7 +410,6 @@ jobs:
       - source-policy
       - reused-windows-checks
       - backend-tests
-      - backend-compatibility
       - pc-runtime-tests
       - frontend-tests
       - desktop-unit-tests
@@ -489,8 +448,6 @@ jobs:
           android = os.environ["ANDROID"].lower() == "true"
           if not upstream_verified and (full or (backend and not windows_release)):
               required.add("backend-tests")
-          if not upstream_verified and backend and not full and not windows_release:
-              required.add("backend-compatibility")
           if not upstream_verified and (full or windows_release or pc_runtime):
               required.add("pc-runtime-tests")
           if not upstream_verified and (full or windows_release or frontend):

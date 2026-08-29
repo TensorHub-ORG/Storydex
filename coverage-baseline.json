@@ -12,11 +12,7 @@
         "branches": 70.8
       },
       "critical": {
-        "api/routes_agent.py": { "lines": 87.5 },
-        "services/agent_git_autocommit_service.py": { "lines": 97.4 },
-        "services/coomi_agent_service.py": { "lines": 79.9 },
-        "services/git_service.py": { "lines": 91.3 },
-        "services/storydex_intent_service.py": { "lines": 89.9 }
+        "services/git_service.py": { "lines": 91.3 }
       }
     },
     "frontend": {

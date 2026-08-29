@@ -62,7 +62,7 @@ describe("API envelope and transport contracts", () => {
     window.storydexDesktop = {
       platform: "win32",
       backendAuthToken: " runtime-token ",
-      versions: { electron: "", chrome: "WebView2", node: "" }
+      versions: { tauri: "2.0.5" }
     };
     expect(getRuntimeAuthToken()).toBe("runtime-token");
     delete window.storydexDesktop;

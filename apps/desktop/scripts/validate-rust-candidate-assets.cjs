@@ -277,7 +277,7 @@ function parseArgs(argv) {
 function usage() {
   return [
     "Usage: node validate-rust-candidate-assets.cjs --root <candidate-staging-root> [--manifest <policy.json>] [--json]",
-    "The root must be an isolated directory inside this repository; Stable Electron assets and real user projects are never scanned."
+    "The root must be an isolated directory inside this repository; legacy desktop assets and real user projects are never scanned."
   ].join("\n");
 }
 

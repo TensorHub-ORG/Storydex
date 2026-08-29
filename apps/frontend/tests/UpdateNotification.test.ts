@@ -22,7 +22,7 @@ function installBridge(updater: StorydexDesktopUpdaterBridge): void {
     configurable: true,
     value: {
       platform: "win32",
-      versions: { electron: "", chrome: "", node: "" },
+      versions: { tauri: "2.0.5" },
       updater
     } satisfies StorydexDesktopBridge
   });

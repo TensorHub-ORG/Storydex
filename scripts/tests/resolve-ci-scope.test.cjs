@@ -57,7 +57,7 @@ test("PC runtime changes use focused runtime checks without backend coverage", (
 });
 
 test("desktop and documentation changes stay scoped", () => {
-  const desktop = classifyChangedPaths(["apps/desktop/electron/main.cjs"]);
+  const desktop = classifyChangedPaths(["apps/desktop/tauri-preview/src/main.rs"]);
   assert.equal(desktop.desktop, true);
   assert.equal(desktop.backend, false);
   assert.equal(desktop.frontend, false);

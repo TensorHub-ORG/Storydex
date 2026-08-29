@@ -29,7 +29,6 @@ from services.story_chapter_action_service import (
     validate_chapter_plan,
 )
 from services.story_project_service import (
-    DEFAULT_CHAPTER_TEMPLATE_ID,
     SINGLE_FILE_CHAPTER_TEMPLATE_ID,
     SINGLE_FILE_CONTENT_MODE,
     get_story_project_service,
@@ -196,37 +195,21 @@ def test_planner_still_continues_the_active_chapter(tmp_path: Path) -> None:
     assert targets[0]["path"] == "chapters/第1章 开端/002.md"
 
 
-def test_turn_contract_publishes_the_authoritative_chapter_plan(tmp_path: Path) -> None:
-    from services.storydex_orchestration_service import get_storydex_orchestration_service
-
+def test_planner_publishes_the_authoritative_chapter_plan(tmp_path: Path) -> None:
     service = get_story_project_service()
     service.ensure_project_structure(tmp_path)
     active = _write_chapter(tmp_path, "第1章 开端")
 
-    contract = get_storydex_orchestration_service().build_turn_contract(
+    targets = service.plan_story_generation_targets(
         tmp_path,
-        prompt="请写第二章的剧情",
+        template=service.default_chapter_directory_template(),
+        fragment_count=1,
         active_file=active,
-        story_generation={"chapterTemplateId": DEFAULT_CHAPTER_TEMPLATE_ID},
-        intent_frame={
-            "primary": "story_generation",
-            "confidence": 1.0,
-            "source": "test",
-            "secondary": [],
-            "needsTools": True,
-            "needsPlanning": True,
-            "isAdvisory": False,
-        },
+        prompt="请写第二章的剧情",
     )
-    plan = contract["turnPlan"]
-    assert plan["chapterAction"] == CHAPTER_ACTION_CREATE_SPECIFIC_CHAPTER
-    assert plan["targetChapterNumber"] == 2
-    assert plan["authoritativeChapterPath"].startswith("chapters/第2章 ")
-    assert plan["authoritativeFragmentPaths"] == [
-        target["path"] for target in plan["fragmentTargets"]
-    ]
-    for fragment_path in plan["authoritativeFragmentPaths"]:
-        assert fragment_path.startswith(plan["authoritativeChapterPath"] + "/")
+    assert len(targets) == 1
+    assert targets[0]["path"].startswith("chapters/第2章 ")
+    assert targets[0]["writeMode"] == "replace"
 
 
 def test_validation_accepts_a_coherent_plan(tmp_path: Path) -> None:
