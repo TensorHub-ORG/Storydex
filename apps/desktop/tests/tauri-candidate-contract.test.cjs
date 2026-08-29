@@ -19,6 +19,10 @@ test("Tauri Stable has an isolated build descriptor and minimum capability", () 
     path.resolve(desktopRoot, "..", "..", "scripts", "run_desktop_dev.bat"),
     "utf8"
   );
+  const rootLauncher = fs.readFileSync(
+    path.resolve(desktopRoot, "..", "..", "start-desktop.bat"),
+    "utf8"
+  );
   assert.equal(config.identifier, "cn.tensorhub.storydex");
   assert.equal(config.build.frontendDist, "../../frontend/dist");
   assert.equal(config.build.beforeDevCommand, "npm --prefix ../frontend run dev");
@@ -39,7 +43,13 @@ test("Tauri Stable has an isolated build descriptor and minimum capability", () 
   assert.match(desktopPackage.scripts["smoke:tauri-preview"], /smoke:tauri/);
   assert.match(launcher, /cargo build[^\r\n]*storydex-agentd[^\r\n]*storydex-coomi-bridge/);
   assert.match(launcher, /storydex-coomi-bridge\.exe/);
+  assert.match(launcher, /Get-CimInstance Win32_Process/);
+  assert.match(launcher, /RUNTIME_AGENTD_EXE/);
+  assert.match(launcher, /RUNTIME_BRIDGE_EXE/);
+  assert.match(launcher, /Stopped orphan Rust runtime process/);
+  assert.match(launcher, /Rust runtime process is still running/);
   assert.match(launcher, /call npm run dev/);
+  assert.match(rootLauncher, /pause/);
   assert.doesNotMatch(
     launcher,
     /python|fastapi|uvicorn|electron\.exe|127\.0\.0\.1:18081/i
