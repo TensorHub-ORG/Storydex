@@ -67,13 +67,13 @@ cargo build --manifest-path apps/desktop/agent-runtime/Cargo.toml --locked -p st
 npm --prefix apps/desktop run dev
 ```
 
-桌面端的默认 `dev`、构建、打包和 Tauri 检查入口位于 `apps/desktop/package.json`。普通 Windows Stable 开发不需要安装 Python；旧 Python 全栈脚本仅用于兼容路径和差分验证：
+桌面端的默认 `dev`、构建、打包和 Tauri 检查入口位于 `apps/desktop/package.json`。普通 Windows Stable 开发不需要安装 Python；默认入口直接启动 Rust/Tauri：
 
 ```powershell
-.\scripts\run_fullstack_dev.bat
+.\scripts\run_desktop_dev.bat
 ```
 
-运行兼容脚本前，请确认自己是在验证旧后端链路，而不是准备 Tauri 发行包。
+`run_fullstack_dev.bat` 仅保留为迁移期兼容别名，不再启动 Python/FastAPI。
 
 ## 文档
 

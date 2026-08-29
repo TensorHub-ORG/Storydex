@@ -10,19 +10,19 @@ export function getRuntimeAuthToken(): string {
 }
 
 function resolveApiBaseUrl(): string {
-  const envBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim();
-  if (envBaseUrl) {
-    return envBaseUrl;
-  }
-
+  // The Tauri sidecar owns the dynamically assigned Rust runtime endpoint.
+  // Prefer it whenever the desktop shell injects one so stale developer
+  // environment variables cannot redirect the app to the legacy backend.
   const desktopBaseUrl =
     typeof window !== "undefined" ? window.storydexDesktop?.backendBaseUrl?.trim() || "" : "";
   if (desktopBaseUrl) {
     return desktopBaseUrl;
   }
 
-  if (typeof window !== "undefined" && window.location.protocol === "file:") {
-    return "http://127.0.0.1:18081/api/v1";
+  // Browser-only development may still opt into an explicit API server.
+  const envBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim();
+  if (envBaseUrl) {
+    return envBaseUrl;
   }
 
   return "/api/v1";

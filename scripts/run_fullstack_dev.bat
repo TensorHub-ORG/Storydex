@@ -3,55 +3,7 @@ setlocal EnableExtensions
 chcp 65001 >nul
 
 set "ROOT=%~dp0.."
-set "BOOTSTRAP_SCRIPT=%ROOT%\scripts\bootstrap_python39.ps1"
-set "PORT_SELECTOR=%ROOT%\scripts\select_available_port.ps1"
-set "PYTHON_EXE=%ROOT%\.python39\Scripts\python.exe"
-
-echo [Storydex] Cleaning stale Storydex dev processes...
-powershell -NoProfile -Command ^
-  "$ports = 18080, 18081, 5173; foreach ($port in $ports) { Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { try { Stop-Process -Id $_ -Force -ErrorAction Stop } catch {} } }"
-
-timeout /t 1 /nobreak >nul
-
-echo [Storydex] Preparing project-local Python 3.9 runtime...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%BOOTSTRAP_SCRIPT%" -InstallRequirements || goto :error
-
-if not exist "%PYTHON_EXE%" (
-  echo [Storydex] Project-local Python 3.9 was not created: %PYTHON_EXE%
-  goto :error
-)
-
-echo [Storydex] Launching backend dev window (uvicorn)...
-set "PYTHONNOUSERSITE=1"
-set "PYTHONUTF8=1"
-set "PYTHONIOENCODING=utf-8"
-start "Storydex Backend Dev" /D "%ROOT%\apps\backend" cmd /k ""%PYTHON_EXE%" -m uvicorn main:app --host 127.0.0.1 --port 18081"
-
-echo [Storydex] Waiting for backend health check...
-powershell -NoProfile -Command ^
-  "$deadline = (Get-Date).AddSeconds(45); while ((Get-Date) -lt $deadline) { try { $resp = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:18081/api/v1/sys/health' -TimeoutSec 2; if ($resp.StatusCode -eq 200) { exit 0 } } catch {}; Start-Sleep -Seconds 1 }; exit 1"
-if errorlevel 1 (
-  echo [Storydex] Backend was not ready within 45 seconds. Frontend will still start and auto-retry.
-) else (
-  echo [Storydex] Backend is healthy.
-)
-
-set "STORYDEX_FRONTEND_PORT="
-for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%PORT_SELECTOR%" -PreferredPort 5173`) do set "STORYDEX_FRONTEND_PORT=%%P"
-if not defined STORYDEX_FRONTEND_PORT (
-  echo [Storydex] No available frontend development port was found.
-  goto :error
-)
-set "STORYDEX_DESKTOP_URL=http://127.0.0.1:%STORYDEX_FRONTEND_PORT%"
-
-echo [Storydex] Launching frontend dev window (npm run dev)...
-start "Storydex Frontend Dev" /D "%ROOT%\apps\frontend" cmd /k "npm install && npm run dev"
-
-echo [Storydex] Dev stack started.
-echo [Storydex] Frontend: %STORYDEX_DESKTOP_URL%
-echo [Storydex] Backend : http://127.0.0.1:18081
-exit /b 0
-
-:error
-echo [Storydex] Fullstack dev startup failed.
-exit /b 1
+echo [Storydex] 已切换到 Rust/Tauri 默认开发入口。
+echo [Storydex] Python/FastAPI 旧全栈脚本不再作为产品启动路径。
+call "%ROOT%\scripts\run_desktop_dev.bat" %*
+exit /b %errorlevel%
