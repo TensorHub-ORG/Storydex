@@ -995,32 +995,6 @@ interface WikiReviewDraft {
   rejectNote: string;
 }
 
-interface StoryWikiAgentWorkflowResponse {
-  ok: boolean;
-  workflow: string;
-  status: string;
-  traceId: string;
-  agentAttempted: boolean;
-  agentCompleted: boolean;
-  fallbackUsed: boolean;
-  summary: string;
-  changedSourcePaths: string[];
-  writtenPaths: string[];
-  errorMessage?: string;
-  wiki: StoryWikiData;
-  review?: Record<string, unknown>;
-}
-
-interface StoryWikiAgentJobResponse {
-  jobId: string;
-  workflow: string;
-  status: "running" | "completed" | "failed";
-  createdAt: string;
-  updatedAt: string;
-  result?: StoryWikiAgentWorkflowResponse | null;
-  errorMessage?: string;
-}
-
 interface WikiGraphNode {
   id: string;
   label: string;
@@ -1076,10 +1050,8 @@ const errorMessage = ref("");
 const snapshot = ref<EvolutionSnapshot>({});
 const wikiLoading = ref(false);
 const wikiRebuilding = ref(false);
-const wikiAgentRunning = ref(false);
 const wikiAgentStatus = ref("");
 const wikiAgentTone = ref<"idle" | "success" | "warning" | "error">("idle");
-const wikiAgentJobId = ref("");
 const wikiErrorMessage = ref("");
 const wikiData = ref<StoryWikiData | null>(null);
 const wikiGraphQueryData = ref<StoryWikiGraphQueryResponse | null>(null);
@@ -1177,7 +1149,7 @@ const WIKI_TONE_LABELS: Record<string, string> = {
 };
 
 const panelLoading = computed(() => (
-  props.relationshipOnly ? wikiLoading.value || wikiRebuilding.value || wikiAgentRunning.value : loading.value
+  props.relationshipOnly ? wikiLoading.value || wikiRebuilding.value : loading.value
 ));
 
 const changeEntries = computed<ChangeEntry[]>(() => {
@@ -1826,12 +1798,6 @@ const wikiWorkflowLabel = computed(() => {
   return `${workflow} / ${status}`;
 });
 
-const WIKI_AGENT_ENDPOINTS: Record<"generate" | "update" | "review", string> = {
-  generate: "/story/wiki/agent/generate",
-  update: "/story/wiki/agent/update",
-  review: "/story/wiki/agent/review",
-};
-
 interface WikiGraphQueryParams {
   q?: string;
   category?: StoryWikiCategory;
@@ -2259,7 +2225,7 @@ async function loadWikiReviewQueue(): Promise<void> {
       wikiReviewDraft(candidate);
     }
   } catch (error: unknown) {
-    wikiReviewError.value = describeWikiAgentError(error, "无法读取关系待确认队列。");
+    wikiReviewError.value = describeWikiRequestError(error, "无法读取关系待确认队列。");
   } finally {
     wikiReviewLoading.value = false;
   }
@@ -2306,7 +2272,7 @@ async function confirmWikiCandidate(candidate: WikiReviewCandidate): Promise<voi
     unwrapEnvelope(response.data, "确认关系候选失败。");
     await loadWiki();
   } catch (error: unknown) {
-    wikiReviewError.value = describeWikiAgentError(error, "确认关系候选失败。");
+    wikiReviewError.value = describeWikiRequestError(error, "确认关系候选失败。");
   } finally {
     wikiReviewActionId.value = "";
   }
@@ -2332,7 +2298,7 @@ async function rejectWikiCandidate(candidate: WikiReviewCandidate): Promise<void
     unwrapEnvelope(response.data, "驳回关系候选失败。");
     await loadWiki();
   } catch (error: unknown) {
-    wikiReviewError.value = describeWikiAgentError(error, "驳回关系候选失败。");
+    wikiReviewError.value = describeWikiRequestError(error, "驳回关系候选失败。");
   } finally {
     wikiReviewActionId.value = "";
   }
@@ -2389,77 +2355,7 @@ function runWikiAgentWorkflow(workflow: "generate" | "update" | "review"): void 
   wikiErrorMessage.value = "";
 }
 
-async function pollWikiAgentJob(jobId: string): Promise<void> {
-  while (wikiAgentJobId.value === jobId) {
-    const response = await apiClient.get<ApiEnvelope<StoryWikiAgentJobResponse>>(
-      `/story/wiki/agent/jobs/${encodeURIComponent(jobId)}`
-    );
-    const data = unwrapEnvelope(response.data, "Story wiki agent job status failed.");
-    const job = data.data;
-    if (job.status === "running") {
-      await waitForWikiAgentPoll();
-      continue;
-    }
-    if (job.status === "failed") {
-      throw new Error(job.errorMessage || "Agent WIKI 后台任务失败。");
-    }
-    if (!job.result) {
-      throw new Error("Agent WIKI 后台任务未返回结果。");
-    }
-    await applyWikiAgentWorkflowResult(job.result);
-    stopWikiAgentPolling();
-    wikiAgentRunning.value = false;
-    return;
-  }
-}
-
-async function applyWikiAgentWorkflowResult(payload: StoryWikiAgentWorkflowResponse): Promise<void> {
-  if (payload.wiki) {
-    wikiData.value = payload.wiki;
-    ensureWikiSelection();
-    await Promise.all([
-      loadWikiGraph(currentWikiGraphQueryParams()),
-      loadWikiReviewQueue(),
-    ]);
-  }
-  if (payload.fallbackUsed) {
-    wikiAgentTone.value = "warning";
-    wikiAgentStatus.value = `${payload.summary} 已使用本地 fallback。`;
-  } else {
-    wikiAgentTone.value = "success";
-    wikiAgentStatus.value = payload.summary || "Agent WIKI 流程完成。";
-  }
-  if (payload.errorMessage) {
-    wikiAgentStatus.value += ` ${payload.errorMessage}`;
-  }
-}
-
-let wikiAgentPollTimer: ReturnType<typeof setTimeout> | null = null;
-let resolveWikiAgentPoll: (() => void) | null = null;
-
-function waitForWikiAgentPoll(): Promise<void> {
-  return new Promise((resolve) => {
-    resolveWikiAgentPoll = resolve;
-    wikiAgentPollTimer = setTimeout(() => {
-      wikiAgentPollTimer = null;
-      resolveWikiAgentPoll = null;
-      resolve();
-    }, 3000);
-  });
-}
-
-function stopWikiAgentPolling(): void {
-  wikiAgentJobId.value = "";
-  if (wikiAgentPollTimer) {
-    clearTimeout(wikiAgentPollTimer);
-    wikiAgentPollTimer = null;
-  }
-  const resolvePending = resolveWikiAgentPoll;
-  resolveWikiAgentPoll = null;
-  resolvePending?.();
-}
-
-function describeWikiAgentError(error: unknown, fallback: string): string {
+function describeWikiRequestError(error: unknown, fallback: string): string {
   const response = error && typeof error === "object"
     ? (error as { response?: { data?: ApiEnvelope<unknown> } }).response
     : undefined;
@@ -2485,7 +2381,7 @@ async function syncWiki(): Promise<void> {
     return;
   }
   // 不打断手动 Agent 流程或重建。
-  if (wikiAgentRunning.value || wikiRebuilding.value || wikiLoading.value) {
+  if (wikiRebuilding.value || wikiLoading.value) {
     wikiSyncPending = true;
     return;
   }
@@ -3009,7 +2905,6 @@ watch(
 );
 
 onBeforeUnmount(() => {
-  stopWikiAgentPolling();
   if (wikiSyncTimer) {
     clearTimeout(wikiSyncTimer);
     wikiSyncTimer = null;
@@ -3091,10 +2986,8 @@ defineExpose({
     wikiWorkflowLabel,
     snapshot,
     wikiData,
-    wikiAgentRunning,
     wikiAgentStatus,
     wikiAgentTone,
-    wikiAgentJobId,
     wikiGraphQueryData,
     wikiGraphSearchInput,
     wikiGraphSearchQuery,
@@ -3152,7 +3045,6 @@ defineExpose({
     confirmWikiCandidate,
     rejectWikiCandidate,
     runWikiAgentWorkflow,
-    pollWikiAgentJob,
     refreshPanel,
     syncWiki,
     ensureWikiSelection,

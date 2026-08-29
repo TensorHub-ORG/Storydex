@@ -7,7 +7,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from api.routes_agent import router as agent_router
 from api.routes_auth import router as auth_router
 from api.routes_file import router as file_router
 from api.routes_help import router as help_router
@@ -50,7 +49,6 @@ app.add_middleware(
 )
 
 app.include_router(sys_router, prefix="/api/v1")
-app.include_router(agent_router, prefix="/api/v1")
 app.include_router(file_router, prefix="/api/v1")
 app.include_router(help_router, prefix="/api/v1")
 app.include_router(story_router, prefix="/api/v1")
