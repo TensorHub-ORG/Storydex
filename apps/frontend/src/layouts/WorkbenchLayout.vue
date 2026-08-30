@@ -46,6 +46,25 @@
     <UpdateNotification />
 
     <SystemSettingsWindow :visible="uiStore.systemSettingsOpen" @close="uiStore.setSystemSettingsOpen(false)" />
+
+    <div v-if="closeDialogVisible" class="close-guard-backdrop" role="presentation" @click.self="cancelClose">
+      <section class="close-guard-dialog" role="dialog" aria-modal="true" aria-labelledby="close-guard-title">
+        <div class="close-guard-icon" aria-hidden="true">
+          <span class="material-symbols-rounded">pending_actions</span>
+        </div>
+        <div class="close-guard-copy">
+          <h2 id="close-guard-title">任务仍在进行</h2>
+          <p>Coomi 仍在执行或有待处理消息。现在退出可能中断尚未保存的结果。</p>
+        </div>
+        <div class="close-guard-actions">
+          <button type="button" class="close-guard-button" @click="cancelClose">取消</button>
+          <button type="button" class="close-guard-button" @click="waitAndClose">等待完成后退出</button>
+          <button type="button" class="close-guard-button danger" :disabled="stoppingForClose" @click="stopAndClose">
+            {{ stoppingForClose ? "正在停止" : "停止任务并退出" }}
+          </button>
+        </div>
+      </section>
+    </div>
   </div>
 </template>
 
@@ -67,15 +86,61 @@ import UpdateNotification from "@/components/UpdateNotification.vue";
 import { useTheme } from "@/composables/useTheme";
 import { useUiStore } from "@/stores/ui";
 import { useWorkspaceStore } from "@/stores/workspace";
+import { useAgentStore } from "@/stores/agent";
 import { paneFontScaleStyle } from "@/utils/paneFontScale";
 
 const uiStore = useUiStore();
 const workspaceStore = useWorkspaceStore();
+const agentStore = useAgentStore();
 const { applyTheme, applyPaneFontScale, applyEditorFont } = useTheme();
 applyPaneFontScale();
 applyEditorFont(uiStore.fontFamily);
 
 const workspaceRef = ref<HTMLElement | null>(null);
+const closeDialogVisible = ref(false);
+const exitWhenIdle = ref(false);
+const stoppingForClose = ref(false);
+let detachCloseRequested: (() => void) | undefined;
+
+const hasActiveAgentWork = computed(() => agentStore.isRunning || agentStore.followups.some(
+  (message) => !["sent", "cancelled", "failed"].includes(message.status)
+));
+
+function confirmClose(): void {
+  void window.storydexDesktop?.confirmMainWindowClose?.();
+}
+
+function requestClose(): void {
+  if (!hasActiveAgentWork.value) {
+    confirmClose();
+    return;
+  }
+  closeDialogVisible.value = true;
+}
+
+function cancelClose(): void {
+  closeDialogVisible.value = false;
+  exitWhenIdle.value = false;
+}
+
+function waitAndClose(): void {
+  closeDialogVisible.value = false;
+  exitWhenIdle.value = true;
+}
+
+async function stopAndClose(): Promise<void> {
+  if (stoppingForClose.value) return;
+  stoppingForClose.value = true;
+  closeDialogVisible.value = false;
+  try {
+    await agentStore.stopActiveRun();
+    confirmClose();
+  } catch {
+    closeDialogVisible.value = true;
+  } finally {
+    stoppingForClose.value = false;
+  }
+}
 
 const ACTIVITY_BAR_WIDTH = 48;
 const SPLITTER_WIDTH = 8;
@@ -159,6 +224,14 @@ function updateViewportWidth(): void {
 onMounted(() => {
   updateViewportWidth();
   window.addEventListener("resize", updateViewportWidth, { passive: true });
+  detachCloseRequested = window.storydexDesktop?.onCloseRequested?.(requestClose);
+});
+
+watch(hasActiveAgentWork, (active) => {
+  if (!active && exitWhenIdle.value) {
+    exitWhenIdle.value = false;
+    confirmClose();
+  }
 });
 
 watch(
@@ -227,6 +300,7 @@ function startResize(target: "sidebar" | "agent", event: PointerEvent): void {
 onBeforeUnmount(() => {
   document.body.classList.remove("is-resizing-panels");
   window.removeEventListener("resize", updateViewportWidth);
+  detachCloseRequested?.();
 });
 
 function clamp(value: number, min: number, max: number): number {
@@ -237,6 +311,78 @@ function clamp(value: number, min: number, max: number): number {
 <style scoped>
 .workspace {
   position: relative;
+}
+
+.close-guard-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(0 0 0 / 42%);
+}
+
+.close-guard-dialog {
+  width: min(460px, 100%);
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  gap: 14px;
+  padding: 20px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-card);
+  color: var(--text-main);
+  box-shadow: 0 18px 52px rgb(0 0 0 / 28%);
+}
+
+.close-guard-icon {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  color: var(--warning, #b7791f);
+}
+
+.close-guard-copy h2 {
+  margin: 0 0 6px;
+  font-size: 16px;
+  letter-spacing: 0;
+}
+
+.close-guard-copy p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.close-guard-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.close-guard-button {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-input);
+  color: var(--text-main);
+  cursor: pointer;
+}
+
+.close-guard-button:hover {
+  background: var(--bg-hover);
+}
+
+.close-guard-button.danger {
+  border-color: #c42b1c;
+  background: #c42b1c;
+  color: #fff;
 }
 
 .workspace-font-pane {

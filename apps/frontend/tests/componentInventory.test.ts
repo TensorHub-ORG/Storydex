@@ -59,6 +59,7 @@ import UpdateNotification from "@/components/UpdateNotification.vue";
 import WorkspaceStartPage from "@/components/WelcomeStartPage.vue";
 import WorkbenchLayout from "@/layouts/WorkbenchLayout.vue";
 import { useUiStore } from "@/stores/ui";
+import { useAgentStore } from "@/stores/agent";
 import FilePreviewView from "@/views/FilePreviewView.vue";
 import WorkbenchView from "@/views/WorkbenchView.vue";
 
@@ -170,5 +171,58 @@ describe("frontend component inventory", () => {
     expect((editorPane.element as HTMLElement).style.getPropertyValue("--ui-pane-scaled-px-16")).toBe("24px");
     expect((editorPane.element as HTMLElement).style.getPropertyValue("--ui-pane-scaled-px-14")).toBe("21px");
     wrapper.unmount();
+  });
+
+  it("guards native close requests while Agent work is active", async () => {
+    const confirmMainWindowClose = vi.fn().mockResolvedValue(undefined);
+    let closeListener: (() => void) | undefined;
+    Object.defineProperty(window, "storydexDesktop", {
+      configurable: true,
+      value: {
+        platform: "win32",
+        versions: { tauri: "2.0.5" },
+        confirmMainWindowClose,
+        onCloseRequested: (listener: () => void) => {
+          closeListener = listener;
+          return vi.fn();
+        }
+      } satisfies StorydexDesktopBridge
+    });
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const agentStore = useAgentStore();
+    agentStore.isRunning = true;
+    agentStore.stopActiveRun = vi.fn(async () => { agentStore.isRunning = false; });
+    const wrapper = shallowMount(WorkbenchLayout, { global: { plugins: [pinia] } });
+
+    closeListener?.();
+    await nextTick();
+    expect(wrapper.find(".close-guard-dialog").exists()).toBe(true);
+    expect(confirmMainWindowClose).not.toHaveBeenCalled();
+
+    await wrapper.findAll(".close-guard-button")[0].trigger("click");
+    await nextTick();
+    expect(wrapper.find(".close-guard-dialog").exists()).toBe(false);
+    expect(confirmMainWindowClose).not.toHaveBeenCalled();
+
+    closeListener?.();
+    await nextTick();
+    await wrapper.findAll(".close-guard-button")[1].trigger("click");
+    agentStore.isRunning = false;
+    await nextTick();
+    expect(confirmMainWindowClose).toHaveBeenCalledTimes(1);
+
+    confirmMainWindowClose.mockClear();
+    agentStore.isRunning = true;
+    closeListener?.();
+    await nextTick();
+    await wrapper.findAll(".close-guard-button")[2].trigger("click");
+    await flushPromises();
+    expect(agentStore.stopActiveRun).toHaveBeenCalledTimes(1);
+    expect(confirmMainWindowClose).toHaveBeenCalledTimes(1);
+    expect(wrapper.find(".close-guard-dialog").exists()).toBe(false);
+
+    wrapper.unmount();
+    Object.defineProperty(window, "storydexDesktop", { configurable: true, value: undefined });
   });
 });

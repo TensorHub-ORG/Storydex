@@ -110,6 +110,19 @@ describe("workspace store deterministic helpers", () => {
     expect(u.isStoryDiagnosticCandidate("chapters/a.md")).toBe(true); expect(u.isStoryDiagnosticCandidate("chapters/a.variables.json")).toBe(false); expect(u.isStoryDiagnosticCandidate("other/a.md")).toBe(false);
     expect(u.normalizeDiagnostics(undefined)).toEqual([]);
     expect(u.normalizeDiagnostics([null, { relativePath: "chapters/a.md", message: " issue ", source: "", severity: "", line: "2", column: 1 }, { relativePath: "", message: "bad" }] as never)).toHaveLength(1);
+    expect(u.normalizeDiagnostics([{
+      relativePath: "chapters/a.md",
+      message: "BOM",
+      source: "workspace",
+      severity: "warning",
+      code: "utf8_bom",
+      evidence: "EF BB BF",
+      fixes: [{ id: "remove_utf8_bom", label: "移除 BOM" }]
+    }] as never)[0]).toMatchObject({
+      code: "utf8_bom",
+      evidence: "EF BB BF",
+      fixes: [{ id: "remove_utf8_bom", label: "移除 BOM" }]
+    });
     expect(u.isStorySegmentPath("chapters/seg-one.md", ".txt")).toBe(true); expect(u.isStorySegmentPath("chapters/one.txt", ".txt")).toBe(true); expect(u.isStorySegmentPath("chapters/one.variables.json", ".md")).toBe(false);
     expect(u.findFirstFile(tree)).toBe("root.py"); expect(u.findFirstFile([{ kind: "directory", children: [] }] as never)).toBe("");
     expect(u.collectFilePaths(tree).has("nested/b.json")).toBe(true);

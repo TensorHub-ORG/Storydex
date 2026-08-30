@@ -78,6 +78,29 @@ function envelopeMailbox(messages: unknown[] = []) {
 }
 
 describe("agent store streaming", () => {
+  it("dismisses the current error and removes failed runs without touching successful history", () => {
+    const store = useAgentStore();
+    store.lastError = "provider failed";
+    store.lastErrorCode = "provider_error";
+    store.executionHistory = [
+      { traceId: "failed", status: "failed", prompt: "bad", reply: "", trace: null, audit: [], events: [] },
+      { traceId: "ok", status: "completed", prompt: "good", reply: "done", trace: null, audit: [], events: [] }
+    ] as never;
+    store.currentTraceId = "failed";
+    store.selectedTraceId = "failed";
+
+    store.dismissError();
+    expect(store.lastError).toBe("");
+    expect(store.lastErrorCode).toBeNull();
+
+    store.lastError = "provider failed";
+    store.clearFailedRuns();
+    expect(store.executionHistory.map((run) => run.traceId)).toEqual(["ok"]);
+    expect(store.currentTraceId).toBe("ok");
+    expect(store.selectedTraceId).toBe("");
+    expect(store.lastReply).toBe("done");
+  });
+
   it("handles /plan and /exit_plan locally without entering the story generation stream", async () => {
     const store = useAgentStore();
     store.currentSessionId = "session-plan";
@@ -982,6 +1005,35 @@ describe("agent store coomi status normalization boundaries", () => {
         isFast: true
       })
     ]);
+  });
+
+  it("sends the exact word-count target only when precise mode is enabled", async () => {
+    api.streamAgentPrompt.mockImplementation(async (_request: unknown, onPacket: (packet: unknown) => void) => {
+      onPacket({
+        _type: "TurnContract",
+        turnPlan: {
+          chapterLengthTier: "medium",
+          chapterWordCountTarget: 4200,
+          wordCountPolicy: { mode: "precise", target: 4200 }
+        }
+      });
+      onPacket({ _type: "AgentCompleted", status: "success" });
+    });
+    const store = useAgentStore();
+    store.setStoryGenerationOptions({
+      chapterWordCountTarget: 4200,
+      preciseWordCountEnabled: true
+    });
+    store.promptInput = "生成精确长度正文";
+
+    await store.runPrompt();
+
+    expect(api.streamAgentPrompt.mock.calls[0][0].storyGeneration).toMatchObject({
+      chapterWordCountTarget: 4200,
+      preciseWordCountEnabled: true
+    });
+    expect(store.chapterWordCountTarget).toBe(4200);
+    expect(store.preciseWordCountEnabled).toBe(true);
   });
 
   it("derives reasoning control from wire fields and prompt fallback", () => {

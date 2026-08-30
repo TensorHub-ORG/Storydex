@@ -95,6 +95,58 @@ fn set_titlebar_theme(_theme: serde_json::Value) -> TitleBarResult {
     }
 }
 
+fn ensure_main_window(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() == "main" {
+        Ok(())
+    } else {
+        Err("window controls are only available to the main window".to_owned())
+    }
+}
+
+#[tauri::command]
+fn start_main_window_dragging(window: tauri::WebviewWindow) -> Result<(), String> {
+    ensure_main_window(&window)?;
+    window.start_dragging().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn minimize_main_window(window: tauri::WebviewWindow) -> Result<(), String> {
+    ensure_main_window(&window)?;
+    window.minimize().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn toggle_main_window_maximized(window: tauri::WebviewWindow) -> Result<bool, String> {
+    ensure_main_window(&window)?;
+    if window.is_maximized().map_err(|error| error.to_string())? {
+        window.unmaximize().map_err(|error| error.to_string())?;
+    } else {
+        window.maximize().map_err(|error| error.to_string())?;
+    }
+    window.is_maximized().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn is_main_window_maximized(window: tauri::WebviewWindow) -> Result<bool, String> {
+    ensure_main_window(&window)?;
+    window.is_maximized().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn close_main_window(window: tauri::WebviewWindow) -> Result<(), String> {
+    ensure_main_window(&window)?;
+    window
+        .emit("storydex:close-requested", ())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn confirm_main_window_close(window: tauri::WebviewWindow, app: AppHandle) -> Result<(), String> {
+    ensure_main_window(&window)?;
+    app.exit(0);
+    Ok(())
+}
+
 #[tauri::command]
 fn get_pending_open_target(state: State<'_, Arc<OpenTargetStore>>) -> Option<OpenTarget> {
     state
@@ -183,6 +235,12 @@ fn main() {
             reveal_path,
             open_with_dialog,
             set_titlebar_theme,
+            start_main_window_dragging,
+            minimize_main_window,
+            toggle_main_window_maximized,
+            is_main_window_maximized,
+            close_main_window,
+            confirm_main_window_close,
             get_pending_open_target,
             ack_open_target,
             open_preview_window
@@ -205,6 +263,7 @@ fn main() {
                     .inner_size(1440.0, 900.0)
                     .min_inner_size(1024.0, 700.0)
                     .resizable(true)
+                    .decorations(false)
                     .initialization_script(initialization_script);
             if let Some(webview_data_dir) = webview_data_dir {
                 window = window.data_directory(webview_data_dir);
@@ -226,7 +285,7 @@ fn main() {
         {
             if label == "main" {
                 api.prevent_close();
-                app_handle.exit(0);
+                let _ = app_handle.emit("storydex:close-requested", ());
             }
         }
 

@@ -25,6 +25,7 @@ export async function installTauriDesktopBridge(): Promise<void> {
   const eventModule = await loadEventModule();
   const openTargetListeners = new Set<(target: StorydexDesktopOpenTarget) => void>();
   const previewListeners = new Set<(relativePath: string) => void>();
+  const closeRequestListeners = new Set<() => void>();
   const detachOpenTargets = await eventModule.listen<StorydexDesktopOpenTarget>("storydex:open-target", (event) => {
     for (const listener of openTargetListeners) {
       listener(event.payload);
@@ -35,11 +36,18 @@ export async function installTauriDesktopBridge(): Promise<void> {
       listener(event.payload);
     }
   });
+  const detachCloseRequested = await eventModule.listen("storydex:close-requested", () => {
+    for (const listener of closeRequestListeners) {
+      listener();
+    }
+  });
   bridge.onOpenTarget = (listener) => subscribe(openTargetListeners, listener);
   bridge.onPreviewOpenFile = (listener) => subscribe(previewListeners, listener);
+  bridge.onCloseRequested = (listener) => subscribe(closeRequestListeners, listener);
   window.addEventListener("pagehide", () => {
     detachOpenTargets();
     detachPreview();
+    detachCloseRequested();
   }, { once: true });
 }
 

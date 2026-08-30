@@ -151,6 +151,43 @@ fn read_file_error(kind: &str, message: impl Into<String>, revision: Option<&str
     .to_string()
 }
 
+fn edit_file_not_found_error(content: &str, old_string: &str) -> String {
+    let revision = source_revision(content.as_bytes());
+    let needle = old_string
+        .lines()
+        .map(str::trim)
+        .find(|line| line.chars().count() >= 3)
+        .unwrap_or(old_string)
+        .chars()
+        .take(24)
+        .collect::<String>()
+        .to_lowercase();
+    let candidates = content
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let compact = line.trim();
+            if compact.is_empty() || needle.is_empty() || !compact.to_lowercase().contains(&needle)
+            {
+                return None;
+            }
+            Some(json!({
+                "line": index + 1,
+                "content": compact.chars().take(240).collect::<String>(),
+            }))
+        })
+        .take(3)
+        .collect::<Vec<_>>();
+    json!({
+        "error": "old_string_not_found",
+        "message": "old_string was not found; re-read the current file and retry once with exact text",
+        "revision": revision,
+        "candidates": candidates,
+        "recommendedAction": "Call read_file for the affected area, then retry edit_file with exact current text. Do not repeat the unchanged call."
+    })
+    .to_string()
+}
+
 pub struct CoreTools {
     cwd: PathBuf,
     policy: SecurityPolicy,
@@ -1018,6 +1055,12 @@ impl CoreTools {
                 "hasMore": has_more,
                 "nextOffset": line_number_at_byte(&content, end),
                 "nextByteOffset": end,
+                "nextPage": if has_more { Some(json!({
+                    "path": display_path,
+                    "byte_offset": end,
+                    "expected_revision": &revision,
+                    "limit": limit,
+                })) } else { None },
                 "truncated": has_more,
                 "truncationReasons": truncation_reasons,
                 "content": render_numbered_content(&content, start, end),
@@ -1098,7 +1141,7 @@ impl CoreTools {
         };
         let matches = content.matches(old_string).count();
         if matches == 0 {
-            return ToolResult::error("old_string was not found");
+            return ToolResult::error(edit_file_not_found_error(&content, old_string));
         }
         let replace_all = arguments
             .get("replace_all")
@@ -1975,6 +2018,15 @@ mod tests {
         assert_eq!(first_payload["hasMore"], true);
         assert_eq!(first_payload["nextOffset"], 501);
         assert!(first_payload["nextByteOffset"].as_u64().unwrap_or(0) > 0);
+        assert_eq!(first_payload["nextPage"]["path"], first_payload["path"]);
+        assert_eq!(
+            first_payload["nextPage"]["byte_offset"],
+            first_payload["nextByteOffset"]
+        );
+        assert_eq!(
+            first_payload["nextPage"]["expected_revision"],
+            first_payload["revision"]
+        );
         assert!(
             first_payload["revision"]
                 .as_str()
@@ -2060,6 +2112,48 @@ mod tests {
             );
         }
         assert!(pages > 1);
+    }
+
+    #[tokio::test]
+    async fn edit_file_mismatch_returns_revision_and_candidate_lines() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        std::fs::write(
+            workspace.path().join("chapter.txt"),
+            "opening\nThe current exact sentence.\nending\n",
+        )
+        .expect("write edit fixture");
+        let policy = SecurityPolicy::new(workspace.path(), AccessMode::WorkspaceWrite)
+            .expect("security policy");
+        let tools = CoreTools::new(workspace.path().to_path_buf(), policy);
+
+        let result = tools
+            .call(
+                &ToolCall {
+                    id: "edit-mismatch".into(),
+                    name: "edit_file".into(),
+                    arguments: json!({
+                        "path": "chapter.txt",
+                        "old_string": "The current exact sentence. with stale suffix",
+                        "new_string": "replacement"
+                    }),
+                },
+                &Deny,
+            )
+            .await;
+
+        assert!(!result.success);
+        let error: Value = serde_json::from_str(&result.output).expect("edit error envelope");
+        assert_eq!(error["error"], "old_string_not_found");
+        assert!(
+            error["revision"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("sha256:"))
+        );
+        assert_eq!(error["candidates"][0]["line"], 2);
+        assert_eq!(
+            error["candidates"][0]["content"],
+            "The current exact sentence."
+        );
     }
 
     #[tokio::test]

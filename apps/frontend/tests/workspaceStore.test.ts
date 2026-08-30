@@ -61,6 +61,28 @@ beforeEach(() => {
 });
 
 describe("workspace store full action lifecycle", () => {
+  it("acknowledges current diagnostics without hiding changed diagnostics", () => {
+    const store = useWorkspaceStore();
+    const diagnostic = {
+      source: "workspace",
+      severity: "error",
+      relativePath: "chapters/a.md",
+      line: 2,
+      column: 1,
+      message: "旧问题"
+    } as never;
+    store.diagnostics = [diagnostic];
+
+    expect(store.visibleDiagnostics).toHaveLength(1);
+    store.acknowledgeDiagnostic(diagnostic);
+    expect(store.visibleDiagnostics).toHaveLength(0);
+
+    store.diagnostics = [{ ...diagnostic, message: "文件变化后的新问题" }];
+    expect(store.visibleDiagnostics).toHaveLength(1);
+    store.acknowledgeAllDiagnostics();
+    expect(store.visibleDiagnostics).toHaveLength(0);
+  });
+
   it("boots, refreshes and transitions between launch and active project states", async () => {
     const store = useWorkspaceStore();
     await store.bootstrapGlobalState(); expect(ui.applyPersistedState).toHaveBeenCalled();

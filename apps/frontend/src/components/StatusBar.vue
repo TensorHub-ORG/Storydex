@@ -2,7 +2,7 @@
   <footer class="status-bar">
     <div class="status-left">
       <span>{{ readinessLabel }}</span>
-      <span>Memory Usage: {{ memoryUsageLabel }}</span>
+      <span>内存：{{ memoryUsageLabel }}</span>
       <span>{{ projectLabel }}</span>
     </div>
   </footer>
@@ -17,10 +17,10 @@ const HEALTH_REFRESH_INTERVAL_MS = 15000;
 let healthRefreshTimer: number | null = null;
 
 const readinessLabel = computed(() => {
-  if (workspaceStore.isBootstrapping) return "Connecting";
-  if (workspaceStore.health?.status === "ok") return "Ready";
-  if (workspaceStore.workspaceError) return "Error";
-  return "Waiting";
+  if (workspaceStore.isBootstrapping) return "正在连接";
+  if (workspaceStore.health?.status === "ok") return "就绪";
+  if (workspaceStore.workspaceError) return "错误";
+  return "等待连接";
 });
 
 const memoryUsageLabel = computed(() => {
@@ -32,8 +32,8 @@ const memoryUsageLabel = computed(() => {
 });
 
 const projectLabel = computed(() => {
-  if (workspaceStore.launchScreenVisible) return "No project";
-  return workspaceStore.currentProject?.projectName || workspaceStore.health?.projectName || "No project";
+  if (workspaceStore.launchScreenVisible) return "未打开项目";
+  return workspaceStore.currentProject?.projectName || workspaceStore.health?.projectName || "未打开项目";
 });
 
 onMounted(() => {

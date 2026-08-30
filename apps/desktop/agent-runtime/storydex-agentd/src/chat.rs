@@ -205,6 +205,8 @@ fn default_followup_mode() -> String {
 pub(crate) struct StoryGenerationOptions {
     pub(crate) fragment_count: u64,
     pub(crate) chapter_length_tier: String,
+    pub(crate) chapter_word_count_target: Option<u64>,
+    pub(crate) precise_word_count_enabled: bool,
     pub(crate) chapter_template_id: String,
 }
 
@@ -1093,7 +1095,11 @@ fn parse_story_generation(
     if story_generation.keys().any(|key| {
         !matches!(
             key.as_str(),
-            "fragmentCount" | "chapterLengthTier" | "chapterTemplateId"
+            "fragmentCount"
+                | "chapterLengthTier"
+                | "chapterWordCountTarget"
+                | "preciseWordCountEnabled"
+                | "chapterTemplateId"
         )
     }) {
         return Err((
@@ -1136,9 +1142,37 @@ fn parse_story_generation(
             "Agent storyGeneration.chapterTemplateId must be a safe template identifier.",
         ))?
         .to_owned();
+    let precise_word_count_enabled = story_generation
+        .get("preciseWordCountEnabled")
+        .map(Value::as_bool)
+        .unwrap_or(Some(false))
+        .ok_or((
+            "invalid_request",
+            "Agent storyGeneration.preciseWordCountEnabled must be a boolean.",
+        ))?;
+    let chapter_word_count_target = match story_generation.get("chapterWordCountTarget") {
+        Some(value) => Some(
+            value
+                .as_u64()
+                .filter(|target| (100..=20_000).contains(target))
+                .ok_or((
+                    "invalid_request",
+                    "Agent storyGeneration.chapterWordCountTarget must be an integer from 100 to 20000.",
+                ))?,
+        ),
+        None => None,
+    };
+    if precise_word_count_enabled && chapter_word_count_target.is_none() {
+        return Err((
+            "invalid_request",
+            "Agent precise word count requires chapterWordCountTarget from 100 to 20000.",
+        ));
+    }
     Ok(Some(StoryGenerationOptions {
         fragment_count,
         chapter_length_tier,
+        chapter_word_count_target,
+        precise_word_count_enabled,
         chapter_template_id,
     }))
 }
@@ -3105,6 +3139,8 @@ fn build_turn_contract(payload: &ChatStreamRequest, workspace: &Path) -> anyhow:
         "storyGeneration": {
             "fragmentCount": story_generation.fragment_count,
             "chapterLengthTier": story_generation.chapter_length_tier,
+            "chapterWordCountTarget": story_generation.chapter_word_count_target,
+            "preciseWordCountEnabled": story_generation.precise_word_count_enabled,
             "chapterTemplateId": story_generation.chapter_template_id,
         },
     });
@@ -3112,7 +3148,6 @@ fn build_turn_contract(payload: &ChatStreamRequest, workspace: &Path) -> anyhow:
         && let Some(turn_plan) = contract.get_mut("turnPlan").and_then(Value::as_object_mut)
     {
         for legacy_key in [
-            "chapterWordCountTarget",
             "fragmentWordCount",
             "fragmentWordCountMin",
             "fragmentWordCountMax",
@@ -3123,15 +3158,33 @@ fn build_turn_contract(payload: &ChatStreamRequest, workspace: &Path) -> anyhow:
             "chapterLengthTier".into(),
             Value::String(story_generation.chapter_length_tier.clone()),
         );
-        turn_plan.insert(
-            "wordCountPolicy".into(),
-            json!({
-                "version": 5,
-                "mode": "tier",
-                "scope": "candidate",
-                "tier": story_generation.chapter_length_tier,
-            }),
-        );
+        if story_generation.precise_word_count_enabled {
+            turn_plan.insert(
+                "chapterWordCountTarget".into(),
+                json!(story_generation.chapter_word_count_target),
+            );
+            turn_plan.insert(
+                "wordCountPolicy".into(),
+                json!({
+                    "version": 5,
+                    "mode": "precise",
+                    "scope": "candidate",
+                    "target": story_generation.chapter_word_count_target,
+                    "tolerance": 0.10,
+                }),
+            );
+        } else {
+            turn_plan.remove("chapterWordCountTarget");
+            turn_plan.insert(
+                "wordCountPolicy".into(),
+                json!({
+                    "version": 5,
+                    "mode": "tier",
+                    "scope": "candidate",
+                    "tier": story_generation.chapter_length_tier,
+                }),
+            );
+        }
     }
     Ok(contract)
 }
@@ -3714,7 +3767,7 @@ fn bridge_request(
         );
     const COOMI_IDENTITY_PROMPT: &str = "You are Coomi, the Storydex Agent. Your identity remains Coomi regardless of the permission mode or turn capability.";
     let capability_boundary = if writes_authorized {
-        "This turn may modify only paths authorized by the compiled turn capability. Preserve unrelated work and report only verified results."
+        "This turn may modify only paths authorized by the compiled turn capability. Preserve unrelated work and report only verified results. Before a continuation read, reuse nextPage.byte_offset and nextPage.expected_revision exactly. If edit_file reports old_string_not_found, re-read the affected area and retry once with current exact text; never repeat an unchanged failed call. Do not retry a mutation rejected by the turn capability."
     } else {
         "This turn has no project-write authority. Use only tools allowed by the compiled turn capability and do not modify project files. Describe this as the current tool boundary, never as a different agent role."
     };
@@ -5332,6 +5385,37 @@ mod tests {
         ] {
             assert!(contract["turnPlan"].get(legacy_key).is_none());
         }
+    }
+
+    #[test]
+    fn create_new_precise_turn_contract_keeps_the_explicit_target() {
+        let directory = tempdir().expect("tempdir");
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("chapters")).expect("chapters");
+        let workspace = workspace.canonicalize().expect("canonical workspace");
+        let payload: ChatStreamRequest = serde_json::from_value(json!({
+            "prompt": "create a new exact-length chapter",
+            "activeFile": "",
+            "storyGeneration": {
+                "fragmentCount": 1,
+                "chapterLengthTier": "medium",
+                "chapterWordCountTarget": 4200,
+                "preciseWordCountEnabled": true,
+                "chapterTemplateId": "default_chapter_directory"
+            },
+            "capabilityMode": "scoped_write",
+            "writesAllowed": true,
+            "coreWritesAllowed": true,
+            "allowedWriteRoots": ["chapters/"]
+        }))
+        .expect("request");
+
+        let contract = build_turn_contract(&payload, &workspace).expect("turn contract");
+        assert_eq!(contract["storyGeneration"]["chapterWordCountTarget"], 4200);
+        assert_eq!(contract["storyGeneration"]["preciseWordCountEnabled"], true);
+        assert_eq!(contract["turnPlan"]["chapterWordCountTarget"], 4200);
+        assert_eq!(contract["turnPlan"]["wordCountPolicy"]["mode"], "precise");
+        assert_eq!(contract["turnPlan"]["wordCountPolicy"]["target"], 4200);
     }
 
     #[test]

@@ -104,10 +104,14 @@ test("Tauri Stable build input never points at legacy runtime assets", () => {
   assert.match(smokeScript, /sidecar stopped cleanly/);
   assert.match(source, /runtime_info/);
   assert.match(source, /WebviewWindowBuilder/);
+  assert.match(source, /\.decorations\(false\)/);
+  assert.match(source, /start_main_window_dragging/);
+  assert.match(source, /toggle_main_window_maximized/);
   assert.match(source, /data_directory/);
   assert.match(source, /WindowEvent::CloseRequested/);
   assert.match(source, /prevent_close/);
-  assert.match(source, /app_handle\.exit\(0\)/);
+  assert.match(source, /app\.exit\(0\)/);
+  assert.match(source, /fn confirm_main_window_close[\s\S]{0,240}ensure_main_window\(&window\)/);
   assert.match(sidecar, /backendAuthToken/);
   assert.match(sidecar, /STORYDEX_COOMI_BRIDGE/);
   assert.match(sidecar, /resolve_bridge_path/);
@@ -119,6 +123,11 @@ test("Tauri Stable build input never points at legacy runtime assets", () => {
   assert.match(sidecar, /STORYDEX_TESTING/);
   assert.doesNotMatch(sidecar, /127\.0\.0\.1:18081/);
   assert.match(sidecar, /pickDirectory/);
+  assert.match(sidecar, /startMainWindowDragging/);
+  assert.match(sidecar, /confirmMainWindowClose/);
+  assert.match(source, /storydex:close-requested/);
+  assert.doesNotMatch(source, /fn close_main_window[\s\S]{0,240}window\.close\(\)/);
+  assert.match(sidecar, /closeMainWindow/);
   assert.match(source, /pick_directory/);
   assert.match(desktop, /FileDialog/);
 });

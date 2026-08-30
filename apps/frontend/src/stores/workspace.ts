@@ -77,6 +77,7 @@ interface WorkspaceState {
   openTabs: WorkspaceEditorTab[];
   documents: Record<string, CachedWorkspaceDocument>;
   diagnostics: WorkspaceDiagnosticItem[];
+  acknowledgedDiagnostics: string[];
   activeFile: string;
   activeFileContent: string;
   editorContent: string;
@@ -138,6 +139,7 @@ export const useWorkspaceStore = defineStore("workspace", {
     openTabs: [],
     documents: {},
     diagnostics: [],
+    acknowledgedDiagnostics: [],
     activeFile: "",
     activeFileContent: "",
     editorContent: "",
@@ -173,6 +175,10 @@ export const useWorkspaceStore = defineStore("workspace", {
   }),
 
   getters: {
+    visibleDiagnostics(state): WorkspaceDiagnosticItem[] {
+      const acknowledged = new Set(state.acknowledgedDiagnostics);
+      return state.diagnostics.filter((item) => !acknowledged.has(workspaceDiagnosticKey(item)));
+    },
     activeFileName(state): string {
       if (!state.activeFile) {
         return "未选择文件";
@@ -367,7 +373,8 @@ export const useWorkspaceStore = defineStore("workspace", {
         if (!normalized) {
           return [];
         }
-        return state.diagnostics.filter((item) => {
+        const acknowledged = new Set(state.acknowledgedDiagnostics);
+        return state.diagnostics.filter((item) => !acknowledged.has(workspaceDiagnosticKey(item))).filter((item) => {
           const itemPath = normalizeRelativePath(item.relativePath);
           return itemPath === normalized || itemPath.startsWith(`${normalized}/`);
         });
@@ -380,6 +387,19 @@ export const useWorkspaceStore = defineStore("workspace", {
   },
 
   actions: {
+    acknowledgeDiagnostic(item: WorkspaceDiagnosticItem): void {
+      const key = workspaceDiagnosticKey(item);
+      if (!this.acknowledgedDiagnostics.includes(key)) {
+        this.acknowledgedDiagnostics = [...this.acknowledgedDiagnostics, key];
+      }
+    },
+
+    acknowledgeAllDiagnostics(): void {
+      this.acknowledgedDiagnostics = Array.from(new Set([
+        ...this.acknowledgedDiagnostics,
+        ...this.diagnostics.map(workspaceDiagnosticKey)
+      ]));
+    },
     async bootstrapGlobalState(): Promise<void> {
       try {
         const result = await fetchSystemBootstrap();
@@ -1477,6 +1497,7 @@ export const useWorkspaceStore = defineStore("workspace", {
 
     resetStoryWorkspaceState(): void {
       this.diagnostics = [];
+      this.acknowledgedDiagnostics = [];
       this.diagnosticsTrace = null;
       this.storySettingsTrace = null;
       this.storySettings = defaultStoryProjectSettings();
@@ -2102,7 +2123,13 @@ function normalizeStorySettingsResponse(
         chapterWordCountTarget
       ),
       chapterWordCountTarget,
-      preciseWordCountEnabled: false,
+      preciseWordCountEnabled: normalizeBooleanFlag(
+        payload.preciseWordCountEnabled
+          ?? payload.precise_word_count_enabled
+          ?? fallbackSettings?.preciseWordCountEnabled
+          ?? currentSettings?.preciseWordCountEnabled,
+        false
+      ),
       storyFragmentWordCount: responseWordCountRange.max,
       storyFragmentWordCountMin: responseWordCountRange.min,
       storyFragmentWordCountMax: responseWordCountRange.max,
@@ -2228,7 +2255,10 @@ function normalizeStorySettingsFromProjectFile(
         chapterWordCountTarget
       ),
       chapterWordCountTarget,
-      preciseWordCountEnabled: false,
+      preciseWordCountEnabled: normalizeBooleanFlag(
+        storySettings.preciseWordCountEnabled ?? storySettings.precise_word_count_enabled,
+        false
+      ),
       storyFragmentWordCount: projectWordCountRange.max,
       storyFragmentWordCountMin: projectWordCountRange.min,
       storyFragmentWordCountMax: projectWordCountRange.max,
@@ -2584,14 +2614,33 @@ function normalizeDiagnostics(items: WorkspaceDiagnosticItem[] | undefined): Wor
   return items
     .filter((item) => typeof item?.relativePath === "string")
     .map((item) => ({
+      code: String(item.code || "").trim() || undefined,
       source: String(item.source || "").trim() || "workspace",
       severity: String(item.severity || "").trim() || "error",
       relativePath: normalizeRelativePath(item.relativePath),
       line: Number(item.line || 0),
       column: Number(item.column || 0),
-      message: String(item.message || "").trim()
+      message: String(item.message || "").trim(),
+      evidence: String(item.evidence || "").trim() || undefined,
+      fixes: Array.isArray(item.fixes)
+        ? item.fixes
+            .map((fix) => ({ id: String(fix?.id || "").trim(), label: String(fix?.label || "").trim() }))
+            .filter((fix) => Boolean(fix.id) && Boolean(fix.label))
+        : undefined
     }))
     .filter((item) => Boolean(item.relativePath) && Boolean(item.message));
+}
+
+function workspaceDiagnosticKey(item: WorkspaceDiagnosticItem): string {
+  return [
+    normalizeRelativePath(item.relativePath),
+    String(item.severity || ""),
+    String(item.source || ""),
+    String(item.code || ""),
+    Number(item.line || 0),
+    Number(item.column || 0),
+    String(item.message || "").trim()
+  ].join("\u001f");
 }
 
 function isStorySegmentPath(relativePath: string, preferredExtension: StorySegmentExtension): boolean {

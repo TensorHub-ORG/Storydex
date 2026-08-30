@@ -8,10 +8,10 @@
         <button class="coomi-icon-btn" type="button" title="新建会话" @click="handleNewSession">
           <span class="material-symbols-rounded">add_box</span>
         </button>
-        <button class="coomi-icon-btn" type="button" title="History" @click="toggleSessionMenu">
+        <button class="coomi-icon-btn" type="button" title="会话历史" @click="toggleSessionMenu">
           <span class="material-symbols-rounded">history</span>
         </button>
-        <button class="coomi-icon-btn" type="button" title="Settings" @click="openConfigPanel">
+        <button class="coomi-icon-btn" type="button" title="设置" @click="openConfigPanel">
           <span class="material-symbols-rounded">settings</span>
         </button>
         <div class="coomi-run-state" :class="{ running: agentStore.isRunning }">
@@ -111,6 +111,20 @@
       >
         <strong>{{ composerFeedback.label }}</strong>
         <span>{{ composerFeedback.message }}</span>
+        <span class="coomi-feedback-actions">
+          <button type="button" title="关闭当前提示" aria-label="关闭当前提示" @click="agentStore.dismissError">
+            <span class="material-symbols-rounded" aria-hidden="true">close</span>
+          </button>
+          <button
+            v-if="failedRunCount"
+            type="button"
+            title="移除本会话失败记录"
+            aria-label="移除本会话失败记录"
+            @click="agentStore.clearFailedRuns"
+          >
+            <span class="material-symbols-rounded" aria-hidden="true">delete_sweep</span>
+          </button>
+        </span>
       </div>
       <div v-if="collapsedHandlesVisible" class="coomi-collapsed-handles">
         <button
@@ -222,6 +236,25 @@
                 </button>
               </div>
             </div>
+            <label class="coomi-story-field coomi-story-precision-field">
+              <span>精确目标</span>
+              <input
+                type="checkbox"
+                :checked="agentStore.preciseWordCountEnabled"
+                @change="updatePreciseWordCountEnabled"
+              />
+            </label>
+            <label v-if="agentStore.preciseWordCountEnabled" class="coomi-story-field">
+              <span>目标字数</span>
+              <input
+                type="number"
+                min="100"
+                max="20000"
+                step="100"
+                :value="agentStore.chapterWordCountTarget"
+                @change="updateChapterWordCountTarget"
+              />
+            </label>
             <label class="coomi-story-field coomi-story-template-field">
               <span>章节模板</span>
               <select
@@ -749,10 +782,10 @@ const executionFloatSignature = computed(() => {
 const executionFloatVisible = computed(() => Boolean(executionFloatSignature.value));
 const headerStatusLabel = computed(() => {
   if (!agentStore.isRunning) {
-    return "Coomi · Ready";
+    return "Coomi · 就绪";
   }
   const startedAt = agentStore.runStartedAt || Date.parse(agentStore.activeTraceRun?.createdAt || "") || runtimeNow.value;
-  return `Coomi · Running ${formatRunDuration(runtimeNow.value - startedAt)}`;
+  return `Coomi · 运行中 ${formatRunDuration(runtimeNow.value - startedAt)}`;
 });
 const composerError = computed(() => {
   const message = agentStore.lastError.trim();
@@ -781,6 +814,7 @@ const composerFeedback = computed(() => {
 const visibleFollowups = computed(() =>
   agentStore.followups.filter((message) => message.status !== "sent" && message.status !== "cancelled")
 );
+const failedRunCount = computed(() => agentStore.executionHistory.filter((run) => run.status === "failed").length);
 const composerPlaceholder = computed(() => {
   if (agentStore.editingTraceId) {
     return "修改最新消息后选择“取消编辑”或“重新执行”";
@@ -921,7 +955,9 @@ const storyLengthTierEnabled = computed(
   () => workspaceStore.storySettings.storyLengthTierEnabled === true
 );
 const storyOptionsLabel = computed(() =>
-  storyLengthTierEnabled.value
+  agentStore.preciseWordCountEnabled
+    ? `${agentStore.storyFragmentCount}片段/${agentStore.chapterWordCountTarget}字`
+    : storyLengthTierEnabled.value
     ? `${agentStore.storyFragmentCount}片段/${chapterLengthTierLabel(agentStore.chapterLengthTier)}`
     : `${agentStore.storyFragmentCount}片段`
 );
@@ -1228,6 +1264,7 @@ function handleComposerFocus(): void {
 
 async function handleStopRun(): Promise<void> {
   await agentStore.stopActiveRun();
+  handleComposerFocus();
 }
 
 async function handleNoSnapshotConfirm(): Promise<void> {
@@ -1359,6 +1396,16 @@ function updateChapterLengthTier(tier: ChapterLengthTier): void {
   void persistStoryGenerationOptions({ chapterLengthTier: tier });
 }
 
+function updatePreciseWordCountEnabled(event: Event): void {
+  const target = event.target as HTMLInputElement | null;
+  void persistStoryGenerationOptions({ preciseWordCountEnabled: Boolean(target?.checked) });
+}
+
+function updateChapterWordCountTarget(event: Event): void {
+  const target = event.target as HTMLInputElement | null;
+  void persistStoryGenerationOptions({ chapterWordCountTarget: Number(target?.value || 3000) });
+}
+
 function updateStoryChapterTemplate(event: Event): void {
   const target = event.target as HTMLSelectElement | null;
   void persistStoryGenerationOptions({
@@ -1377,6 +1424,8 @@ function syncStoryGenerationOptionsFromProjectSettings(): void {
   agentStore.setStoryGenerationOptions({
     fragmentCount: workspaceStore.storySettings.storyFragmentCount,
     chapterLengthTier: workspaceStore.storySettings.chapterLengthTier,
+    chapterWordCountTarget: workspaceStore.storySettings.chapterWordCountTarget,
+    preciseWordCountEnabled: workspaceStore.storySettings.preciseWordCountEnabled,
     chapterTemplateId: workspaceStore.storySettings.storyChapterTemplateId || "default_chapter_directory"
   });
 }
@@ -1384,11 +1433,15 @@ function syncStoryGenerationOptionsFromProjectSettings(): void {
 async function persistStoryGenerationOptions(options: {
   fragmentCount?: number;
   chapterLengthTier?: ChapterLengthTier;
+  chapterWordCountTarget?: number;
+  preciseWordCountEnabled?: boolean;
   chapterTemplateId?: string;
 }): Promise<void> {
   const previousOptions = {
     fragmentCount: agentStore.storyFragmentCount,
     chapterLengthTier: agentStore.chapterLengthTier,
+    chapterWordCountTarget: agentStore.chapterWordCountTarget,
+    preciseWordCountEnabled: agentStore.preciseWordCountEnabled,
     chapterTemplateId: agentStore.storyChapterTemplateId
   };
   storyOptionsEditing.value = true;
@@ -1400,6 +1453,8 @@ async function persistStoryGenerationOptions(options: {
     await workspaceStore.updateStorySettings({
       storyFragmentCount: agentStore.storyFragmentCount,
       chapterLengthTier: agentStore.chapterLengthTier,
+      chapterWordCountTarget: agentStore.chapterWordCountTarget,
+      preciseWordCountEnabled: agentStore.preciseWordCountEnabled,
       storyChapterTemplateId: agentStore.storyChapterTemplateId
     });
   } catch (error: unknown) {
@@ -4086,6 +4141,42 @@ defineExpose({
   border-radius: 6px;
   background: var(--bg-input);
   overflow: visible;
+}
+
+.coomi-story-precision-field input[type="checkbox"] {
+  justify-self: start;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  accent-color: var(--accent);
+}
+
+.coomi-feedback-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.coomi-feedback-actions button {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  display: inline-grid;
+  place-items: center;
+  background: transparent;
+  color: currentColor;
+  cursor: pointer;
+}
+
+.coomi-feedback-actions button:hover {
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.coomi-feedback-actions .material-symbols-rounded {
+  font-size: 16px;
 }
 
 .coomi-collapsed-handles {

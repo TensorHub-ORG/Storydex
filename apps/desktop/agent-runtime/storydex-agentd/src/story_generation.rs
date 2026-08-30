@@ -192,6 +192,7 @@ pub(crate) async fn run_modify_existing(
                 session_id,
                 tier,
                 provider_mode(state),
+                false,
                 1,
             )
             .await?;
@@ -279,6 +280,7 @@ pub(crate) async fn run_modify_existing(
             session_id,
             tier,
             provider_mode,
+            false,
             1,
         )
         .await?;
@@ -343,6 +345,7 @@ pub(crate) async fn run_modify_existing(
             session_id,
             tier,
             provider_mode,
+            false,
             1,
         )
         .await?;
@@ -424,6 +427,7 @@ pub(crate) async fn run_modify_existing(
             session_id,
             tier,
             provider_mode,
+            false,
             1,
         )
         .await?;
@@ -489,6 +493,7 @@ pub(crate) async fn run_modify_existing(
         session_id,
         tier,
         provider_mode,
+        false,
         1,
     )
     .await?;
@@ -555,7 +560,7 @@ pub(crate) async fn run_create_new(
     trace_events: &mut Vec<(String, Value)>,
 ) -> Result<StoryGenerationOutcome> {
     let tier = options.chapter_length_tier.as_str();
-    let (hard_minimum, runtime_safety_maximum) = tier_bounds(tier)?;
+    let (tier_hard_minimum, tier_runtime_safety_maximum) = tier_bounds(tier)?;
     ensure!(
         payload.writes_allowed
             && payload
@@ -572,7 +577,35 @@ pub(crate) async fn run_create_new(
     )?;
     ensure_story_targets_are_authorized(payload, workspace, &targets)?;
     let effective_fragment_count = targets.len();
-    let calibration = read_tier_summary(workspace, &identity.id, &identity.model, tier)?;
+    let precise_target = options
+        .precise_word_count_enabled
+        .then_some(options.chapter_word_count_target)
+        .flatten()
+        .map(|value| value as usize);
+    let calibration = if let Some(target) = precise_target {
+        let (preferred_minimum, preferred_maximum) = precise_word_count_bounds(target);
+        ShortCalibrationSummary {
+            status: "precise_target".to_owned(),
+            preferred_minimum,
+            preferred_maximum,
+        }
+    } else {
+        read_tier_summary(workspace, &identity.id, &identity.model, tier)?
+    };
+    let hard_minimum = precise_target
+        .map(|_| calibration.preferred_minimum)
+        .unwrap_or(tier_hard_minimum);
+    let runtime_safety_maximum = precise_target
+        .map(|_| calibration.preferred_maximum)
+        .unwrap_or(tier_runtime_safety_maximum);
+    let length_prompt = precise_target
+        .map(|target| {
+            format!(
+                "Write approximately {target} non-whitespace characters. The accepted range is {} to {} characters.",
+                calibration.preferred_minimum, calibration.preferred_maximum
+            )
+        })
+        .unwrap_or_else(|| tier_prompt(tier).to_owned());
     let fragment_prompt = if effective_fragment_count > 1 {
         "\n\nWrite continuous prose with clear blank-line paragraph boundaries. Storydex will split the prose programmatically into the planned fragment files; do not emit fragment labels or separate metadata."
     } else {
@@ -587,7 +620,7 @@ pub(crate) async fn run_create_new(
                 "role": "system",
                 "content": format!(
                     "Generate only the publishable Storydex chapter prose. Do not emit Markdown fences, XML/content wrappers, metadata, summaries, or commentary.\n\n{}{}",
-                    tier_prompt(tier),
+                    length_prompt,
                     fragment_prompt,
                 )
             },
@@ -664,6 +697,7 @@ pub(crate) async fn run_create_new(
                 session_id,
                 tier,
                 provider_mode(state),
+                precise_target.is_some(),
                 1,
             )
             .await?;
@@ -721,6 +755,19 @@ pub(crate) async fn run_create_new(
         runtime_safety_maximum,
         &calibration,
     );
+    let precision_achieved = validation.get("tierHit").and_then(Value::as_bool);
+    if let Some(object) = validation.as_object_mut() {
+        object.insert("exact".into(), json!(precise_target.is_some()));
+        object.insert(
+            "preciseWordCountEnabled".into(),
+            json!(precise_target.is_some()),
+        );
+        object.insert("chapterWordCountTarget".into(), json!(precise_target));
+        object.insert(
+            "precisionAchieved".into(),
+            json!(precise_target.and(precision_achieved)),
+        );
+    }
     if !validation
         .get("passed")
         .and_then(Value::as_bool)
@@ -753,6 +800,7 @@ pub(crate) async fn run_create_new(
             session_id,
             tier,
             provider_mode,
+            precise_target.is_some(),
             1,
         )
         .await?;
@@ -836,6 +884,7 @@ pub(crate) async fn run_create_new(
             session_id,
             tier,
             provider_mode,
+            precise_target.is_some(),
             1,
         )
         .await?;
@@ -891,22 +940,24 @@ pub(crate) async fn run_create_new(
         &calibration,
     )
     .await?;
-    record_tier_sample(
-        workspace,
-        tier,
-        CalibrationSampleInput {
-            provider: &identity.id,
-            model: &identity.model,
-            actual_word_count,
-            tier_hit,
-            structure_passed: true,
-            machine_quality_passed: true,
-            logical_prose_calls: 1,
-            completion_tokens,
-            duration_ms: Some(draft_duration_ms),
-            trace_id,
-        },
-    )?;
+    if precise_target.is_none() {
+        record_tier_sample(
+            workspace,
+            tier,
+            CalibrationSampleInput {
+                provider: &identity.id,
+                model: &identity.model,
+                actual_word_count,
+                tier_hit,
+                structure_passed: true,
+                machine_quality_passed: true,
+                logical_prose_calls: 1,
+                completion_tokens,
+                duration_ms: Some(draft_duration_ms),
+                trace_id,
+            },
+        )?;
+    }
     emit(
         sender,
         trace_events,
@@ -923,6 +974,7 @@ pub(crate) async fn run_create_new(
         session_id,
         tier,
         provider_mode,
+        precise_target.is_some(),
         1,
     )
     .await?;
@@ -956,6 +1008,9 @@ pub(crate) async fn run_create_new(
             "resultingWordCount": actual_word_count,
             "finalWordCount": actual_word_count,
             "tierHit": tier_hit,
+            "chapterWordCountTarget": precise_target,
+            "preciseWordCountEnabled": precise_target.is_some(),
+            "precisionAchieved": precise_target.map(|_| tier_hit),
         }),
         trace_id,
         session_id,
@@ -1170,6 +1225,7 @@ async fn emit_story_accounting(
     session_id: &str,
     tier: &str,
     provider_mode: &str,
+    precise_word_count_enabled: bool,
     provider_attempts: u64,
 ) -> Result<()> {
     emit(
@@ -1180,7 +1236,7 @@ async fn emit_story_accounting(
             "_type": "StoryCallAccounting",
             "_version": 1,
             "chapterLengthTier": tier,
-            "preciseWordCountEnabled": false,
+            "preciseWordCountEnabled": precise_word_count_enabled,
             "asymmetricLengthEnabled": false,
             "logicalStoryCalls": 1,
             "providerAttempts": provider_attempts,
@@ -1715,6 +1771,10 @@ fn tier_deviation(count: usize, calibration: &ShortCalibrationSummary) -> &'stat
     }
 }
 
+fn precise_word_count_bounds(target: usize) -> (usize, usize) {
+    ((target * 9).div_ceil(10), target * 11 / 10)
+}
+
 fn serialized_story_content(content: &str) -> String {
     let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
     let normalized = normalized.trim_end_matches('\n');
@@ -1871,7 +1931,7 @@ fn cleanup_story_staging(
 }
 
 fn atomic_replace_many(writes: &[(PathBuf, String)]) -> Result<()> {
-    atomic_replace_many_with(writes, |temporary, target| fs::rename(temporary, target))
+    atomic_replace_many_with(writes, crate::workspace::rename_with_retry)
 }
 
 fn atomic_replace_many_with<F>(writes: &[(PathBuf, String)], mut publish: F) -> Result<()>
@@ -1935,7 +1995,7 @@ where
                 .unwrap_or("chapter"),
             Uuid::new_v4()
         ));
-        if let Err(error) = fs::rename(&target, &backup) {
+        if let Err(error) = crate::workspace::rename_with_retry(&target, &backup) {
             let rollback_result = rollback_replacement(&staged, &moved_backups);
             if let Err(rollback_error) = rollback_result {
                 bail!(
@@ -2002,7 +2062,9 @@ fn rollback_replacement(
             } else {
                 true
             };
-            if target_cleared && let Err(error) = fs::rename(backup, target) {
+            if target_cleared
+                && let Err(error) = crate::workspace::rename_with_retry(backup, target)
+            {
                 failures.push(format!(
                     "unable to restore backup {} to {}: {error}",
                     backup.display(),
@@ -2054,6 +2116,8 @@ mod tests {
         let options = StoryGenerationOptions {
             fragment_count: 1,
             chapter_length_tier: tier.to_owned(),
+            chapter_word_count_target: None,
+            precise_word_count_enabled: false,
             chapter_template_id: "default_chapter_directory".to_owned(),
         };
         (payload, options)
@@ -2107,6 +2171,12 @@ mod tests {
         assert_eq!(validation["actualWordCount"], SHORT_HARD_MINIMUM);
         assert_eq!(validation["passed"], true);
         assert_eq!(validation["providerMode"], "replay");
+    }
+
+    #[test]
+    fn precise_word_count_bounds_round_inward() {
+        assert_eq!(precise_word_count_bounds(101), (91, 111));
+        assert_eq!(precise_word_count_bounds(4_200), (3_780, 4_620));
     }
 
     #[test]
@@ -2222,15 +2292,30 @@ mod tests {
             "session-medium",
             "medium",
             "replay",
+            false,
             1,
         )
         .await
         .expect("accounting event");
+        emit_story_accounting(
+            &sender,
+            &mut events,
+            "trace-precise",
+            "session-precise",
+            "medium",
+            "replay",
+            true,
+            1,
+        )
+        .await
+        .expect("precise accounting event");
 
         assert_eq!(events[0].0, "StoryDraftMeasured");
         assert_eq!(events[0].1["chapterLengthTier"], "medium");
         assert_eq!(events[1].0, "StoryCallAccounting");
         assert_eq!(events[1].1["chapterLengthTier"], "medium");
+        assert_eq!(events[1].1["preciseWordCountEnabled"], false);
+        assert_eq!(events[2].1["preciseWordCountEnabled"], true);
         assert!(receiver.recv().await.expect("draft SSE").contains("medium"));
         assert!(
             receiver

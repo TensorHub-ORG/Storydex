@@ -1936,6 +1936,7 @@ mod tests {
                     "storyFragmentCount": 2,
                     "chapterLengthTier": "long",
                     "chapterWordCountTarget": 6000,
+                    "preciseWordCountEnabled": true,
                     "autoUpdateVariables": true,
                     "autoUpdateWiki": true,
                     "agentCommitPromptEnabled": false,
@@ -1952,6 +1953,8 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(body["data"]["segmentExtension"], ".txt");
         assert_eq!(body["data"]["chapterLengthTier"], "long");
+        assert_eq!(body["data"]["chapterWordCountTarget"], 6000);
+        assert_eq!(body["data"]["preciseWordCountEnabled"], true);
 
         let response = router(state.clone())
             .oneshot(protected_json_request_with_method(
@@ -1965,6 +1968,8 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(body["data"]["chapterCompletion"]["chapters/第1章"], true);
         assert_eq!(body["data"]["segmentExtension"], ".txt");
+        assert_eq!(body["data"]["chapterWordCountTarget"], 6000);
+        assert_eq!(body["data"]["preciseWordCountEnabled"], true);
 
         let response = router(state.clone())
             .oneshot(protected_get_request("/api/v1/story/chapters"))

@@ -1,6 +1,16 @@
 <template>
-  <header class="top-header">
+  <header
+    class="top-header"
+    :class="{ 'tauri-titlebar': isTauriDesktop }"
+    @pointerdown="handleTitlebarPointerDown"
+    @dblclick="handleTitlebarDoubleClick"
+  >
     <div class="top-header-left">
+      <div v-if="isTauriDesktop" class="topbar-brand" aria-label="Storydex">
+        <img :src="storydexIcon" alt="" class="topbar-brand-icon" />
+        <span class="topbar-brand-name">Storydex</span>
+      </div>
+
       <div ref="projectMenuRef" class="file-menu-wrap no-drag">
         <button
           class="file-menu-trigger menu-bar-item"
@@ -134,7 +144,38 @@
         </span>
       </button>
 
-      <div class="titlebar-spacer" aria-hidden="true"></div>
+      <div v-if="isTauriDesktop" class="titlebar-window-controls no-drag">
+        <button
+          class="window-control-btn"
+          type="button"
+          title="最小化"
+          aria-label="最小化窗口"
+          @click="handleWindowMinimize"
+        >
+          <span class="material-symbols-rounded" aria-hidden="true">minimize</span>
+        </button>
+        <button
+          class="window-control-btn"
+          type="button"
+          :title="isWindowMaximized ? '还原' : '最大化'"
+          :aria-label="isWindowMaximized ? '还原窗口' : '最大化窗口'"
+          @click="handleWindowMaximize"
+        >
+          <span class="material-symbols-rounded" aria-hidden="true">
+            {{ isWindowMaximized ? "filter_none" : "crop_square" }}
+          </span>
+        </button>
+        <button
+          class="window-control-btn window-control-close"
+          type="button"
+          title="关闭"
+          aria-label="关闭窗口"
+          @click="handleWindowClose"
+        >
+          <span class="material-symbols-rounded" aria-hidden="true">close</span>
+        </button>
+      </div>
+      <div v-else class="titlebar-spacer" aria-hidden="true"></div>
     </div>
   </header>
 
@@ -280,6 +321,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useProjectLauncher } from "@/composables/useProjectLauncher";
+import storydexIcon from "@/assets/storydex_icon_01.png";
 import { searchWorkspace } from "@/api/workspace";
 import { useUiStore } from "@/stores/ui";
 import { useWorkspaceStore } from "@/stores/workspace";
@@ -288,6 +330,8 @@ import type { WorkspaceProjectInfo, WorkspaceSearchItem, WorkspaceTreeNode } fro
 const uiStore = useUiStore();
 const workspaceStore = useWorkspaceStore();
 const launcher = useProjectLauncher();
+const isTauriDesktop = Boolean(window.storydexDesktop?.versions?.tauri);
+const isWindowMaximized = ref(false);
 
 type OpenMenu = "project" | "help" | null;
 
@@ -574,6 +618,50 @@ function handleGlobalCommandShortcut(event: KeyboardEvent): void {
   }
 }
 
+function isInteractiveTitlebarTarget(target: EventTarget | null): boolean {
+  return target instanceof Element
+    && Boolean(target.closest(".no-drag, button, input, select, textarea, a, [role='button']"));
+}
+
+function handleTitlebarPointerDown(event: PointerEvent): void {
+  if (!isTauriDesktop || event.button !== 0 || event.detail > 1 || isInteractiveTitlebarTarget(event.target)) {
+    return;
+  }
+  void window.storydexDesktop?.startMainWindowDragging?.();
+}
+
+function handleTitlebarDoubleClick(event: MouseEvent): void {
+  if (!isTauriDesktop || event.button !== 0 || isInteractiveTitlebarTarget(event.target)) {
+    return;
+  }
+  event.preventDefault();
+  void handleWindowMaximize();
+}
+
+async function syncWindowMaximizedState(): Promise<void> {
+  if (!isTauriDesktop) return;
+  try {
+    isWindowMaximized.value = Boolean(await window.storydexDesktop?.isMainWindowMaximized?.());
+  } catch {
+    // Window state can be unavailable while the native window is closing.
+  }
+}
+
+function handleWindowMinimize(): void {
+  void window.storydexDesktop?.minimizeMainWindow?.();
+}
+
+async function handleWindowMaximize(): Promise<void> {
+  const nextState = await window.storydexDesktop?.toggleMainWindowMaximized?.();
+  if (typeof nextState === "boolean") {
+    isWindowMaximized.value = nextState;
+  }
+}
+
+function handleWindowClose(): void {
+  void window.storydexDesktop?.closeMainWindow?.();
+}
+
 watch(commandQuery, () => {
   commandActiveIndex.value = 0;
   if (contentSearchTimer !== null) window.clearTimeout(contentSearchTimer);
@@ -608,11 +696,16 @@ watch(
 onMounted(() => {
   document.addEventListener("pointerdown", handleDocumentPointerDown, true);
   window.addEventListener("keydown", handleGlobalCommandShortcut);
+  if (isTauriDesktop) {
+    window.addEventListener("resize", syncWindowMaximizedState);
+    void syncWindowMaximizedState();
+  }
 });
 
 onBeforeUnmount(() => {
   document.removeEventListener("pointerdown", handleDocumentPointerDown, true);
   window.removeEventListener("keydown", handleGlobalCommandShortcut);
+  window.removeEventListener("resize", syncWindowMaximizedState);
   if (contentSearchTimer !== null) window.clearTimeout(contentSearchTimer);
 });
 
@@ -740,6 +833,50 @@ function handleOpenAbout(): void {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.top-header.tauri-titlebar {
+  padding-right: 0;
+  user-select: none;
+}
+
+.tauri-titlebar .topbar-brand {
+  flex: 0 0 auto;
+  margin-right: 6px;
+}
+
+.titlebar-window-controls {
+  align-self: stretch;
+  display: flex;
+  height: var(--header-height);
+  margin-left: 2px;
+}
+
+.window-control-btn {
+  width: 46px;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--text-main);
+  cursor: default;
+}
+
+.window-control-btn:hover {
+  background: var(--bg-hover);
+}
+
+.window-control-close:hover {
+  background: #c42b1c;
+  color: #ffffff;
+}
+
+.window-control-btn .material-symbols-rounded {
+  font-size: 17px;
 }
 
 .top-header-left,

@@ -24,13 +24,15 @@ use std::cmp::Ordering as CompareOrdering;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::time::{Instant, SystemTime};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
 
 const STORYDEX_DIR: &str = ".storydex";
 const MAX_TREE_NODES: usize = 20_000;
 const MAX_SEARCH_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_FULL_READ_BYTES: u64 = 8 * 1024 * 1024;
+const WINDOWS_FILE_OPERATION_ATTEMPTS: usize = 5;
 
 const STANDARD_DIRECTORIES: &[&str] = &[
     "chapters",
@@ -537,26 +539,59 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         file.sync_all()?;
         drop(file);
         if path.exists() {
-            fs::rename(path, &backup)?;
-            match fs::rename(&temporary, path) {
+            rename_with_retry(path, &backup)?;
+            match rename_with_retry(&temporary, path) {
                 Ok(()) => {
-                    let _ = fs::remove_file(&backup);
+                    let _ = remove_file_with_retry(&backup);
                     Ok(())
                 }
                 Err(error) => {
-                    let _ = fs::rename(&backup, path);
+                    let _ = rename_with_retry(&backup, path);
                     Err(error)
                 }
             }
         } else {
-            fs::rename(&temporary, path)
+            rename_with_retry(&temporary, path)
         }
     })();
-    let _ = fs::remove_file(&temporary);
+    let _ = remove_file_with_retry(&temporary);
     if write_result.is_err() && backup.exists() && !path.exists() {
-        let _ = fs::rename(&backup, path);
+        let _ = rename_with_retry(&backup, path);
     }
     write_result
+}
+
+pub(crate) fn rename_with_retry(source: &Path, target: &Path) -> std::io::Result<()> {
+    retry_windows_file_operation(|| fs::rename(source, target))
+}
+
+fn remove_file_with_retry(path: &Path) -> std::io::Result<()> {
+    retry_windows_file_operation(|| fs::remove_file(path))
+}
+
+fn retry_windows_file_operation<T>(
+    mut operation: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let mut last_error = None;
+    for attempt in 0..WINDOWS_FILE_OPERATION_ATTEMPTS {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error) if is_transient_windows_file_lock(&error) => last_error = Some(error),
+            Err(error) => return Err(error),
+        }
+        if attempt + 1 < WINDOWS_FILE_OPERATION_ATTEMPTS {
+            thread::sleep(Duration::from_millis(20 * (1_u64 << attempt)));
+        }
+    }
+    Err(last_error.unwrap_or_else(|| std::io::Error::other("file operation retry exhausted")))
+}
+
+fn is_transient_windows_file_lock(error: &std::io::Error) -> bool {
+    cfg!(windows)
+        && (matches!(
+            error.kind(),
+            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::WouldBlock
+        ) || matches!(error.raw_os_error(), Some(5 | 32 | 33)))
 }
 
 fn create_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -1873,6 +1908,22 @@ mod tests {
         atomic_write(&target, b"after").expect("replace");
         assert_eq!(fs::read_to_string(&target).expect("read"), "after");
         assert_eq!(fs::read_dir(root.path()).expect("entries").count(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn transient_windows_file_lock_is_retried() {
+        let mut attempts = 0;
+        let result = retry_windows_file_operation(|| {
+            attempts += 1;
+            if attempts < 3 {
+                return Err(std::io::Error::from_raw_os_error(5));
+            }
+            Ok("published")
+        });
+
+        assert_eq!(result.expect("retry succeeds"), "published");
+        assert_eq!(attempts, 3);
     }
 
     #[test]

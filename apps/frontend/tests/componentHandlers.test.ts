@@ -161,8 +161,8 @@ describe("high-density component handler matrices", () => {
     store.health = { status: "ok", projectName: "Demo", memoryUsageMb: 218 } as never;
     store.refreshHealth = vi.fn().mockResolvedValue(undefined);
     const wrapper = mount(StatusBar);
-    expect(wrapper.text()).toContain("Ready");
-    expect(wrapper.text()).toContain("Memory Usage: 218 MB");
+    expect(wrapper.text()).toContain("就绪");
+    expect(wrapper.text()).toContain("内存：218 MB");
     expect(wrapper.text()).toContain("Demo");
     expect(wrapper.text()).not.toContain("Trace:");
     wrapper.unmount();

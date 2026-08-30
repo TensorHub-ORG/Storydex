@@ -93,7 +93,7 @@
               </button>
               <button class="explorer-toolbar-btn explorer-problems-trigger" type="button" title="问题" @click="problemsOpen = !problemsOpen">
                 <span class="material-symbols-rounded">problem</span>
-                <small v-if="workspaceStore.diagnostics.length" class="explorer-problem-badge">{{ formatBadgeCount(workspaceStore.diagnostics.length) }}</small>
+                <small v-if="workspaceStore.visibleDiagnostics.length" class="explorer-problem-badge">{{ formatBadgeCount(workspaceStore.visibleDiagnostics.length) }}</small>
               </button>
             </div>
           </div>
@@ -274,12 +274,21 @@
           <select v-model="problemSeverity" aria-label="筛选问题级别"><option value="all">全部</option><option value="error">错误</option><option value="warning">警告</option><option value="info">提示</option></select>
           <span class="material-symbols-rounded filter-chevron">expand_more</span>
         </label>
+        <button
+          v-if="workspaceStore.visibleDiagnostics.length"
+          class="explorer-problems-close"
+          type="button"
+          title="忽略全部当前问题"
+          aria-label="忽略全部当前问题"
+          @click="workspaceStore.acknowledgeAllDiagnostics"
+        ><span class="material-symbols-rounded">done_all</span></button>
         <button class="explorer-problems-close" type="button" title="关闭问题面板" aria-label="关闭问题面板" @click="problemsOpen = false"><span class="material-symbols-rounded">close</span></button>
       </header>
       <div class="explorer-problem-list">
         <div v-for="item in filteredProblems" :key="`${item.relativePath}:${item.code}:${item.line}:${item.message}`" class="explorer-problem-item">
           <button type="button" class="problem-open" @click="openProblem(item.relativePath)"><span class="problem-severity" :class="`is-${item.severity}`"></span><span><strong>{{ item.code || item.source }}</strong><small>{{ item.relativePath }}{{ item.line ? `:${item.line}:${item.column || 1}` : "" }}</small><em>{{ item.message }}</em></span></button>
           <button v-if="item.fixes?.[0]" type="button" class="problem-fix" @click="applyProblemFix(item.relativePath, item.fixes[0].id)">{{ item.fixes[0].label }}</button>
+          <button type="button" class="problem-fix" title="忽略此问题" @click="workspaceStore.acknowledgeDiagnostic(item)">忽略</button>
         </div>
         <div v-if="!filteredProblems.length" class="explorer-problem-empty">没有匹配的问题</div>
       </div>
@@ -437,10 +446,10 @@ const selectionAnchor = ref("");
 const internalDragPaths = ref<string[]>([]);
 const problemsOpen = ref(false);
 const problemSeverity = ref<"all" | "error" | "warning" | "info">("all");
-const filteredProblems = computed(() => workspaceStore.diagnostics.filter(
+const filteredProblems = computed(() => workspaceStore.visibleDiagnostics.filter(
   (item) => problemSeverity.value === "all" || item.severity === problemSeverity.value
 ));
-const diagnosticIndex = computed(() => buildPathIndex(workspaceStore.diagnostics));
+const diagnosticIndex = computed(() => buildPathIndex(workspaceStore.visibleDiagnostics));
 const gitIndex = computed(() => buildPathIndex(gitStore.summary?.changedFiles || []));
 const pendingRenameValue = computed({
   get: () => pendingRename.value?.value ?? "",
@@ -639,7 +648,7 @@ function directDiagnosticCount(node: WorkspaceTreeNode): number {
   if (!relativePath) {
     return 0;
   }
-  return workspaceStore.diagnostics.filter((item) => normalizeNodePath(item.relativePath) === relativePath).length;
+  return workspaceStore.visibleDiagnostics.filter((item) => normalizeNodePath(item.relativePath) === relativePath).length;
 }
 
 function hasDiagnostics(node: WorkspaceTreeNode): boolean {

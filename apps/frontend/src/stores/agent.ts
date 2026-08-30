@@ -187,7 +187,7 @@ export const useAgentStore = defineStore("agent", {
 
   getters: {
     statusLabel(state): string {
-      return state.isRunning ? "Coomi · Running" : "Coomi · Ready";
+      return state.isRunning ? "Coomi · 运行中" : "Coomi · 就绪";
     },
 
     permissionModeLabel(state): string {
@@ -213,6 +213,35 @@ export const useAgentStore = defineStore("agent", {
   actions: {
     selectTraceRun(traceId: string): void {
       this.selectedTraceId = traceId;
+    },
+
+    dismissError(): void {
+      this.lastError = "";
+      this.lastErrorCode = null;
+    },
+
+    clearFailedRuns(): void {
+      const removed = new Set(
+        this.executionHistory
+          .filter((run) => run.status === "failed")
+          .map((run) => run.traceId)
+      );
+      if (removed.size === 0) {
+        this.dismissError();
+        return;
+      }
+      this.executionHistory = this.executionHistory.filter((run) => !removed.has(run.traceId));
+      if (removed.has(this.selectedTraceId)) this.selectedTraceId = "";
+      if (removed.has(this.currentTraceId)) {
+        const latest = this.executionHistory[0];
+        this.currentTraceId = latest?.traceId || "";
+        this.lastPrompt = latest?.prompt || "";
+        this.lastReply = latest?.reply || "";
+        this.lastTrace = latest?.trace || null;
+        this.lastAudit = latest?.audit || [];
+        this.lastEvents = latest?.events || [];
+      }
+      this.dismissError();
     },
 
     createNewSession(): void {
@@ -395,7 +424,7 @@ export const useAgentStore = defineStore("agent", {
               id: `${traceId}-user`,
               type: "user",
               status: "success",
-              title: "User",
+              title: "用户",
               content: command,
               raw: { prompt: command }
             }),
@@ -556,7 +585,9 @@ export const useAgentStore = defineStore("agent", {
       } else if (isSingleFileTemplate) {
         this.storyFragmentCount = 1;
       }
-      this.preciseWordCountEnabled = false;
+      if (options.preciseWordCountEnabled !== undefined) {
+        this.preciseWordCountEnabled = Boolean(options.preciseWordCountEnabled);
+      }
       if (options.chapterWordCountTarget !== undefined) {
         const target = clampInteger(
           options.chapterWordCountTarget,
@@ -876,6 +907,9 @@ export const useAgentStore = defineStore("agent", {
             storyGeneration: {
               fragmentCount: this.storyFragmentCount,
               chapterLengthTier: this.chapterLengthTier,
+              ...(this.preciseWordCountEnabled
+                ? { chapterWordCountTarget: this.chapterWordCountTarget, preciseWordCountEnabled: true }
+                : {}),
               chapterTemplateId: this.storyChapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID
             },
             sourceFollowupMessageId: next.messageId,
@@ -984,6 +1018,9 @@ export const useAgentStore = defineStore("agent", {
         storyGeneration: {
           fragmentCount: this.storyFragmentCount,
           chapterLengthTier: this.chapterLengthTier,
+          ...(this.preciseWordCountEnabled
+            ? { chapterWordCountTarget: this.chapterWordCountTarget, preciseWordCountEnabled: true }
+            : {}),
           chapterTemplateId: this.storyChapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID
         },
         replaceLatestTraceId: expectedTraceId
@@ -1043,6 +1080,9 @@ export const useAgentStore = defineStore("agent", {
         storyGeneration: {
           fragmentCount: this.storyFragmentCount,
           chapterLengthTier: this.chapterLengthTier,
+          ...(this.preciseWordCountEnabled
+            ? { chapterWordCountTarget: this.chapterWordCountTarget, preciseWordCountEnabled: true }
+            : {}),
           chapterTemplateId: this.storyChapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID
         }
       };
@@ -1194,6 +1234,9 @@ export const useAgentStore = defineStore("agent", {
         storyGeneration: {
           fragmentCount: this.storyFragmentCount,
           chapterLengthTier: this.chapterLengthTier,
+          ...(this.preciseWordCountEnabled
+            ? { chapterWordCountTarget: this.chapterWordCountTarget, preciseWordCountEnabled: true }
+            : {}),
           chapterTemplateId: this.storyChapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID
         }
       };
@@ -1256,7 +1299,7 @@ export const useAgentStore = defineStore("agent", {
             id: `${traceId}-user`,
             type: "user",
             status: "success",
-            title: "User",
+            title: "用户",
             content: prompt,
             raw: { prompt }
           })
@@ -1304,7 +1347,7 @@ export const useAgentStore = defineStore("agent", {
           this.finishRun(traceId, "completed");
         }
         const finished = this.executionHistory.find((item) => item.traceId === traceId);
-        this.lastSuccess = finished?.status === "failed" ? "" : "Coomi run complete.";
+        this.lastSuccess = finished?.status === "failed" ? "" : "Coomi 执行完成。";
         await this.loadSessions();
         await this.loadFollowups();
         succeeded = true;
@@ -1389,7 +1432,7 @@ export const useAgentStore = defineStore("agent", {
               id: `${traceId}-user`,
               type: "user",
               status: "success",
-              title: "User",
+              title: "用户",
               content: prompt,
               raw: { prompt, messageId: packet.messageId, continuationMode: packet.continuationMode }
             })
@@ -1511,10 +1554,20 @@ export const useAgentStore = defineStore("agent", {
         const toolRegistry = toRecord(visiblePacket.toolRegistry) || {};
         const contextAssembly = toRecord(visiblePacket.contextAssembly) || {};
         const contextBudget = toRecord(contextAssembly.budget) || {};
+        const wordCountPolicy = toRecord(turnPlan.wordCountPolicy) || {};
+        const preciseTarget = firstNumber(turnPlan, ["chapterWordCountTarget"]);
+        const precisePlan = wordCountPolicy.mode === "precise" && preciseTarget !== null;
         if (turnPlan.chapterLengthTier !== undefined) {
           this.chapterLengthTier = normalizeChapterLengthTier(
             turnPlan.chapterLengthTier
           );
+        }
+        if (precisePlan) {
+          this.setStoryGenerationOptions({
+            chapterWordCountTarget: preciseTarget,
+            preciseWordCountEnabled: true
+          });
+        } else if (turnPlan.chapterLengthTier !== undefined) {
           this.preciseWordCountEnabled = false;
         }
         nextRun.audit = [
@@ -1884,7 +1937,7 @@ function streamPacketToWaterfallItem(
       id: `${traceId}-user-${continuationId}`,
       type: "user",
       status: "success",
-      title: "User",
+      title: "用户",
       content,
       raw
     });
@@ -2756,7 +2809,7 @@ function buildHistoryWaterfallItems(
 ): CoomiWaterfallItem[] {
   const items: CoomiWaterfallItem[] = [];
   if (prompt) {
-    items.push(createWaterfallItem({ id: `${traceId}-user`, type: "user", status: "success", title: "User", content: prompt }));
+    items.push(createWaterfallItem({ id: `${traceId}-user`, type: "user", status: "success", title: "用户", content: prompt }));
   }
   for (const event of events) {
     const packet = event.data ? ({ type: event.event, ...event.data } as AgentStreamPacket) : ({ type: event.event } as AgentStreamPacket);

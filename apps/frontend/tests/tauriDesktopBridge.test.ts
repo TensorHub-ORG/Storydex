@@ -54,23 +54,30 @@ describe("Tauri desktop bridges", () => {
     const handlers = new Map<string, (event: { payload: unknown }) => void>();
     const detachOpen = vi.fn();
     const detachPreview = vi.fn();
+    const detachClose = vi.fn();
     eventModule.listen.mockImplementation(async (name: string, handler: (event: { payload: unknown }) => void) => {
       handlers.set(name, handler);
-      return name === "storydex:open-target" ? detachOpen : detachPreview;
+      if (name === "storydex:open-target") return detachOpen;
+      if (name === "storydex:preview-open-file") return detachPreview;
+      return detachClose;
     });
 
     expect(isTauriRuntime()).toBe(true);
     await installTauriDesktopBridge();
     const openListener = vi.fn();
     const previewListener = vi.fn();
+    const closeListener = vi.fn();
     const unsubscribeOpen = bridge.onOpenTarget?.(openListener);
     bridge.onPreviewOpenFile?.(previewListener);
+    bridge.onCloseRequested?.(closeListener);
     const target = { id: 7, path: "C:\\stories\\demo", isFile: false };
     handlers.get("storydex:open-target")?.({ payload: target });
     handlers.get("storydex:preview-open-file")?.({ payload: "chapters/001.md" });
+    handlers.get("storydex:close-requested")?.({ payload: undefined });
 
     expect(openListener).toHaveBeenCalledWith(target);
     expect(previewListener).toHaveBeenCalledWith("chapters/001.md");
+    expect(closeListener).toHaveBeenCalledTimes(1);
     unsubscribeOpen?.();
     handlers.get("storydex:open-target")?.({ payload: target });
     expect(openListener).toHaveBeenCalledTimes(1);
@@ -78,6 +85,7 @@ describe("Tauri desktop bridges", () => {
     window.dispatchEvent(new Event("pagehide"));
     expect(detachOpen).toHaveBeenCalledTimes(1);
     expect(detachPreview).toHaveBeenCalledTimes(1);
+    expect(detachClose).toHaveBeenCalledTimes(1);
   });
 
   it("recognizes the loopback URL used by Tauri development", () => {

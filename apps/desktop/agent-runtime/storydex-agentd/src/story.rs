@@ -304,7 +304,6 @@ pub(crate) async fn update_story_settings(
     let format = extension.trim_start_matches('.');
     let mut updated = current;
     let baseline = updated.clone();
-    let _retired_precision_request = input.precise_word_count_enabled;
     if let Some(object) = updated.as_object_mut() {
         object.insert("storySegmentFormat".to_owned(), json!(format));
         object.insert("segmentExtension".to_owned(), json!(extension));
@@ -372,7 +371,15 @@ pub(crate) async fn update_story_settings(
                 20_000
             )),
         );
-        object.insert("preciseWordCountEnabled".to_owned(), json!(false));
+        object.insert(
+            "preciseWordCountEnabled".to_owned(),
+            json!(input.precise_word_count_enabled.unwrap_or_else(|| {
+                baseline
+                    .get("preciseWordCountEnabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            })),
+        );
         if let Some(value) = input.story_chapter_template_id {
             object.insert(
                 "storyChapterTemplateId".to_owned(),

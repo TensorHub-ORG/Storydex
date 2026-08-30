@@ -629,7 +629,7 @@ fn adapter_script(backend_base_url: &str, token: &str, app_version: &str) -> Res
     });
     let bridge = serde_json::to_string(&bridge)?;
     Ok(format!(
-        "if (window.__TAURI_INTERNALS__ && (window.location.protocol === 'tauri:' || window.location.hostname === 'tauri.localhost' || (window.location.protocol === 'http:' && (window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost')))) {{ const bridge = {bridge}; const invoke = (command, args = {{}}) => window.__TAURI_INTERNALS__.invoke(command, args); Object.assign(bridge, {{ pickDirectory: (options = {{}}) => invoke('pick_directory', {{ options }}), revealPath: (absolutePath) => invoke('reveal_path', {{ absolutePath }}), openWithDialog: (absolutePath) => invoke('open_with_dialog', {{ absolutePath }}), openPreviewWindow: (relativePath) => invoke('open_preview_window', {{ relativePath }}), setTitleBarTheme: (theme) => invoke('set_titlebar_theme', {{ theme }}), getPendingOpenTarget: () => invoke('get_pending_open_target'), ackOpenTarget: (targetId) => invoke('ack_open_target', {{ targetId }}) }}); Object.defineProperty(window, 'storydexDesktop', {{ value: bridge, configurable: false, writable: false }}); }}"
+        "if (window.__TAURI_INTERNALS__ && (window.location.protocol === 'tauri:' || window.location.hostname === 'tauri.localhost' || (window.location.protocol === 'http:' && (window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost')))) {{ const bridge = {bridge}; const invoke = (command, args = {{}}) => window.__TAURI_INTERNALS__.invoke(command, args); Object.assign(bridge, {{ pickDirectory: (options = {{}}) => invoke('pick_directory', {{ options }}), revealPath: (absolutePath) => invoke('reveal_path', {{ absolutePath }}), openWithDialog: (absolutePath) => invoke('open_with_dialog', {{ absolutePath }}), openPreviewWindow: (relativePath) => invoke('open_preview_window', {{ relativePath }}), setTitleBarTheme: (theme) => invoke('set_titlebar_theme', {{ theme }}), startMainWindowDragging: () => invoke('start_main_window_dragging'), minimizeMainWindow: () => invoke('minimize_main_window'), toggleMainWindowMaximized: () => invoke('toggle_main_window_maximized'), isMainWindowMaximized: () => invoke('is_main_window_maximized'), closeMainWindow: () => invoke('close_main_window'), confirmMainWindowClose: () => invoke('confirm_main_window_close'), getPendingOpenTarget: () => invoke('get_pending_open_target'), ackOpenTarget: (targetId) => invoke('ack_open_target', {{ targetId }}) }}); Object.defineProperty(window, 'storydexDesktop', {{ value: bridge, configurable: false, writable: false }}); }}"
     ))
 }
 
@@ -770,6 +770,11 @@ mod tests {
         assert!(script.contains("pickDirectory"));
         assert!(script.contains("revealPath"));
         assert!(script.contains("openWithDialog"));
+        assert!(script.contains("startMainWindowDragging"));
+        assert!(script.contains("confirmMainWindowClose"));
+        assert!(script.contains("minimizeMainWindow"));
+        assert!(script.contains("toggleMainWindowMaximized"));
+        assert!(script.contains("closeMainWindow"));
         assert!(script.contains("Object.defineProperty"));
         assert!(!script.contains("shell"));
         assert!(!script.contains("18081"));

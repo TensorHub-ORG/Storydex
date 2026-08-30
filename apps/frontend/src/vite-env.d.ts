@@ -17,6 +17,13 @@ interface StorydexDesktopBridge {
     symbolColor?: string;
     height?: number;
   }>;
+  startMainWindowDragging?: () => Promise<void>;
+  minimizeMainWindow?: () => Promise<void>;
+  toggleMainWindowMaximized?: () => Promise<boolean>;
+  isMainWindowMaximized?: () => Promise<boolean>;
+  closeMainWindow?: () => Promise<void>;
+  confirmMainWindowClose?: () => Promise<void>;
+  onCloseRequested?: (listener: () => void) => () => void;
   pickDirectory?: (options?: { title?: string; defaultPath?: string }) => Promise<string>;
   revealPath?: (absolutePath: string) => Promise<boolean>;
   openWithDialog?: (absolutePath: string) => Promise<boolean>;
