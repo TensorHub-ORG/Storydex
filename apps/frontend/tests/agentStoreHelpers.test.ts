@@ -21,7 +21,7 @@ describe("agent store deterministic helpers", () => {
     store.setStoryGenerationOptions({ chapterLengthTier: "long", chapterWordCountTarget: 1000 });
     expect(store.chapterLengthTier).toBe("long");
     store.setStoryGenerationOptions({ preciseWordCountEnabled: true });
-    expect(store.preciseWordCountEnabled).toBe(false);
+    expect(store.preciseWordCountEnabled).toBe(true);
   });
 
   it("maps packet phase, status, detail, and waterfall variants", () => {

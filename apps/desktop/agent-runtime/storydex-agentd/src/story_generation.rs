@@ -1218,6 +1218,7 @@ async fn emit_existing_story_draft_measured(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn emit_story_accounting(
     sender: &mpsc::Sender<String>,
     trace_events: &mut Vec<(String, Value)>,

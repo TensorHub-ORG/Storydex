@@ -1450,11 +1450,17 @@ async function persistStoryGenerationOptions(options: {
     return;
   }
   try {
+    const preciseSettings = options.preciseWordCountEnabled !== undefined
+      || options.chapterWordCountTarget !== undefined
+      ? {
+          chapterWordCountTarget: agentStore.chapterWordCountTarget,
+          preciseWordCountEnabled: agentStore.preciseWordCountEnabled
+        }
+      : {};
     await workspaceStore.updateStorySettings({
       storyFragmentCount: agentStore.storyFragmentCount,
       chapterLengthTier: agentStore.chapterLengthTier,
-      chapterWordCountTarget: agentStore.chapterWordCountTarget,
-      preciseWordCountEnabled: agentStore.preciseWordCountEnabled,
+      ...preciseSettings,
       storyChapterTemplateId: agentStore.storyChapterTemplateId
     });
   } catch (error: unknown) {

@@ -248,7 +248,7 @@ describe("agent store action fallbacks with an empty workspace", () => {
     });
     await store.runPrompt();
     expect(store.executionHistory[0].status).toBe("completed");
-    expect(store.lastSuccess).toBe("Coomi run complete.");
+    expect(store.lastSuccess).toBe("Coomi 执行完成。");
 
     // runPrompt guards: empty prompt, editing, pending snapshot.
     store.promptInput = "";

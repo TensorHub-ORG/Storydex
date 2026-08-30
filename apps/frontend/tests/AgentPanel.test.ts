@@ -240,7 +240,7 @@ describe("AgentPanel", () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
 
     const wrapper = shallowMount(AgentPanel);
-    await wrapper.find('button[title="Settings"]').trigger("click");
+    await wrapper.find('button[title="设置"]').trigger("click");
     await nextTick();
     const configPanel = wrapper.findComponent({ name: "CoomiConfigPanel" });
     expect(configPanel.exists()).toBe(true);
@@ -248,7 +248,7 @@ describe("AgentPanel", () => {
     await nextTick();
     expect(wrapper.findComponent({ name: "CoomiConfigPanel" }).exists()).toBe(false);
 
-    await wrapper.find('button[title="History"]').trigger("click");
+    await wrapper.find('button[title="会话历史"]').trigger("click");
     await vi.waitFor(() => expect(wrapper.findAll(".coomi-session-select")).toHaveLength(2));
     expect(wrapper.text()).toContain("历史会话");
     const deleteIndex = wrapper.findAll(".coomi-session-select").findIndex((button) => button.text().includes("待删除会话"));
@@ -741,7 +741,7 @@ describe("AgentPanel", () => {
     await nextTick();
     expect(wrapper.find(".coomi-scroll-latest").exists()).toBe(true);
 
-    await wrapper.find('button[title="Settings"]').trigger("click");
+    await wrapper.find('button[title="设置"]').trigger("click");
     expect(wrapper.find(".coomi-scroll-latest").exists()).toBe(false);
 
     store.executionHistory = [{
