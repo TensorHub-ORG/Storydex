@@ -69,7 +69,7 @@
       </section>
 
       <section v-else-if="conversationRuns.length === 0" class="coomi-welcome">
-        <img src="@/assets/storydex_icon_01.png" alt="Storydex" />
+        <img :src="storydexIcon" alt="Storydex" />
         <div class="coomi-welcome-title">Coomi 已就绪</div>
         <p class="coomi-welcome-copy">如果你有任何使用上的疑问，都可以向我询问。</p>
       </section>
@@ -608,6 +608,7 @@ import AgentExecutionFloatBar from "@/components/AgentExecutionFloatBar.vue";
 import CoomiClaudeTurn from "@/components/CoomiClaudeTurn.vue";
 import CoomiConfigPanel from "@/components/CoomiConfigPanel.vue";
 import FeedbackDialog from "@/components/FeedbackDialog.vue";
+import storydexIcon from "../../../../assets/Storydex_icon/storydex_icon_01.svg";
 import { useAgentStore } from "@/stores/agent";
 import { useGitStore } from "@/stores/git";
 import { useWorkspaceStore } from "@/stores/workspace";

@@ -590,6 +590,31 @@ describe("AgentPanel", () => {
     wrapper.unmount();
   });
 
+  it("keeps every tool call under one summary fold", async () => {
+    const now = new Date().toISOString();
+    const tools = Array.from({ length: 11 }, (_, index) => ({
+      id: `read-${index}`,
+      type: "tool",
+      status: "success",
+      title: "read_file",
+      toolName: "read_file",
+      arguments: { path: `chapters/${String(index + 1).padStart(3, "0")}.md` },
+      content: "",
+      timestamp: now,
+      raw: {}
+    }));
+    const wrapper = mount(CoomiClaudeTurn, {
+      props: { run: makeRun({ status: "completed", items: tools }) }
+    });
+
+    expect(wrapper.findAll(".cct-summary")).toHaveLength(1);
+    expect(wrapper.find(".cct-tool-list").exists()).toBe(false);
+    await wrapper.find(".cct-summary").trigger("click");
+    expect(wrapper.findAll(".cct-tool")).toHaveLength(11);
+    expect(wrapper.findAll(".cct-chunk-head")).toHaveLength(0);
+    wrapper.unmount();
+  });
+
   it("labels token usage as a turn total and exposes the input/output split", () => {
     const wrapper = mount(CoomiClaudeTurn, {
       props: {

@@ -64,36 +64,17 @@
             </span>
           </button>
           <div v-if="isOpen(entry.id, isRunning)" class="cct-reveal cct-tool-list">
-            <div v-for="chunk in toolChunks(entry)" :key="chunk.id" class="cct-tool-chunk">
-              <!-- 工具超过 5 个时分块，避免长列表一次铺开 -->
-              <button
-                v-if="entry.tools.length > TOOL_CHUNK_SIZE"
-                class="cct-summary cct-chunk-head"
-                type="button"
-                @click="toggle(chunk.id, isRunning)"
-              >
-                <span>{{ chunk.start }}–{{ chunk.end }} 共 {{ chunk.tools.length }} 项</span>
-                <span class="cct-chev material-symbols-rounded">
-                  {{ isOpen(chunk.id, isRunning) ? "expand_more" : "chevron_right" }}
+            <div v-for="tool in entry.tools" :key="tool.id" class="cct-tool">
+              <button class="cct-tool-head" type="button" @click="toggle(rowId(entry, tool), false)">
+                <span class="cct-tool-state material-symbols-rounded" :class="`status-${tool.status}`">
+                  {{ toolStateIcon(tool.status) }}
                 </span>
+                <span class="cct-tool-name">{{ tool.toolName || tool.title || "工具" }}</span>
+                <span v-if="toolDetail(tool)" class="cct-tool-detail">{{ toolDetail(tool) }}</span>
               </button>
-              <div
-                v-if="entry.tools.length <= TOOL_CHUNK_SIZE || isOpen(chunk.id, isRunning)"
-                class="cct-tool-chunk-list"
-              >
-                <div v-for="tool in chunk.tools" :key="tool.id" class="cct-tool">
-                  <button class="cct-tool-head" type="button" @click="toggle(rowId(entry, tool), false)">
-                    <span class="cct-tool-state material-symbols-rounded" :class="`status-${tool.status}`">
-                      {{ toolStateIcon(tool.status) }}
-                    </span>
-                    <span class="cct-tool-name">{{ tool.toolName || tool.title || "工具" }}</span>
-                    <span v-if="toolDetail(tool)" class="cct-tool-detail">{{ toolDetail(tool) }}</span>
-                  </button>
-                  <div v-if="isOpen(rowId(entry, tool), false)" class="cct-tool-expand">
-                    <pre v-if="tool.arguments && Object.keys(tool.arguments).length">{{ compactJson(tool.arguments) }}</pre>
-                    <pre v-if="tool.resultPreview" class="cct-tool-result">{{ compactText(tool.resultPreview) }}</pre>
-                  </div>
-                </div>
+              <div v-if="isOpen(rowId(entry, tool), false)" class="cct-tool-expand">
+                <pre v-if="tool.arguments && Object.keys(tool.arguments).length">{{ compactJson(tool.arguments) }}</pre>
+                <pre v-if="tool.resultPreview" class="cct-tool-result">{{ compactText(tool.resultPreview) }}</pre>
               </div>
             </div>
           </div>
@@ -204,16 +185,7 @@ type FlowEntry =
   | { kind: "info"; id: string; text: string }
   | { kind: "error"; id: string; text: string };
 
-type ToolChunk = {
-  id: string;
-  start: number;
-  end: number;
-  tools: CoomiWaterfallItem[];
-};
-
 type ToolFeedbackState = "consent" | "analyzing" | "ready" | "uploading" | "analysis_failed" | "upload_failed" | "complete";
-
-const TOOL_CHUNK_SIZE = 5;
 
 const props = defineProps<{
   run: AgentExecutionRun;
@@ -395,21 +367,6 @@ async function handleToolFailureFeedback(): Promise<void> {
     toolFeedbackState.value = "upload_failed";
     toolFeedbackError.value = error instanceof Error ? error.message : String(error);
   }
-}
-
-// 运行中不显示 phase 之外的活动提示；完成后 store 会把 phase 内容覆盖为终态
-function toolChunks(entry: Extract<FlowEntry, { kind: "tools" }>): ToolChunk[] {
-  const chunks: ToolChunk[] = [];
-  for (let index = 0; index < entry.tools.length; index += TOOL_CHUNK_SIZE) {
-    const tools = entry.tools.slice(index, index + TOOL_CHUNK_SIZE);
-    chunks.push({
-      id: `${entry.id}-chunk-${Math.floor(index / TOOL_CHUNK_SIZE)}`,
-      start: index + 1,
-      end: index + tools.length,
-      tools
-    });
-  }
-  return chunks;
 }
 
 // 折叠后的工具摘要，模仿 "Ran 2 commands, read 3 files"
@@ -739,24 +696,8 @@ function compactText(value: unknown, limit = 1200): string {
   overflow-wrap: anywhere;
 }
 
-/* 工具展开列表 */
+/* 工具展开列表（所有调用共用顶部摘要折叠栏） */
 .cct-tool-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.cct-tool-chunk {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.cct-chunk-head {
-  font-size: 12.5px;
-}
-
-.cct-tool-chunk-list {
   display: flex;
   flex-direction: column;
   gap: 2px;

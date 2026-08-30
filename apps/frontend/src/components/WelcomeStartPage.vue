@@ -97,8 +97,8 @@
 </template>
 
 <script setup lang="ts">
-import storydexIcon from "@/assets/storydex_icon_01.png";
-import storydexFront from "../../../../assets/Storydex_front.png";
+import storydexIcon from "../../../../assets/Storydex_icon/storydex_icon_01.svg";
+import storydexFront from "../../../../assets/Storydex_front.svg";
 import { computed } from "vue";
 import { useProjectLauncher } from "@/composables/useProjectLauncher";
 import { useWorkspaceStore } from "@/stores/workspace";
