@@ -128,7 +128,6 @@ docs/superpowers/
 
 # Local-only drafts, plans, promotional pages, and handoff artifacts.
 # These directories intentionally never become part of the repository.
-/AGENTS.md
 /local/
 /docs/local/
 /CONTEXT.md
