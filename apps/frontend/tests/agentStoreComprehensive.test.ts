@@ -94,6 +94,39 @@ describe("agent store lifecycle and normalization", () => {
     expect(store.storyFragmentCount).toBe(1);
   });
 
+  it("covers running status, partial failed-run cleanup, and plan-mode transitions", async () => {
+    const store = useAgentStore();
+    store.isRunning = true;
+    expect(store.statusLabel).toBe("Coomi · 运行中");
+    store.isRunning = false;
+
+    store.lastError = "stale";
+    store.clearFailedRuns();
+    expect(store.lastError).toBe("");
+
+    const failed = run("failed");
+    failed.status = "failed";
+    const kept = run("kept");
+    kept.status = "completed";
+    kept.prompt = "保留的提示";
+    kept.reply = "保留的回复";
+    store.executionHistory = [failed, kept];
+    store.selectedTraceId = "kept";
+    store.currentTraceId = "kept";
+    store.clearFailedRuns();
+    expect(store.executionHistory.map((item) => item.traceId)).toEqual(["kept"]);
+    expect(store.currentTraceId).toBe("kept");
+    expect(store.selectedTraceId).toBe("kept");
+
+    store.isRunning = true;
+    await expect(store.setPlanMode(true)).resolves.toBe(false);
+    store.isRunning = false;
+    await expect(store.setPlanMode(true)).resolves.toBe(true);
+    expect(api.setAgentCoomiPlanMode).toHaveBeenLastCalledWith(expect.any(String), true);
+    await expect(store.setPlanMode(false)).resolves.toBe(true);
+    expect(api.setAgentCoomiPlanMode).toHaveBeenLastCalledWith(expect.any(String), false);
+  });
+
   it("refreshes status and permission modes across direct and fallback branches", async () => {
     const store = useAgentStore();
     await store.refreshCoomiStatus();
@@ -230,6 +263,39 @@ describe("agent packet state machine", () => {
     store.applyStreamPacket("trace", { _type: "AgentCompleted" } as never); expect(store.executionHistory[0].status).toBe("completed");
     store.applyStreamPacket("trace", { _type: "AgentCancelled" } as never); expect(store.executionHistory[0].status).toBe("cancelled");
     store.applyStreamPacket("trace", { _type: "AgentError", message: "boom", error_type: "provider" } as never); expect(store.executionHistory[0].errorCode).toBe("provider");
+  });
+
+  it("debounces Git summary refresh after successful write-tool packets", () => {
+    const store = useAgentStore();
+    // A previous stream can leave the module-level debounce timer pending; settle
+    // it before asserting the new refresh contract.
+    vi.runAllTimers();
+    git.refreshSummary.mockClear();
+    store.executionHistory = [run("trace-write", "session")];
+    store.currentTraceId = "trace-write";
+
+    store.applyStreamPacket("trace-write", {
+      _type: "ToolDone",
+      tool_name: "write_file",
+      changedFiles: ["chapters/a.md", null],
+      is_error: false
+    } as never);
+    store.applyStreamPacket("trace-write", {
+      _type: "ToolDone",
+      tool_name: "write_file",
+      changedFiles: ["chapters/b.md"],
+      is_error: false
+    } as never);
+
+    expect(store.executionHistory[0].changeLedger.changedFiles).toEqual([
+      "chapters/a.md",
+      "chapters/b.md"
+    ]);
+    vi.advanceTimersByTime(349);
+    expect(git.refreshSummary).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(git.refreshSummary).toHaveBeenCalledTimes(1);
+    expect(git.refreshSummary).toHaveBeenCalledWith({ silent: true });
   });
 
   it("covers finish/upsert ordering and missing run branches", () => {

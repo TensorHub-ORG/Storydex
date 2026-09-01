@@ -47,6 +47,7 @@ vi.mock("@/api/client", () => ({
 
 import AgentPanel from "@/components/AgentPanel.vue";
 import CoomiClaudeTurn from "@/components/CoomiClaudeTurn.vue";
+import FeedbackDialog from "@/components/FeedbackDialog.vue";
 import { useAgentStore } from "@/stores/agent";
 import type { AgentExecutionRun } from "@/types/agent";
 
@@ -1016,6 +1017,55 @@ describe("AgentPanel", () => {
     expect(persisted).not.toHaveProperty("chapterWordCountTarget");
     expect(persisted).not.toHaveProperty("preciseWordCountEnabled");
     expect(persisted).not.toHaveProperty("storyFragmentWordCount");
+    wrapper.unmount();
+  });
+
+  it("persists precise word-count controls and opens feedback diagnostics", async () => {
+    workspace.storySettings = {
+      storyFragmentCount: 1,
+      storyLengthTierEnabled: false,
+      chapterLengthTier: "medium",
+      chapterWordCountTarget: 2500,
+      storyFragmentWordCount: 2500,
+      storyChapterTemplateId: "default_chapter_directory",
+      preciseWordCountEnabled: false
+    } as any;
+    const store = useAgentStore();
+    const failedRun = makeRun({
+      traceId: "feedback-run",
+      status: "failed",
+      errorMessage: "provider failed",
+      errorCode: "provider_error"
+    });
+    store.executionHistory = [failedRun];
+    const wrapper = shallowMount(AgentPanel);
+    const utils = (wrapper.vm as any).__testUtils;
+
+    utils.toggleStoryOptions();
+    await flushPromises();
+    const precisionToggle = wrapper.find(".coomi-story-precision-field input[type=\"checkbox\"]");
+    expect(precisionToggle.exists()).toBe(true);
+    workspace.updateStorySettings.mockClear();
+    await precisionToggle.setValue(true);
+    await vi.waitFor(() => expect(workspace.updateStorySettings).toHaveBeenCalled());
+    expect(store.preciseWordCountEnabled).toBe(true);
+
+    const numberInputs = wrapper.findAll('.coomi-story-popover input[type="number"]');
+    expect(numberInputs).toHaveLength(2);
+    workspace.updateStorySettings.mockClear();
+    await numberInputs[1].setValue("4200");
+    await vi.waitFor(() => expect(workspace.updateStorySettings).toHaveBeenCalled());
+    expect(store.chapterWordCountTarget).toBe(4200);
+    expect(workspace.updateStorySettings.mock.calls.at(-1)?.[0]).toMatchObject({
+      chapterWordCountTarget: 4200,
+      preciseWordCountEnabled: true
+    });
+
+    const turn = wrapper.findComponent(CoomiClaudeTurn);
+    expect(turn.exists()).toBe(true);
+    turn.vm.$emit("feedback", failedRun);
+    await nextTick();
+    expect(wrapper.findComponent(FeedbackDialog).props("open")).toBe(true);
     wrapper.unmount();
   });
 
