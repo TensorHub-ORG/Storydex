@@ -47,6 +47,10 @@ pub(crate) struct FollowupMessage {
     pub(crate) updated_at: String,
     pub(crate) sequence: u64,
     pub(crate) dispatch_trace_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) segment_id: String,
+    /// The Python runtime did not persist `previousTraceId` for pending messages.
+    #[serde(default)]
     pub(crate) previous_trace_id: String,
     pub(crate) error: String,
 }
@@ -283,6 +287,7 @@ impl FollowupStore {
                 updated_at: now,
                 sequence: state.message_sequence,
                 dispatch_trace_id: String::new(),
+                segment_id: String::new(),
                 previous_trace_id: String::new(),
                 error: String::new(),
             };
@@ -747,20 +752,31 @@ impl FollowupStore {
         }
         let raw = fs::read_to_string(&path)
             .map_err(|error| FollowupError::new("followup_storage_error", error.to_string()))?;
-        let state: FollowupState = serde_json::from_str(&raw).map_err(|error| {
+        let mut state: FollowupState = serde_json::from_str(&raw).map_err(|error| {
             FollowupError::new(
                 "corrupt_followup_mailbox",
                 format!("invalid follow-up mailbox: {error}"),
             )
         })?;
+        let expected_workspace_root = contract_path(&workspace);
         if state.version != MAILBOX_VERSION
             || state.session_id != normalize_session(session_id)
-            || state.workspace_root != contract_path(&workspace)
+            || !workspace_roots_match(&state.workspace_root, &expected_workspace_root)
         {
             return Err(FollowupError::new(
                 "corrupt_followup_mailbox",
                 "follow-up mailbox identity does not match the requested workspace/session",
             ));
+        }
+        // Keep the response and the next write on the current canonical
+        // spelling, while accepting the slash/extended-prefix spellings that
+        // the Python runtime persisted on Windows.
+        state.workspace_root = expected_workspace_root;
+        if state.last_trace_id.trim().is_empty() {
+            // `lastTraceId` was introduced by the Rust runtime. Recover it
+            // from the legacy mailbox's active/pending trace metadata so a
+            // queued message can still pass the stale-trace guard on resume.
+            state.last_trace_id = recover_last_trace_id(&state);
         }
         Ok(state)
     }
@@ -873,6 +889,106 @@ fn contract_path(path: &Path) -> String {
         .unwrap_or_else(|| value.into_owned())
 }
 
+fn workspace_roots_match(stored: &str, expected: &str) -> bool {
+    let stored = normalize_workspace_identity(stored);
+    let expected = normalize_workspace_identity(expected);
+    if cfg!(windows) {
+        stored.eq_ignore_ascii_case(&expected)
+    } else {
+        stored == expected
+    }
+}
+
+fn normalize_workspace_identity(value: &str) -> String {
+    // The desktop release is Windows-only, but keeping the non-Windows path
+    // spelling untouched avoids treating a literal backslash in a Unix file
+    // name as a separator.
+    if !cfg!(windows) {
+        return value.trim().to_owned();
+    }
+
+    let mut normalized = value.trim().replace('/', "\\");
+    const EXTENDED_UNC_PREFIX: &str = "\\\\?\\UNC\\";
+    const EXTENDED_PREFIX: &str = "\\\\?\\";
+    if normalized.len() >= EXTENDED_UNC_PREFIX.len()
+        && normalized[..EXTENDED_UNC_PREFIX.len()].eq_ignore_ascii_case(EXTENDED_UNC_PREFIX)
+    {
+        normalized = format!("\\\\{}", &normalized[EXTENDED_UNC_PREFIX.len()..]);
+    } else if normalized.len() >= EXTENDED_PREFIX.len()
+        && normalized[..EXTENDED_PREFIX.len()].eq_ignore_ascii_case(EXTENDED_PREFIX)
+    {
+        normalized = normalized[EXTENDED_PREFIX.len()..].to_owned();
+    }
+
+    // Windows accepts repeated separators in a path. Collapse them while
+    // retaining the two leading separators that identify a UNC path.
+    let preserve_unc_prefix = normalized.starts_with("\\\\");
+    let mut compact = String::with_capacity(normalized.len());
+    let mut separator_run = 0usize;
+    for character in normalized.chars() {
+        if character == '\\' {
+            separator_run += 1;
+            if separator_run > 1 && !(preserve_unc_prefix && compact.len() < 2) {
+                continue;
+            }
+        } else {
+            separator_run = 0;
+        }
+        compact.push(character);
+    }
+    normalized = compact;
+
+    // A trailing separator is not part of the workspace identity, except for
+    // a drive root (for example, `C:\\`).
+    let minimum_length = if normalized.starts_with("\\\\") {
+        2
+    } else if normalized.as_bytes().get(1) == Some(&b':') {
+        3
+    } else {
+        1
+    };
+    while normalized.len() > minimum_length && normalized.ends_with('\\') {
+        normalized.pop();
+    }
+    normalized
+}
+
+fn recover_last_trace_id(state: &FollowupState) -> String {
+    if !state.active_trace_id.trim().is_empty() {
+        return state.active_trace_id.trim().to_owned();
+    }
+    state
+        .messages
+        .iter()
+        .rev()
+        .filter(|message| message.mode == "queued" && message.status == "pending")
+        .find_map(|message| {
+            [
+                message.expected_trace_id.as_str(),
+                message.active_trace_id.as_str(),
+                message.previous_trace_id.as_str(),
+            ]
+            .into_iter()
+            .map(str::trim)
+            .find(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            state.events.iter().rev().find_map(|event| {
+                [
+                    event.get("traceId").and_then(Value::as_str),
+                    event.get("activeTraceId").and_then(Value::as_str),
+                ]
+                .into_iter()
+                .flatten()
+                .map(str::trim)
+                .find(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+            })
+        })
+        .unwrap_or_default()
+}
+
 fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339()
 }
@@ -945,6 +1061,110 @@ mod tests {
             .list(workspace, "session")
             .expect_err("corrupt mailbox must fail");
         assert_eq!(error.code, "corrupt_followup_mailbox");
+    }
+
+    #[test]
+    fn legacy_python_mailbox_is_accepted_and_preserved_on_write() {
+        let directory = tempdir().expect("tempdir");
+        let workspace = directory.path().canonicalize().expect("workspace");
+        let path = mailbox_path(&workspace, "legacy-session");
+        fs::create_dir_all(path.parent().expect("parent")).expect("parent");
+
+        let legacy_workspace = contract_path(&workspace).replace('\\', "/");
+        let legacy = json!({
+            "_type": "FollowupMailbox",
+            "_version": MAILBOX_VERSION,
+            "revision": 2,
+            "workspaceRoot": legacy_workspace,
+            "sessionId": "legacy-session",
+            "activeTraceId": "",
+            "paused": false,
+            "pauseReason": "",
+            "messageSequence": 1,
+            "eventSequence": 1,
+            "messages": [{
+                "messageId": "legacy-message",
+                "sessionId": "legacy-session",
+                "activeTraceId": "",
+                "expectedTraceId": "trace-old",
+                "content": "continue from the old runtime",
+                "mode": "queued",
+                "status": "pending",
+                "statusDetail": "等待当前轮完成",
+                "createdAt": "2026-08-20T00:00:00Z",
+                "updatedAt": "2026-08-20T00:00:00Z",
+                "sequence": 1,
+                "dispatchTraceId": "",
+                "segmentId": "legacy-segment",
+                "error": ""
+            }],
+            "events": [],
+            "createdAt": "2026-08-20T00:00:00Z",
+            "updatedAt": "2026-08-20T00:00:00Z"
+        });
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&legacy).expect("legacy mailbox JSON"),
+        )
+        .expect("legacy mailbox");
+
+        let store = FollowupStore::default();
+        let state = store
+            .list(&workspace, "legacy-session")
+            .expect("legacy mailbox should load");
+        assert_eq!(state.workspace_root, contract_path(&workspace));
+        assert_eq!(state.last_trace_id, "trace-old");
+        assert_eq!(state.messages[0].previous_trace_id, "");
+        assert_eq!(state.messages[0].segment_id, "legacy-segment");
+
+        // The first normal state mutation performs the safe schema rewrite;
+        // the pending message itself must remain dispatchable.
+        let claimed = store
+            .claim(
+                &workspace,
+                "legacy-session",
+                "legacy-message",
+                "trace-old",
+                "trace-next",
+                "",
+            )
+            .expect("legacy pending message should be claimable");
+        assert_eq!(claimed.status, "dispatching");
+
+        let persisted: Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("rewritten mailbox"))
+                .expect("rewritten mailbox JSON");
+        assert_eq!(
+            persisted["workspaceRoot"],
+            Value::String(contract_path(&workspace))
+        );
+        assert_eq!(
+            persisted["messages"][0]["content"],
+            legacy["messages"][0]["content"]
+        );
+        assert_eq!(
+            persisted["messages"][0]["segmentId"],
+            Value::String("legacy-segment".to_owned())
+        );
+        assert_eq!(
+            persisted["messages"][0]["previousTraceId"],
+            Value::String("trace-old".to_owned())
+        );
+    }
+
+    #[test]
+    fn windows_workspace_identity_accepts_legacy_spellings() {
+        if !cfg!(windows) {
+            return;
+        }
+        assert!(workspace_roots_match(
+            "E:/Docs/Story/",
+            r"\\?\e:\\docs\\story"
+        ));
+        assert!(workspace_roots_match(
+            r"\\server\share\Story",
+            "//SERVER/share/Story/"
+        ));
     }
 
     #[test]
