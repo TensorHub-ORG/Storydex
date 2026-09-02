@@ -12,8 +12,9 @@ Storydex v2.0.6 是 Windows 桌面端 Tauri 2 Stable 版本，完成从旧 Elect
 
 ## 升级说明
 
-- v2.0.5 及更早版本仍使用旧 Electron 更新链路，不能直接读取 Tauri 的 `latest.json`。请先备份项目，再下载完整安装包 `StorydexSetup-x64-2.0.6.exe` 覆盖安装。
-- v2.0.6 及后续 Tauri 版本可通过应用内更新升级，也可以使用 `Storydex-win-portable.zip` 运行便携版。
+- v2.0.5 及更早版本仍使用旧 Electron 更新链路，不能读取 Tauri 的 `latest.json`，不能通过应用内更新迁移到本版本。请先备份项目，再手动下载完整安装包 `StorydexSetup-x64-2.0.6.exe`，按安装器提示覆盖安装。
+- v2.0.6 是 Electron → Tauri 的迁移版本，本次迁移请以手动安装为准；不要把 Tauri 文件直接复制到旧 Electron 目录，也不要用便携包覆盖原安装目录。
+- 从旧版本迁移时，应用内更新暂不作为已验证路径承诺。待后续 Tauri → Tauri 的下载、重启和安装链路完成实机验证后，再启用该升级方式。
 - Windows 更新源：<https://updates.septemc.com/storydex/windows/latest.json>
 
 ## 发行资产

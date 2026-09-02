@@ -49,6 +49,17 @@ test("Tauri release contract requires signed updater artifacts and a Rust-only c
   assert.doesNotMatch(artifactScript, /python|electron|node_modules/i);
 });
 
+test("NSIS installer license is UTF-8 text without a duplicate BOM", () => {
+  const licensePath = path.join(desktopRoot, "build", "installer-license.zh-CN.txt");
+  const bytes = fs.readFileSync(licensePath);
+  assert.notDeepEqual(bytes.subarray(0, 2), Buffer.from([0xff, 0xfe]), "license must not be UTF-16LE");
+  assert.notDeepEqual(bytes.subarray(0, 2), Buffer.from([0xfe, 0xff]), "license must not be UTF-16BE");
+  assert.notDeepEqual(bytes.subarray(0, 3), Buffer.from([0xef, 0xbb, 0xbf]), "bundler adds the UTF-8 BOM");
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  assert.match(text, /Storydex 软件许可与使用协议/);
+  assert.doesNotMatch(text, /\u0000/);
+});
+
 test("Tauri Rust shell exposes the desktop capabilities consumed by Vue", () => {
   const main = fs.readFileSync(path.join(previewRoot, "src/main.rs"), "utf8");
   const sidecar = fs.readFileSync(path.join(previewRoot, "src/sidecar.rs"), "utf8");

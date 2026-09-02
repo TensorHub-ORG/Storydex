@@ -1,7 +1,7 @@
 {
   "name": "storydex-desktop",
   "private": true,
-  "version": "2.0.6",
+  "version": "2.0.7",
   "description": "Storydex desktop app",
   "scripts": {
     "dev": "npm run dev:tauri",
