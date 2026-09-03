@@ -2178,6 +2178,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn followup_routes_accept_unicode_workspace_paths_without_panic() {
+        let root = tempdir().expect("root");
+        let (state, _) = followup_test_state(root.path());
+        let workspace = root.path().join("中文工作区");
+        std::fs::create_dir_all(&workspace).expect("unicode workspace");
+        let encoded_workspace = encode_query_value(&workspace);
+
+        let response = router(state.clone())
+            .oneshot(protected_get_request(&format!(
+                "/api/v1/agent/followups?sessionId=unicode-session&workspaceRoot={encoded_workspace}"
+            )))
+            .await
+            .expect("unicode followup list response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router(state)
+            .oneshot(protected_json_request(
+                "/api/v1/agent/followups",
+                json!({
+                    "messageId": "unicode-followup",
+                    "sessionId": "unicode-session",
+                    "workspaceRoot": workspace.to_string_lossy(),
+                    "content": "中文路径回归测试",
+                    "mode": "queued"
+                }),
+            ))
+            .await
+            .expect("unicode followup enqueue response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await["data"]["message"]["status"],
+            "pending"
+        );
+    }
+
+    #[tokio::test]
     async fn followup_patch_and_delete_routes_are_idempotent() {
         let root = tempdir().expect("root");
         let (state, workspace) = followup_test_state(root.path());

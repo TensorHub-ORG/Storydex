@@ -49,6 +49,48 @@ test("Tauri release contract requires signed updater artifacts and a Rust-only c
   assert.doesNotMatch(artifactScript, /python|electron|node_modules/i);
 });
 
+test("Current website overlay points Windows downloads at the desktop release version", () => {
+  const pkg = JSON.parse(read("package.json"));
+  const overlay = fs.readFileSync(
+    path.resolve(desktopRoot, "..", "website-overlay", "storydex-android-download-v0.1.4.js"),
+    "utf8"
+  );
+  assert.match(
+    overlay,
+    new RegExp(`https://updates\\.septemc\\.com/storydex/windows/StorydexSetup-x64-${pkg.version.replaceAll(".", "\\.")}\\.exe`)
+  );
+});
+
+test("Windows ICO puts the high-resolution image first for Tauri window icons", () => {
+  const iconPaths = [
+    path.resolve(desktopRoot, "..", "..", "assets", "Storydex_icon", "storydex_icon_01.ico"),
+    path.join(previewRoot, "icons", "icon.ico")
+  ];
+  const expectedSizes = [256, 128, 96, 64, 48, 40, 32, 24, 20, 16];
+
+  for (const iconPath of iconPaths) {
+    const bytes = fs.readFileSync(iconPath);
+    assert.equal(bytes.readUInt16LE(0), 0, `${iconPath} must be an ICO file`);
+    assert.equal(bytes.readUInt16LE(2), 1, `${iconPath} must contain images`);
+    const count = bytes.readUInt16LE(4);
+    assert.equal(count, expectedSizes.length, `${iconPath} entry count changed`);
+    const sizes = [];
+    for (let index = 0; index < count; index += 1) {
+      const offset = 6 + index * 16;
+      sizes.push(bytes[offset] || 256);
+    }
+    assert.deepEqual(sizes, expectedSizes, `${iconPath} must keep the 256px entry first`);
+    const firstDataOffset = bytes.readUInt32LE(6 + 12);
+    assert.deepEqual(
+      bytes.subarray(firstDataOffset, firstDataOffset + 8),
+      Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+      `${iconPath} high-resolution entry must be a PNG image`
+    );
+  }
+
+  assert.deepEqual(fs.readFileSync(iconPaths[0]), fs.readFileSync(iconPaths[1]));
+});
+
 test("NSIS installer license is UTF-8 text without a duplicate BOM", () => {
   const licensePath = path.join(desktopRoot, "build", "installer-license.zh-CN.txt");
   const bytes = fs.readFileSync(licensePath);

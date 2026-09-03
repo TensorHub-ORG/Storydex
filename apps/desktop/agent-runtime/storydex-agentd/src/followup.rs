@@ -910,12 +910,14 @@ fn normalize_workspace_identity(value: &str) -> String {
     let mut normalized = value.trim().replace('/', "\\");
     const EXTENDED_UNC_PREFIX: &str = "\\\\?\\UNC\\";
     const EXTENDED_PREFIX: &str = "\\\\?\\";
-    if normalized.len() >= EXTENDED_UNC_PREFIX.len()
-        && normalized[..EXTENDED_UNC_PREFIX.len()].eq_ignore_ascii_case(EXTENDED_UNC_PREFIX)
+    if normalized
+        .get(..EXTENDED_UNC_PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(EXTENDED_UNC_PREFIX))
     {
         normalized = format!("\\\\{}", &normalized[EXTENDED_UNC_PREFIX.len()..]);
-    } else if normalized.len() >= EXTENDED_PREFIX.len()
-        && normalized[..EXTENDED_PREFIX.len()].eq_ignore_ascii_case(EXTENDED_PREFIX)
+    } else if normalized
+        .get(..EXTENDED_PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(EXTENDED_PREFIX))
     {
         normalized = normalized[EXTENDED_PREFIX.len()..].to_owned();
     }
@@ -1164,6 +1166,19 @@ mod tests {
         assert!(workspace_roots_match(
             r"\\server\share\Story",
             "//SERVER/share/Story/"
+        ));
+    }
+
+    #[test]
+    fn windows_workspace_identity_handles_unicode_paths() {
+        if !cfg!(windows) {
+            return;
+        }
+        // The prefix checks above must not slice a UTF-8 path at an arbitrary
+        // byte boundary when the path is not an extended Windows path.
+        assert!(workspace_roots_match(
+            r"E:\文档\1dex小说\123456",
+            r"e:/文档/1dex小说/123456/"
         ));
     }
 
