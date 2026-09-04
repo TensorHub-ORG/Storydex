@@ -1517,7 +1517,7 @@ function formatDate(value: string): string {
 
 .llm-options-menu--presets::-webkit-scrollbar-thumb {
   border: 2px solid transparent;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: color-mix(in srgb, var(--text-muted) 48%, transparent);
   background-clip: padding-box;
 }
@@ -1648,7 +1648,7 @@ function formatDate(value: string): string {
   justify-content: center;
   padding: 0;
   border: 1px solid color-mix(in srgb, var(--text-muted) 76%, transparent);
-  border-radius: 50%;
+  border-radius: var(--radius-full);
   background: transparent;
   color: var(--text-muted);
   font-family: inherit;
@@ -1676,7 +1676,7 @@ function formatDate(value: string): string {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   background: var(--bg-card);
-  box-shadow: 0 8px 24px color-mix(in srgb, #000 16%, transparent);
+  box-shadow: var(--shadow-overlay);
   color: var(--text-soft);
   font-size: 11px;
   font-weight: 400;
@@ -1832,7 +1832,7 @@ function formatDate(value: string): string {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   background: var(--bg-card);
-  box-shadow: 0 10px 28px color-mix(in srgb, #000 18%, transparent);
+  box-shadow: var(--shadow-overlay);
 }
 
 .llm-option {
@@ -1916,7 +1916,7 @@ function formatDate(value: string): string {
 
 .llm-options-menu--models::-webkit-scrollbar-thumb {
   border: 2px solid transparent;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: color-mix(in srgb, var(--text-muted) 48%, transparent);
   background-clip: padding-box;
 }
@@ -2111,7 +2111,7 @@ function formatDate(value: string): string {
   min-width: 0;
   overflow: hidden;
   color: var(--text-soft);
-  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-family: var(--font-mono);
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2142,7 +2142,7 @@ function formatDate(value: string): string {
   width: 6px;
   height: 6px;
   flex-shrink: 0;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: var(--success);
 }
 

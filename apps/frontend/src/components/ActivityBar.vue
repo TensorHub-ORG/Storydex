@@ -236,7 +236,7 @@ function handleDocumentKeydown(event: KeyboardEvent): void {
 .activity-account-badge {
   width: 22px;
   height: 22px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   display: grid;
   place-items: center;
   background: var(--accent-soft);
@@ -252,7 +252,7 @@ function handleDocumentKeydown(event: KeyboardEvent): void {
   min-width: 16px;
   height: 16px;
   padding: 0 4px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   display: inline-flex;
   align-items: center;
   justify-content: center;

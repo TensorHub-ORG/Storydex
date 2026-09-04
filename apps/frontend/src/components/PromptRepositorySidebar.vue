@@ -389,21 +389,23 @@ function showFeedback(message: string): void {
 
 .prompt-repository-header {
   flex: 0 0 auto;
-  min-height: 52px;
-  padding: 12px 14px;
+  min-height: 34px;
+  padding: 6px 12px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  border-bottom: 1px solid var(--border-ghost);
+  gap: 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-2);
 }
 
 .prompt-repository-title {
   margin: 0;
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  color: var(--text-main);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .prompt-icon-button {
@@ -414,7 +416,7 @@ function showFeedback(message: string): void {
   align-items: center;
   justify-content: center;
   border: 0;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -438,7 +440,7 @@ function showFeedback(message: string): void {
   gap: 6px;
   padding: 0 8px;
   border: 1px solid var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--bg-input);
 }
 
@@ -480,7 +482,7 @@ function showFeedback(message: string): void {
   align-items: center;
   gap: 3px;
   border: 1px solid var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   color: var(--text-muted);
   background: var(--bg-card);
   font: inherit;
@@ -520,7 +522,7 @@ function showFeedback(message: string): void {
   justify-content: center;
   gap: 5px;
   border: 1px solid var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--bg-card);
   color: var(--text-main);
   font: inherit;
@@ -562,7 +564,7 @@ function showFeedback(message: string): void {
   align-items: center;
   justify-content: center;
   border: 0;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -591,7 +593,7 @@ function showFeedback(message: string): void {
   width: 100%;
   padding: 7px 8px;
   border: 1px solid var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--bg-input);
   color: var(--text-main);
   font: inherit;
@@ -619,7 +621,7 @@ function showFeedback(message: string): void {
 
 .prompt-custom-create-error {
   margin: 0;
-  color: var(--danger, #dc2626);
+  color: var(--danger);
   font-size: 11px;
   line-height: 1.5;
 }
@@ -628,7 +630,7 @@ function showFeedback(message: string): void {
   height: 28px;
   padding: 0 12px;
   border: 1px solid var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--bg-card);
   color: var(--text-main);
   font: inherit;
@@ -662,7 +664,7 @@ function showFeedback(message: string): void {
   gap: 7px;
   padding: 10px 7px;
   border: 0;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   color: inherit;
   text-align: left;
   background: transparent;
@@ -679,7 +681,7 @@ function showFeedback(message: string): void {
   height: 28px;
   display: grid;
   place-items: center;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   color: var(--accent);
   background: var(--accent-soft);
   font-size: 17px;
@@ -737,7 +739,7 @@ function showFeedback(message: string): void {
   gap: 4px;
   padding: 5px 7px;
   border: 0;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   color: var(--text-muted);
   background: transparent;
   font: inherit;
@@ -760,7 +762,7 @@ function showFeedback(message: string): void {
   display: inline-flex;
   align-items: center;
   border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border-subtle));
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
   color: var(--accent-strong);
   font-size: 11px;
@@ -806,10 +808,10 @@ function showFeedback(message: string): void {
 .prompt-placeholder {
   padding: 3px 6px;
   border: 1px solid var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   color: var(--text-muted);
   background: var(--bg-card);
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-mono);
   font-size: 10px;
 }
 
@@ -828,7 +830,7 @@ function showFeedback(message: string): void {
   justify-content: center;
   gap: 5px;
   border: 0;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   font: inherit;
   font-size: 11px;
   font-weight: 600;
@@ -867,7 +869,7 @@ function showFeedback(message: string): void {
 .prompt-feedback {
   margin-top: 8px;
   padding: 7px 8px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   color: var(--accent-strong);
   background: var(--accent-soft);
   font-size: 11px;
@@ -881,17 +883,17 @@ function showFeedback(message: string): void {
   white-space: pre-wrap;
   word-break: break-word;
   border: 1px solid var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   color: var(--text-main);
   background: var(--bg-card);
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.65;
 }
 
 .prompt-feedback.is-error {
-  color: var(--danger, #dc2626);
-  background: color-mix(in srgb, var(--danger, #dc2626) 10%, transparent);
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
 
 .prompt-content-editor {
@@ -954,7 +956,7 @@ function showFeedback(message: string): void {
 .prompt-empty-state button {
   padding: 5px 9px;
   border: 1px solid var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   color: var(--text-main);
   background: var(--bg-card);
   font: inherit;
@@ -968,7 +970,7 @@ function showFeedback(message: string): void {
 }
 
 .prompt-empty-state.is-error {
-  color: var(--danger, #dc2626);
+  color: var(--danger);
 }
 
 .prompt-state-icon {

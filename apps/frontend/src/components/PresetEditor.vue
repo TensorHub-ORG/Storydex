@@ -980,7 +980,7 @@ function onRawJsonChange(text: string): void {
   height: 26px;
   padding: 0 14px;
   border: 1px solid transparent;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--accent);
   color: var(--accent-contrast);
   font-size: 12px;
@@ -1008,7 +1008,7 @@ function onRawJsonChange(text: string): void {
   height: 24px;
   padding: 0 10px;
   border: 1px solid var(--border-strong);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--bg-card);
   color: var(--text-soft);
   font-size: 11px;
@@ -1025,7 +1025,7 @@ function onRawJsonChange(text: string): void {
   margin: 8px 16px 0;
   padding: 7px 10px;
   border: 1px solid var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--bg-card);
   font-size: 12px;
   line-height: 1.5;
@@ -1033,17 +1033,17 @@ function onRawJsonChange(text: string): void {
 
 .preset-editor-error {
   border-left: 2px solid var(--state-danger);
-  color: var(--state-danger, #b91c1c);
+  color: var(--state-danger);
 }
 
 .preset-editor-warning {
   border-left: 2px solid var(--state-warning);
-  color: var(--state-warning, #b45309);
+  color: var(--state-warning);
 }
 
 .preset-editor-section {
   border: 1px solid var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   padding: 0;
   background: var(--bg-card);
 }
@@ -1113,7 +1113,7 @@ function onRawJsonChange(text: string): void {
   background: var(--bg-input);
   color: var(--text-main);
   border: 1px solid var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   font-size: 12px;
   outline: none;
 }
@@ -1124,7 +1124,7 @@ function onRawJsonChange(text: string): void {
 }
 
 .preset-editor-field input[type="range"] {
-  accent-color: var(--accent, #2563eb);
+  accent-color: var(--accent);
 }
 
 .preset-editor-slider-row {
@@ -1158,7 +1158,7 @@ function onRawJsonChange(text: string): void {
   background: var(--bg-input);
   color: var(--text-main);
   border: 1px solid var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   font-size: 12px;
   resize: vertical;
   outline: none;
@@ -1185,7 +1185,7 @@ function onRawJsonChange(text: string): void {
   min-width: 0;
   padding: 7px 8px;
   border: 1px solid var(--border-ghost);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--bg-card);
 }
 
@@ -1260,7 +1260,7 @@ function onRawJsonChange(text: string): void {
 .preset-module-card,
 .preset-risk-group {
   border: 1px solid var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--bg-card);
 }
 
@@ -1313,7 +1313,7 @@ function onRawJsonChange(text: string): void {
 .preset-editor-chip,
 .preset-section-token {
   border: 1px solid var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--bg-code);
   color: var(--text-muted);
   font-size: 11px;
@@ -1332,7 +1332,7 @@ function onRawJsonChange(text: string): void {
 .preset-editor-empty {
   padding: 16px 12px;
   border: 1px dashed var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   color: var(--text-muted);
   font-size: 12px;
   line-height: 1.7;
@@ -1386,30 +1386,30 @@ function onRawJsonChange(text: string): void {
 .preset-risk-pill {
   flex: 0 0 auto;
   padding: 3px 7px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   font-size: 10px;
   font-weight: 800;
   letter-spacing: 0.04em;
 }
 
 .risk-ok {
-  background: rgba(22, 163, 74, 0.12);
-  color: var(--state-success, #15803d);
+  background: var(--success-bg);
+  color: var(--success-fg);
 }
 
 .risk-info {
-  background: rgba(37, 99, 235, 0.12);
-  color: var(--accent-strong, #1d4ed8);
+  background: var(--info-bg);
+  color: var(--info-fg);
 }
 
 .risk-warning {
-  background: rgba(217, 119, 6, 0.14);
-  color: var(--state-warning, #b45309);
+  background: var(--warning-bg);
+  color: var(--warning-fg);
 }
 
 .risk-error {
-  background: rgba(220, 38, 38, 0.14);
-  color: var(--state-danger, #b91c1c);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
 }
 
 .preset-compiled-preview {
@@ -1418,7 +1418,7 @@ function onRawJsonChange(text: string): void {
   padding: 12px;
   overflow: auto;
   border: 1px solid var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--bg-card);
   color: var(--text-main);
   font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;

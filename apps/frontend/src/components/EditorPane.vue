@@ -972,7 +972,7 @@ defineExpose({
   align-items: center;
   justify-content: center;
   border: 0;
-  border-radius: var(--radius-sm, 4px);
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -1011,9 +1011,9 @@ defineExpose({
   gap: 4px;
   padding: 3px 5px;
   border: 1px solid var(--border-subtle);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--bg-card);
-  box-shadow: 0 10px 26px rgba(15, 23, 42, .18);
+  box-shadow: var(--shadow-overlay);
 }
 .editor-find-box > .material-symbols-rounded { color: var(--text-muted); font-size: 17px; }
 .editor-find-box input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: var(--text-main); padding: 4px; }
@@ -1022,14 +1022,15 @@ defineExpose({
 .editor-find-count { color: var(--text-muted); font-size: 11px; white-space: nowrap; }
 .editor-pane :deep(mark.editor-find-highlight) {
   padding: 0;
-  border-radius: 2px;
-  background: #ffe082;
-  color: #202124;
-  box-shadow: 0 0 0 1px rgba(120, 84, 0, .2);
+  border-radius: var(--radius-sm);
+  background: var(--find-highlight-bg);
+  color: var(--find-highlight-fg);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--find-highlight-active-bg) 60%, transparent);
 }
 .editor-pane :deep(mark.editor-find-highlight.is-active) {
-  background: #ff9f43;
-  box-shadow: 0 0 0 2px rgba(196, 90, 0, .42);
+  background: var(--find-highlight-active-bg);
+  color: var(--find-highlight-active-fg);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--find-highlight-active-bg) 70%, var(--text-main));
 }
 
 .editor-readonly-badge {
@@ -1113,11 +1114,11 @@ defineExpose({
 }
 
 .agent-preview-line.is-added {
-  background: color-mix(in srgb, var(--accent-success, #4caf50) 18%, transparent);
+  background: color-mix(in srgb, var(--accent-success) 18%, transparent);
 }
 
 .agent-preview-line.is-removed {
-  background: color-mix(in srgb, var(--accent-danger, #d15d5d) 18%, transparent);
+  background: color-mix(in srgb, var(--accent-danger) 18%, transparent);
 }
 
 .agent-preview-gutter {
@@ -1133,7 +1134,7 @@ defineExpose({
   padding: 4px 18px;
   white-space: pre-wrap;
   word-break: break-word;
-  font-family: var(--font-editor, "Cascadia Mono", "Consolas", monospace);
+  font-family: var(--font-editor);
   font-size: 13px;
   line-height: 1.6;
   color: var(--text-primary);

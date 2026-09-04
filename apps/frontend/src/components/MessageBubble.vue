@@ -86,54 +86,54 @@ function getToolProgress(toolId: string): string | undefined {
 .message-bubble {
   margin: 10px 0;
   padding: 10px 14px;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   max-width: 100%;
 }
 .role-user {
-  background: var(--color-user-bubble, #e3f2fd);
+  background: var(--color-user-bubble);
   margin-left: 40px;
 }
 .role-assistant {
-  background: var(--color-assistant-bubble, #f5f5f5);
+  background: var(--color-assistant-bubble);
   margin-right: 40px;
 }
 .role-system {
-  background: var(--color-surface, #fff3e0);
+  background: var(--color-surface);
   font-style: italic;
 }
 
 .bubble-header {
   margin-bottom: 6px;
   font-size: 12px;
-  color: var(--color-text-secondary, #888);
+  color: var(--color-text-secondary);
 }
 .role-label { font-weight: 600; }
 
 .bubble-content { line-height: 1.6; }
 .text-block :deep(p) { margin: 4px 0; }
 .text-block :deep(pre) {
-  background: var(--color-code-bg, #1e1e1e);
-  color: var(--color-code-fg, #d4d4d4);
+  background: var(--color-code-bg);
+  color: var(--color-code-fg);
   padding: 8px 12px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   overflow-x: auto;
   font-size: 13px;
 }
 
 .thinking-block {
   margin: 4px 0;
-  border: 1px dashed var(--color-border, #ccc);
-  border-radius: 4px;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-sm);
   padding: 4px 8px;
 }
 .thinking-block summary {
   cursor: pointer;
   font-size: 12px;
-  color: var(--color-text-secondary, #888);
+  color: var(--color-text-secondary);
 }
 .thinking-content {
   font-size: 13px;
-  color: var(--color-text-secondary, #666);
+  color: var(--color-text-secondary);
   white-space: pre-wrap;
   max-height: 200px;
   overflow-y: auto;

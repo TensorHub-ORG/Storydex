@@ -85,7 +85,7 @@ defineExpose({
   gap: 6px;
   margin: 10px 12px 0;
   padding: 8px 10px;
-  border-radius: var(--radius-sm, 4px);
+  border-radius: var(--radius-sm);
   font-size: 12px;
   line-height: 1.6;
 }

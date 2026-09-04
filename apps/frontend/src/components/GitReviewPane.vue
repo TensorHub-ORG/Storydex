@@ -278,7 +278,7 @@ function normalizePath(value: string): string {
   height: 14px;
   border: 2px solid color-mix(in srgb, var(--accent-strong) 28%, transparent);
   border-top-color: var(--accent-strong);
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   animation: git-review-spin 0.8s linear infinite;
 }
 
@@ -339,11 +339,11 @@ function normalizePath(value: string): string {
 }
 
 .git-review-status.is-added {
-  color: var(--success, #2f8b57);
+  color: var(--success);
 }
 
 .git-review-status.is-modified {
-  color: var(--warning, #b7791f);
+  color: var(--warning);
 }
 
 .git-review-status.is-deleted {
@@ -362,7 +362,7 @@ function normalizePath(value: string): string {
 }
 
 .is-added {
-  color: var(--success, #2f8b57);
+  color: var(--success);
 }
 
 .is-removed {
@@ -388,13 +388,13 @@ function normalizePath(value: string): string {
   grid-template-columns: 54px 54px 18px minmax(0, 1fr);
   min-height: 24px;
   align-items: stretch;
-  font-family: var(--font-editor, "Cascadia Mono", "Consolas", monospace);
+  font-family: var(--font-editor);
   font-size: 13px;
   line-height: 1.55;
 }
 
 .git-review-line.is-added {
-  background: color-mix(in srgb, var(--success, #2f8b57) 16%, transparent);
+  background: color-mix(in srgb, var(--success) 16%, transparent);
 }
 
 .git-review-line.is-removed {

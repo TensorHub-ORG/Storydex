@@ -589,7 +589,7 @@ async function handleUsernameBlur(): Promise<void> {
 .activity-account-avatar {
   width: 28px;
   height: 28px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   display: grid;
   place-items: center;
   background: var(--accent-soft);
@@ -702,7 +702,7 @@ async function handleUsernameBlur(): Promise<void> {
 .activity-account-tab {
   min-height: 32px;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-main);
   cursor: pointer;
@@ -788,7 +788,7 @@ async function handleUsernameBlur(): Promise<void> {
   right: 0;
   bottom: -1px;
   height: 2px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: transparent;
   transition: background 160ms ease, opacity 160ms ease, transform 160ms ease;
   opacity: 0;

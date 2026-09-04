@@ -642,11 +642,12 @@ defineExpose({
 .preset-header {
   flex: 0 0 auto;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 14px 18px 12px;
-  border-bottom: 1px solid var(--border-ghost);
+  gap: 10px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-2);
 }
 
 .preset-header-copy {
@@ -666,9 +667,11 @@ defineExpose({
 
 .preset-title {
   margin: 0;
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .preset-subtitle {
@@ -759,8 +762,8 @@ defineExpose({
   gap: 5px;
   padding: 6px 7px;
   border: 1px solid var(--border-ghost);
-  border-radius: 4px;
-  background: var(--bg-elevated, transparent);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
   color: var(--text-muted);
   font: inherit;
   font-size: 11px;
@@ -784,7 +787,7 @@ defineExpose({
 
 .preset-workbench-entry b {
   padding: 1px 4px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: var(--bg-hover);
   color: var(--text-faint);
   font-size: 9px;
@@ -918,7 +921,7 @@ defineExpose({
 .preset-status-badge {
   flex: 0 0 auto;
   padding: 1px 4px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--bg-hover);
   color: var(--text-faint);
   font-size: 9px;
@@ -945,7 +948,7 @@ defineExpose({
   font-size: 18px;
   color: var(--text-muted);
   cursor: pointer;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 2px;
   transition: background-color 0.15s ease, color 0.15s ease;
 }
@@ -961,8 +964,8 @@ defineExpose({
   min-width: 168px;
   padding: 5px;
   border: 1px solid var(--border-subtle);
-  border-radius: 6px;
-  background: var(--bg-panel, var(--bg-sidebar));
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
   box-shadow: var(--shadow-popover);
 }
 
@@ -973,7 +976,7 @@ defineExpose({
   align-items: center;
   padding: 0 10px;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-main);
   font: inherit;
@@ -1013,7 +1016,7 @@ defineExpose({
   height: min(90vh, 800px);
   background: var(--bg-sidebar);
   border: 1px solid var(--border-subtle);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   position: relative;
   overflow: hidden;
   display: flex;
@@ -1024,7 +1027,7 @@ defineExpose({
 .preset-import-preview-modal {
   width: min(960px, 96vw);
   height: min(86vh, 720px);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
 }
 
 .preset-editor-close {
@@ -1036,7 +1039,7 @@ defineExpose({
   border: 0;
   color: var(--text-muted);
   cursor: pointer;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 4px;
 }
 

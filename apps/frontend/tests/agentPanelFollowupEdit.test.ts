@@ -179,21 +179,21 @@ describe("AgentPanel computed branch coverage", () => {
     await nextTick();
     expect(utils.contextRatio.value).toBeCloseTo(0.7);
     expect(utils.contextLevel.value).toBe("warning");
-    expect(utils.contextRingStyle.value["--coomi-context-color"]).toBe("#f59e0b");
+    expect(utils.contextRingStyle.value["--coomi-context-color"]).toBe("var(--warning-fg)");
 
     // Danger level once the explicit ratio crosses the default danger threshold.
     store.usageRatio = 0.9;
     store.usedTokens = 900;
     await nextTick();
     expect(utils.contextLevel.value).toBe("danger");
-    expect(utils.contextRingStyle.value["--coomi-context-color"]).toBe("#ef4444");
+    expect(utils.contextRingStyle.value["--coomi-context-color"]).toBe("var(--danger-fg)");
 
     // Safe level below the warning threshold.
     store.usageRatio = 0.1;
     store.usedTokens = 100;
     await nextTick();
     expect(utils.contextLevel.value).toBe("safe");
-    expect(utils.contextRingStyle.value["--coomi-context-color"]).toBe("#22c55e");
+    expect(utils.contextRingStyle.value["--coomi-context-color"]).toBe("var(--success-fg)");
     wrapper.unmount();
   });
 

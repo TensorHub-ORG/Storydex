@@ -320,7 +320,7 @@ function clamp(value: number, min: number, max: number): number {
   display: grid;
   place-items: center;
   padding: 24px;
-  background: rgb(0 0 0 / 42%);
+  background: var(--overlay-scrim);
 }
 
 .close-guard-dialog {
@@ -329,11 +329,11 @@ function clamp(value: number, min: number, max: number): number {
   grid-template-columns: 40px minmax(0, 1fr);
   gap: 14px;
   padding: 20px;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--surface-overlay);
   color: var(--text-main);
-  box-shadow: 0 18px 52px rgb(0 0 0 / 28%);
+  box-shadow: var(--shadow-modal);
 }
 
 .close-guard-icon {
@@ -341,7 +341,7 @@ function clamp(value: number, min: number, max: number): number {
   height: 40px;
   display: grid;
   place-items: center;
-  color: var(--warning, #b7791f);
+  color: var(--warning-fg);
 }
 
 .close-guard-copy h2 {
@@ -366,12 +366,13 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 .close-guard-button {
-  min-height: 32px;
+  min-height: 28px;
   padding: 0 12px;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
   color: var(--text-main);
+  font-weight: 500;
   cursor: pointer;
 }
 
@@ -380,8 +381,8 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 .close-guard-button.danger {
-  border-color: #c42b1c;
-  background: #c42b1c;
+  border-color: transparent;
+  background: var(--danger-fg);
   color: #fff;
 }
 

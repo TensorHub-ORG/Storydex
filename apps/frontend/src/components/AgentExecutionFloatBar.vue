@@ -123,7 +123,7 @@ function openRunDiff(): void {
   max-width: 100%;
   margin: 0 4px 0 auto;
   border: 1px solid color-mix(in srgb, var(--text-muted) 18%, transparent);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--bg-card) 94%, transparent);
   color: var(--text-main);
   box-shadow: var(--shadow-popover);
@@ -227,7 +227,7 @@ function openRunDiff(): void {
 }
 
 .is-added {
-  color: var(--success, #2f8b57);
+  color: var(--success);
 }
 
 .is-removed {
@@ -243,7 +243,7 @@ function openRunDiff(): void {
   display: flex;
   flex-direction: column;
   border: 1px solid color-mix(in srgb, var(--text-muted) 18%, transparent);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--bg-card) 98%, transparent);
   box-shadow: var(--shadow-md);
   overflow: hidden;
@@ -282,7 +282,7 @@ function openRunDiff(): void {
 .float-task-dot {
   width: 11px;
   height: 11px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   border: 2px solid color-mix(in srgb, var(--text-muted) 60%, transparent);
 }
 
@@ -293,8 +293,8 @@ function openRunDiff(): void {
 }
 
 .float-task-row.is-completed .float-task-dot {
-  border-color: var(--success, #2f8b57);
-  background: var(--success, #2f8b57);
+  border-color: var(--success);
+  background: var(--success);
 }
 
 .float-task-row.is-failed .float-task-dot {
@@ -303,8 +303,8 @@ function openRunDiff(): void {
 }
 
 .float-task-row.is-skipped .float-task-dot {
-  border-color: var(--warning, #b7791f);
-  background: var(--warning, #b7791f);
+  border-color: var(--warning);
+  background: var(--warning);
 }
 
 .float-task-title {

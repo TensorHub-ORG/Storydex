@@ -311,7 +311,7 @@ function chatsquashDisplayFields(meta: Record<string, unknown>): Record<string, 
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--accent);
   color: var(--accent-contrast);
   font-size: 10px;
@@ -325,7 +325,7 @@ function chatsquashDisplayFields(meta: Record<string, unknown>): Record<string, 
   align-items: center;
   justify-content: center;
   border: 0;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -364,7 +364,7 @@ function chatsquashDisplayFields(meta: Record<string, unknown>): Record<string, 
   height: 14px;
   border: 2px solid var(--border-strong);
   border-top-color: var(--accent);
-  border-radius: 50%;
+  border-radius: var(--radius-full);
   animation: stip-spin 0.8s linear infinite;
 }
 
@@ -500,7 +500,7 @@ function chatsquashDisplayFields(meta: Record<string, unknown>): Record<string, 
   height: 20px;
   padding: 0 8px;
   border: 1px solid var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--bg-card);
   color: var(--text-muted);
   font-size: 11px;
@@ -528,7 +528,7 @@ function chatsquashDisplayFields(meta: Record<string, unknown>): Record<string, 
 
 .stip-sampling-item {
   padding: 1px 6px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--bg-code);
   color: var(--text-soft);
   font-family: var(--font-mono);
@@ -569,7 +569,7 @@ function chatsquashDisplayFields(meta: Record<string, unknown>): Record<string, 
   gap: 4px;
   padding: 0 6px;
   border: 1px solid var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--bg-input);
 }
 
@@ -608,7 +608,7 @@ function chatsquashDisplayFields(meta: Record<string, unknown>): Record<string, 
   min-height: 80px;
   overflow-y: auto;
   border: 1px solid var(--border-ghost);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--bg-card);
 }
 
@@ -633,7 +633,7 @@ function chatsquashDisplayFields(meta: Record<string, unknown>): Record<string, 
   flex: 0 0 auto;
   width: 7px;
   height: 7px;
-  border-radius: 50%;
+  border-radius: var(--radius-full);
 }
 
 .stip-module-dot.on {
@@ -656,7 +656,7 @@ function chatsquashDisplayFields(meta: Record<string, unknown>): Record<string, 
 .stip-module-slot {
   flex: 0 0 auto;
   padding: 0 6px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--bg-code);
   color: var(--text-muted);
   font-size: 10px;
@@ -720,7 +720,7 @@ function chatsquashDisplayFields(meta: Record<string, unknown>): Record<string, 
 
 .stip-fold-count {
   padding: 0 5px;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--bg-hover);
   color: var(--text-muted);
   font-size: 10px;
@@ -795,7 +795,7 @@ function chatsquashDisplayFields(meta: Record<string, unknown>): Record<string, 
   height: 26px;
   padding: 0 14px;
   border: 1px solid var(--border-strong);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--bg-card);
   color: var(--text-soft);
   font-size: 12px;

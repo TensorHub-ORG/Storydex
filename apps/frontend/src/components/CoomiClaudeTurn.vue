@@ -564,10 +564,11 @@ function compactText(value: unknown, limit = 1200): string {
 
 .cct-user-text {
   max-width: 90%;
-  padding: 8px 14px;
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--text-main) 7%, transparent);
-  color: var(--text-soft);
+  padding: 8px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  color: var(--text-main);
   font-size: 14px;
   line-height: 1.6;
   white-space: pre-wrap;
@@ -603,19 +604,20 @@ function compactText(value: unknown, limit = 1200): string {
   height: 26px;
   padding: 0;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-faint);
   cursor: pointer;
 }
 
 .cct-user-action:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--text-main) 8%, transparent);
-  color: var(--text-soft);
+  background: var(--bg-hover);
+  color: var(--text-main);
 }
 
 .cct-user-action.danger:hover:not(:disabled) {
-  color: var(--danger);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
 }
 
 .cct-user-action:disabled {
@@ -681,11 +683,19 @@ function compactText(value: unknown, limit = 1200): string {
   color: var(--text-faint);
 }
 
-/* 展开内容：左侧一条细线缩进，无背景卡片 */
+/* 展开内容：左侧一条实色细线缩进，无背景卡片 */
 .cct-reveal {
   margin-left: 2px;
   padding-left: 14px;
-  border-left: 1px solid var(--border-subtle);
+  border-left: 2px solid var(--border-subtle);
+}
+
+.cct-line-block:has(.cct-reasoning-text) > .cct-reveal {
+  border-left-color: var(--warning-border);
+}
+
+.cct-line-block:has(.cct-tool-list) > .cct-reveal {
+  border-left-color: var(--info-border);
 }
 
 .cct-reasoning-text {
@@ -725,15 +735,15 @@ function compactText(value: unknown, limit = 1200): string {
 }
 
 .cct-tool-state.status-success {
-  color: var(--success);
+  color: var(--success-fg);
 }
 
 .cct-tool-state.status-error {
-  color: var(--danger);
+  color: var(--danger-fg);
 }
 
 .cct-tool-state.status-running {
-  color: var(--info);
+  color: var(--info-fg);
   animation: cct-spin 1s linear infinite;
 }
 
@@ -771,7 +781,7 @@ function compactText(value: unknown, limit = 1200): string {
   padding: 8px 10px;
   max-height: 200px;
   overflow: auto;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--text-main) 5%, transparent);
   color: var(--text-soft);
   font-family: var(--font-mono);
@@ -819,7 +829,7 @@ function compactText(value: unknown, limit = 1200): string {
   margin-top: 1px;
   padding: 0;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   color: var(--danger);
   background: transparent;
   cursor: pointer;
@@ -920,7 +930,7 @@ function compactText(value: unknown, limit = 1200): string {
   min-height: 30px;
   padding: 0 9px;
   border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border-subtle));
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-main);
   font: inherit;
@@ -983,7 +993,7 @@ function compactText(value: unknown, limit = 1200): string {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  color: var(--warning, #d08700);
+  color: var(--warning);
   font-size: 12.5px;
 }
 
@@ -1015,7 +1025,7 @@ function compactText(value: unknown, limit = 1200): string {
 .cct-markdown :deep(pre) {
   margin: 0.6em 0;
   padding: 10px 12px;
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   background: color-mix(in srgb, var(--text-main) 5%, transparent);
   overflow: auto;
   font-weight: 400;
@@ -1023,7 +1033,7 @@ function compactText(value: unknown, limit = 1200): string {
 
 .cct-markdown :deep(code) {
   padding: 1px 5px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--text-main) 9%, transparent);
   font-family: var(--font-mono);
   font-size: 0.86em;

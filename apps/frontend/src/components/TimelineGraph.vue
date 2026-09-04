@@ -814,7 +814,7 @@ defineExpose({
   z-index: 6;
   padding: 3px;
   border: 0;
-  border-radius: var(--radius-md, 6px);
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--bg-editor) 88%, transparent);
   box-shadow: var(--shadow-sm);
   backdrop-filter: blur(8px);
@@ -847,7 +847,7 @@ defineExpose({
   align-items: center;
   justify-content: center;
   border: 0;
-  border-radius: var(--radius-sm, 4px);
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -876,7 +876,7 @@ defineExpose({
   gap: 6px;
   margin: 6px 6px 0;
   padding: 6px 8px;
-  border-radius: var(--radius-sm, 4px);
+  border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--warning) 12%, transparent);
   color: var(--warning);
   font-size: 11px;
@@ -896,7 +896,7 @@ defineExpose({
   line-height: 1.7;
   background: var(--bg-card);
   border: 1px solid var(--border-ghost);
-  border-radius: var(--radius-md, 6px);
+  border-radius: var(--radius-md);
 }
 
 .wl.is-full .wl-empty {
@@ -1039,7 +1039,7 @@ defineExpose({
   height: 19px;
   padding: 0 6px;
   border: 1px solid;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   background: var(--bg-elevated);
   color: var(--text-soft);
   font: inherit;
@@ -1064,7 +1064,7 @@ defineExpose({
   flex: 0 0 auto;
   width: 6px;
   height: 6px;
-  border-radius: 50%;
+  border-radius: var(--radius-full);
 }
 
 .wl-lane-name {
@@ -1077,7 +1077,7 @@ defineExpose({
 .wl-lane-badge {
   flex: 0 0 auto;
   padding: 0 4px;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--accent);
   color: var(--accent-contrast);
   font-size: 9px;
@@ -1090,9 +1090,9 @@ defineExpose({
   width: 236px;
   padding: 8px 10px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md, 6px);
+  border-radius: var(--radius-md);
   background: var(--bg-elevated);
-  box-shadow: var(--shadow-popover, 0 6px 20px rgba(0, 0, 0, 0.18));
+  box-shadow: var(--shadow-overlay);
   color: var(--text-main);
   font-size: 11px;
   z-index: 8;
@@ -1124,7 +1124,7 @@ defineExpose({
 
 .wl-pop-meta code {
   padding: 0 4px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--bg-hover);
   color: var(--text-soft);
   font-family: var(--font-mono);
@@ -1140,7 +1140,7 @@ defineExpose({
 
 .wl-pop-tag {
   padding: 1px 6px;
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   background: var(--bg-hover);
   color: var(--text-muted);
   font-size: 10px;
@@ -1178,7 +1178,7 @@ defineExpose({
   width: 100%;
   padding: 5px 6px;
   border: 0;
-  border-radius: var(--radius-sm, 4px);
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-main);
   font: inherit;
@@ -1242,7 +1242,7 @@ defineExpose({
 .wl-resize-grip {
   width: 34px;
   height: 3px;
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
   background: var(--text-faint);
 }
 </style>

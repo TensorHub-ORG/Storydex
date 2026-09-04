@@ -5,14 +5,23 @@
       <span>内存：{{ memoryUsageLabel }}</span>
       <span>{{ projectLabel }}</span>
     </div>
+    <div class="status-right">
+      <span :class="agentStatusClass">{{ agentStatusLabel }}</span>
+      <span>{{ themeLabel }}</span>
+    </div>
   </footer>
 </template>
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted } from "vue";
+import { themeOptions } from "@/constants/themes";
+import { useAgentStore } from "@/stores/agent";
+import { useUiStore } from "@/stores/ui";
 import { useWorkspaceStore } from "@/stores/workspace";
 
 const workspaceStore = useWorkspaceStore();
+const agentStore = useAgentStore();
+const uiStore = useUiStore();
 const HEALTH_REFRESH_INTERVAL_MS = 15000;
 let healthRefreshTimer: number | null = null;
 
@@ -36,6 +45,12 @@ const projectLabel = computed(() => {
   return workspaceStore.currentProject?.projectName || workspaceStore.health?.projectName || "未打开项目";
 });
 
+const agentStatusLabel = computed(() => (agentStore.isRunning ? "Coomi 运行中" : "Coomi 空闲"));
+const agentStatusClass = computed(() => (agentStore.isRunning ? "is-running" : undefined));
+const themeLabel = computed(
+  () => themeOptions.find((option) => option.code === uiStore.theme)?.label || uiStore.theme
+);
+
 onMounted(() => {
   healthRefreshTimer = window.setInterval(() => {
     if (!workspaceStore.isBootstrapping) {
@@ -52,4 +67,8 @@ onBeforeUnmount(() => {
 });
 </script>
 
-<style scoped></style>
+<style scoped>
+.status-right span.is-running {
+  color: var(--accent);
+}
+</style>

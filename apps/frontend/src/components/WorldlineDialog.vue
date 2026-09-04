@@ -198,10 +198,10 @@ defineExpose({
   width: min(420px, 100%);
   padding: 18px 20px 16px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg, 10px);
+  border-radius: var(--radius-lg);
   background: var(--bg-elevated);
   color: var(--text-main);
-  box-shadow: var(--shadow-popover, 0 16px 48px rgba(0, 0, 0, 0.28));
+  box-shadow: var(--shadow-modal);
 }
 
 .wld-title {
@@ -242,7 +242,7 @@ defineExpose({
   height: 32px;
   padding: 0 9px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm, 4px);
+  border-radius: var(--radius-sm);
   background: var(--bg-input);
   color: var(--text-main);
   font: inherit;
@@ -264,7 +264,7 @@ defineExpose({
 .wld-danger {
   margin: 10px 0 0;
   padding: 9px 11px;
-  border-radius: var(--radius-sm, 4px);
+  border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--danger) 10%, transparent);
   color: var(--danger);
   font-size: 12px;
@@ -289,7 +289,7 @@ defineExpose({
   height: 30px;
   padding: 0 14px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm, 4px);
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-main);
   font: inherit;

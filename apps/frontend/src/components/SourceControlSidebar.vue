@@ -693,7 +693,7 @@ defineExpose({
   overflow: hidden;
   /* --bg-panel is not a defined theme token; fall back to the sidebar surface so
      the panel never renders on a transparent background. */
-  background: var(--bg-panel, var(--bg-sidebar));
+  background: var(--surface-2);
   color: var(--text-main);
 }
 
@@ -702,11 +702,12 @@ defineExpose({
 .scm-header {
   flex: 0 0 auto;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 14px 16px 12px;
-  border-bottom: 1px solid var(--border-ghost);
+  gap: 10px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-2);
 }
 
 .scm-header-copy {
@@ -716,9 +717,11 @@ defineExpose({
 
 .scm-title {
   margin: 0;
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .scm-project {
@@ -738,7 +741,7 @@ defineExpose({
   align-items: center;
   justify-content: center;
   border: 0;
-  border-radius: var(--radius-sm, 4px);
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -778,11 +781,12 @@ defineExpose({
 .scm-empty-state {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
+  align-items: center;
   gap: 8px;
-  padding: 22px 16px;
+  padding: 28px 16px;
   color: var(--text-muted);
   font-size: 12px;
+  text-align: center;
 }
 
 .scm-empty-icon {
@@ -791,7 +795,7 @@ defineExpose({
 }
 
 .scm-empty-state.is-warning .scm-empty-icon {
-  color: var(--warning, #b46c08);
+  color: var(--warning-fg);
 }
 
 .scm-empty-title {
@@ -804,6 +808,10 @@ defineExpose({
 .scm-empty-hint {
   margin: 0;
   line-height: 1.7;
+}
+
+.scm-empty-state .scm-primary-btn {
+  margin-top: 4px;
 }
 
 /* ---------- 我在哪 ---------- */
@@ -828,7 +836,7 @@ defineExpose({
   height: 24px;
   padding: 0 4px 0 6px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm, 4px);
+  border-radius: var(--radius-sm);
   background: var(--bg-hover);
   color: var(--accent-strong);
   font: inherit;
@@ -888,9 +896,9 @@ defineExpose({
   overflow-x: hidden;
   overflow-y: auto;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm, 4px);
+  border-radius: var(--radius-sm);
   background: var(--bg-card, var(--bg-sidebar));
-  box-shadow: 0 8px 22px rgb(0 0 0 / 24%);
+  box-shadow: var(--shadow-overlay);
 }
 
 .scm-branch-menu-label {
@@ -910,7 +918,7 @@ defineExpose({
   gap: 6px;
   padding: 0 7px;
   border: 0;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-main);
   font: inherit;
@@ -981,7 +989,7 @@ defineExpose({
   height: 28px;
   padding: 0 7px;
   border: 1px solid var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--bg-input);
   color: var(--text-main);
   font: inherit;
@@ -998,7 +1006,7 @@ defineExpose({
   align-items: center;
   justify-content: center;
   border: 0;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--accent);
   color: var(--accent-contrast);
   cursor: pointer;
@@ -1024,15 +1032,15 @@ defineExpose({
   flex: 0 0 auto;
   width: 7px;
   height: 7px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
 }
 
 .scm-dot.is-clean {
-  background: var(--success, #2f8b57);
+  background: var(--success);
 }
 
 .scm-dot.is-dirty {
-  background: var(--warning, #b7791f);
+  background: var(--warning);
 }
 
 /* ---------- 树状图（面板主角） ---------- */
@@ -1066,7 +1074,7 @@ defineExpose({
   max-height: 90px;
   padding: 7px 8px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm, 4px);
+  border-radius: var(--radius-sm);
   background: var(--bg-input);
   color: var(--text-main);
   font: inherit;
@@ -1108,7 +1116,7 @@ defineExpose({
   justify-content: center;
   gap: 5px;
   border: 0;
-  border-radius: var(--radius-sm, 4px);
+  border-radius: var(--radius-sm);
   background: var(--accent);
   color: var(--accent-contrast);
   font: inherit;
@@ -1144,7 +1152,7 @@ defineExpose({
   gap: 6px;
   margin: 8px 14px 0;
   padding: 7px 9px;
-  border-radius: var(--radius-sm, 4px);
+  border-radius: var(--radius-sm);
   font-size: 12px;
   line-height: 1.6;
 }
@@ -1155,8 +1163,8 @@ defineExpose({
 }
 
 .scm-feedback.is-success {
-  background: color-mix(in srgb, var(--success, #2f8b57) 10%, transparent);
-  color: var(--success, #1d7b50);
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+  color: var(--success);
 }
 
 .scm-feedback.is-error {
@@ -1216,7 +1224,7 @@ defineExpose({
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 9px;
+  border-radius: var(--radius-lg);
   background: var(--bg-hover);
   color: var(--text-muted);
   font-size: 11px;
@@ -1256,7 +1264,7 @@ defineExpose({
   gap: 8px;
   padding: 7px 6px;
   border: 0;
-  border-radius: var(--radius-sm, 4px);
+  border-radius: var(--radius-sm);
   background: transparent;
   color: inherit;
   cursor: pointer;
@@ -1310,20 +1318,20 @@ defineExpose({
   padding: 0 6px;
   display: inline-flex;
   align-items: center;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   font-size: 11px;
   font-weight: 600;
   white-space: nowrap;
 }
 
 .scm-status-chip.is-added {
-  background: color-mix(in srgb, var(--success, #2f8b57) 14%, transparent);
-  color: var(--success, #2f8b57);
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+  color: var(--success);
 }
 
 .scm-status-chip.is-modified {
-  background: color-mix(in srgb, var(--warning, #b7791f) 16%, transparent);
-  color: var(--warning, #b7791f);
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
+  color: var(--warning);
 }
 
 .scm-status-chip.is-deleted {
@@ -1332,8 +1340,8 @@ defineExpose({
 }
 
 .scm-status-chip.is-renamed {
-  background: color-mix(in srgb, var(--info, #2f6feb) 12%, transparent);
-  color: var(--info, #2f6feb);
+  background: color-mix(in srgb, var(--info) 12%, transparent);
+  color: var(--info);
 }
 
 /* ---------- footer ---------- */

@@ -1841,9 +1841,9 @@ function levelWidth(level: number): string {
 }
 
 function levelColor(level: number): string {
-  if (level > 0) return "linear-gradient(90deg, #1f9d55, #5ab97d)";
-  if (level < 0) return "linear-gradient(90deg, #c53030, #e07171)";
-  return "#888";
+  if (level > 0) return "var(--success-fg)";
+  if (level < 0) return "var(--danger-fg)";
+  return "var(--text-muted)";
 }
 
 const RELATIONSHIP_DIMENSION_LABELS: Record<string, string> = {
@@ -3170,9 +3170,9 @@ defineExpose({
   gap: 4px;
   max-width: 100%;
   border: 1px solid var(--border-ghost);
-  background: var(--bg-elevated, transparent);
+  background: var(--bg-elevated);
   padding: 4px 7px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   font: inherit;
   font-size: 11px;
   cursor: pointer;
@@ -3190,7 +3190,7 @@ defineExpose({
   font-size: 10px;
   background: var(--bg-hover);
   color: var(--text-faint);
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   padding: 0 4px;
 }
 .ssp-body {
@@ -3226,7 +3226,7 @@ defineExpose({
   gap: 2px;
   padding: 3px;
   border: 1px solid var(--border-ghost);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--bg-card) 72%, transparent);
 }
 .ssp-wiki-category-tab {
@@ -3236,7 +3236,7 @@ defineExpose({
   min-height: 30px;
   padding: 0 12px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-muted);
   font: inherit;
@@ -3260,7 +3260,7 @@ defineExpose({
 .ssp-wiki-category-tab.active {
   background: var(--bg-card);
   color: var(--accent-strong);
-  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.1);
+  box-shadow: var(--shadow-resting);
 }
 .ssp-wiki-category-tab.active small {
   color: var(--accent);
@@ -3273,7 +3273,7 @@ defineExpose({
   align-items: center;
   gap: 7px;
   border: 1px solid var(--border-ghost);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   padding: 0 6px 0 10px;
   background: color-mix(in srgb, var(--bg-card) 72%, transparent);
   transition: border-color 140ms ease;
@@ -3306,7 +3306,7 @@ defineExpose({
   display: grid;
   place-items: center;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-faint);
   cursor: pointer;
@@ -3331,8 +3331,8 @@ defineExpose({
 .ssp-wiki-review-alert,
 .ssp-wiki-review-refresh {
   border: 1px solid var(--border-ghost);
-  border-radius: 4px;
-  background: var(--bg-elevated, transparent);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
   color: var(--text-soft);
   padding: 3px 7px;
   font-size: 11px;
@@ -3349,8 +3349,8 @@ defineExpose({
   cursor: wait;
 }
 .ssp-wiki-review-alert {
-  color: var(--warning, #c08020);
-  border-color: color-mix(in srgb, var(--warning, #c08020) 42%, transparent);
+  color: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 42%, transparent);
 }
 .ssp-wiki-review-alert {
   color: var(--warning);
@@ -3365,7 +3365,7 @@ defineExpose({
 }
 .ssp-wiki-source-chip {
   padding: 1px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border-ghost);
   color: var(--text-muted);
   font-size: 10px;
@@ -3374,7 +3374,7 @@ defineExpose({
 .ssp-wiki-agent-status {
   flex: 0 0 auto;
   border: 1px solid var(--border-ghost);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   padding: 6px 10px;
   color: var(--text-soft);
   background: color-mix(in srgb, var(--bg-card) 76%, transparent);
@@ -3403,7 +3403,7 @@ defineExpose({
   min-width: 0;
   min-height: 0;
   border: 1px solid var(--border-ghost);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   overflow: hidden;
   background:
     radial-gradient(color-mix(in srgb, var(--text-faint) 18%, transparent) 1px, transparent 1.4px),
@@ -3435,7 +3435,7 @@ defineExpose({
   stroke-width: 1.7;
 }
 .ssp-wiki-edge.edge-review-required {
-  stroke: var(--warning, #c08020);
+  stroke: var(--warning);
   stroke-dasharray: 6 5;
   stroke-width: 1.8;
 }
@@ -3479,16 +3479,16 @@ defineExpose({
   cursor: pointer;
 }
 .ssp-wiki-node.tone-character {
-  --wiki-node-color: #5b8def;
+  --wiki-node-color: var(--wiki-cat-1);
 }
 .ssp-wiki-node.tone-plot {
-  --wiki-node-color: #dda13f;
+  --wiki-node-color: var(--wiki-cat-2);
 }
 .ssp-wiki-node.tone-setting {
-  --wiki-node-color: #45b384;
+  --wiki-node-color: var(--wiki-cat-3);
 }
 .ssp-wiki-node.tone-misc {
-  --wiki-node-color: #9d8bd6;
+  --wiki-node-color: var(--wiki-cat-4);
 }
 .ssp-wiki-node.tone-hub {
   --wiki-node-color: color-mix(in srgb, var(--text-muted) 72%, transparent);
@@ -3503,7 +3503,7 @@ defineExpose({
   filter: brightness(1.15) drop-shadow(0 2px 6px var(--wiki-node-color)); /* 优化：添加激活态发光效果 */
 }
 .ssp-wiki-node.needs-review .ssp-wiki-node-dot {
-  stroke: color-mix(in srgb, var(--warn, #d9a441) 82%, var(--wiki-node-color, var(--text-muted)));
+  stroke: color-mix(in srgb, var(--warning-fg) 82%, var(--wiki-node-color, var(--text-muted)));
   stroke-width: 2;
   stroke-dasharray: 4 3;
 }
@@ -3561,7 +3561,7 @@ defineExpose({
   max-width: min(520px, calc(100% - 32px));
   padding: 6px 12px;
   border: 1px solid var(--border-ghost);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--bg-card) 88%, transparent);
   color: var(--text-muted);
   font-size: 12px;
@@ -3579,7 +3579,7 @@ defineExpose({
   gap: 12px;
   padding: 5px 11px;
   border: 1px solid var(--border-ghost);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--bg-card) 82%, transparent);
   backdrop-filter: blur(8px);
   color: var(--text-muted);
@@ -3594,20 +3594,20 @@ defineExpose({
 .ssp-wiki-legend-item i {
   width: 8px;
   height: 8px;
-  border-radius: 50%;
+  border-radius: var(--radius-full);
   background: var(--text-muted);
 }
 .ssp-wiki-legend-item i.tone-character {
-  background: #5b8def;
+  background: var(--wiki-cat-1);
 }
 .ssp-wiki-legend-item i.tone-plot {
-  background: #dda13f;
+  background: var(--wiki-cat-2);
 }
 .ssp-wiki-legend-item i.tone-setting {
-  background: #45b384;
+  background: var(--wiki-cat-3);
 }
 .ssp-wiki-legend-item i.tone-misc {
-  background: #9d8bd6;
+  background: var(--wiki-cat-4);
 }
 .ssp-wiki-legend-item i.tone-hub {
   background: color-mix(in srgb, var(--text-muted) 72%, transparent);
@@ -3621,7 +3621,7 @@ defineExpose({
   gap: 2px;
   padding: 3px;
   border: 1px solid var(--border-ghost);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--bg-card) 88%, transparent);
   backdrop-filter: blur(8px);
   box-shadow: var(--shadow-sm);
@@ -3632,7 +3632,7 @@ defineExpose({
   display: grid;
   place-items: center;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -3684,7 +3684,7 @@ defineExpose({
   display: flex;
   flex-direction: column;
   border: 1px solid var(--border-ghost);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   overflow: hidden;
   background: color-mix(in srgb, var(--bg-card) 76%, transparent);
 }
@@ -3853,8 +3853,8 @@ defineExpose({
   margin-top: 8px;
   padding: 9px;
   border: 1px solid var(--border-ghost);
-  border-radius: 6px;
-  background: var(--bg-elevated, transparent);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
 }
 .ssp-wiki-review-card-title {
   display: flex;
@@ -3875,7 +3875,7 @@ defineExpose({
   width: 100%;
   box-sizing: border-box;
   border: 1px solid var(--border-ghost);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: var(--bg-card);
   color: var(--text-main);
   padding: 4px 6px;
@@ -3892,7 +3892,7 @@ defineExpose({
   line-height: 1.5;
 }
 .ssp-wiki-review-error {
-  color: var(--danger, #c53030);
+  color: var(--danger);
 }
 .ssp-wiki-sidecar-note {
   color: var(--text-faint);
@@ -3914,7 +3914,7 @@ defineExpose({
 }
 .ssp-wiki-review-chip {
   border: 1px solid color-mix(in srgb, var(--warning) 42%, transparent);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 1px 6px;
   color: var(--warning);
   background: color-mix(in srgb, var(--warning) 10%, transparent);
@@ -3937,7 +3937,7 @@ defineExpose({
   display: grid;
   gap: 3px;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: transparent;
   padding: 7px 8px;
   color: var(--text-main);
@@ -3976,7 +3976,7 @@ defineExpose({
   text-overflow: ellipsis;
   white-space: nowrap;
   border: 1px solid var(--border-ghost);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 2px 6px;
   color: var(--text-muted);
   font-size: 10px;
@@ -3990,9 +3990,9 @@ defineExpose({
   gap: 8px;
 }
 .ssp-list-item {
-  background: var(--bg-elevated, transparent);
+  background: var(--bg-elevated);
   border: 1px solid var(--border-ghost);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 8px;
 }
 .ssp-list-item.resolved {
@@ -4012,19 +4012,19 @@ defineExpose({
   background: var(--bg-hover);
   color: var(--text-main);
   padding: 1px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .ssp-tag.status-open {
-  color: #c08020;
+  color: var(--warning-fg);
 }
 .ssp-tag.status-recalled {
-  color: #4060b0;
+  color: var(--info-fg);
 }
 .ssp-tag.status-resolved {
-  color: #1f9d55;
+  color: var(--success-fg);
 }
 .ssp-time {
   flex: 0 0 auto;
@@ -4048,12 +4048,12 @@ defineExpose({
   font-size: 11px;
   background: var(--bg-hover);
   color: var(--text-muted);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   padding: 1px 6px;
 }
 .ssp-error {
   font-size: 11px;
-  color: #c53030;
+  color: var(--danger-fg);
   margin-top: 4px;
 }
 .ssp-section-head {
@@ -4078,7 +4078,7 @@ defineExpose({
   overflow-wrap: anywhere;
 }
 .ssp-mini-meta.resolved {
-  color: #1f9d55;
+  color: var(--success-fg);
 }
 .ssp-conflict-row {
   display: grid;
@@ -4088,7 +4088,7 @@ defineExpose({
 }
 .ssp-conflict-cell {
   background: var(--bg-hover);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 4px 6px;
 }
 .ssp-cell-label {
@@ -4110,19 +4110,19 @@ defineExpose({
 .ssp-btn {
   font-size: 11px;
   padding: 3px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border-ghost);
   background: transparent;
   cursor: pointer;
   color: inherit;
 }
 .ssp-btn.accept {
-  border-color: #1f9d55;
-  color: #1f9d55;
+  border-color: var(--success-border);
+  color: var(--success-fg);
 }
 .ssp-btn.keep {
-  border-color: #5070d0;
-  color: #5070d0;
+  border-color: var(--info-border);
+  color: var(--info-fg);
 }
 .ssp-btn.dismiss {
   opacity: 0.7;
@@ -4131,8 +4131,8 @@ defineExpose({
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  border-color: #c08020;
-  color: #c08020;
+  border-color: var(--warning-border);
+  color: var(--warning-fg);
 }
 .ssp-btn.rollback .material-symbols-rounded {
   font-size: 14px;
@@ -4143,13 +4143,13 @@ defineExpose({
 }
 .ssp-resolved-tag {
   font-size: 11px;
-  color: #1f9d55;
+  color: var(--success-fg);
   margin-top: 4px;
 }
 .ssp-level-bar {
   height: 6px;
   background: var(--bg-hover);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   overflow: hidden;
   margin: 4px 0 2px;
 }
@@ -4197,8 +4197,8 @@ defineExpose({
   height: 23px;
   padding: 0;
   border: 1px solid var(--border-ghost);
-  border-radius: 4px;
-  background: var(--bg-elevated, transparent);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
   color: var(--text-muted);
   cursor: pointer;
 }
@@ -4220,7 +4220,7 @@ defineExpose({
   height: 220px;
   min-height: 220px;
   border: 1px solid var(--border-subtle);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background:
     linear-gradient(color-mix(in srgb, var(--border-subtle) 54%, transparent) 1px, transparent 1px),
     linear-gradient(90deg, color-mix(in srgb, var(--border-subtle) 54%, transparent) 1px, transparent 1px),
@@ -4294,9 +4294,9 @@ defineExpose({
 }
 .ssp-relation-evidence {
   flex: 1 1 auto;
-  background: var(--bg-elevated, transparent);
+  background: var(--bg-elevated);
   border: 1px solid var(--border-ghost);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 10px 10px 12px;
   min-height: 0;
   overflow: auto;

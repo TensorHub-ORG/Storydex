@@ -1777,23 +1777,23 @@ defineExpose({
 .explorer-toolbar-btn { flex: 0 0 26px; box-sizing: border-box; }
 .explorer-problems-trigger { position: relative; display: inline-flex; align-items: center; justify-content: center; overflow: visible; padding: 0; }
 .explorer-problems-trigger > .material-symbols-rounded { width: 18px; display: inline-flex; align-items: center; justify-content: center; overflow: visible; font-size: 18px; line-height: 1; }
-.explorer-problem-badge { position: absolute; right: 0; bottom: 0; min-width: 13px; height: 13px; padding: 0 3px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--bg-panel); border-radius: 7px; background: var(--state-danger); color: var(--accent-contrast, #fff); font-size: 8px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
-.explorer-problems { position: absolute; inset: auto 8px 8px; z-index: 12; max-height: 46%; display: flex; flex-direction: column; overflow: hidden; opacity: 1; border: 1px solid var(--border-ghost); border-radius: 5px; background: var(--bg-sidebar, #fff); box-shadow: var(--shadow-popover); backdrop-filter: none; }
+.explorer-problem-badge { position: absolute; right: 0; bottom: 0; min-width: 13px; height: 13px; padding: 0 3px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--bg-panel); border-radius: var(--radius-md); background: var(--state-danger); color: var(--accent-contrast); font-size: 8px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+.explorer-problems { position: absolute; inset: auto 8px 8px; z-index: 12; max-height: 46%; display: flex; flex-direction: column; overflow: hidden; opacity: 1; border: 1px solid var(--border-ghost); border-radius: var(--radius-md); background: var(--surface-overlay); box-shadow: var(--shadow-overlay); backdrop-filter: none; }
 .explorer-problems-header { display: flex; align-items: center; gap: 7px; padding: 7px 8px 7px 10px; border-bottom: 1px solid var(--border-ghost); font-size: 12px; }
 .explorer-problems-header strong { flex: 1; }
-.explorer-problem-filter { position: relative; height: 26px; display: inline-flex; align-items: center; gap: 3px; padding-left: 7px; border: 1px solid color-mix(in srgb, var(--text-muted) 22%, transparent); border-radius: 4px; background: color-mix(in srgb, var(--bg-card) 92%, transparent); color: var(--text-muted); }
+.explorer-problem-filter { position: relative; height: 26px; display: inline-flex; align-items: center; gap: 3px; padding-left: 7px; border: 1px solid color-mix(in srgb, var(--text-muted) 22%, transparent); border-radius: var(--radius-sm); background: color-mix(in srgb, var(--bg-card) 92%, transparent); color: var(--text-muted); }
 .explorer-problem-filter:hover { border-color: color-mix(in srgb, var(--accent) 36%, var(--border-subtle)); color: var(--text-main); }
 .explorer-problem-filter:focus-within { border-color: var(--accent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent); }
 .explorer-problem-filter .material-symbols-rounded { flex: none; font-size: 15px; pointer-events: none; }
 .explorer-problem-filter select { height: 100%; min-width: 52px; padding: 0 19px 0 1px; border: 0; outline: 0; appearance: none; background: transparent; color: var(--text-main); font: inherit; cursor: pointer; }
 .explorer-problem-filter .filter-chevron { position: absolute; right: 3px; font-size: 16px; }
-.explorer-problems-close { width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 4px; background: transparent; color: var(--text-muted); cursor: pointer; }
+.explorer-problems-close { width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); cursor: pointer; }
 .explorer-problems-close:hover { background: var(--bg-hover); color: var(--text-main); }
 .explorer-problems-close .material-symbols-rounded { font-size: 17px; }
 .explorer-problem-list { overflow: auto; }.explorer-problem-item { display: flex; align-items: flex-start; border-bottom: 1px solid var(--border-ghost); }
 .problem-open { flex: 1; min-width: 0; display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px; border: 0; background: transparent; text-align: left; cursor: pointer; }
 .problem-open > span:nth-child(2) { flex: 1; min-width: 0; }.problem-open strong,.problem-open small,.problem-open em { display: block; font-size: 11px; font-style: normal; }.problem-open small { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; }.problem-open em { margin-top: 3px; color: var(--text-secondary); }
-.problem-severity { width: 8px; height: 8px; margin-top: 4px; border-radius: 50%; background: var(--state-info); }.problem-severity.is-error { background: var(--state-danger); }.problem-severity.is-warning { background: var(--state-warning); }
+.problem-severity { width: 8px; height: 8px; margin-top: 4px; border-radius: var(--radius-full); background: var(--state-info); }.problem-severity.is-error { background: var(--state-danger); }.problem-severity.is-warning { background: var(--state-warning); }
 .problem-fix { flex: none; align-self: center; margin-right: 8px; border: 1px solid var(--border-ghost); background: transparent; padding: 3px 6px; font-size: 10px; cursor: pointer; }.explorer-problem-empty { padding: 16px; color: var(--text-muted); font-size: 12px; text-align: center; }
 
 .tree-row-shell {
@@ -1835,7 +1835,7 @@ defineExpose({
 .tree-chapter-state:hover { color: var(--text-main); }
 .tree-chapter-state.completed:hover { color: color-mix(in srgb, var(--state-success) 82%, var(--text-main)); }
 .tree-chapter-state input { position: absolute; width: 16px; height: 20px; margin: 0; opacity: 0; cursor: pointer; }
-.tree-chapter-state input:focus-visible + .material-symbols-rounded { outline: 1px solid var(--accent); outline-offset: 1px; border-radius: 50%; }
+.tree-chapter-state input:focus-visible + .material-symbols-rounded { outline: 1px solid var(--accent); outline-offset: 1px; border-radius: var(--radius-full); }
 .tree-chapter-state .material-symbols-rounded { width: 14px; height: 14px; display: inline-flex; align-items: center; justify-content: center; overflow: visible; font-size: 13px; line-height: 14px; pointer-events: none; }
 
 .tree-status-cluster {
@@ -1860,13 +1860,13 @@ defineExpose({
 .tree-git-decoration.is-uncommitted { color: var(--state-success); }
 
 .tree-view.is-import-drop-target {
-  outline: 1px solid rgba(196, 100, 48, 0.45);
+  outline: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
   outline-offset: -3px;
-  background: rgba(196, 100, 48, 0.05);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
 }
 
 .tree-row.is-drop-target {
-  background: rgba(196, 100, 48, 0.12);
+  background: var(--bg-selected);
   color: var(--text);
 }
 
@@ -1893,7 +1893,7 @@ defineExpose({
 .tree-diagnostic-dot {
   width: 8px;
   height: 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1902,10 +1902,10 @@ defineExpose({
   cursor: default;
 }
 
-.tree-diagnostic-dot.is-warning { background: #d99524; box-shadow: 0 0 0 3px color-mix(in srgb, #d99524 14%, transparent); }
-.tree-diagnostic-dot.is-info { background: #4b83d1; box-shadow: 0 0 0 3px color-mix(in srgb, #4b83d1 14%, transparent); }
-.tree-diagnostic-count { min-width: 16px; height: 16px; padding: 0 4px; display: inline-flex; align-items: center; justify-content: center; border-radius: 8px; background: #4b83d1; color: #fff; font-size: 9px; line-height: 1; }
-.tree-diagnostic-count.is-error { background: var(--danger); }.tree-diagnostic-count.is-warning { background: #d99524; }
+.tree-diagnostic-dot.is-warning { background: var(--warning-fg); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warning-fg) 14%, transparent); }
+.tree-diagnostic-dot.is-info { background: var(--info-fg); box-shadow: 0 0 0 3px color-mix(in srgb, var(--info-fg) 14%, transparent); }
+.tree-diagnostic-count { min-width: 16px; height: 16px; padding: 0 4px; display: inline-flex; align-items: center; justify-content: center; border-radius: var(--radius-lg); background: var(--info-fg); color: #fff; font-size: 9px; line-height: 1; }
+.tree-diagnostic-count.is-error { background: var(--danger); }.tree-diagnostic-count.is-warning { background: var(--warning-fg); }
 
 .tree-complete-toggle {
   position: relative;
@@ -1939,7 +1939,7 @@ defineExpose({
   position: relative;
   width: 28px;
   height: 16px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: color-mix(in srgb, var(--text-secondary) 18%, transparent);
   transition: background 160ms ease;
 }
@@ -1951,13 +1951,13 @@ defineExpose({
   left: 2px;
   width: 12px;
   height: 12px;
-  border-radius: 50%;
+  border-radius: var(--radius-full);
   background: var(--bg-panel);
   transition: transform 160ms ease;
 }
 
 .tree-complete-toggle input:checked + .tree-complete-toggle-track {
-  background: color-mix(in srgb, var(--state-success, #4caf50) 72%, transparent);
+  background: color-mix(in srgb, var(--state-success) 72%, transparent);
 }
 
 .tree-complete-toggle input:checked + .tree-complete-toggle-track::after {
@@ -1997,8 +1997,8 @@ defineExpose({
 }
 
 .tree-complete-toggle input:checked + .tree-complete-toggle-track {
-  background: var(--state-success, #4caf50);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--state-success, #4caf50) 18%, transparent);
+  background: var(--state-success);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--state-success) 18%, transparent);
 }
 
 .tree-complete-toggle input:checked + .tree-complete-toggle-track::after {
@@ -2064,7 +2064,7 @@ defineExpose({
 
 .tree-inline-create-input {
   height: 26px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 0 8px;
   font-size: 13px;
 }

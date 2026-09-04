@@ -65,15 +65,15 @@ const formattedArguments = computed(() => {
 
 <style scoped>
 .tool-call-card {
-  border: 1px solid var(--color-border, #e0e0e0);
-  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
   margin: 8px 0;
   overflow: hidden;
   font-size: 13px;
 }
-.status-running { border-left: 3px solid var(--color-info, #2196f3); }
-.status-done { border-left: 3px solid var(--color-success, #4caf50); }
-.status-error { border-left: 3px solid var(--color-error, #f44336); }
+.status-running { border-left: 3px solid var(--color-info); }
+.status-done { border-left: 3px solid var(--color-success); }
+.status-error { border-left: 3px solid var(--color-error); }
 
 .tool-header {
   display: flex;
@@ -81,12 +81,12 @@ const formattedArguments = computed(() => {
   gap: 6px;
   padding: 6px 10px;
   cursor: pointer;
-  background: var(--color-surface, #f5f5f5);
+  background: var(--color-surface);
 }
 .tool-icon { font-size: 14px; }
 .tool-name { font-weight: 600; flex: 1; font-family: monospace; }
 .tool-status { font-size: 12px; }
-.tool-toggle { font-size: 10px; color: var(--color-text-secondary, #999); }
+.tool-toggle { font-size: 10px; color: var(--color-text-secondary); }
 
 .tool-body { padding: 8px 10px; }
 .tool-arguments pre, .tool-result pre {
@@ -101,16 +101,16 @@ const formattedArguments = computed(() => {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: var(--color-text-secondary, #666);
+  color: var(--color-text-secondary);
 }
 .spinner {
   width: 14px;
   height: 14px;
-  border: 2px solid var(--color-border, #e0e0e0);
-  border-top-color: var(--color-info, #2196f3);
-  border-radius: 50%;
+  border: 2px solid var(--color-border);
+  border-top-color: var(--color-info);
+  border-radius: var(--radius-full);
   animation: spin 0.8s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
-.tool-error { color: var(--color-error, #f44336); }
+.tool-error { color: var(--color-error); }
 </style>

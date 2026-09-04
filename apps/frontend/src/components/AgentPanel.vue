@@ -1016,10 +1016,10 @@ const contextRingStyle = computed<Record<string, string>>(() => {
   const ratio = contextRatio.value;
   const safeRatio = ratio === null || (agentStore.usedTokens ?? 0) <= 0 ? 0 : Math.min(1, Math.max(0, ratio));
   const colorByLevel: Record<string, string> = {
-    safe: "#22c55e",
-    warning: "#f59e0b",
-    danger: "#ef4444",
-    unknown: "rgba(148, 163, 184, 0.72)"
+    safe: "var(--success-fg)",
+    warning: "var(--warning-fg)",
+    danger: "var(--danger-fg)",
+    unknown: "var(--text-faint)"
   };
   return {
     "--coomi-context-progress": `${Math.round(safeRatio * 360)}deg`,
@@ -2472,7 +2472,7 @@ defineExpose({
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   color: var(--text-muted);
 }
 
@@ -2486,7 +2486,7 @@ defineExpose({
   align-items: center;
   gap: 6px;
   padding: 3px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   color: var(--text-muted);
   background: color-mix(in srgb, var(--text-main) 6%, transparent);
   font-size: 11px;
@@ -2500,7 +2500,7 @@ defineExpose({
 .coomi-dot {
   width: 6px;
   height: 6px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: currentColor;
 }
 
@@ -2529,7 +2529,7 @@ defineExpose({
   align-items: center;
   justify-content: center;
   border: 1px solid color-mix(in srgb, var(--text-muted) 22%, transparent);
-  border-radius: 50%;
+  border-radius: var(--radius-full);
   background: color-mix(in srgb, var(--bg-card) 96%, transparent);
   color: var(--text-secondary);
   box-shadow: var(--shadow-popover);
@@ -2577,7 +2577,7 @@ defineExpose({
   margin: 0;
   padding: 6px 10px;
   border: 1px solid var(--border-ghost);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--bg-input) 72%, transparent);
   color: var(--text-soft);
   font-size: 12px;
@@ -2649,7 +2649,7 @@ defineExpose({
   align-items: center;
   justify-content: center;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -2710,7 +2710,7 @@ defineExpose({
   padding: 18px;
   overflow-y: auto;
   border: 1px solid color-mix(in srgb, var(--warning) 42%, var(--border-subtle));
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--bg-card);
   box-shadow: var(--shadow-md);
 }
@@ -2750,7 +2750,7 @@ defineExpose({
   min-height: 32px;
   padding: 0 11px;
   border: 1px solid var(--border-subtle);
-  border-radius: 5px;
+  border-radius: var(--radius-md);
   background: var(--bg-card-muted);
   color: var(--text-main);
   font: inherit;
@@ -2895,7 +2895,7 @@ defineExpose({
   overflow: auto;
   background: var(--bg-card-muted);
   border: 1px solid var(--border-subtle);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 11px;
 }
@@ -3040,7 +3040,7 @@ defineExpose({
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--bg-hover);
   color: var(--text-muted);
   font-size: 11px;
@@ -3075,7 +3075,7 @@ defineExpose({
   align-items: center;
   width: 100%;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: transparent;
 }
 
@@ -3109,7 +3109,7 @@ defineExpose({
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--text-main) 6%, transparent);
   color: var(--text-muted);
   font-size: 15px;
@@ -3147,7 +3147,7 @@ defineExpose({
   display: inline-flex;
   align-items: center;
   border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
   color: var(--accent-strong);
   font-size: 11px;
@@ -3165,7 +3165,7 @@ defineExpose({
   align-items: center;
   justify-content: center;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -3225,12 +3225,12 @@ defineExpose({
   height: 18px;
   position: relative;
   display: inline-block;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   border: 0;
   background:
     conic-gradient(
-      var(--coomi-context-color, rgba(148, 163, 184, 0.72)) var(--coomi-context-progress, 0deg),
-      rgba(248, 250, 252, 0.9) 0deg
+      var(--coomi-context-color, var(--text-faint)) var(--coomi-context-progress, 0deg),
+      var(--surface-3) 0deg
     );
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--border-subtle) 75%, transparent);
 }
@@ -3244,19 +3244,19 @@ defineExpose({
 }
 
 .coomi-context-ring.safe {
-  --coomi-context-color: #22c55e;
+  --coomi-context-color: var(--success-fg);
 }
 
 .coomi-context-ring.warning {
-  --coomi-context-color: #f59e0b;
+  --coomi-context-color: var(--warning-fg);
 }
 
 .coomi-context-ring.danger {
-  --coomi-context-color: #ef4444;
+  --coomi-context-color: var(--danger-fg);
 }
 
 .coomi-context-ring.unknown {
-  --coomi-context-color: rgba(148, 163, 184, 0.72);
+  --coomi-context-color: var(--text-faint);
 }
 
 .coomi-plan-indicator {
@@ -3317,7 +3317,7 @@ defineExpose({
 
 .coomi-status-button.permission-plan-mode,
 .coomi-choice-card.permission-plan-mode span {
-  color: #60a5fa;
+  color: var(--info-fg);
 }
 
 .coomi-status-button.permission-ask-approval {
@@ -3330,12 +3330,12 @@ defineExpose({
 
 .coomi-status-button.permission-approve-for-me,
 .coomi-choice-card.permission-approve-for-me span {
-  color: #22c55e;
+  color: var(--success-fg);
 }
 
 .coomi-status-button.permission-full-access,
 .coomi-choice-card.permission-full-access span {
-  color: #f59e0b;
+  color: var(--warning-fg);
 }
 
 .coomi-status-control {
@@ -3354,7 +3354,7 @@ defineExpose({
   gap: 6px;
   padding: 8px;
   border: 1px solid var(--border-subtle);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--bg-input);
   box-shadow: var(--shadow-popover);
 }
@@ -3426,7 +3426,7 @@ defineExpose({
   height: 28px;
   padding: 0 8px;
   border: 1px solid var(--border-subtle);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--bg-input) 86%, black);
   color: var(--text-main);
   font: inherit;
@@ -3446,7 +3446,7 @@ defineExpose({
   min-width: 0;
   height: 28px;
   border: 1px solid var(--border-subtle);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   overflow: hidden;
   background: color-mix(in srgb, var(--bg-input) 86%, black);
 }
@@ -3516,7 +3516,7 @@ defineExpose({
   gap: 3px;
   padding: 8px 9px;
   border: 1px solid var(--border-ghost);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-main);
   font: inherit;
@@ -3636,7 +3636,7 @@ defineExpose({
 
 .coomi-markdown :deep(code) {
   padding: 1px 4px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--text-main) 9%, transparent);
   color: var(--text-soft);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
@@ -3649,7 +3649,7 @@ defineExpose({
   overflow: auto;
   padding: 10px;
   border: 1px solid var(--border-subtle);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: var(--bg-card-muted);
 }
 
@@ -3695,7 +3695,7 @@ defineExpose({
   flex-direction: column;
   overflow: hidden;
   border: 1px solid var(--border-subtle);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--bg-input);
   background-color: var(--bg-input);
   backdrop-filter: none;
@@ -3714,7 +3714,7 @@ defineExpose({
   gap: 9px;
   padding: 8px 10px;
   border: 1px solid var(--border-subtle);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--bg-input);
   color: var(--text-soft);
   box-shadow: var(--shadow-popover);
@@ -3725,7 +3725,7 @@ defineExpose({
   width: 8px;
   height: 8px;
   flex: 0 0 auto;
-  border-radius: 50%;
+  border-radius: var(--radius-full);
   background: var(--accent);
   animation: coomi-running-pulse 1.2s ease-in-out infinite;
 }
@@ -3787,7 +3787,7 @@ defineExpose({
   align-items: center;
   justify-content: center;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -3822,7 +3822,7 @@ defineExpose({
   align-items: center;
   justify-content: center;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -3922,7 +3922,7 @@ defineExpose({
   max-height: 120px;
   resize: vertical;
   border: 1px solid var(--border-subtle);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 8px 9px;
   background: color-mix(in srgb, var(--bg-input) 88%, black);
   color: var(--text-main);
@@ -3947,7 +3947,7 @@ defineExpose({
   min-width: 64px;
   height: 30px;
   border: 1px solid var(--border-subtle);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-main);
   font: inherit;
@@ -3981,7 +3981,7 @@ defineExpose({
   gap: 6px;
   padding: 7px 9px;
   border: 1px solid var(--border-subtle);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--bg-input) 94%, transparent);
 }
 
@@ -4025,7 +4025,7 @@ defineExpose({
   min-height: 27px;
   padding: 4px 8px;
   border: 1px solid var(--border-subtle);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-soft);
   font: inherit;
@@ -4127,7 +4127,7 @@ defineExpose({
   resize: vertical;
   padding: 7px 8px;
   border: 1px solid var(--border-strong);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   outline: none;
   background: var(--bg-card-muted);
   color: var(--text-main);
@@ -4144,7 +4144,7 @@ defineExpose({
   gap: 10px;
   padding: 8px 10px 8px 12px;
   border: 1px solid var(--border-strong);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--bg-input);
   overflow: visible;
 }
@@ -4169,7 +4169,7 @@ defineExpose({
   height: 26px;
   padding: 0;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   display: inline-grid;
   place-items: center;
   background: transparent;
@@ -4204,7 +4204,7 @@ defineExpose({
   height: 14px;
   padding: 0;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: transparent;
   cursor: pointer;
   pointer-events: auto;
@@ -4217,7 +4217,7 @@ defineExpose({
   right: 16px;
   top: 6px;
   height: 3px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: color-mix(in srgb, var(--accent-strong) 72%, transparent);
   opacity: 0.86;
   transition:
@@ -4267,7 +4267,7 @@ defineExpose({
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--accent) 16%, transparent);
   color: var(--text-main);
   transition:
@@ -4286,7 +4286,7 @@ defineExpose({
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-muted);
 }
@@ -4346,7 +4346,7 @@ defineExpose({
   position: absolute;
   inset: 12px;
   z-index: 0;
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
   background: currentColor;
   pointer-events: none;
 }

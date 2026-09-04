@@ -957,7 +957,7 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 .system-settings-window {
   width: min(1120px, calc(100vw - 28px));
   height: min(780px, calc(100vh - 28px));
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--border-subtle);
   background: var(--bg-card);
   box-shadow: var(--shadow-md);
@@ -1004,7 +1004,7 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
   align-items: center;
   justify-content: center;
   border: 0;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -1046,7 +1046,7 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
   width: 26px;
   height: 26px;
   border: 0;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   display: inline-grid;
@@ -1073,7 +1073,7 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
   flex: 0 0 auto;
   margin: 0 12px;
   height: 28px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border-subtle);
   background: var(--bg-input);
   display: inline-flex;
@@ -1132,7 +1132,7 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 
 .system-settings-update-progress-bar {
   height: 6px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: color-mix(in srgb, var(--text-main) 8%, transparent);
   overflow: hidden;
 }
@@ -1155,7 +1155,7 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
   min-height: 28px;
   padding: 0 14px;
   border: 1px solid var(--border-strong);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--bg-card);
   color: var(--text-soft);
   font: inherit;
@@ -1262,7 +1262,7 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 .system-settings-empty {
   min-height: 220px;
   border: 1px dashed var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   display: grid;
   place-items: center;
   color: var(--text-muted);
@@ -1354,7 +1354,7 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 
 .theme-option {
   border: 1px solid var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--bg-card);
   padding: 7px 9px;
   display: flex;
@@ -1377,7 +1377,7 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 .theme-option-preview {
   width: 28px;
   height: 28px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   border: 1px solid color-mix(in srgb, var(--border-subtle) 90%, white 10%);
   flex-shrink: 0;
 }
@@ -1410,7 +1410,7 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
   min-height: 30px;
   padding: 0 12px;
   border: 1px solid var(--border-subtle);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-soft);
   cursor: pointer;
@@ -1465,7 +1465,7 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
   min-height: 30px;
   padding: 0 9px;
   border: 1px solid var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--bg-input);
   color: var(--text-main);
   font-size: 13px;
@@ -1491,7 +1491,7 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
   height: 22px;
   padding: 0 8px;
   border: 1px solid var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--bg-card);
   color: var(--text-muted);
   font-size: 12px;
@@ -1521,7 +1521,7 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 .system-settings-empty-inline {
   min-height: 48px;
   border: 1px dashed var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   display: grid;
   place-items: center;
   color: var(--text-muted);
@@ -1575,7 +1575,7 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 .system-settings-switch-track {
   width: 38px;
   height: 20px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: color-mix(in srgb, var(--text-soft) 24%, transparent);
   position: relative;
   transition: background-color 0.18s ease;
@@ -1588,9 +1588,9 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
   left: 2px;
   width: 16px;
   height: 16px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: #fff;
-  box-shadow: 0 2px 6px color-mix(in srgb, black 18%, transparent);
+  box-shadow: var(--shadow-resting);
   transition: transform 0.18s ease;
 }
 
@@ -1606,7 +1606,7 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 .system-settings-secondary-btn {
   min-height: 30px;
   padding: 0 12px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border-subtle);
   cursor: pointer;
 }

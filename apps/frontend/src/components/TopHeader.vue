@@ -820,12 +820,12 @@ function handleOpenAbout(): void {
 .project-architecture-options button { display: grid; gap: 4px; padding: 10px; border: 1px solid var(--border-subtle); background: var(--bg-editor); color: var(--text-main); text-align: left; cursor: pointer; }
 .project-architecture-options button.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent-soft) 45%, var(--bg-editor)); }
 .project-architecture-options span { color: var(--text-muted); font-size: 11px; line-height: 1.4; }
-.modal-card { width: min(620px, calc(100vw - 32px)); padding: 24px 26px 20px; border-radius: 10px; }
+.modal-card { width: min(620px, calc(100vw - 32px)); padding: 24px 26px 20px; border-radius: var(--radius-lg); }
 .modal-title { font-size: 21px; letter-spacing: 0; }
 .modal-desc { margin-top: 6px; color: var(--text-muted); }
 .modal-label { gap: 6px; margin-top: 14px; }
-.modal-input, .modal-inline-readonly { min-height: 40px; border-radius: 7px; }
-.project-architecture-options button { min-height: 66px; border-radius: 7px; transition: border-color .16s ease, background-color .16s ease; }
+.modal-input, .modal-inline-readonly { min-height: 40px; border-radius: var(--radius-md); }
+.project-architecture-options button { min-height: 66px; border-radius: var(--radius-md); transition: border-color .16s ease, background-color .16s ease; }
 .project-architecture-options button:hover { border-color: var(--accent); }
 .modal-actions { margin-top: 18px; }
 .top-header {
@@ -870,6 +870,7 @@ function handleOpenAbout(): void {
   background: var(--bg-hover);
 }
 
+/* Windows 标准关闭键悬停色，不随主题变化 */
 .window-control-close:hover {
   background: #c42b1c;
   color: #ffffff;
@@ -927,7 +928,7 @@ function handleOpenAbout(): void {
   border: 0;
   background: transparent;
   padding: 0 4px 0 0;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   transition: background 180ms ease, box-shadow 180ms ease;
 }
@@ -945,7 +946,7 @@ function handleOpenAbout(): void {
   min-width: 28px;
   height: 28px;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-soft);
   display: inline-flex;
@@ -975,7 +976,7 @@ function handleOpenAbout(): void {
   width: 28px;
   height: 28px;
   padding: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   box-shadow: none;
 }
 
@@ -991,7 +992,7 @@ function handleOpenAbout(): void {
 .activity-account-badge {
   width: 22px;
   height: 22px;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   display: grid;
   place-items: center;
   background: var(--accent-soft);

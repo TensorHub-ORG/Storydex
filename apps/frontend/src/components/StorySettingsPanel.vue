@@ -223,7 +223,7 @@ async function handleSave(): Promise<void> {
   padding: 0 8px;
   color: var(--accent-primary);
   background: color-mix(in srgb, var(--accent-primary) 14%, transparent);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   font-size: 12px;
 }
 

@@ -62,5 +62,5 @@ onBeforeUnmount(() => { if (scrollTimer) clearTimeout(scrollTimer); });
 .large-file-banner button { border: 1px solid var(--border-ghost); background: transparent; color: var(--text-secondary); padding: 5px 10px; cursor: pointer; font-size: 12px; }
 .large-file-scroll { flex: 1; min-height: 0; overflow: auto; contain: strict; }
 .large-file-spacer { position: relative; width: 100%; }
-.large-file-window { position: absolute; inset: 0 0 auto; margin: 0; padding: 10px 18px 24px; white-space: pre; font-family: var(--font-editor, "Cascadia Mono", "Consolas", monospace); font-size: 13px; line-height: 22px; color: var(--text-primary); }
+.large-file-window { position: absolute; inset: 0 0 auto; margin: 0; padding: 10px 18px 24px; white-space: pre; font-family: var(--font-editor); font-size: 13px; line-height: 22px; color: var(--text-primary); }
 </style>
