@@ -6,13 +6,16 @@ export interface SystemHealthResponse {
   status: string;
   service: string;
   time: string;
-  workspaceRoot: string;
-  storydexRoot: string;
-  projectName: string;
-  hasStorydexConfig: boolean;
-  requiresInitialization: boolean;
-  missingDirectories: string[];
-  frontendStaticMode: boolean;
+  runtime?: string;
+  version?: string;
+  protocolVersion?: number;
+  workspaceRoot?: string;
+  storydexRoot?: string;
+  projectName?: string;
+  hasStorydexConfig?: boolean;
+  requiresInitialization?: boolean;
+  missingDirectories?: string[];
+  frontendStaticMode?: boolean;
   memoryUsageMb?: number | null;
 }
 

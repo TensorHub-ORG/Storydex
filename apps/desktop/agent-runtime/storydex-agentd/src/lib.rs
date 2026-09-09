@@ -7,7 +7,7 @@ use axum::extract::State;
 use axum::http::Request;
 use axum::http::StatusCode;
 use axum::http::header;
-use axum::http::{HeaderName, Method};
+use axum::http::{HeaderMap, HeaderName, Method};
 use axum::middleware;
 use axum::middleware::Next;
 use axum::response::IntoResponse;
@@ -460,6 +460,24 @@ struct HealthData {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct PublicHealthData {
+    status: &'static str,
+    service: &'static str,
+    time: String,
+    runtime: &'static str,
+    version: &'static str,
+    protocol_version: u32,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum HealthResponseData {
+    Public(PublicHealthData),
+    Full(HealthData),
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct VersionData {
     runtime: &'static str,
     version: &'static str,
@@ -632,21 +650,27 @@ pub(crate) fn error_response_with_details(
     (status, Json(envelope)).into_response()
 }
 
+fn bearer_token_authorized(state: &AppState, headers: &HeaderMap) -> bool {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|value| value == state.token.as_ref())
+}
+
+fn runtime_token_authorized(state: &AppState, headers: &HeaderMap) -> bool {
+    headers
+        .get("x-storydex-runtime-token")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == state.token.as_ref())
+}
+
 async fn auth_layer(State(state): State<AppState>, request: Request<Body>, next: Next) -> Response {
     if request.uri().path() == "/api/v1/sys/health" || request.method() == Method::OPTIONS {
         return next.run(request).await;
     }
-    let bearer_authorized = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|value| value == state.token.as_ref());
-    let runtime_authorized = request
-        .headers()
-        .get("x-storydex-runtime-token")
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value == state.token.as_ref());
+    let bearer_authorized = bearer_token_authorized(&state, request.headers());
+    let runtime_authorized = runtime_token_authorized(&state, request.headers());
     let is_account_route = request.uri().path().starts_with("/api/v1/auth/");
     let authorized = if is_account_route {
         runtime_authorized
@@ -684,8 +708,26 @@ fn cors_layer() -> CorsLayer {
         ])
 }
 
-async fn health(State(state): State<AppState>) -> Json<ApiEnvelope<HealthData>> {
+async fn health(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Json<ApiEnvelope<HealthResponseData>> {
     let started_at = Instant::now();
+    if !runtime_token_authorized(&state, &headers)
+        && !bearer_token_authorized(&state, &headers)
+    {
+        return Json(ApiEnvelope::success(
+            HealthResponseData::Public(PublicHealthData {
+                status: "ok",
+                service: API_SERVICE_NAME,
+                time: Utc::now().to_rfc3339(),
+                runtime: SERVICE_NAME,
+                version: env!("CARGO_PKG_VERSION"),
+                protocol_version: API_PROTOCOL_VERSION,
+            }),
+            started_at,
+        ));
+    }
     let workspace = state.current_workspace();
     let workspace_root = workspace
         .as_ref()
@@ -705,7 +747,7 @@ async fn health(State(state): State<AppState>) -> Json<ApiEnvelope<HealthData>> 
         .as_ref()
         .is_some_and(|path| path.join(".storydex").is_dir());
     Json(ApiEnvelope::success(
-        HealthData {
+        HealthResponseData::Full(HealthData {
             status: "ok",
             service: API_SERVICE_NAME,
             time: Utc::now().to_rfc3339(),
@@ -721,7 +763,7 @@ async fn health(State(state): State<AppState>) -> Json<ApiEnvelope<HealthData>> 
             requires_initialization: workspace.is_some() && !has_storydex_config,
             missing_directories: Vec::new(),
             frontend_static_mode: false,
-        },
+        }),
         started_at,
     ))
 }
@@ -1129,8 +1171,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn health_is_public_and_uses_storydex_envelope() {
-        let app = router(AppState::new("test-token").expect("state"));
+    async fn unauthenticated_health_is_public_and_redacts_workspace_metadata() {
+        let root = tempdir().expect("root");
+        let (state, _) = workspace_test_state(root.path());
+        let app = router(state);
         let response = app
             .oneshot(
                 Request::builder()
@@ -1145,12 +1189,79 @@ mod tests {
         assert_eq!(body["ok"], true);
         assert_eq!(body["data"]["status"], "ok");
         assert_eq!(body["data"]["service"], API_SERVICE_NAME);
+        assert_eq!(body["data"]["runtime"], SERVICE_NAME);
+        assert_eq!(
+            body["data"]["protocolVersion"],
+            Value::from(API_PROTOCOL_VERSION)
+        );
+        for field in [
+            "activeTasks",
+            "uptimeMs",
+            "workspaceRoot",
+            "storydexRoot",
+            "projectName",
+            "hasStorydexConfig",
+            "requiresInitialization",
+            "missingDirectories",
+            "frontendStaticMode",
+        ] {
+            assert!(
+                body["data"].get(field).is_none(),
+                "anonymous health response exposed {field}"
+            );
+        }
         assert!(
             body["trace"]["traceId"]
                 .as_str()
                 .is_some_and(|value| !value.is_empty())
         );
         assert_eq!(body["audit"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn authenticated_health_includes_workspace_metadata() {
+        let root = tempdir().expect("root");
+        let (state, workspace) = workspace_test_state(root.path());
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/sys/health")
+                    .header("x-storydex-runtime-token", "test-token")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("health response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(
+            body["data"]["workspaceRoot"],
+            Value::String(workspace.to_string_lossy().into_owned())
+        );
+        assert_eq!(body["data"]["projectName"], "workspace");
+        assert_eq!(body["data"]["hasStorydexConfig"], false);
+    }
+
+    #[tokio::test]
+    async fn invalid_health_token_does_not_expose_workspace_metadata() {
+        let root = tempdir().expect("root");
+        let (state, _) = workspace_test_state(root.path());
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/sys/health")
+                    .header("x-storydex-runtime-token", "wrong-token")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("health response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert!(body["data"].get("workspaceRoot").is_none());
+        assert!(body["data"].get("projectName").is_none());
     }
 
     #[tokio::test]
