@@ -35,7 +35,7 @@
 
 ## 简介
 
-Storydex 面向需要长期维护世界观、角色关系和章节连续性的小说作者。它以本地文件为事实源，把写作、资料整理、Agent 协作和版本控制放进同一个桌面工作台：你可以先查证项目资料，再让 Agent 生成或修改内容，并在提交前审阅 Diff。
+Storydex 面向需要长期维护世界观、角色关系和章节连续性的小说作者。它以本地文件为事实源头，把写作、资料整理、Agent 协作和版本控制放进同一个桌面工作台：你可以先查证项目资料，再让 Agent 生成或修改内容，并在提交前审阅 Diff。
 
 Windows 当前源码主线的唯一桌面链路是 `Vue → Tauri 2 → storydex-agentd → Coomi Rust`。Python/FastAPI 仅保留非 Stable 的后端兼容与测试边界，不提供 Agent 产品入口；Electron 桌面运行时和旧打包入口已移除。已发布版本的具体资产格式以对应的 [GitHub Release](https://github.com/TensorHub-ORG/Storydex/releases) 为准，README 不复制逐版本历史说明。
 
@@ -52,7 +52,7 @@ Windows 当前源码主线的唯一桌面链路是 `Vue → Tauri 2 → storydex
 
 ### 普通用户
 
-从 [GitHub Releases](https://github.com/TensorHub-ORG/Storydex/releases) 下载与你的平台和版本匹配的发行资产。公开 Release 可能与当前源码主线处于不同发布阶段：已发布版本按 Release 页面说明使用，当前 Tauri 源码按下方开发步骤验证。安装包、便携包、校验文件和发行说明以 Release 页面为准；不要从源码仓库的 `target`、`release` 或测试目录直接运行发行文件。
+从 [GitHub Releases](https://github.com/TensorHub-ORG/Storydex/releases) 下载与你的平台和版本匹配的发行资产。公开 Release 可能与当前源码主线处于不同发布阶段：已发布版本按 Release 页面说明使用，当前 Tauri 源码按下方开发步骤验证。安装包、便携包、校验文件和发行说明以 Release 页面为准；不要从源码仓库的 `target`、`release` 或测试目录下面直接运行发行文件。
 
 首次启动后，在 Storydex 的系统设置中配置模型服务。API Key 等敏感配置只应保存在本机受保护的位置，不要提交到 Git 仓库或反馈材料中。
 
@@ -135,7 +135,7 @@ Storydex/
 
 ## 分支与 CI
 
-本仓库当前只在公开说明中定义两条主线：
+本仓库当前在公开说明中定义两条主线：
 
 - `dev/windows`：Windows 桌面端日常开发和聚焦验证，先通过 Development CI。
 - `main`：稳定集成；普通改动按路径执行组件检查，同一 SHA 已通过 `dev/windows` 时复用 Windows 结果。
@@ -169,7 +169,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_pre_push_ci.ps1
 - 不提交 API Key、私钥、证书、用户小说、日志、缓存、`node_modules`、Rust `target` 或打包产物；
 - 修改运行时、发布配置或内置提示词时，同时更新对应的维护者文档和聚焦测试。
 
-发现安全问题时，请不要在公开 Issue 中粘贴凭据或完整利用细节；请先通过 `septemc@foxmail.com` 私下联系维护者。
+在发现安全问题时，请不要在公开 Issue 中粘贴凭据或完整利用细节；请先通过 `septemc@foxmail.com` 私下联系维护者。
 
 ## 许可证
 
