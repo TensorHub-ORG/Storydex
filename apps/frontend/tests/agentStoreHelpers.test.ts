@@ -184,6 +184,45 @@ describe("agent store deterministic helpers", () => {
     expect(message).toContain("Staged candidate (draft): .storydex/.agent/temp/trace/draft.json");
   });
 
+  it("covers optional Agent error fields without losing useful fallback details", () => {
+    const message = u.formatAgentErrorPacket(packet({
+      _type: "AgentError",
+      code: "agent_write_rejected",
+      message: "基础错误",
+      details: {
+        error: { message: "底层失败" },
+        applyResult: { message: "基础错误" },
+        validation: {
+          message: "基础错误",
+          fragments: [null, { passed: false }, { status: "failed" }, { status: "passed", passed: true }]
+        },
+        origin: {},
+        exceptionChain: [null, { type: "AgentError", message: "基础错误" }],
+        runtimeVersion: "2.1.0-storydex-desktop.1",
+        stagedCandidates: { empty: "", draft: ".storydex/.agent/temp/trace/draft.json" }
+      }
+    }));
+
+    expect(message).toContain("Code: agent_write_rejected");
+    expect(message).toContain("Cause: 底层失败");
+    expect(message).toContain("Rejected target: failed");
+    expect(message).toContain("Runtime: 2.1.0-storydex-desktop.1");
+    expect(message).toContain("Staged candidate (draft): .storydex/.agent/temp/trace/draft.json");
+
+    const causeMessage = u.formatAgentErrorPacket(packet({
+      _type: "AgentError",
+      message: "请求失败",
+      details: {
+        error: { causeType: "IoError", message: "文件被占用" },
+        validation: { fragments: "not-an-array" },
+        statusCode: 409
+      }
+    }));
+    expect(causeMessage).toContain("Error: IoError");
+    expect(causeMessage).toContain("Cause: IoError: 文件被占用");
+    expect(causeMessage).toContain("HTTP 409");
+  });
+
   it("summarizes Git, contracts, presets, context, usage, and compression", () => {
     expect(u.summarizeGitAutoCommitPacket(packet({ _type: "GitCommitPrompt", changedFileCount: 2, workspaceRoot: "C:/story" }))).toContain("2");
     expect(u.summarizeGitAutoCommitPacket(packet({ _type: "GitCommitResult", created: true, shortHash: "abc", changedFileCount: 1 }))).toContain("abc");
