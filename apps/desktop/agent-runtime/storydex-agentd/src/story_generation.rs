@@ -1832,7 +1832,7 @@ fn tier_prompt(tier: &str) -> &'static str {
 }
 
 fn atomic_create_many(writes: &[(PathBuf, String)]) -> Result<()> {
-    atomic_create_many_with(writes, |temporary, target| fs::rename(temporary, target))
+    atomic_create_many_with(writes, crate::workspace::rename_with_retry)
 }
 
 fn atomic_create_many_with<F>(writes: &[(PathBuf, String)], mut publish: F) -> Result<()>

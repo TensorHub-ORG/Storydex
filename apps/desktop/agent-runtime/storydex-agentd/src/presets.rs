@@ -747,16 +747,43 @@ fn write_pointer(workspace: &Path, payload: &Value) -> Result<(), Response> {
     write_json(&target, payload)
 }
 
+fn markdown_fallback_document(markdown: &Path) -> std::io::Result<Value> {
+    let content = fs::read_to_string(markdown)?;
+    let name = markdown
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("Markdown preset")
+        .to_owned();
+    let mut document = default_document();
+    document["meta"]["name"] = json!(name.clone());
+    document["meta"]["description"] = json!("缺少参数文件，当前仅将 Markdown 内容用作临时预设。");
+    document["modules"] = json!([{
+        "id": "markdown_fallback",
+        "title": name,
+        "slot": "advanced",
+        "enabledByDefault": true,
+        "priority": 50,
+        "scope": "global",
+        "placement": "turn_plan",
+        "content": content,
+    }]);
+    Ok(document)
+}
+
 fn read_document(markdown: &Path) -> Result<(Value, Vec<String>), Response> {
     let sidecar = sidecar_path(markdown);
-    if !sidecar.exists() {
-        return Ok((
-            default_document(),
-            vec!["no sidecar JSON; returning empty document".to_owned()],
-        ));
-    }
-    let metadata = fs::symlink_metadata(&sidecar)
-        .map_err(|error| io_error("Inspecting the preset sidecar", error))?;
+    let metadata = match fs::symlink_metadata(&sidecar) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let document = markdown_fallback_document(markdown)
+                .map_err(|error| io_error("Reading preset Markdown fallback", error))?;
+            return Ok((
+                document,
+                vec!["缺少同名 .preset.json 参数文件，当前使用 Markdown 内容作为临时预设；保存参数后可创建参数文件。".to_owned()],
+            ));
+        }
+        Err(error) => return Err(io_error("Inspecting the preset sidecar", error)),
+    };
     if metadata.file_type().is_symlink() {
         return Err(preset_error(
             StatusCode::FORBIDDEN,
@@ -1553,12 +1580,31 @@ pub(crate) fn compile_active_for_agent(
         ));
     }
     let sidecar = sidecar_path(&markdown);
-    let sidecar_metadata = fs::symlink_metadata(&sidecar).map_err(|error| {
-        ActivePresetError::new(
-            "preset_sidecar_invalid",
-            format!("Active preset sidecar is unavailable: {error}"),
-        )
-    })?;
+    let sidecar_metadata = match fs::symlink_metadata(&sidecar) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let document = markdown_fallback_document(&markdown).map_err(|error| {
+                ActivePresetError::new(
+                    "preset_markdown_unavailable",
+                    format!("Unable to read active preset Markdown fallback: {error}"),
+                )
+            })?;
+            let compiled = compile_document(&document, &json!({}));
+            return Ok(Some(
+                compiled
+                    .get("compiledText")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            ));
+        }
+        Err(error) => {
+            return Err(ActivePresetError::new(
+                "preset_sidecar_invalid",
+                format!("Unable to inspect the active preset sidecar: {error}"),
+            ));
+        }
+    };
     if sidecar_metadata.file_type().is_symlink() || !sidecar_metadata.is_file() {
         return Err(ActivePresetError::new(
             "preset_sidecar_invalid",
@@ -3745,6 +3791,40 @@ mod tests {
         .expect("unsafe pointer");
         let error = compile_active_for_agent(workspace.path()).expect_err("unsafe pointer");
         assert_eq!(error.code, "preset_path_invalid");
+    }
+
+    #[test]
+    fn active_markdown_without_sidecar_compiles_without_creating_files() {
+        let workspace = tempdir().expect("workspace");
+        let preset_dir = workspace.path().join(".storydex/presets/active");
+        fs::create_dir_all(&preset_dir).expect("preset directory");
+        let markdown = preset_dir.join("legacy.md");
+        fs::write(&markdown, "# Legacy rules\n\nKeep the narration concise.\n").expect("markdown");
+        fs::write(
+            workspace.path().join(".storydex/presets/active.json"),
+            r#"{"activeMainPreset":".storydex/presets/active/legacy.md"}"#,
+        )
+        .expect("pointer");
+
+        let compiled = compile_active_for_agent(workspace.path())
+            .expect("compile fallback")
+            .expect("active preset");
+        assert!(compiled.contains("# Legacy rules"));
+        assert!(compiled.contains("Keep the narration concise."));
+        assert!(!sidecar_path(&markdown).exists());
+
+        let (document, warnings) = read_document(&markdown).expect("read editor fallback");
+        assert_eq!(document["meta"]["name"], "legacy");
+        assert_eq!(
+            document["modules"][0]["content"],
+            "# Legacy rules\n\nKeep the narration concise.\n"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("缺少同名 .preset.json"))
+        );
+        assert!(!sidecar_path(&markdown).exists());
     }
 
     #[test]

@@ -155,7 +155,7 @@ impl SidecarRuntime {
             }
         };
         validate_ready(&ready)?;
-        verify_health(ready.port)?;
+        verify_health(ready.port, &ready.version)?;
 
         let runtime = Arc::new(Self {
             backend_base_url: format!("http://127.0.0.1:{}/api/v1", ready.port),
@@ -189,7 +189,12 @@ impl SidecarRuntime {
     }
 
     pub fn initialization_script(&self, app_version: String) -> Result<String> {
-        adapter_script(&self.backend_base_url, &self.ready.token, &app_version)
+        adapter_script(
+            &self.backend_base_url,
+            &self.ready.token,
+            &self.ready.version,
+            &app_version,
+        )
     }
 
     pub fn webview_data_directory(&self) -> Option<PathBuf> {
@@ -553,7 +558,7 @@ fn validate_ready(ready: &ReadyMessage) -> Result<()> {
     Ok(())
 }
 
-fn verify_health(port: u16) -> Result<()> {
+fn verify_health(port: u16, expected_version: &str) -> Result<()> {
     let body = request_json(port, "GET", "/api/v1/sys/health", None)?;
     ensure!(
         body.get("ok").and_then(Value::as_bool) == Some(true),
@@ -562,6 +567,10 @@ fn verify_health(port: u16) -> Result<()> {
     ensure!(
         body.pointer("/data/runtime").and_then(Value::as_str) == Some(SIDECAR_NAME),
         "health runtime does not match sidecar"
+    );
+    ensure!(
+        body.pointer("/data/version").and_then(Value::as_str) == Some(expected_version),
+        "health version does not match sidecar ready version"
     );
     Ok(())
 }
@@ -614,7 +623,12 @@ fn parse_http_json(response: &[u8]) -> Result<Value> {
     serde_json::from_slice(&response[split + 4..]).context("sidecar HTTP body is invalid JSON")
 }
 
-fn adapter_script(backend_base_url: &str, token: &str, app_version: &str) -> Result<String> {
+fn adapter_script(
+    backend_base_url: &str,
+    token: &str,
+    backend_runtime_version: &str,
+    app_version: &str,
+) -> Result<String> {
     let platform = if cfg!(windows) {
         "win32"
     } else {
@@ -624,6 +638,8 @@ fn adapter_script(backend_base_url: &str, token: &str, app_version: &str) -> Res
         "platform": platform,
         "backendBaseUrl": backend_base_url,
         "backendAuthToken": token,
+        "backendRuntime": SIDECAR_NAME,
+        "backendRuntimeVersion": backend_runtime_version,
         "versions": {"tauri": app_version},
         "isTitleBarOverlaySupported": false,
     });
@@ -762,11 +778,14 @@ mod tests {
         let script = adapter_script(
             "http://127.0.0.1:49152/api/v1",
             "0123456789abcdef0123456789abcdef",
+            "2.1.0-storydex-desktop.1",
             "2.0.5",
         )
         .expect("adapter script");
         assert!(script.contains("backendBaseUrl"));
         assert!(script.contains("backendAuthToken"));
+        assert!(script.contains("backendRuntime"));
+        assert!(script.contains("backendRuntimeVersion"));
         assert!(script.contains("pickDirectory"));
         assert!(script.contains("revealPath"));
         assert!(script.contains("openWithDialog"));
