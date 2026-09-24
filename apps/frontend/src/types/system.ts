@@ -6,6 +6,11 @@ export interface SystemHealthResponse {
   status: string;
   service: string;
   time: string;
+  /** Runtime identity is required by the Tauri Rust desktop shell. */
+  runtime?: string;
+  /** Rust sidecar package version, independent from the desktop shell version. */
+  version?: string;
+  protocolVersion?: number;
   workspaceRoot: string;
   storydexRoot: string;
   projectName: string;

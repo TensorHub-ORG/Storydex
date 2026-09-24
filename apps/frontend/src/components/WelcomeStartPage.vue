@@ -19,11 +19,15 @@
             <h2 class="welcome-section-title">启动</h2>
             <p class="welcome-section-note">{{ launchNote }}</p>
 
+            <div v-if="workspaceStore.workspaceError" class="welcome-runtime-error" role="alert">
+              {{ workspaceStore.workspaceError }}
+            </div>
+
             <div class="welcome-command-list">
               <button
                 class="welcome-command"
                 type="button"
-                :disabled="workspaceStore.isProjectSwitching || workspaceStore.isProjectCreating"
+                :disabled="workspaceStore.runtimeMismatch || workspaceStore.isProjectSwitching || workspaceStore.isProjectCreating"
                 @click="handleOpenFolder"
               >
                 <span class="material-symbols-rounded">folder_open</span>
@@ -36,7 +40,7 @@
               <button
                 class="welcome-command"
                 type="button"
-                :disabled="workspaceStore.isProjectSwitching || workspaceStore.isProjectCreating"
+                :disabled="workspaceStore.runtimeMismatch || workspaceStore.isProjectSwitching || workspaceStore.isProjectCreating"
                 @click="openCreateProjectDialog"
               >
                 <span class="material-symbols-rounded">create_new_folder</span>
@@ -61,7 +65,7 @@
                 :key="item.workspaceRoot"
                 class="welcome-recent-row"
                 type="button"
-                :disabled="workspaceStore.isProjectSwitching"
+                :disabled="workspaceStore.runtimeMismatch || workspaceStore.isProjectSwitching"
                 @click="handleOpenRecent(item.workspaceRoot)"
               >
                 <span class="welcome-recent-name">{{ item.projectName || pathLeaf(item.workspaceRoot) }}</span>

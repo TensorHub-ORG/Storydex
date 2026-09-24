@@ -158,6 +158,32 @@ describe("agent store deterministic helpers", () => {
     expect(gateway).toContain("HTTP 502");
   });
 
+  it("shows bounded-generation rejection causes and staged candidate paths", () => {
+    const message = u.formatAgentErrorPacket(packet({
+      _type: "AgentError",
+      error_type: "BoundedStoryGenerationFailed",
+      message: "项目服务拒绝本轮正文写入，暂存候选已保留。",
+      details: {
+        runtime: "bounded_story_generation",
+        error: { type: "StoryGenerationApplyRejected", reason: "target_changed", issues: ["baseline mismatch"] },
+        applyResult: { code: "story_generation_constraints_not_met", message: "章节片段未通过写入校验。" },
+        validation: {
+          message: "目标章节结构不匹配。",
+          fragments: [{ path: "chapters/3/001.md", status: "failed" }]
+        },
+        stagedCandidates: { draft: ".storydex/.agent/temp/trace/draft.json" }
+      }
+    }));
+
+    expect(message).toContain("Error: StoryGenerationApplyRejected");
+    expect(message).toContain("Reason: target_changed");
+    expect(message).toContain("Issue: baseline mismatch");
+    expect(message).toContain("Write code: story_generation_constraints_not_met");
+    expect(message).toContain("Validation: 目标章节结构不匹配。");
+    expect(message).toContain("Rejected target: chapters/3/001.md · failed");
+    expect(message).toContain("Staged candidate (draft): .storydex/.agent/temp/trace/draft.json");
+  });
+
   it("summarizes Git, contracts, presets, context, usage, and compression", () => {
     expect(u.summarizeGitAutoCommitPacket(packet({ _type: "GitCommitPrompt", changedFileCount: 2, workspaceRoot: "C:/story" }))).toContain("2");
     expect(u.summarizeGitAutoCommitPacket(packet({ _type: "GitCommitResult", created: true, shortHash: "abc", changedFileCount: 1 }))).toContain("abc");

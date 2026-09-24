@@ -26,6 +26,7 @@ describe("Coomi streaming API contract", () => {
     setApiAuthToken("secret");
     window.storydexDesktop = {
       platform: "win32",
+      backendBaseUrl: "http://127.0.0.1:49152/api/v1",
       backendAuthToken: "runtime-secret",
       versions: { tauri: "2.0.5" }
     };
@@ -35,7 +36,7 @@ describe("Coomi streaming API contract", () => {
     const packets: Record<string, unknown>[] = [];
     await streamAgentPrompt({ prompt: "hello" }, (packet) => packets.push(packet), "trace-1", "session 1");
     expect(packets.map((packet) => packet.type)).toEqual(["RunAccepted", "TextChunk", "AgentCompleted"]);
-    expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("sessionId=session+1"), expect.objectContaining({
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("http://127.0.0.1:49152/api/v1/agent/chat/stream"), expect.objectContaining({
       headers: expect.objectContaining({
         Authorization: "Bearer secret",
         "X-Storydex-Runtime-Token": "runtime-secret",

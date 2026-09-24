@@ -46,7 +46,7 @@ describe("API envelope and transport contracts", () => {
       callExportedApiFunctions(authApi),
       callExportedApiFunctions(helpApi),
       callExportedApiFunctions(presetApi),
-      callExportedApiFunctions(systemApi),
+      callExportedApiFunctions(systemApi, ["validateSystemHealthRuntime"]),
       callExportedApiFunctions(workspaceApi)
     ]);
     expect(results.flat().length).toBeGreaterThan(60);
@@ -82,5 +82,36 @@ describe("API envelope and transport contracts", () => {
     await expect(presetApi.listPresets()).rejects.toBeInstanceOf(presetApi.PresetApiError);
     await expect(systemApi.fetchSystemHealth()).rejects.toBeInstanceOf(systemApi.SystemApiError);
     await expect(workspaceApi.fetchWorkspaceTree()).rejects.toBeInstanceOf(workspaceApi.WorkspaceApiError);
+  });
+
+  it("accepts the Rust sidecar health identity and rejects the legacy Python shape in Tauri", () => {
+    const health = {
+      status: "ok",
+      service: "Storydex Backend",
+      time: "2026-09-24T00:00:00Z",
+      runtime: "storydex-agentd",
+      version: "2.1.0-storydex-desktop.1",
+      protocolVersion: 1,
+      workspaceRoot: "",
+      storydexRoot: "",
+      projectName: "",
+      hasStorydexConfig: false,
+      requiresInitialization: false,
+      missingDirectories: [],
+      frontendStaticMode: false
+    };
+    window.storydexDesktop = {
+      platform: "win32",
+      backendRuntime: "storydex-agentd",
+      backendRuntimeVersion: "2.1.0-storydex-desktop.1",
+      versions: { tauri: "2.0.9" }
+    };
+
+    expect(() => systemApi.validateSystemHealthRuntime(health, true)).not.toThrow();
+    expect(() => systemApi.validateSystemHealthRuntime({ ...health, runtime: undefined, version: undefined }, true))
+      .toThrowError(expect.objectContaining({ code: "runtime_mismatch" }));
+    expect(() => systemApi.validateSystemHealthRuntime({ ...health, runtime: "python-fastapi" }, true))
+      .toThrowError(expect.objectContaining({ code: "runtime_mismatch" }));
+    delete window.storydexDesktop;
   });
 });

@@ -28,6 +28,14 @@ async function consumeOpenTarget(target: StorydexDesktopOpenTarget | null): Prom
 }
 
 async function bootstrapWorkbench(force = false): Promise<void> {
+  // Probe the sidecar first.  A Tauri window must never authenticate or load
+  // workspace state through a stale Python service on the same machine.
+  await workspaceStore.refreshHealth();
+  // The Rust sidecar identity is validated before any account, recent-project,
+  // workspace, or Agent request is allowed to run.
+  if (workspaceStore.runtimeMismatch || workspaceStore.workspaceError) {
+    return;
+  }
   await authStore.bootstrap();
   await workspaceStore.bootstrapGlobalState();
   await workspaceStore.bootstrap(force);

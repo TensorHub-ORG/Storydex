@@ -2255,6 +2255,52 @@ function formatAgentErrorPacket(packet: AgentStreamPacket): string {
   const errorType = String(packet.error_type || details.exceptionType || "CoomiError").trim();
   lines.push(message || errorType);
 
+  const code = asString(packet.code) || asString(details.code);
+  if (code) lines.push(`Code: ${code}`);
+
+  const structuredError = toRecord(details.error);
+  if (structuredError) {
+    const structuredType = asString(structuredError.type) || asString(structuredError.causeType);
+    if (structuredType) lines.push(`Error: ${structuredType}`);
+    const causeType = asString(structuredError.causeType);
+    const causeMessage = asString(structuredError.message);
+    if (causeMessage && !message.includes(causeMessage)) {
+      lines.push(`Cause: ${[causeType, causeMessage].filter(Boolean).join(": ")}`);
+    }
+    const reason = asString(structuredError.reason);
+    if (reason) lines.push(`Reason: ${reason}`);
+    const issues = Array.isArray(structuredError.issues)
+      ? structuredError.issues
+        .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+        .slice(0, 5)
+      : [];
+    for (const issue of issues) lines.push(`Issue: ${issue}`);
+  }
+
+  const applyResult = toRecord(details.applyResult);
+  if (applyResult) {
+    const applyCode = asString(applyResult.code);
+    const applyMessage = asString(applyResult.message);
+    if (applyCode) lines.push(`Write code: ${applyCode}`);
+    if (applyMessage && !message.includes(applyMessage)) lines.push(`Write result: ${applyMessage}`);
+  }
+
+  const validation = toRecord(details.validation);
+  if (validation) {
+    const validationMessage = asString(validation.message);
+    if (validationMessage && !message.includes(validationMessage)) {
+      lines.push(`Validation: ${validationMessage}`);
+    }
+    const fragments = Array.isArray(validation.fragments) ? validation.fragments : [];
+    for (const fragment of fragments.slice(0, 8)) {
+      const record = toRecord(fragment);
+      if (!record || (asString(record.status) !== "failed" && record.passed !== false)) continue;
+      const path = asString(record.path);
+      const reason = asString(record.message) || asString(record.status);
+      if (path || reason) lines.push(`Rejected target: ${[path, reason].filter(Boolean).join(" · ")}`);
+    }
+  }
+
   const statusCode = asNumber(details.statusCode) ?? asNumber(details.providerHttpStatus) ?? asNumber(packet.statusCode);
   if (statusCode && !new RegExp(`\\bHTTP\\s+${statusCode}\\b`, "i").test(message)) {
     lines.push(`HTTP ${statusCode}`);
@@ -2293,6 +2339,14 @@ function formatAgentErrorPacket(packet: AgentStreamPacket): string {
   const sessionId = asString(details.sessionId);
   if (traceId) lines.push(`Trace: ${traceId}`);
   if (sessionId) lines.push(`Session: ${sessionId}`);
+
+  const stagedCandidates = toRecord(details.stagedCandidates);
+  if (stagedCandidates) {
+    for (const [name, value] of Object.entries(stagedCandidates).slice(0, 8)) {
+      const path = asString(value);
+      if (path) lines.push(`Staged candidate (${name}): ${path}`);
+    }
+  }
   return lines.join("\n");
 }
 

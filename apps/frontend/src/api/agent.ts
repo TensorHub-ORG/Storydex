@@ -2,6 +2,7 @@ import {
   ApiResponseError,
   apiClient,
   getApiAuthToken,
+  getDesktopBackendBaseUrl,
   getRuntimeAuthToken,
   unwrapEnvelope
 } from "@/api/client";
@@ -613,7 +614,9 @@ export async function submitAgentRunCommitDecision(
 }
 
 function resolveApiUrl(path: string): string {
-  const rawBase = String(apiClient.defaults.baseURL || "/api/v1").trim() || "/api/v1";
+  const rawBase = getDesktopBackendBaseUrl()
+    || String(apiClient.defaults.baseURL || "/api/v1").trim()
+    || "/api/v1";
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
 
   if (/^https?:\/\//i.test(rawBase)) {

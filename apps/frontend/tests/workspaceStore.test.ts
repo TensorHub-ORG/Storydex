@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
+import { ApiResponseError } from "@/api/client";
 
 const api = vi.hoisted(() => ({
   fetchAgentRunDiff: vi.fn(), fetchHelpGuide: vi.fn(), fetchSystemBootstrap: vi.fn(), fetchSystemHealth: vi.fn(),
@@ -26,7 +27,6 @@ vi.mock("@/api/client", async (load) => {
 });
 
 import { useWorkspaceStore } from "@/stores/workspace";
-import { ApiResponseError } from "@/api/client";
 
 const result = (data: unknown) => ({ data, trace: null, audit: [] });
 const project = { projectName: "Demo", workspaceRoot: "C:/story", storydexRoot: "C:/story/.storydex", storydexDirName: ".storydex", hasStorydexConfig: true, requiresInitialization: false, missingDirectories: [], projectState: "ready", openedAt: "now" };
@@ -61,6 +61,21 @@ beforeEach(() => {
 });
 
 describe("workspace store full action lifecycle", () => {
+  it("locks the workspace after a desktop runtime identity mismatch", () => {
+    const store = useWorkspaceStore();
+    store.launchScreenVisible = false;
+    store.currentProject = project as any;
+    store.markRuntimeMismatch(new ApiResponseError(
+      "桌面端未连接到 Storydex Rust 后端。",
+      "runtime_mismatch"
+    ));
+
+    expect(store.runtimeMismatch).toBe(true);
+    expect(store.launchScreenVisible).toBe(true);
+    expect(store.currentProject).toBeNull();
+    expect(() => store.ensureRuntimeAvailable()).toThrowError(/Rust 后端/);
+  });
+
   it("acknowledges current diagnostics without hiding changed diagnostics", () => {
     const store = useWorkspaceStore();
     const diagnostic = {

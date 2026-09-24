@@ -93,6 +93,7 @@
                   <span>{{ item.displayPath }}</span>
                   <span v-if="item.isActiveMain" class="preset-status-badge">主预设</span>
                   <span v-if="item.hasSidecar" class="preset-status-badge">参数</span>
+                  <span v-else-if="item.extension === '.md'" class="preset-status-badge is-warning" title="使用 Markdown 临时预设；编辑并保存参数可生成参数文件">缺参数</span>
                 </span>
               </span>
               <span class="preset-row-actions">
@@ -142,6 +143,7 @@
                 <span class="preset-row-path">
                   <span>{{ item.displayPath }}</span>
                   <span v-if="item.hasSidecar" class="preset-status-badge">参数</span>
+                  <span v-else-if="item.extension === '.md'" class="preset-status-badge is-warning" title="编辑并保存参数可生成参数文件">缺参数</span>
                 </span>
               </span>
               <span class="preset-row-actions">
@@ -927,6 +929,11 @@ defineExpose({
   font-size: 9px;
   font-weight: 800;
   letter-spacing: 0.04em;
+}
+
+.preset-status-badge.is-warning {
+  background: var(--warning-bg);
+  color: var(--warning-fg);
 }
 
 .preset-row-meta {

@@ -7,6 +7,9 @@ interface StorydexDesktopBridge {
   platform: string;
   backendBaseUrl?: string;
   backendAuthToken?: string;
+  /** Identity of the sidecar selected by the Tauri shell. */
+  backendRuntime?: string;
+  backendRuntimeVersion?: string;
   isTitleBarOverlaySupported?: boolean;
   versions?: {
     tauri?: string;

@@ -4443,6 +4443,18 @@ body.is-resizing-panels .workspace-splitter::before {
   line-height: 1.55;
 }
 
+.welcome-runtime-error {
+  max-width: 560px;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid rgba(192, 63, 54, 0.24);
+  border-radius: var(--radius-md);
+  background: rgba(192, 63, 54, 0.08);
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .welcome-command-list {
   gap: 8px;
 }

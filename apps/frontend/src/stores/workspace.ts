@@ -96,6 +96,7 @@ interface WorkspaceState {
   saveTrace: ApiTrace | null;
   healthTrace: ApiTrace | null;
   health: SystemHealthResponse | null;
+  runtimeMismatch: boolean;
   lastProjectPath: string;
   treeResetToken: number;
   recentProjects: WorkspaceRecentProject[];
@@ -158,6 +159,7 @@ export const useWorkspaceStore = defineStore("workspace", {
     saveTrace: null,
     healthTrace: null,
     health: null,
+    runtimeMismatch: false,
     lastProjectPath: "",
     treeResetToken: 0,
     recentProjects: [],
@@ -401,6 +403,9 @@ export const useWorkspaceStore = defineStore("workspace", {
       ]));
     },
     async bootstrapGlobalState(): Promise<void> {
+      if (this.runtimeMismatch) {
+        return;
+      }
       try {
         const result = await fetchSystemBootstrap();
         this.lastProjectPath = String(result.data.workspaceState.lastProjectPath || "").trim();
@@ -420,6 +425,9 @@ export const useWorkspaceStore = defineStore("workspace", {
       if (this.isBootstrapping) {
         return;
       }
+      if (this.runtimeMismatch) {
+        return;
+      }
       if (this.initialized && !force) {
         return;
       }
@@ -435,6 +443,7 @@ export const useWorkspaceStore = defineStore("workspace", {
         const healthResult = await fetchSystemHealth();
         this.health = healthResult.data;
         this.healthTrace = healthResult.trace;
+        this.runtimeMismatch = false;
         this.workspaceError = "";
 
         if (this.launchScreenVisible) {
@@ -472,20 +481,32 @@ export const useWorkspaceStore = defineStore("workspace", {
 
         this.initialized = true;
       } catch (error: unknown) {
-        this.workspaceError = normalizeWorkspaceError(error);
+        if (isRuntimeMismatchError(error)) {
+          this.markRuntimeMismatch(error);
+        } else {
+          this.workspaceError = normalizeWorkspaceError(error);
+        }
       } finally {
         this.isBootstrapping = false;
       }
     },
 
     async refreshHealth(): Promise<void> {
+      if (this.runtimeMismatch) {
+        return;
+      }
       try {
         const result = await fetchSystemHealth();
         this.health = result.data;
         this.healthTrace = result.trace;
+        this.runtimeMismatch = false;
         this.workspaceError = "";
       } catch (error: unknown) {
-        this.workspaceError = normalizeWorkspaceError(error);
+        if (isRuntimeMismatchError(error)) {
+          this.markRuntimeMismatch(error);
+        } else {
+          this.workspaceError = normalizeWorkspaceError(error);
+        }
       }
     },
 
@@ -706,6 +727,7 @@ export const useWorkspaceStore = defineStore("workspace", {
     },
 
     async openProject(projectPath: string): Promise<WorkspaceProjectInfo> {
+      this.ensureRuntimeAvailable();
       this.isProjectSwitching = true;
       this.workspaceError = "";
       this.lastProjectAction = "";
@@ -740,6 +762,7 @@ export const useWorkspaceStore = defineStore("workspace", {
     },
 
     async createProject(projectPath: string, architecture: "standard" | "free" = "standard"): Promise<WorkspaceProjectInfo> {
+      this.ensureRuntimeAvailable();
       this.isProjectCreating = true;
       this.workspaceError = "";
       this.lastProjectAction = "";
@@ -761,6 +784,7 @@ export const useWorkspaceStore = defineStore("workspace", {
     },
 
     async initializeCurrentProject(projectPath = ""): Promise<WorkspaceProjectInfo> {
+      this.ensureRuntimeAvailable();
       this.isProjectInitializing = true;
       this.workspaceError = "";
       this.lastProjectAction = "";
@@ -1493,6 +1517,27 @@ export const useWorkspaceStore = defineStore("workspace", {
       this.resetStoryWorkspaceState();
       this.treeResetToken += 1;
       this.clearActiveFile();
+    },
+
+    markRuntimeMismatch(error: unknown): void {
+      this.runtimeMismatch = true;
+      this.enterLaunchScreen();
+      this.health = null;
+      this.healthTrace = null;
+      this.initialized = false;
+      this.workspaceError = normalizeWorkspaceError(error);
+    },
+
+    ensureRuntimeAvailable(): void {
+      if (!this.runtimeMismatch) {
+        return;
+      }
+      const error = new ApiResponseError(
+        this.workspaceError || "桌面端后端运行时不匹配，请完全退出 Storydex 后重新启动。",
+        "runtime_mismatch"
+      );
+      this.workspaceError = error.message;
+      throw error;
     },
 
     resetStoryWorkspaceState(): void {
@@ -2762,6 +2807,10 @@ function normalizeWorkspaceError(error: unknown): string {
     return error.message;
   }
   return describeTransportError(error, "工作区请求失败，请稍后重试。");
+}
+
+function isRuntimeMismatchError(error: unknown): error is ApiResponseError {
+  return error instanceof ApiResponseError && error.code === "runtime_mismatch";
 }
 
 function normalizeAgentRunDiffError(error: unknown): string {

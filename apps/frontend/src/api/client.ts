@@ -9,12 +9,15 @@ export function getRuntimeAuthToken(): string {
     : "";
 }
 
+export function getDesktopBackendBaseUrl(): string {
+  return typeof window !== "undefined" ? window.storydexDesktop?.backendBaseUrl?.trim() || "" : "";
+}
+
 function resolveApiBaseUrl(): string {
   // The Tauri sidecar owns the dynamically assigned Rust runtime endpoint.
   // Prefer it whenever the desktop shell injects one so stale developer
   // environment variables cannot redirect the app to the legacy backend.
-  const desktopBaseUrl =
-    typeof window !== "undefined" ? window.storydexDesktop?.backendBaseUrl?.trim() || "" : "";
+  const desktopBaseUrl = getDesktopBackendBaseUrl();
   if (desktopBaseUrl) {
     return desktopBaseUrl;
   }
@@ -42,6 +45,13 @@ export function getApiAuthToken(): string {
 }
 
 apiClient.interceptors.request.use((config) => {
+  // The bridge normally arrives before page scripts. Refreshing this value on
+  // every request also handles a late bridge injection without falling back
+  // to a legacy Vite/Python proxy.
+  const desktopBaseUrl = getDesktopBackendBaseUrl();
+  if (desktopBaseUrl) {
+    config.baseURL = desktopBaseUrl;
+  }
   const runtimeAuthToken = getRuntimeAuthToken();
   if (!currentAuthToken && !runtimeAuthToken) {
     return config;
