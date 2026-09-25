@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from services.entity_registry import EntityRecord, EntityRegistry
 from services.story_relationship_semantics import (
+    classify_relationship,
     parse_relationship_markdown,
     semantics_for_dimension,
 )
@@ -35,7 +36,7 @@ ENTITY_SOURCE_PATH = ".storydex/memory/current/entities.json"
 FACT_SOURCE_PATH = ".storydex/memory/current/facts.json"
 WIKI_SOURCE_SNAPSHOT_NAME = "source_snapshot.json"
 
-WIKI_CATEGORY_SCHEMA_VERSION = "story-wiki-v7-auditable-relations"
+WIKI_CATEGORY_SCHEMA_VERSION = "story-wiki-v8-entity-identities"
 PROJECTION_SCHEMA_VERSION = 3
 EVIDENCE_GROUNDED_GRAPH_POLICY = {
     "mode": "evidence_grounded_local_v1",
@@ -325,7 +326,8 @@ class StoryWikiService:
                 reason="wiki projection has not been published",
             )
         if (
-            str(payload.get("catalogRevision") or "") == snapshot.catalog_revision
+            self._has_current_category_schema(payload)
+            and str(payload.get("catalogRevision") or "") == snapshot.catalog_revision
             and int(payload.get("catalogGeneration") or 0) == int(snapshot.generation)
             and str(payload.get("status") or "ready") == "ready"
             and int(snapshot.dirty_file_count) == 0
@@ -514,9 +516,10 @@ class StoryWikiService:
             if changed_paths is not None
             else [str(item["relativePath"]) for item in sources]
         )
-        registry = EntityRegistry(root)
         entities = self._collect_entities(root, sources)
+        registry = self._graph_entity_registry(root, entities)
         character_entities = [entity for entity in entities if entity["type"] == "character"]
+        character_names_by_id = {self._entity_node_id(entity): str(entity["name"]) for entity in character_entities}
         character_names = [str(entity["name"]) for entity in character_entities]
         chapter_sources = [item for item in sources if item["kind"] == "chapter"]
         planned_sources = [item for item in sources if item["kind"] == "planned"]
@@ -614,7 +617,7 @@ class StoryWikiService:
                 knowledge_status="observed",
             ))
 
-        chapter_mentions = self._chapter_mentions_by_path(registry, chapter_sources, character_names)
+        chapter_mentions = self._chapter_mentions_by_path(registry, chapter_sources, list(character_names_by_id))
 
         previous_chapter_node_id = ""
         for index, source in enumerate(chapter_sources):
@@ -626,7 +629,7 @@ class StoryWikiService:
                 chapter_title,
                 "plot",
                 summary,
-                self._chapter_details(source, chapter_mentions.get(source["relativePath"], ())),
+                self._chapter_details(source, [character_names_by_id[node_id] for node_id in chapter_mentions.get(source["relativePath"], ())]),
                 [source["relativePath"]],
                 knowledge_status="observed",
             ))
@@ -678,16 +681,16 @@ class StoryWikiService:
             graph_edges.append(self._edge(project_id, entry_id, "规划", "planned", weight=index))
 
         character_sources = self._character_sources(root, sources, character_entities)
-        mention_sources_by_character: Dict[str, List[Dict[str, Any]]] = {name: [] for name in character_names}
+        mention_sources_by_character: Dict[str, List[Dict[str, Any]]] = {node_id: [] for node_id in character_names_by_id}
         for source in chapter_sources:
-            for name in chapter_mentions.get(source["relativePath"], ()):
-                mention_sources_by_character.setdefault(name, []).append(source)
+            for node_id in chapter_mentions.get(source["relativePath"], ()):
+                mention_sources_by_character.setdefault(node_id, []).append(source)
 
         for entity in character_entities:
             name = str(entity["name"])
-            related = character_sources.get(name, [])
-            mentions = mention_sources_by_character.get(name, [])
             entry_id = self._entity_node_id(entity)
+            related = character_sources.get(entry_id, [])
+            mentions = mention_sources_by_character.get(entry_id, [])
             node_id = entry_id
             summary = self._character_summary(name, related, mentions)
             entries.append(self._entry(
@@ -878,13 +881,13 @@ class StoryWikiService:
     ) -> Dict[str, Any]:
         """仅为受变更影响的章节/角色局部重建条目、节点与边；id 用全量排序位置保持稳定。"""
         changed_set = {str(path) for path in changed_paths}
-        registry = EntityRegistry(root)
         entities = self._collect_entities(root, sources)
+        registry = self._graph_entity_registry(root, entities)
         character_entities = [entity for entity in entities if entity["type"] == "character"]
-        character_names = [str(entity["name"]) for entity in character_entities]
+        character_names_by_id = {self._entity_node_id(entity): str(entity["name"]) for entity in character_entities}
         chapter_sources = [item for item in sources if item["kind"] == "chapter"]
         planned_sources = [item for item in sources if item["kind"] == "planned"]
-        chapter_mentions = self._chapter_mentions_by_path(registry, chapter_sources, character_names)
+        chapter_mentions = self._chapter_mentions_by_path(registry, chapter_sources, list(character_names_by_id))
         entries: List[Dict[str, Any]] = []
         nodes: List[Dict[str, Any]] = []
         edges: List[Dict[str, Any]] = []
@@ -900,7 +903,7 @@ class StoryWikiService:
                 chapter_title,
                 "plot",
                 summary,
-                self._chapter_details(source, chapter_mentions.get(source["relativePath"], ())),
+                self._chapter_details(source, [character_names_by_id[node_id] for node_id in chapter_mentions.get(source["relativePath"], ())]),
                 [source["relativePath"]],
                 knowledge_status="observed",
             ))
@@ -961,20 +964,20 @@ class StoryWikiService:
 
         entity_changed = ENTITY_SOURCE_PATH in changed_set
         character_sources = self._character_sources(root, sources, character_entities)
-        mention_sources_by_character: Dict[str, List[Dict[str, Any]]] = {name: [] for name in character_names}
+        mention_sources_by_character: Dict[str, List[Dict[str, Any]]] = {node_id: [] for node_id in character_names_by_id}
         for source in chapter_sources:
-            for name in chapter_mentions.get(source["relativePath"], ()):
-                mention_sources_by_character.setdefault(name, []).append(source)
+            for node_id in chapter_mentions.get(source["relativePath"], ()):
+                mention_sources_by_character.setdefault(node_id, []).append(source)
 
         for entity in character_entities:
             name = str(entity["name"])
-            related = character_sources.get(name, [])
-            mentions = mention_sources_by_character.get(name, [])
+            entry_id = self._entity_node_id(entity)
+            related = character_sources.get(entry_id, [])
+            mentions = mention_sources_by_character.get(entry_id, [])
             related_changed = any(item["relativePath"] in changed_set for item in related)
             mention_changed = any(item["relativePath"] in changed_set for item in mentions)
             if not (entity_changed or related_changed or mention_changed):
                 continue
-            entry_id = self._entity_node_id(entity)
             summary = self._character_summary(name, related, mentions)
             entries.append(self._entry(
                 entry_id,
@@ -3139,6 +3142,56 @@ class StoryWikiService:
                 return str(source.get("relativePath") or "")
         return ""
 
+    def _graph_endpoint_registry(
+        self, root: Path, nodes: Sequence[Dict[str, Any]],
+    ) -> EntityRegistry:
+        """在整张图中解析身份；单条边的两个端点不足以判断姓名/别名是否唯一。"""
+        entities_by_id: Dict[str, Dict[str, Any]] = {}
+        node_ids_by_name: Dict[tuple[str, str], set[str]] = {}
+        for node in nodes:
+            node_id = str(node.get("id") or "").strip()
+            name = str(node.get("label") or "").strip()
+            node_type = str(node.get("type") or "setting")
+            if not node_id or not name:
+                continue
+            entities_by_id[node_id] = {
+                "name": name, "nodeId": node_id, "type": node_type,
+                "aliases": [node_id], "sourcePaths": [],
+            }
+            node_ids_by_name.setdefault((name, node_type), set()).add(node_id)
+
+        records = EntityRegistry(root).load_records()
+        record_names = Counter((record.canonical_name, self._entity_type_for_kind(record.kind)) for record in records)
+        projected_ids = Counter(
+            (self._entity_node_id(self._entity_from_record(record)), record.canonical_name, self._entity_type_for_kind(record.kind))
+            for record in records
+        )
+        unresolved_records: List[EntityRecord] = []
+        for record in records:
+            node_type = self._entity_type_for_kind(record.kind)
+            key = (record.canonical_name, node_type)
+            node_id = self._entity_node_id(self._entity_from_record(record))
+            entity = entities_by_id.get(node_id)
+            if (
+                entity is None or entity["name"] != record.canonical_name or entity["type"] != node_type
+                or projected_ids[(node_id, *key)] > 1
+            ):
+                candidates = node_ids_by_name.get(key, set())
+                node_id = next(iter(candidates)) if len(candidates) == 1 and record_names[key] == 1 else ""
+                entity = entities_by_id.get(node_id)
+            if entity is None:
+                # 未投影的记录也参与消歧，不能因图中少了一个节点就把共享别名判成唯一。
+                unresolved_records.append(EntityRecord(
+                    canonical_name=record.canonical_name, aliases=record.aliases,
+                    kind=record.kind, source_paths=record.source_paths,
+                ))
+                continue
+            entity["aliases"].extend(name for name in (*record.aliases, record.entity_id) if name)
+            entity["sourcePaths"].extend(record.source_paths)
+
+        projected = self._graph_entity_registry(root, list(entities_by_id.values())).load_records()
+        return EntityRegistry(root, records=[*projected, *unresolved_records])
+
     def _edge_evidence_anchors_endpoints(
         self,
         root: Path,
@@ -3172,70 +3225,35 @@ class StoryWikiService:
         if source_document is None:
             return False
 
-        names_by_id: Dict[str, set[str]] = {endpoint_id: set() for endpoint_id in endpoint_ids}
-        label_candidates: Dict[str, set[str]] = {}
-        for node in nodes:
-            node_id = str(node.get("id") or "").strip()
-            label = str(node.get("label") or "").strip()
-            if node_id not in endpoint_ids or not label:
-                continue
-            names_by_id[node_id].add(label)
-            label_candidates.setdefault(label, set()).add(node_id)
-
-        for record in EntityRegistry(root).load_records():
-            node_id = ""
-            if record.entity_id in endpoint_ids:
-                node_id = record.entity_id
-            else:
-                candidates = label_candidates.get(record.canonical_name, set())
-                if len(candidates) == 1:
-                    node_id = next(iter(candidates))
-            if node_id:
-                names_by_id[node_id].update(record.names())
-
-        def contains_name(text: str, name: str) -> bool:
-            normalized_name = re.sub(r"\s+", " ", str(name or "")).strip()
-            if len(re.sub(r"\s+", "", normalized_name)) < 2:
-                return False
-            if re.fullmatch(r"[A-Za-z0-9_ -]+", normalized_name):
-                return bool(re.search(
-                    rf"(?<![A-Za-z0-9_]){re.escape(normalized_name)}(?![A-Za-z0-9_])",
-                    text,
-                    flags=re.IGNORECASE,
-                ))
-            return re.sub(r"\s+", "", normalized_name) in re.sub(r"\s+", "", text)
-
+        registry = self._graph_endpoint_registry(root, nodes)
         evidence = re.sub(r"\s+", " ", str(edge.get("evidence") or "")).strip().strip("`'\"“”‘’")
         if source_document.get("kind") == "chapter":
-            return all(
-                any(contains_name(evidence, name) for name in names_by_id[endpoint_id])
-                for endpoint_id in endpoint_ids
-            )
+            return endpoint_ids.issubset(registry.resolve_mention_ids(evidence, ignore_case=True))
 
         if source_document.get("kind") != "character":
             return False
-        card_endpoint_ids: set[str] = set()
-        stable_card_id = self._stable_entity_id_from_source(source_document)
-        if stable_card_id in endpoint_ids:
-            card_endpoint_ids.add(stable_card_id)
-        for card_name in self._character_names_from_source(source_document):
-            card_endpoint_ids.update(
-                endpoint_id
-                for endpoint_id, names in names_by_id.items()
-                if card_name in names
-            )
-        if len(card_endpoint_ids) != 1:
+        owner = self._character_source_owner(registry, source_document)
+        if owner is None or owner.entity_id not in endpoint_ids:
             return False
-        card_endpoint_id = next(iter(card_endpoint_ids))
-        other_endpoint_id = target_id if card_endpoint_id == source_id else source_id
-        other_names = {*names_by_id[other_endpoint_id], other_endpoint_id}
+        other_endpoint_id = target_id if owner.entity_id == source_id else source_id
         compact_evidence = re.sub(r"\s+", "", evidence)
         for raw_line in str(source_document.get("text") or "").splitlines():
             if compact_evidence not in re.sub(r"\s+", "", raw_line):
                 continue
-            if any(contains_name(raw_line, name) for name in other_names):
+            if other_endpoint_id in registry.resolve_mention_ids(raw_line, ignore_case=True):
                 return True
         return False
+
+    def _character_source_owner(self, registry: EntityRegistry, source: Dict[str, Any]) -> EntityRecord | None:
+        relative_path = str(source.get("relativePath") or "")
+        owners = [record for record in registry.load_records() if relative_path in record.source_paths]
+        if owners:
+            return owners[0] if len(owners) == 1 else None
+        stable_id = self._stable_entity_id_from_source(source)
+        if stable_id:
+            return registry.resolve_name(stable_id)
+        names = self._character_names_from_source(source)
+        return registry.resolve_name(names[0]) if names else None
 
     def _formal_relation_edge_is_grounded(
         self,
@@ -3360,28 +3378,8 @@ class StoryWikiService:
         target_id = str(edge.get("target") or "").strip()
         if not source_id or not target_id or source_id == target_id:
             return False
-        endpoint_ids = (source_id, target_id)
-        names_by_id: Dict[str, set[str]] = {endpoint_id: set() for endpoint_id in endpoint_ids}
-        for node in nodes:
-            node_id = str(node.get("id") or "").strip()
-            label = str(node.get("label") or "").strip()
-            if node_id in names_by_id and label:
-                names_by_id[node_id].add(label)
-        for record in EntityRegistry(root).load_records():
-            if record.entity_id in names_by_id:
-                names_by_id[record.entity_id].update(record.names())
-
-        def contains_name(text: str, name: str) -> bool:
-            normalized_name = re.sub(r"\s+", " ", str(name or "")).strip()
-            if len(re.sub(r"\s+", "", normalized_name)) < 2:
-                return False
-            if re.fullmatch(r"[A-Za-z0-9_ -]+", normalized_name):
-                return bool(re.search(
-                    rf"(?<![A-Za-z0-9_]){re.escape(normalized_name)}(?![A-Za-z0-9_])",
-                    text,
-                    flags=re.IGNORECASE,
-                ))
-            return re.sub(r"\s+", "", normalized_name) in re.sub(r"\s+", "", text)
+        endpoint_ids = {source_id, target_id}
+        registry = self._graph_endpoint_registry(root, nodes)
 
         resolved_root = root.resolve()
         for ref in refs:
@@ -3404,10 +3402,7 @@ class StoryWikiService:
                 continue
             if quote not in content:
                 continue
-            if all(
-                any(contains_name(quote, name) for name in names_by_id[endpoint_id])
-                for endpoint_id in endpoint_ids
-            ):
+            if endpoint_ids.issubset(registry.resolve_mention_ids(quote, ignore_case=True)):
                 return True
         return False
 
@@ -3503,28 +3498,12 @@ class StoryWikiService:
     def _append_character_card_relationship_edges(
         self,
         *,
+        root: Path,
         sources: Sequence[Dict[str, Any]],
         nodes: List[Dict[str, Any]],
         edges: List[Dict[str, Any]],
     ) -> None:
-        endpoint_candidates: Dict[str, set[str]] = {}
-
-        def register_endpoint(name: Any, node_id: str) -> None:
-            normalized = str(name or "").strip()
-            if normalized and node_id:
-                endpoint_candidates.setdefault(normalized, set()).add(node_id)
-
-        def resolve_endpoint(name: Any) -> str:
-            candidates = endpoint_candidates.get(str(name or "").strip(), set())
-            return next(iter(candidates)) if len(candidates) == 1 else ""
-
-        for node in nodes:
-            node_id = str(node.get("id") or "").strip()
-            label = str(node.get("label") or "").strip()
-            if not node_id:
-                continue
-            register_endpoint(node_id, node_id)
-            register_endpoint(label, node_id)
+        registry = self._graph_endpoint_registry(root, nodes)
 
         seen_relations = {
             (
@@ -3535,27 +3514,20 @@ class StoryWikiService:
             if str(edge.get("source") or "") and str(edge.get("target") or "")
         }
         for source in sources:
-            stable_source_id = self._stable_entity_id_from_source(source)
-            if stable_source_id:
-                source_id = resolve_endpoint(stable_source_id)
-            else:
-                source_names = self._character_names_from_source(source)
-                source_id = ""
-                for name in source_names:
-                    source_id = resolve_endpoint(name)
-                    if source_id:
-                        break
+            owner = self._character_source_owner(registry, source)
+            source_id = owner.entity_id if owner is not None else ""
             if not source_id:
                 continue
             for line in self._relationship_lines_from_character_source(source):
                 statement = parse_relationship_markdown(line)
                 if statement is None:
                     continue
-                target_id = resolve_endpoint(
+                target = registry.resolve_name(
                     statement.stable_target
                     if statement.stable_target
                     else statement.display_target
                 )
+                target_id = target.entity_id if target is not None else ""
                 if not target_id or source_id == target_id:
                     continue
                 semantics = statement.semantics
@@ -3616,45 +3588,11 @@ class StoryWikiService:
         if not raw_edges and not character_sources:
             return existing_edges
 
-        endpoint_candidates: Dict[str, set[str]] = {}
-
-        def register_endpoint(name: Any, node_id: str) -> None:
-            normalized = str(name or "").strip()
-            if normalized and node_id:
-                endpoint_candidates.setdefault(normalized, set()).add(node_id)
-
-        for node in nodes:
-            node_id = str(node.get("id") or "")
-            label = str(node.get("label") or "").strip()
-            if node_id:
-                register_endpoint(node_id, node_id)
-                register_endpoint(label, node_id)
-
-        known_node_ids = {
-            str(node.get("id") or "").strip()
-            for node in nodes
-            if str(node.get("id") or "").strip()
-        }
-        for record in EntityRegistry(root).load_records():
-            canonical_candidates = endpoint_candidates.get(record.canonical_name, set())
-            node_id = (
-                record.entity_id
-                if record.entity_id in known_node_ids
-                else next(iter(canonical_candidates))
-                if len(canonical_candidates) == 1
-                else ""
-            )
-            if not node_id:
-                continue
-            for name in record.names():
-                register_endpoint(name, node_id)
+        registry = self._graph_endpoint_registry(root, nodes)
 
         def resolve_endpoint(raw_name: Any) -> str:
-            name = str(raw_name or "").strip()
-            if not name:
-                return ""
-            candidates = endpoint_candidates.get(name, set())
-            return next(iter(candidates)) if len(candidates) == 1 else ""
+            record = registry.resolve_name(str(raw_name or "").strip())
+            return record.entity_id if record is not None else ""
 
         merged = [
             edge
@@ -3724,6 +3662,8 @@ class StoryWikiService:
                 )
                 if not grounded_path:
                     continue
+                if classify_relationship(quote, dimension=dimension).status != "asserted":
+                    continue
                 candidate_edge = {
                     "source": source,
                     "target": target,
@@ -3773,6 +3713,8 @@ class StoryWikiService:
                     "quote": evidence,
                     "role": "dynamic_relationship",
                 }]
+            if classify_relationship(evidence, dimension=dimension).status != "asserted":
+                continue
             relation_type = semantics.relation_type
             key = (*sorted((source, target)), relation_type)
             if key in seen_keys:
@@ -3837,6 +3779,7 @@ class StoryWikiService:
                 continue
             merged.append(relationship_edge)
         self._append_character_card_relationship_edges(
+            root=root,
             sources=character_sources,
             nodes=nodes,
             edges=merged,
@@ -4171,16 +4114,34 @@ class StoryWikiService:
             relative_path = str(source.get("relativePath") or "")
             stable_id = self._stable_entity_id_from_source(source)
             match: Dict[str, Any] | None = None
-            if stable_id:
-                match = find_record(lambda item: record_id(item) == stable_id)
-            if match is None and relative_path:
-                match = find_record(lambda item: relative_path in record_source_paths(item))
+            if relative_path:
+                match = find_record(
+                    lambda item: relative_path in record_source_paths(item)
+                    and str(item.get("kind") or "character").lower() in {"character", "person", "role"}
+                )
+            if match is None and stable_id:
+                match = find_record(
+                    lambda item: record_id(item) == stable_id
+                    and str(item.get("kind") or "character").lower() in {"character", "person", "role"}
+                )
             if match is None and names:
                 display = names[0]
-                match = find_record(
-                    lambda item: display == record_name(item)
-                    or display in [str(alias).strip() for alias in item.get("aliases", [])]
-                )
+                eligible = [
+                    item for item in entities
+                    if id(item) not in claimed_record_ids
+                    and str(item.get("kind") or "character").lower() in {"character", "person", "role"}
+                    and (not stable_id or not record_id(item) or record_id(item) == stable_id)
+                    and not any(
+                        path != relative_path and is_character_card_path(path) and (root / path).is_file()
+                        for path in record_source_paths(item)
+                    )
+                ]
+                candidates = [item for item in eligible if display == record_name(item)]
+                if not candidates:
+                    candidates = [item for item in eligible if display in item.get("aliases", [])]
+                # 姓名不能授权覆盖另一个 ID 或另一类实体，也不能猜测同名卡的归属。
+                if len(candidates) == 1:
+                    match = candidates[0]
             if match is None:
                 if not names:
                     # 全新卡且认不出名字：不凭空造实体（正文人名抽取不在本次范围内）。
@@ -4192,8 +4153,12 @@ class StoryWikiService:
             previous_name = record_name(match)
             # 认不出名字时保留既有 canonical_name：识别失败不等于角色不存在。
             display_name = names[0] if names else previous_name
-            id_conflict_with = ""
-            resolved_id = stable_id or record_id(match)
+            id_conflict_with = stable_id if stable_id and match.get("idConflictWith") == stable_id else ""
+            resolved_id = (
+                record_id(match)
+                if match.get("idConflictWith") == stable_id and record_id(match)
+                else stable_id or record_id(match)
+            )
             if resolved_id and resolved_id in taken_entity_ids:
                 # 撞车的一方改用路径派生的确定性 id（冷重建可复现，不用 uuid4）。
                 id_conflict_with = resolved_id
@@ -4209,7 +4174,7 @@ class StoryWikiService:
             source_paths = [
                 path
                 for path in record_source_paths(match)
-                if (root / path).exists()
+                if (root / path).exists() and (not is_character_card_path(path) or path == relative_path)
             ]
             if relative_path:
                 source_paths.append(relative_path)
@@ -4339,33 +4304,50 @@ class StoryWikiService:
         return temporary_root / f"{prefix}.{uuid4().hex}{suffix}"
 
     def _collect_entities(self, root: Path, sources: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        entities_by_name: Dict[str, Dict[str, Any]] = {}
+        entities_by_identity: Dict[tuple[str, str, str], Dict[str, Any]] = {}
         registry = EntityRegistry(root)
+        records = registry.load_records()
         review_flags = self._registry_review_flags(root)
-        for record in registry.load_records():
+        for record in records:
             self._add_entity(
-                entities_by_name,
+                entities_by_identity,
                 self._entity_from_record(record, review_flags.get(record.entity_id, {})),
             )
 
         for source in sources:
-            if source["kind"] == "character":
-                for name in self._character_names_from_source(source):
-                    canonical = registry.canonicalize_many([name])
-                    canonical_name = canonical[0] if canonical else name
-                    self._add_entity(entities_by_name, {
-                        "name": canonical_name,
-                        "entityId": self._stable_entity_id_from_source(source),
-                        "kind": "character",
-                        "type": "character",
-                        "category": "characters",
-                        "aliases": [name] if name != canonical_name else [],
-                        "sourcePaths": [source["relativePath"]],
-                        "needsReview": False,
-                    })
+            if source["kind"] != "character":
+                continue
+            names = self._character_names_from_source(source)
+            if not names:
+                continue
+            relative_path = str(source["relativePath"])
+            stable_id = self._stable_entity_id_from_source(source)
+            owners = [record for record in records if relative_path in record.source_paths]
+            if not owners and stable_id:
+                owners = [record for record in records if record.entity_id == stable_id]
+            owner = owners[0] if len(owners) == 1 and self._entity_type_for_kind(owners[0].kind) == "character" else None
+            if owner is None and not owners:
+                named = registry.resolve_name(names[0])
+                if (
+                    named is not None and self._entity_type_for_kind(named.kind) == "character"
+                    and (not stable_id or not named.entity_id or named.entity_id == stable_id)
+                ):
+                    owner = named
+            # 别名属于这张卡的同一个实体，不能再逐个当成其他角色的档案来源。
+            self._add_entity(entities_by_identity, {
+                "name": owner.canonical_name if owner is not None else names[0],
+                "entityId": (owner.entity_id if owner is not None else "")
+                or stable_id or self._path_derived_entity_id(relative_path),
+                "kind": "character",
+                "type": "character",
+                "category": "characters",
+                "aliases": names[1:],
+                "sourcePaths": [relative_path],
+                "needsReview": len(owners) > 1,
+            })
 
         entities = sorted(
-            entities_by_name.values(),
+            entities_by_identity.values(),
             key=lambda entity: (
                 -self._entity_score(entity, sources),
                 str(entity.get("category") or ""),
@@ -4374,7 +4356,23 @@ class StoryWikiService:
             ),
         )
         self._assign_unique_node_ids(entities)
+        ambiguous_names = set(self._graph_entity_registry(root, entities).ambiguous_names())
+        for entity in entities:
+            if ambiguous_names.intersection([str(entity["name"]), *entity.get("aliases", [])]):
+                entity["needsReview"] = True
         return entities
+
+    def _graph_entity_registry(self, root: Path, entities: Sequence[Dict[str, Any]]) -> EntityRegistry:
+        return EntityRegistry(root, records=[
+            EntityRecord(
+                canonical_name=str(entity["name"]),
+                entity_id=self._entity_node_id(entity),
+                aliases=tuple(entity.get("aliases", [])),
+                kind=str(entity.get("kind") or entity.get("type") or ""),
+                source_paths=tuple(entity.get("sourcePaths", [])),
+            )
+            for entity in entities
+        ])
 
     def _registry_review_flags(self, root: Path) -> Dict[str, Dict[str, Any]]:
         """读取 registry 里 reconcile 打的待确认标记（EntityRecord 不携带这些字段）。"""
@@ -4433,7 +4431,7 @@ class StoryWikiService:
             entity["idConflictWith"] = conflict
         return entity
 
-    def _add_entity(self, entities_by_name: Dict[str, Dict[str, Any]], entity: Dict[str, Any]) -> None:
+    def _add_entity(self, entities_by_identity: Dict[tuple[str, str, str], Dict[str, Any]], entity: Dict[str, Any]) -> None:
         name = str(entity.get("name") or "").strip()
         if not name:
             return
@@ -4442,9 +4440,10 @@ class StoryWikiService:
         incoming["entityId"] = str(incoming.get("entityId") or "").strip()
         incoming["aliases"] = [str(item).strip() for item in incoming.get("aliases", []) if str(item).strip() and str(item).strip() != name]
         incoming["sourcePaths"] = [str(item) for item in incoming.get("sourcePaths", []) if str(item).strip()]
-        existing = entities_by_name.get(name)
+        identity = (incoming["entityId"], str(incoming.get("type") or incoming.get("kind") or ""), name)
+        existing = entities_by_identity.get(identity)
         if existing is None:
-            entities_by_name[name] = incoming
+            entities_by_identity[identity] = incoming
             return
         existing["aliases"] = list(dict.fromkeys([*existing.get("aliases", []), *incoming.get("aliases", [])]))
         existing["sourcePaths"] = list(dict.fromkeys([*existing.get("sourcePaths", []), *incoming.get("sourcePaths", [])]))
@@ -4595,10 +4594,10 @@ class StoryWikiService:
         self,
         registry: EntityRegistry,
         chapter_sources: Sequence[Dict[str, Any]],
-        character_names: Sequence[str],
+        character_ids: Sequence[str],
     ) -> Dict[str, tuple[str, ...]]:
         return {
-            str(source["relativePath"]): self._resolve_character_mentions(registry, str(source.get("text") or ""), character_names)
+            str(source["relativePath"]): self._resolve_character_mentions(registry, str(source.get("text") or ""), character_ids)
             for source in chapter_sources
         }
 
@@ -4606,13 +4605,13 @@ class StoryWikiService:
         self,
         registry: EntityRegistry,
         text: str,
-        character_names: Sequence[str],
+        character_ids: Sequence[str],
     ) -> tuple[str, ...]:
-        known = {str(name) for name in character_names if str(name).strip()}
+        known = set(character_ids)
         if not known:
             return ()
-        resolved = registry.resolve_mentions(text, fallback_names=character_names)
-        return tuple(name for name in resolved if name in known)
+        resolved = registry.resolve_mention_ids(text)
+        return tuple(entity_id for entity_id in resolved if entity_id in known)
 
     def _overview_summary(
         self,
@@ -4714,7 +4713,7 @@ class StoryWikiService:
         sources: Sequence[Dict[str, Any]],
         entities: Sequence[Dict[str, Any]],
     ) -> Dict[str, List[Dict[str, Any]]]:
-        mapping: Dict[str, List[Dict[str, Any]]] = {str(entity["name"]): [] for entity in entities}
+        mapping: Dict[str, List[Dict[str, Any]]] = {self._entity_node_id(entity): [] for entity in entities}
         character_sources = [source for source in sources if source.get("kind") == "character"]
         source_by_path = {str(source.get("relativePath") or ""): source for source in character_sources}
         claimed_paths: set[str] = set()
@@ -4722,13 +4721,13 @@ class StoryWikiService:
         # ``_collect_entities`` 已把角色卡的真实路径记录为 sourcePaths。这个结构化
         # 所有权优先级最高，关系段落里提到其他角色不再改变主档案归属。
         for entity in entities:
-            name = str(entity.get("name") or "")
+            node_id = self._entity_node_id(entity)
             for relative_path in entity.get("sourcePaths", []):
                 normalized = str(relative_path or "")
                 source = source_by_path.get(normalized)
                 if source is None or normalized in claimed_paths:
                     continue
-                mapping[name].append(source)
+                mapping[node_id].append(source)
                 claimed_paths.add(normalized)
 
         # 兼容仅来自 EntityRegistry 的角色：按卡片自身 JSON name、一级标题/文件名
@@ -4738,17 +4737,15 @@ class StoryWikiService:
             if relative_path in claimed_paths:
                 continue
             declared_names = self._character_names_from_source(source)
-            owner = next(
-                (
-                    str(entity.get("name") or "")
-                    for entity in entities
-                    if str(entity.get("name") or "") in declared_names
-                    or any(str(alias) in declared_names for alias in entity.get("aliases", []))
-                ),
-                "",
-            )
-            if owner:
-                mapping[owner].append(source)
+            primary_name = declared_names[0] if declared_names else ""
+            stable_id = self._stable_entity_id_from_source(source)
+            owners = [entity for entity in entities if str(entity.get("entityId") or "") == stable_id] if stable_id else [
+                entity for entity in entities if primary_name and str(entity.get("name") or "") == primary_name
+            ]
+            if not owners and not stable_id and primary_name:
+                owners = [entity for entity in entities if primary_name in entity.get("aliases", [])]
+            if len(owners) == 1:
+                mapping[self._entity_node_id(owners[0])].append(source)
                 claimed_paths.add(relative_path)
         return mapping
 
@@ -4761,7 +4758,7 @@ class StoryWikiService:
         return f"{name}\u5728 {len(mentions)} \u4e2a\u7ae0\u8282/\u7247\u6bb5\u4e2d\u88ab\u63d0\u53ca\uff0c\u5df2\u7eb3\u5165\u77e5\u8bc6\u56fe\u8c31\u8ddf\u8e2a\u3002"
 
     def _character_details(self, name: str, related: Sequence[Dict[str, Any]], mentions: Sequence[Dict[str, Any]]) -> List[str]:
-        details = [f"\u540d\u79f0: {name}", f"\u51fa\u573a/\u63d0\u53ca\u6b21\u6570: {sum(source['text'].count(name) for source in mentions)}"]
+        details = [f"名称: {name}", f"出场/提及章节数: {len(mentions)}"]
         details.extend(self._details_from_sources(related, limit=3))
         if mentions:
             details.append("\u76f8\u5173\u7ae0\u8282: " + "\u3001".join(source["relativePath"] for source in mentions[:8]))
@@ -4788,20 +4785,28 @@ class StoryWikiService:
         if not isinstance(raw_facts, list):
             return
 
-        endpoint_by_name: Dict[str, str] = {}
+        endpoint_ids: Dict[str, set[str]] = {}
         for entity in entities:
             node_id = self._entity_node_id(entity)
-            names = [str(entity.get("name") or ""), *[str(alias) for alias in entity.get("aliases", [])]]
-            for name in names:
-                if name.strip():
-                    endpoint_by_name.setdefault(name, node_id)
+            entity_id = str(entity.get("entityId") or "").strip()
+            if entity_id:
+                endpoint_ids.setdefault(entity_id, set()).add(node_id)
+        node_ids = {str(node.get("id") or "") for node in graph_nodes}
         for node in graph_nodes:
             node_id = str(node.get("id") or "")
-            label = str(node.get("label") or "").strip()
             if node_id:
-                endpoint_by_name.setdefault(node_id, node_id)
-            if label and node_id:
-                endpoint_by_name.setdefault(label, node_id)
+                endpoint_ids.setdefault(node_id, set()).add(node_id)
+
+        def resolve_endpoint(name: str, entity_id: Any) -> str:
+            requested_id = str(entity_id or "").strip()
+            if requested_id:
+                candidates = endpoint_ids.get(requested_id, set())
+                return next(iter(candidates)) if len(candidates) == 1 else ""
+            record = registry.resolve_name(name)
+            if record is not None and record.entity_id in node_ids:
+                return record.entity_id
+            candidates = endpoint_ids.get(name, set())
+            return next(iter(candidates)) if len(candidates) == 1 else ""
 
         source_cache = list(sources) if sources is not None else self._collect_sources(root)
         for item in raw_facts:
@@ -4812,10 +4817,8 @@ class StoryWikiService:
             object_raw = str(item.get("object") or "").strip()
             if not subject_raw or not predicate or not object_raw:
                 continue
-            subject = (registry.canonicalize_many([subject_raw]) or (subject_raw,))[0]
-            obj = (registry.canonicalize_many([object_raw]) or (object_raw,))[0]
-            source_id = endpoint_by_name.get(subject)
-            target_id = endpoint_by_name.get(obj)
+            source_id = resolve_endpoint(subject_raw, item.get("subjectId") or item.get("subject_id"))
+            target_id = resolve_endpoint(object_raw, item.get("objectId") or item.get("object_id"))
             if not source_id or not target_id or source_id == target_id:
                 continue
             established_in = str(item.get("established_in") or item.get("establishedIn") or "").strip()
@@ -5007,19 +5010,17 @@ class StoryWikiService:
         return cleaned or "item"
 
     def _chapter_entry_id(self, relative_path: str) -> str:
-        """\u7ae0\u8282\u6761\u76ee/\u8282\u70b9 ID \u57fa\u4e8e\u6587\u4ef6\u8def\u5f84\uff0c\u4e0d\u968f\u6392\u5e8f\u4f4d\u7f6e\u6f02\u79fb\u3002
-
-        \u65e7\u5b9e\u73b0\u7528 `chapter:{\u6392\u5e8f\u4f4d\u7f6e}`\uff0c\u63d2\u5165/\u5220\u9664/\u91cd\u547d\u540d\u7ae0\u8282\u4f1a\u8ba9\u6240\u6709\u540e\u7eed
-        \u7ae0\u8282\u7684 ID \u79fb\u4f4d\uff0c\u589e\u91cf\u5408\u5e76\u65f6\u5185\u5bb9\u4e92\u76f8\u8986\u76d6\u3002\u8def\u5f84 slug \u662f\u7a33\u5b9a\u6807\u8bc6\u3002
-        """
-        normalized = str(relative_path or "").replace("\\", "/").strip("/")
-        normalized = re.sub(r"\.(md|txt)$", "", normalized, flags=re.IGNORECASE)
-        return f"chapter:{self._slug(normalized.replace('/', '-'))}"
+        return self._source_entry_id("chapter", relative_path)
 
     def _planned_entry_id(self, relative_path: str) -> str:
+        return self._source_entry_id("planned", relative_path)
+
+    def _source_entry_id(self, prefix: str, relative_path: str) -> str:
+        """完整路径含扩展名参与身份计算，目录、空格和标点不能在 slug 中互相覆盖。"""
         normalized = str(relative_path or "").replace("\\", "/").strip("/")
-        normalized = re.sub(r"\.(md|txt|json|jsonl)$", "", normalized, flags=re.IGNORECASE)
-        return f"planned:{self._slug(normalized.replace('/', '-'))}"
+        stem = re.sub(r"\.(md|txt|json|jsonl)$", "", normalized, flags=re.IGNORECASE)
+        digest = sha256(normalized.encode("utf-8")).hexdigest()[:24]
+        return f"{prefix}:{self._slug(stem.replace('/', '-'))[:100]}:{digest}"
 
     def _render_markdown(self, payload: Dict[str, Any]) -> str:
         lines = [f"# {payload.get('projectName', 'Storydex')} WIKI", "", str(payload.get("summary", "")), ""]

@@ -242,7 +242,7 @@ describe("StoryStatePanel deterministic graph and inspector behavior", () => {
     wrapper.unmount();
   });
 
-  it("merges paged graph results and preserves project-wide statistics", async () => {
+  it("keeps category pagination after a node is selected and preserves project-wide statistics", async () => {
     const wrapper = mountPanel(); const u = (wrapper.vm as any).__testUtils;
     await flushPromises();
     transport.get.mockReset();
@@ -287,6 +287,7 @@ describe("StoryStatePanel deterministic graph and inspector behavior", () => {
       nextOffset: null,
     }));
 
+    u.selectWikiNode(u.wikiGraphNodes.value[0]);
     await u.loadMoreWikiGraph();
 
     expect(transport.get).toHaveBeenCalledWith("/story/wiki/graph", {
@@ -301,6 +302,41 @@ describe("StoryStatePanel deterministic graph and inspector behavior", () => {
     });
     expect(u.wikiGraphQueryData.value.graph.nodes).toHaveLength(62);
     expect(u.wikiGraphHasMore.value).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("keeps the character category and selection after automatic synchronization", async () => {
+    const wrapper = mountPanel();
+    const u = (wrapper.vm as any).__testUtils;
+    await flushPromises();
+    const characters = ["Alice", "Bob"].map((name) => ({
+      id: `char:${name}`, label: name, type: "character", category: "characters", entryId: `char:${name}`,
+    }));
+    const entries = characters.map((node) => ({ id: node.id, title: node.label, category: "characters" }));
+    const wiki = { projectName: "Demo", entries, graph: { nodes: characters, edges: [] } };
+    const category = { mode: "category", category: "characters", entries, graph: wiki.graph };
+    const neighborhood = {
+      mode: "node", nodeId: characters[0].id, entries,
+      graph: { nodes: [characters[0], { id: "chapter:1", label: "第一章", type: "chapter" }], edges: [] },
+    };
+    transport.get.mockImplementation(async (url, config) => envelope(
+      url === "/story/wiki/graph"
+        ? (config?.params?.nodeId ? neighborhood : category)
+        : { relations: [], total: 0 },
+    ));
+    transport.post.mockResolvedValueOnce(envelope(wiki));
+    u.wikiData.value = wiki;
+    await u.loadWikiGraph({ category: "characters" });
+    u.selectWikiNode(u.wikiGraphNodes.value[0]);
+
+    await u.syncWiki();
+
+    expect(u.selectedWikiCategory.value).toBe("characters");
+    expect(u.selectedWikiNodeId.value).toBe(characters[0].id);
+    expect(u.wikiGraphNodes.value.map((node: any) => node.type)).toEqual(["character", "character"]);
+    expect(transport.get).toHaveBeenCalledWith("/story/wiki/graph", {
+      params: expect.objectContaining({ category: "characters" }),
+    });
     wrapper.unmount();
   });
 

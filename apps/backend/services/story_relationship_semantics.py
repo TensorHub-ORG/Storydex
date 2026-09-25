@@ -82,6 +82,19 @@ _NEGATION_TOKENS = (
     "互不", "否认", "无怨无仇", "not ", "no relationship", "never ", "unrelated", "stranger",
 )
 
+_NEGATED_RELATION_RE = re.compile(
+    r"(?:不|没|未)(?:再|会|能|肯|愿意|愿|敢|曾经|曾|相互|互相|彼此|完全|很|太|怎么)*\s*(?:"
+    + "|".join(
+        re.escape(token)
+        for _dimension, tokens in _DIMENSION_TOKENS
+        for token in tokens
+        if re.search(r"[\u4e00-\u9fff]", token)
+    )
+    + r")|\b(?:distrust\w*|mistrust\w*|disloyal\w*|untrusted|unfriendly|unfaithful|"
+    r"(?:is|are|was|were|does|do|did|ca|wo)n['’]t|cannot|no longer)\b",
+    re.IGNORECASE,
+)
+
 _NON_CURRENT_TOKENS = (
     "曾经是", "曾是", "过去是", "此前是", "原同事", "前同事", "前任同事", "已分手", "已经分手",
     "former ", "used to be", "ex-",
@@ -122,7 +135,12 @@ def semantics_for_dimension(dimension: str) -> RelationshipSemantics:
     return RelationshipSemantics("unknown", "unknown", "unknown", None, "unresolved", 0)
 
 
-def classify_relationship(description: str) -> RelationshipSemantics:
+def is_negated_relationship_clause(description: str) -> bool:
+    normalized = str(description or "").lower()
+    return any(token in normalized for token in _NEGATION_TOKENS) or bool(_NEGATED_RELATION_RE.search(normalized))
+
+
+def classify_relationship(description: str, *, dimension: Optional[str] = None) -> RelationshipSemantics:
     text = unicodedata.normalize("NFKC", _compact_text(description))
     if not text:
         return semantics_for_dimension("unknown")
@@ -135,26 +153,30 @@ def classify_relationship(description: str) -> RelationshipSemantics:
     ] or [text]
     for clause in clauses:
         normalized = clause.lower()
-        if any(token in normalized for token in (*_UNCERTAINTY_TOKENS, *_NON_CURRENT_TOKENS)):
-            continue
         dimensions = [
-            (dimension, token)
-            for dimension, tokens in _DIMENSION_TOKENS
+            (candidate, token)
+            for candidate, tokens in _DIMENSION_TOKENS
             for token in tokens
-            if token.lower() in normalized
+            if token.lower() in normalized and (dimension is None or candidate == dimension)
         ]
         if not dimensions:
             continue
-        if any(token in normalized for token in _NEGATION_TOKENS):
+        if (
+            any(token in normalized for token in (*_UNCERTAINTY_TOKENS, *_NON_CURRENT_TOKENS))
+            or is_negated_relationship_clause(normalized)
+        ):
+            # 后文的否定/未确认会撤销同一维度的旧肯定，不能留下“过去信任”的边。
+            denied = {candidate for candidate, _token in dimensions}
+            asserted_dimensions = [candidate for candidate in asserted_dimensions if candidate not in denied]
             continue
         # Prefer a specific/longer term, then a semantic priority.  This makes
         # “信任的伙伴” resolve to trust rather than the generic alliance token
         # while retaining the later asserted clause after a negated contrast.
-        dimension = max(
+        selected_dimension = max(
             dimensions,
             key=lambda item: (len(item[1]), _DIMENSION_PRIORITY.get(item[0], 0)),
         )[0]
-        asserted_dimensions.append(dimension)
+        asserted_dimensions.append(selected_dimension)
 
     if asserted_dimensions:
         return semantics_for_dimension(asserted_dimensions[-1])

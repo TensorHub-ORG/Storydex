@@ -13,6 +13,8 @@ from threading import RLock
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 from uuid import uuid4
 
+from services.story_relationship_semantics import is_negated_relationship_clause
+
 
 ENTITY_SCHEMA_VERSION = 2
 FACT_SCHEMA_VERSION = 2
@@ -181,7 +183,7 @@ def _evidence_modality(
     relevant = predicate_anchored or anchored
     modalities: List[str] = []
     for clause in relevant:
-        if _NEGATION_RE.search(clause):
+        if _NEGATION_RE.search(clause) or is_negated_relationship_clause(clause):
             modalities.append("negated")
         elif _HYPOTHETICAL_RE.search(clause):
             modalities.append("hypothetical")

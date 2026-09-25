@@ -2087,9 +2087,7 @@ function currentWikiGraphQueryParams(): WikiGraphQueryParams {
   if (wikiGraphSearchQuery.value.trim()) {
     return { q: wikiGraphSearchQuery.value.trim(), includeReview: true };
   }
-  if (selectedWikiNodeId.value) {
-    return { nodeId: selectedWikiNodeId.value, includeReview: true };
-  }
+  // 节点选择只控制详情和高亮；同步、分页继续使用当前分类或搜索范围。
   return { category: selectedWikiCategory.value, includeReview: true };
 }
 

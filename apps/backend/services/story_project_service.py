@@ -7633,33 +7633,36 @@ class StoryProjectService:
         payload = self._read_json(entities_path)
         if not isinstance(payload, dict):
             payload = {"version": 1, "entities": []}
-        entities = payload.get("entities") if isinstance(payload.get("entities"), list) else []
-        by_name: Dict[str, Dict[str, Any]] = {}
-        for item in entities:
-            if not isinstance(item, dict):
-                continue
-            canonical = self._clean_increment_text(item.get("canonical_name") or item.get("canonicalName") or item.get("name"))
-            key = self._normalize_character_lookup_key(canonical)
-            if key:
-                by_name[key] = dict(item)
-
+        raw_entities = payload.get("entities") if isinstance(payload.get("entities"), list) else []
+        entities = [dict(item) for item in raw_entities if isinstance(item, dict)]
         for update in character_updates:
             name = self._clean_increment_text(update.get("character"))
             key = self._normalize_character_lookup_key(name)
             if not key:
                 continue
-            entry = by_name.get(key, {"canonical_name": name, "kind": "character", "status": "active"})
+            matches = [
+                item for item in entities
+                if self._normalize_character_lookup_key(
+                    item.get("canonical_name") or item.get("canonicalName") or item.get("name")
+                ) == key
+                and str(item.get("kind") or "character").lower() in {"character", "person", "role"}
+            ]
+            if len(matches) > 1:
+                for item in matches:
+                    item["needsReview"] = True
+                continue
+            entry = matches[0] if matches else {"canonical_name": name, "kind": "character", "status": "active"}
+            if not matches:
+                entities.append(entry)
             aliases = self._merge_text_lists(entry.get("aliases"), update.get("aliases"))
             entry["canonical_name"] = self._clean_increment_text(entry.get("canonical_name") or name)
             entry["aliases"] = [alias for alias in aliases if alias and alias != entry["canonical_name"]]
             entry["kind"] = self._clean_increment_text(entry.get("kind")) or "character"
             entry["status"] = self._clean_increment_text(entry.get("status")) or "active"
             entry["updatedAt"] = updated_at
-            by_name[key] = entry
-
-        payload["version"] = 1
+        payload["version"] = max(1, int(payload.get("version") or 1))
         payload["updatedAt"] = updated_at
-        payload["entities"] = sorted(by_name.values(), key=lambda item: str(item.get("canonical_name") or ""))
+        payload["entities"] = sorted(entities, key=lambda item: str(item.get("canonical_name") or ""))
         serialized = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
         current = entities_path.read_text(encoding="utf-8") if entities_path.exists() else ""
         if current == serialized:

@@ -199,8 +199,9 @@ def test_entity_and_text_helpers_cover_optional_paths(service, tmp_path):
     service._add_entity(entities, {})
     service._add_entity(entities, {"name": " Hero ", "aliases": ["Hero", "H", ""], "sourcePaths": ["a", ""], "needsReview": False})
     service._add_entity(entities, {"name": "Hero", "aliases": ["H", "X"], "sourcePaths": ["a", "b"], "needsReview": True})
-    assert entities["Hero"]["aliases"] == ["H", "X"]
-    assert entities["Hero"]["sourcePaths"] == ["a", "b"] and entities["Hero"]["needsReview"]
+    hero = next(iter(entities.values()))
+    assert hero["aliases"] == ["H", "X"]
+    assert hero["sourcePaths"] == ["a", "b"] and hero["needsReview"]
 
     assert service._character_names_from_source(_source("characters/001_hero.json", '{"name":"Alice","displayName":"Al"}', "character")) == ["Alice", "Al"]
     assert service._character_names_from_source(_source("characters/001_Alice.md", "# 角色档案\n", "character")) == ["Alice"]
@@ -234,7 +235,7 @@ def test_character_mapping_entry_edges_dedupe_and_render(service):
     sources = [_source("characters/alice.md", "# Alice\n\nAl", "character"), _source("chapters/1.md", "Alice appears")]
     entities = [{"name": "Alice", "aliases": ["Al"]}, {"name": "Bob", "aliases": []}]
     mapping = service._character_sources(Path("."), sources, entities)
-    assert mapping["Alice"] and mapping["Bob"] == []
+    assert mapping[service._entity_node_id(entities[0])] and mapping[service._entity_node_id(entities[1])] == []
     assert service._mentioning_sources(sources, "Alice") == sources
     assert service._mentioning_sources(sources, "") == []
     assert service._character_summary("Alice", [sources[0]], sources)
@@ -249,7 +250,7 @@ def test_character_mapping_entry_edges_dedupe_and_render(service):
     assert edges == [{"source": "a", "target": "b", "label": "x", "weight": 2}]
     assert service._slug("  !!! ") == "item"
     assert service._slug("Hello world!") == "Hello-world"
-    assert service._chapter_entry_id(r"chapters\001.MD") == "chapter:chapters-001"
+    assert service._chapter_entry_id(r"chapters\001.MD") == service._chapter_entry_id("chapters/001.MD")
     markdown = service._render_markdown({"projectName": "Demo", "summary": "Summary", "entries": [{"title": "One", "summary": "Body", "details": list(map(str, range(30)))}]})
     assert markdown.startswith("# Demo WIKI") and "- 19" in markdown and "- 20" not in markdown
 
