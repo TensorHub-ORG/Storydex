@@ -1,6 +1,6 @@
 [package]
 name = "storydex-tauri"
-version = "2.1.0"
+version = "2.1.1"
 description = "Storydex Tauri 2 desktop shell"
 authors = ["Storydex"]
 edition = "2021"
