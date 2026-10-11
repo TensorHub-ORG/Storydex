@@ -141,7 +141,9 @@ test("standard CI scopes quality jobs while full CI retains its runtime checks",
   assert.equal((workflow.match(/"coverage_ratchet":true/g) || []).length, 2);
   assert.equal((workflow.match(/"coverage_ratchet":false/g) || []).length, 2);
   assert.match(workflow, /if:\s*matrix\.coverage_ratchet/);
-  assert.equal((workflow.match(/\|\| 'advisory'/g) || []).length, 2);
+  assert.equal((workflow.match(/\|\| 'advisory'/g) || []).length, 1);
+  const frontendJob = workflow.split(/\r?\n  frontend-tests:/)[1].split(/\r?\n  desktop-unit-tests:/)[0];
+  assert.match(frontendJob, /--mode=release/);
   assert.match(workflow, /Swatinem\/rust-cache@v2/);
   assert.match(workflow, /Build current-commit Storydex PC Agent runtime/);
   assert.match(workflow, /Verify pinned runtime and backend contract/);
@@ -156,7 +158,9 @@ test("standard CI scopes quality jobs while full CI retains its runtime checks",
   assert.doesNotMatch(workflow, /^  integration-tests:/m);
   assert.match(workflow, /BACKEND:\s*\$\{\{ needs\.changes\.outputs\.backend \}\}/);
   assert.match(workflow, /PC_RUNTIME:\s*\$\{\{ needs\.changes\.outputs\.pc_runtime \}\}/);
-  assert.match(workflow, /if not upstream_verified and \(full or windows_release or pc_runtime\):\s*required\.add\("pc-runtime-tests"\)/);
+  assert.match(workflow, /\("PC_RUNTIME", "pc-runtime-tests"\)/);
+  assert.match(workflow, /if affected and not verified:\s*required\.add\(job\)/);
+  assert.match(workflow, /if full or windows_release:\s*required\.add\("windows-dependency-audit"\)/);
   assert.doesNotMatch(workflow, /required\.add\("backend-compatibility"\)/);
   assert.match(workflow, /desktop-package-check:\s*[\s\S]*?if:\s*inputs\.run_packaged_checks/);
   assert.doesNotMatch(workflow, /^  tauri-e2e:/m);

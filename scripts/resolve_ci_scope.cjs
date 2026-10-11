@@ -26,10 +26,12 @@ function isCiPolicyOnly(filePath) {
   return (
     filePath.startsWith(".github/")
     || filePath === "scripts/resolve_ci_scope.cjs"
+    || filePath === "scripts/resolve_ci_evidence.cjs"
     || filePath === "scripts/run_pre_push_ci.ps1"
     || filePath === "scripts/tests/ci-preflight.test.cjs"
     || filePath === "scripts/tests/check-coverage.test.cjs"
     || filePath === "scripts/tests/resolve-ci-scope.test.cjs"
+    || filePath === "scripts/tests/resolve-ci-evidence.test.cjs"
   );
 }
 
@@ -44,6 +46,7 @@ function classifyChangedPaths(inputPaths, options = {}) {
     backend: false,
     frontend: false,
     desktop: false,
+    tauri: false,
     android: false,
     coomi: false,
     pc_runtime: false,
@@ -56,6 +59,7 @@ function classifyChangedPaths(inputPaths, options = {}) {
     scope.backend = true;
     scope.frontend = true;
     scope.desktop = true;
+    scope.tauri = true;
     scope.android = true;
     scope.coomi = true;
     scope.pc_runtime = true;
@@ -111,9 +115,20 @@ function classifyChangedPaths(inputPaths, options = {}) {
       scope.frontend = true;
       matched = true;
     }
-    if (filePath.startsWith("apps/desktop/")) {
+    // Website download links are checked by the desktop release contracts;
+    // updating the installer URL does not change either application runtime.
+    if (filePath.startsWith("apps/website-overlay/")) {
       scope.desktop = true;
       matched = true;
+    }
+    if (filePath.startsWith("apps/desktop/") && !filePath.startsWith("apps/desktop/agent-runtime/")) {
+      scope.desktop = true;
+      matched = true;
+    }
+    if (filePath.startsWith("apps/desktop/tauri-preview/")
+        && !filePath.startsWith("apps/desktop/tauri-preview/scripts/")
+        && !filePath.startsWith("apps/desktop/tauri-preview/binaries/")) {
+      scope.tauri = true;
     }
     if (filePath.startsWith("apps/android/") || filePath.startsWith("apps/android-frontend/")) {
       scope.android = true;
@@ -138,7 +153,7 @@ function classifyChangedPaths(inputPaths, options = {}) {
       scope.coomi = true;
       scope.pc_runtime = true;
       matched = true;
-      if (desktopRuntimePath || filePath.startsWith("apps/desktop/")) {
+      if (!desktopRuntimePath && filePath.startsWith("apps/desktop/")) {
         scope.desktop = true;
       }
     }
@@ -185,7 +200,7 @@ function classifyChangedPaths(inputPaths, options = {}) {
     enableAll();
   }
 
-  const selected = scope.backend || scope.frontend || scope.desktop || scope.android || scope.coomi || scope.pc_runtime || scope.feedback;
+  const selected = scope.backend || scope.frontend || scope.desktop || scope.tauri || scope.android || scope.coomi || scope.pc_runtime || scope.feedback;
   const reason = unknownPaths.length > 0
     ? "unknown-path-fail-safe"
     : (ciPolicyOnly && !selected ? "ci-policy-only" : (!selected ? "documentation-only" : "path-classified"));
@@ -220,6 +235,7 @@ function writeGithubOutputs(filePath, result) {
     backend: result.backend,
     frontend: result.frontend,
     desktop: result.desktop,
+    tauri: result.tauri,
     android: result.android,
     coomi: result.coomi,
     pc_runtime: result.pc_runtime,

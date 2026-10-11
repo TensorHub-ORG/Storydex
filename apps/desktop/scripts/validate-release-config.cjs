@@ -43,7 +43,7 @@ assert(/npx --no-install tauri build --ci/.test(packageScript), "Tauri packaging
 assert(/STORYDEX_TAURI_UPDATER_PUBKEY/.test(packageScript), "Tauri packaging must require the updater public key.");
 assert(/TAURI_SIGNING_PRIVATE_KEY/.test(packageScript), "Tauri packaging must require the updater private key.");
 assert(/TAURI_SIGNING_PRIVATE_KEY_PATH/.test(packageScript), "Tauri packaging must support CI private key files without treating the path as key content.");
-assert(/quality-gate\.yml/.test(workflow), "Windows release must depend on the reusable full quality gate.");
+assert(/quality-gate\.yml/.test(workflow), "Windows release must depend on the reusable affected-component quality gate.");
 assert(/TAURI_SIGNING_PRIVATE_KEY/.test(workflow), "Windows release must load the updater private key from CI secrets.");
 assert(/STORYDEX_TAURI_UPDATER_PUBKEY/.test(workflow), "Windows release must load the updater public key from CI secrets.");
 assert(/latest\.json/.test(workflow) && /\.exe\.sig/.test(workflow), "Windows release must publish the Tauri updater manifest, signed NSIS installer, and signature.");

@@ -89,8 +89,18 @@ test("normal CI stays scoped while full CI remains explicit for release validati
   assert.doesNotMatch(qualityGate, /^  tauri-e2e:/m);
   assert.match(qualityGate, /component checks reused from dev\/windows/);
   assert.match(qualityGate, /reused-windows-checks:[\s\S]*?upstream_verified == 'true'/);
-  assert.match(qualityGate, /case "\$changed_path" in[\s\S]*?apps\/frontend\/\*[\s\S]*?apps\/desktop\/\*/);
-  assert.match(qualityGate, /actions\/workflows\/dev-ci\.yml\/runs/);
+  assert.match(qualityGate, /node scripts\/resolve_ci_evidence\.cjs/);
+  assert.match(qualityGate, /releases\/latest/);
+  assert.match(qualityGate, /merge-base --is-ancestor/);
+  for (const component of ["pc_runtime", "frontend", "desktop", "tauri"]) {
+    assert.match(qualityGate, new RegExp(`needs\\.changes\\.outputs\\.${component}_verified != 'true'`));
+  }
+  assert.match(qualityGate, /windows-dependency-audit:[\s\S]*?if: inputs\.full \|\| inputs\.windows_release/);
+  const pcJob = qualityGate.split(/\r?\n  pc-runtime-tests:/)[1].split(/\r?\n  frontend-tests:/)[0];
+  assert.doesNotMatch(pcJob, /inputs\.windows_release|cargo install cargo-deny/);
+  const desktopJob = qualityGate.split(/\r?\n  desktop-unit-tests:/)[1].split(/\r?\n  tauri-tests:/)[0];
+  assert.doesNotMatch(desktopJob, /cargo |rust-toolchain/);
+  assert.match(read("apps/desktop/tauri-preview/scripts/prepare-preview.ps1"), /verify-runtime-identity\.cjs/);
   const release = read(".github/workflows/release-windows.yml");
   assert.match(release, /windows_release:\s*true/);
   assert.doesNotMatch(release, /smoke:tauri/);

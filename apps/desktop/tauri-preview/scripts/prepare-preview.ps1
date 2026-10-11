@@ -36,6 +36,11 @@ if (-not (Test-Path -LiteralPath $bridgeBinary -PathType Leaf)) {
     throw "storydex-coomi-bridge release build did not produce $bridgeBinary"
 }
 
+& node (Join-Path $repoRoot "apps/desktop/scripts/verify-runtime-identity.cjs")
+if ($LASTEXITCODE -ne 0) {
+    throw "The runtime binary does not match the current release source."
+}
+
 $targetLine = & rustc -vV | Select-String -Pattern "^host:" | Select-Object -First 1
 if ($null -eq $targetLine) {
     throw "Unable to resolve the Rust host target triple."
@@ -49,7 +54,12 @@ Copy-Item -LiteralPath $agentdBinary -Destination $sidecarPath -Force
 Copy-Item -LiteralPath $bridgeBinary -Destination $bridgePath -Force
 
 if (Test-Path -LiteralPath $mingitTarget) {
-    Remove-Item -LiteralPath $mingitTarget -Recurse -Force
+    $resolvedResources = [System.IO.Path]::GetFullPath($resourcesRoot).TrimEnd('\') + '\'
+    $resolvedTarget = (Resolve-Path -LiteralPath $mingitTarget).Path
+    if (-not $resolvedTarget.StartsWith($resolvedResources, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "MinGit output must remain inside the Tauri resources directory."
+    }
+    Remove-Item -LiteralPath $resolvedTarget -Recurse -Force
 }
 New-Item -ItemType Directory -Force -Path $resourcesRoot | Out-Null
 Copy-Item -LiteralPath $mingitSource -Destination $mingitTarget -Recurse -Force

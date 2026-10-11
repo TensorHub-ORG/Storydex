@@ -13,6 +13,7 @@ test("frontend-only changes run only frontend quality checks", () => {
     backend: false,
     frontend: true,
     desktop: false,
+    tauri: false,
     android: false,
     coomi: false,
     pc_runtime: false,
@@ -43,7 +44,8 @@ test("PC runtime changes use focused runtime checks without backend coverage", (
 
   const rust = classifyChangedPaths(["apps/desktop/agent-runtime/storydex-bridge/src/main.rs"]);
   assert.equal(rust.backend, false);
-  assert.equal(rust.desktop, true);
+  assert.equal(rust.desktop, false);
+  assert.equal(rust.tauri, false);
   assert.equal(rust.coomi, true);
   assert.equal(rust.pc_runtime, true);
   assert.equal(rust.android, false);
@@ -59,6 +61,7 @@ test("PC runtime changes use focused runtime checks without backend coverage", (
 test("desktop and documentation changes stay scoped", () => {
   const desktop = classifyChangedPaths(["apps/desktop/tauri-preview/src/main.rs"]);
   assert.equal(desktop.desktop, true);
+  assert.equal(desktop.tauri, true);
   assert.equal(desktop.backend, false);
   assert.equal(desktop.frontend, false);
 
@@ -83,6 +86,7 @@ test("feedback and release helper changes run only their owning checks", () => {
 
   const release = classifyChangedPaths(["scripts/prepare_tauri_release_bundle.ps1"]);
   assert.equal(release.desktop, true);
+  assert.equal(release.tauri, false);
   assert.equal(release.backend, false);
   assert.equal(release.android, false);
   assert.equal(release.feedback, false);
@@ -115,9 +119,27 @@ test("CI policy, unknown, empty, and forced scopes follow their intended safety 
     assert.equal(result.backend, true);
     assert.equal(result.frontend, true);
     assert.equal(result.desktop, true);
+    assert.equal(result.tauri, true);
     assert.equal(result.android, true);
     assert.equal(result.coomi, true);
     assert.equal(result.pc_runtime, true);
     assert.equal(result.feedback, true);
   }
+});
+
+test("packaging scripts and CI evidence changes avoid unrelated Rust test suites", () => {
+  const packaging = classifyChangedPaths(["apps/desktop/tauri-preview/scripts/prepare-preview.ps1"]);
+  assert.equal(packaging.desktop, true);
+  assert.equal(packaging.tauri, false);
+  assert.equal(packaging.pc_runtime, false);
+  const policy = classifyChangedPaths(["scripts/resolve_ci_evidence.cjs", "scripts/tests/resolve-ci-evidence.test.cjs"]);
+  assert.equal(policy.reason, "ci-policy-only");
+  assert.equal(policy.android, false);
+  const website = classifyChangedPaths(["apps/website-overlay/storydex-android-download-v0.1.4.js"]);
+  assert.equal(website.desktop, true);
+  assert.equal(website.pc_runtime, false);
+  assert.equal(website.tauri, false);
+  assert.equal(website.android, false);
+  assert.equal(website.backend, false);
+  assert.deepEqual(website.unknownPaths, []);
 });

@@ -12,15 +12,20 @@
 ## 测试、提交与推送
 
 - 提交前运行与改动直接相关的聚焦测试。
+- 本地聚焦测试通过后，不重复运行全组件套件；远端 CI 负责组件检查。只有新改动、失败或尚未覆盖的风险才追加验证。
 - 推送前运行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_pre_push_ci.ps1`；不得使用 `--no-verify`。
 - 该脚本只做轻量基础检查，不运行 Backend、Frontend、Desktop、Android、Rust、coverage、打包或 E2E，也不等同于完整跨平台验证；`scripts/run_full_test_suite.ps1 -Mode Fast` 仅在人工明确需要时运行。
 - 普通 push 和 pull request 不运行打包或 GUI E2E，按变更路径执行组件 CI；打包资产和完整跨平台门禁只在显式要求时运行。
+- Agent 运行时、Tauri 外壳和打包脚本分别判定影响范围；运行时内部改动不自动触发外壳测试。
 - 只修改文档时也不能跳过 hook；基础检查应保持在秒级。
 
 ## 分支与 CI
 
 - 只治理 `dev/windows` 和 `main`：Windows 改动先在 `dev/windows` 通过 Development CI，再以相同 SHA 进入 `main`；无法复用成功结果或包含非 Windows 路径时按变更范围检查。其他远端分支不在本文件治理范围内，不因日常任务主动清理、同步或改写。
+- CI 和发布按相同 SHA、可信分支、具体成功 job 复用 Windows 检查；跳过的 job 和工作流整体成功不能代替组件证据，查询失败时执行缺失检查。
+- Windows 发布检查相对上一正式版本的变更，保留每次发布的依赖审计、运行时身份和最终产物校验；无法确定发布基线时检查全部 Windows 组件。release 运行时只在打包阶段构建一次。
 - 开始新提交前检查 `origin/main` 最近一次 CI；已知失败基线先处理，或取得用户决定后再继续。
 - 普通推送后确认当前 SHA 的 GitHub Actions run 已创建，默认监控最多 15 分钟；失败时读取具体 job/step，达到时限仍未完成时报告 run URL 和当前状态，不得宣称成功。
 - 显式 full CI、正式发布或用户明确要求持续等待时，监控到最终 `success`。
 - 本地 Python 版本与 GitHub Actions 不一致时，在交付说明中注明，以远端 CI 为最终依据。
+- 监控由脚本等待并汇总；成功只读取结果摘要，失败才读取对应 job/step 日志，避免重复获取整份日志。
