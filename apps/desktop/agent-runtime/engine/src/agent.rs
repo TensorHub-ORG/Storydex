@@ -327,14 +327,16 @@ impl Agent {
         session.messages.push(prompt);
         self.run_checkpoint(session, CheckpointPriority::Immediate)?;
         let capabilities = provider.capabilities();
-        let tool_specs = if capabilities.supports_native_tools {
-            tools.specs()
-        } else {
-            Vec::new()
-        };
         let mut compacted_for_provider_error = false;
 
         for round in 1..=self.max_tool_rounds {
+            // Tools may change after a control action such as exit_plan_mode.
+            // Send the current surface rather than freezing it for the turn.
+            let tool_specs = if capabilities.supports_native_tools {
+                tools.specs()
+            } else {
+                Vec::new()
+            };
             let normalized = normalize_history(&session.messages);
             session
                 .context
@@ -717,6 +719,7 @@ mod tests {
 
     struct MockProvider {
         calls: Mutex<usize>,
+        expect_changed_tools: bool,
     }
 
     #[async_trait]
@@ -736,6 +739,10 @@ mod tests {
             );
             let mut calls = self.calls.lock().expect("lock mock call count");
             *calls += 1;
+            if self.expect_changed_tools {
+                let expected = if *calls == 1 { "echo" } else { "after_echo" };
+                assert_eq!(request.tools.first().expect("current tools").name, expected);
+            }
             if *calls == 1 {
                 return Ok(ModelResponse {
                     tool_calls: vec![ToolCall {
@@ -761,6 +768,7 @@ mod tests {
         let mut session = Session::new("mock", "mock-model", PathBuf::from("."));
         let provider = MockProvider {
             calls: Mutex::new(0),
+            expect_changed_tools: false,
         };
         let output = Agent::new("test")
             .run_turn(
@@ -775,6 +783,46 @@ mod tests {
             .expect("agent turn");
         assert_eq!(output, "done");
         assert_eq!(session.messages.len(), 4);
+    }
+
+    struct ChangingTools(std::sync::atomic::AtomicBool);
+
+    #[async_trait]
+    impl ToolRuntime for ChangingTools {
+        fn specs(&self) -> Vec<ToolSpec> {
+            let mut specs = EchoTool.specs();
+            if self.0.load(std::sync::atomic::Ordering::Acquire) {
+                specs[0].name = "after_echo".into();
+            }
+            specs
+        }
+
+        async fn call(&self, call: &ToolCall, approval: &dyn ApprovalHandler) -> ToolResult {
+            self.0.store(true, std::sync::atomic::Ordering::Release);
+            EchoTool.call(call, approval).await
+        }
+    }
+
+    #[tokio::test]
+    async fn refreshes_tools_after_a_control_action() {
+        let mut session = Session::new("mock", "mock-model", PathBuf::from("."));
+        let provider = MockProvider {
+            calls: Mutex::new(0),
+            expect_changed_tools: true,
+        };
+        let tools = ChangingTools(std::sync::atomic::AtomicBool::new(false));
+        let output = Agent::new("test")
+            .run_turn(
+                &mut session,
+                "run",
+                &provider,
+                &tools,
+                &Approve,
+                &NoopObserver,
+            )
+            .await
+            .expect("turn");
+        assert_eq!(output, "done");
     }
 
     struct QueuedInputProvider {

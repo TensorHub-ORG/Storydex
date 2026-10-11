@@ -191,6 +191,8 @@ struct BridgeRequest {
     #[serde(default)]
     allowed_tool_names: Option<Vec<String>>,
     #[serde(default)]
+    minimal_context: bool,
+    #[serde(default)]
     max_tool_rounds: Option<usize>,
     #[serde(default)]
     allowed_read_paths: Option<Vec<PathBuf>>,
@@ -463,6 +465,9 @@ impl ToolRuntime for StorydexTools {
     }
 
     async fn call(&self, call: &ToolCall, approval: &dyn ApprovalHandler) -> ToolResult {
+        if !self.tool_name_allowed(&call.name) {
+            return ToolResult::error(self.tool_allowlist_error(&call.name));
+        }
         if call.name == "exit_plan_mode" {
             if !self.plan_mode_active.swap(false, Ordering::AcqRel) {
                 return ToolResult::success("Storydex plan mode is already disabled.");
@@ -480,9 +485,6 @@ impl ToolRuntime for StorydexTools {
             return ToolResult::success(
                 "Plan mode disabled. Continue only within the compiled turn capability and configured Storydex permission mode.",
             );
-        }
-        if !self.tool_name_allowed(&call.name) {
-            return ToolResult::error("Storydex turn tool allowlist blocks this tool");
         }
         if !self.read_path_allowed(call) {
             return ToolResult::error("Storydex turn read boundary blocks this path");
@@ -537,6 +539,19 @@ impl ToolRuntime for StorydexTools {
 }
 
 impl StorydexTools {
+    fn tool_allowlist_error(&self, name: &str) -> String {
+        let mut allowed = self
+            .allowed_tool_names
+            .as_ref()
+            .map(|names| names.iter().map(String::as_str).collect::<Vec<_>>())
+            .unwrap_or_default();
+        allowed.sort_unstable();
+        format!(
+            "Storydex turn tool allowlist blocks tool '{name}'. Allowed tools: {}. Use an allowed tool for the same task. This is a Storydex tool policy, not an operating-system or model-provider restriction.",
+            allowed.join(", ")
+        )
+    }
+
     fn tool_name_allowed(&self, name: &str) -> bool {
         self.allowed_tool_names
             .as_ref()
@@ -568,7 +583,7 @@ impl StorydexTools {
 
     fn rejected_core_call(&self, call: &ToolCall) -> Option<String> {
         if !self.tool_name_allowed(&call.name) {
-            return Some("Storydex turn tool allowlist blocks this tool".into());
+            return Some(self.tool_allowlist_error(&call.name));
         }
         let plan_mode_active = self.plan_mode_active.load(Ordering::Acquire);
         if plan_mode_active && !is_plan_safe_core_tool(&call.name) {
@@ -622,7 +637,8 @@ fn core_tool_allowed(capability: TurnCapability, core_writes_allowed: bool, name
         TurnCapability::ReadOnly => is_plan_safe_core_tool(name),
         TurnCapability::ScopedWrite => {
             is_plan_safe_core_tool(name)
-                || (core_writes_allowed && matches!(name, "write_file" | "edit_file"))
+                || (core_writes_allowed
+                    && matches!(name, "write_file" | "edit_file" | "apply_patch"))
         }
         TurnCapability::WorkspaceWrite => {
             is_plan_safe_core_tool(name) || (core_writes_allowed && is_workspace_core_tool(name))
@@ -898,7 +914,7 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
             .core_writes_allowed
             .unwrap_or(request.writes_allowed);
     let access_mode = capability.access_mode(base_access_mode);
-    let minimal_context = request.allowed_tool_names.is_some();
+    let minimal_context = request.minimal_context || request.allowed_tool_names.is_some();
     let mut system_prompt = if request.system_prompt.trim().is_empty() {
         format!(
             "You are Coomi Desktop for Storydex. Treat the author as the creative authority. Work only on the requested task. Inspect the directly relevant target first (prefer an explicit path or the active file); do not browse the whole workspace or reread unchanged files. Preserve quoted canon, voice, and explicit constraints. For writes, change only authorized paths, verify the target once, and stop. For read-only turns, never write. Do not use memory, loops, delegation, web search, or image tools unless the user explicitly requests them. Never invent canon or overwrite an author's decision. Report only verified results.\n\nStorydex workspace: {}",
@@ -1783,6 +1799,133 @@ mod tests {
         );
     }
 
+    struct ApproveTest;
+
+    #[async_trait]
+    impl ApprovalHandler for ApproveTest {
+        async fn approve(&self, _call: &ToolCall, _reason: &str) -> bool {
+            true
+        }
+    }
+
+    fn policy_test_tools(capability: TurnCapability, plan: bool) -> (PathBuf, StorydexTools) {
+        let directory =
+            std::env::temp_dir().join(format!("storydex-tool-policy-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(directory.join("allowed")).expect("test workspace");
+        let directory = directory.canonicalize().expect("canonical workspace");
+        let mut policy = SecurityPolicy::new(
+            &directory,
+            capability.access_mode(AccessMode::WorkspaceWrite),
+        )
+        .expect("security policy");
+        if capability == TurnCapability::ScopedWrite {
+            policy = policy
+                .with_allowed_write_roots(vec![directory.join("allowed")])
+                .expect("write roots");
+        }
+        let tools = StorydexTools {
+            core: CoreTools::new(directory.clone(), policy.clone()),
+            policy,
+            capability,
+            writes_allowed: capability.allows_writes(),
+            core_writes_allowed: capability.allows_writes(),
+            custom_specs: Vec::new(),
+            custom_names: HashSet::new(),
+            mutating_custom_names: HashSet::new(),
+            allowed_tool_names: None,
+            allowed_read_paths: None,
+            plan_mode_active: Arc::new(AtomicBool::new(plan)),
+            base_permission_mode: "ask_approval".into(),
+            emitter: Emitter::new(),
+            controls: Arc::new(ControlHub::default()),
+        };
+        (directory, tools)
+    }
+
+    fn remove_policy_test_workspace(directory: &Path) {
+        assert!(directory.starts_with(std::env::temp_dir().canonicalize().expect("temp root")));
+        std::fs::remove_dir_all(directory).expect("remove isolated workspace");
+    }
+
+    #[tokio::test]
+    async fn plan_exit_restores_only_the_original_write_capability() {
+        for capability in [TurnCapability::WorkspaceWrite, TurnCapability::ReadOnly] {
+            let (directory, tools) = policy_test_tools(capability, true);
+            let write = ToolCall {
+                id: "write".into(),
+                name: "write_file".into(),
+                arguments: json!({"path": "result.md", "content": "verified"}),
+            };
+            assert!(
+                tools
+                    .specs()
+                    .iter()
+                    .any(|spec| spec.name == "request_user_input")
+            );
+            assert!(
+                tools
+                    .specs()
+                    .iter()
+                    .any(|spec| spec.name == "exit_plan_mode")
+            );
+            assert!(!tools.specs().iter().any(|spec| spec.name == "write_file"));
+            assert!(!tools.call(&write, &ApproveTest).await.success);
+            assert!(!directory.join("result.md").exists());
+            let exit = ToolCall {
+                id: "exit".into(),
+                name: "exit_plan_mode".into(),
+                arguments: json!({}),
+            };
+            assert!(tools.call(&exit, &ApproveTest).await.success);
+            assert_eq!(
+                tools.specs().iter().any(|spec| spec.name == "write_file"),
+                capability.allows_writes()
+            );
+            assert_eq!(
+                tools.call(&write, &ApproveTest).await.success,
+                capability.allows_writes()
+            );
+            assert_eq!(
+                directory.join("result.md").exists(),
+                capability.allows_writes()
+            );
+            remove_policy_test_workspace(&directory);
+        }
+    }
+
+    #[tokio::test]
+    async fn scoped_patch_checks_every_path_before_modifying_any_file() {
+        let (directory, mut tools) = policy_test_tools(TurnCapability::ScopedWrite, false);
+        let patch = ToolCall {
+            id: "patch".into(),
+            name: "apply_patch".into(),
+            arguments: json!({
+                "patch": "*** Begin Patch\n*** Add File: allowed/ok.md\n+ok\n*** Add File: outside.md\n+blocked\n*** End Patch"
+            }),
+        };
+        assert!(tools.specs().iter().any(|spec| spec.name == "apply_patch"));
+        assert!(!tools.call(&patch, &ApproveTest).await.success);
+        assert!(!directory.join("allowed/ok.md").exists());
+        assert!(!directory.join("outside.md").exists());
+        let allowed_patch = ToolCall {
+            arguments: json!({
+                "patch": "*** Begin Patch\n*** Add File: allowed/ok.md\n+ok\n*** End Patch"
+            }),
+            ..patch
+        };
+        assert!(tools.call(&allowed_patch, &ApproveTest).await.success);
+        assert_eq!(
+            std::fs::read_to_string(directory.join("allowed/ok.md")).expect("written"),
+            "ok\n"
+        );
+        tools.allowed_tool_names = Some(HashSet::from(["read_file".into()]));
+        let rejection = tools.call(&allowed_patch, &ApproveTest).await;
+        assert!(!rejection.success);
+        assert!(rejection.output.contains("apply_patch"));
+        assert!(rejection.output.contains("read_file"));
+        remove_policy_test_workspace(&directory);
+    }
+
     #[test]
     fn plan_mode_core_allowlist_blocks_delegation_and_unknown_mcp_tools() {
         assert!(is_plan_safe_core_tool("read_file"));
@@ -1810,7 +1953,7 @@ mod tests {
             true,
             "write_file"
         ));
-        assert!(!core_tool_allowed(
+        assert!(core_tool_allowed(
             TurnCapability::ScopedWrite,
             true,
             "apply_patch"

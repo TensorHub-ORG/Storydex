@@ -6,7 +6,7 @@
 
 #![allow(clippy::result_large_err)]
 
-use crate::chat::{self, ChatStreamRequest, RuntimeSessionBinding};
+use crate::chat::{self, ChatStreamRequest, RuntimeSessionBinding, TurnWritePolicy};
 use crate::replacement;
 use crate::workspace;
 use crate::{AppState, error_response};
@@ -425,6 +425,7 @@ const WRITE_INTENT_SIGNALS: &[&str] = &[
     "写故事",
     "续写",
     "创建",
+    "新建",
     "新增",
     "生成",
     "删除",
@@ -648,6 +649,80 @@ fn apply_configured_capability(payload: &mut ChatStreamRequest, permission_mode:
     apply_inferred_capability(payload);
 }
 
+fn is_task_continuation(prompt: &str) -> bool {
+    matches!(
+        prompt
+            .trim()
+            .trim_end_matches(['。', '！', '!', '.', '，', ','])
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "继续"
+            | "继续执行"
+            | "确认"
+            | "确认执行"
+            | "可以"
+            | "可以执行"
+            | "好的"
+            | "好"
+            | "执行吧"
+            | "开始吧"
+            | "没问题"
+            | "按刚才的方案执行"
+            | "按这个方案执行"
+            | "就按这个方案"
+            | "按你说的做"
+            | "照这个做"
+            | "yes"
+            | "continue"
+            | "proceed"
+            | "go ahead"
+            | "confirmed"
+    )
+}
+
+fn restore_continuation_policy(
+    workspace: &Path,
+    session_id: &str,
+    payload: &mut ChatStreamRequest,
+) -> anyhow::Result<()> {
+    if has_explicit_write_policy(payload) || !is_task_continuation(&payload.prompt) {
+        return Ok(());
+    }
+    let Some(record) = replacement::latest_record(workspace, session_id)? else {
+        return Ok(());
+    };
+    if !matches!(
+        record.get("status").and_then(Value::as_str),
+        Some("completed" | "failed")
+    ) {
+        return Ok(());
+    }
+    let policy = record
+        .get("events")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .rev()
+        .find(|event| event.get("event").and_then(Value::as_str) == Some("TurnAuthorization"))
+        .and_then(|event| event.get("data"))
+        .and_then(|data| serde_json::from_value::<TurnWritePolicy>(data.clone()).ok());
+    if let Some(policy) = policy.filter(|policy| {
+        policy.writes_allowed
+            && matches!(
+                policy.capability_mode.as_str(),
+                "scoped_write" | "workspace_write"
+            )
+            && (payload.active_file.trim().is_empty()
+                || payload.active_file.replace('\\', "/") == policy.active_file.replace('\\', "/"))
+    }) {
+        policy.apply_to(payload);
+        payload.active_file = policy.active_file;
+        payload.continuation_prompt = Some(policy.source_prompt);
+    }
+    Ok(())
+}
+
 fn control_config_path(state: &AppState) -> PathBuf {
     crate::system::global_root(state)
         .join("config")
@@ -867,20 +942,50 @@ pub(crate) fn apply_chat_policy(
     session_id: &str,
     payload: &mut ChatStreamRequest,
 ) -> Result<(), ControlError> {
+    // The control endpoint delegates to the streaming endpoint with the same
+    // request. Do not compile an already overlaid plan request a second time.
+    if payload.base_permission_mode.is_some() {
+        return Ok(());
+    }
     let config =
         load_control_config(state).map_err(|error| ControlError::config(error.to_string()))?;
+    restore_continuation_policy(workspace, session_id, payload)
+        .map_err(|error| ControlError::config(error.to_string()))?;
+    payload.permission_mode = config.permission_mode.clone();
+    apply_configured_capability(payload, &config.permission_mode);
     let key = control_key(workspace, session_id);
     if config.plan_modes.get(&key).copied().unwrap_or(false) {
+        if let Err((code, message)) = chat::validate_refactor_request(payload, workspace) {
+            return Err(ControlError {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                code,
+                message: message.to_owned(),
+            });
+        }
+        payload.plan_resume_policy = Some(TurnWritePolicy::from_request(payload));
         payload.permission_mode = "plan_mode".to_owned();
         payload.capability_mode = "read_only".to_owned();
         payload.writes_allowed = false;
         payload.core_writes_allowed = Some(false);
         payload.allowed_write_roots.clear();
-    } else {
-        payload.permission_mode = config.permission_mode.clone();
-        apply_configured_capability(payload, &config.permission_mode);
     }
+    payload.base_permission_mode = Some(config.permission_mode);
     Ok(())
+}
+
+pub(crate) fn persist_plan_mode_exit(
+    state: &AppState,
+    workspace: &Path,
+    session_id: &str,
+) -> anyhow::Result<()> {
+    let _guard = CONTROL_MUTATION_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut config = load_control_config(state)?;
+    config
+        .plan_modes
+        .remove(&control_key(workspace, session_id));
+    save_control_config(state, &config)
 }
 
 #[derive(Debug)]
@@ -3055,11 +3160,108 @@ mod tests {
         assert_eq!(plan_request.capability_mode, "read_only");
         assert!(!plan_request.writes_allowed);
         assert_eq!(plan_request.core_writes_allowed, Some(false));
+        assert!(
+            plan_request
+                .plan_resume_policy
+                .as_ref()
+                .expect("resume policy")
+                .writes_allowed
+        );
+        assert_eq!(
+            plan_request.base_permission_mode.as_deref(),
+            Some("full_access")
+        );
+        apply_chat_policy(&state, &workspace, "session", &mut plan_request)
+            .expect("idempotent overlay");
+        assert!(
+            plan_request
+                .plan_resume_policy
+                .as_ref()
+                .expect("original policy")
+                .writes_allowed
+        );
+        persist_plan_mode_exit(&state, &workspace, "session").expect("persist exit");
+        assert!(
+            !load_control_config(&state)
+                .expect("config")
+                .plan_modes
+                .contains_key(&control_key(&workspace, "session"))
+        );
+    }
+
+    #[test]
+    fn continuation_preserves_authorized_scope_without_promoting_other_tasks() {
+        let directory = tempdir().expect("tempdir");
+        let workspace = directory.path().join("workspace");
+        fs::create_dir_all(workspace.join("assets")).expect("assets");
+        let workspace = workspace.canonicalize().expect("workspace");
+        let state = AppState::with_paths(
+            "token",
+            directory.path().join("home"),
+            directory.path().join("bridge"),
+            Some(workspace.clone()),
+            None,
+        )
+        .expect("state");
+        let original: ChatStreamRequest = serde_json::from_value(json!({
+            "prompt": "请重写 assets/hero.md", "activeFile": "assets/hero.md",
+            "capabilityMode": "scoped_write", "writesAllowed": true,
+            "coreWritesAllowed": true, "allowedWriteRoots": ["assets"]
+        }))
+        .expect("original");
+        let events = vec![(
+            "TurnAuthorization".to_owned(),
+            json!(TurnWritePolicy::from_request(&original)),
+        )];
+        replacement::persist_execution_record_with_events(replacement::ExecutionRecordInput {
+            workspace: &workspace,
+            session_id: "authorized",
+            trace_id: "write-task",
+            prompt: &original.prompt,
+            status: "completed",
+            events: &events,
+            reply: "方案已准备",
+            provider_id: "test",
+            model: "test",
+        })
+        .expect("authorization record");
+        for prompt in ["继续", "确认", "按刚才的方案执行", "go ahead"] {
+            let mut request: ChatStreamRequest =
+                serde_json::from_value(json!({"prompt": prompt})).expect("followup");
+            apply_chat_policy(&state, &workspace, "authorized", &mut request).expect("policy");
+            assert_eq!(request.capability_mode, "scoped_write", "{prompt}");
+            assert_eq!(request.allowed_write_roots, ["assets"]);
+            assert_eq!(request.active_file, "assets/hero.md");
+            assert_eq!(
+                request.continuation_prompt.as_deref(),
+                Some(original.prompt.as_str())
+            );
+            assert!(request.writes_allowed);
+        }
+        for (session, value) in [
+            ("another-session", json!({"prompt": "确认"})),
+            (
+                "authorized",
+                json!({"prompt": "继续", "capabilityMode": "read_only"}),
+            ),
+            (
+                "authorized",
+                json!({"prompt": "继续", "activeFile": "assets/other.md"}),
+            ),
+            ("authorized", json!({"prompt": "请只读分析当前文件"})),
+            ("authorized", json!({"prompt": "你好"})),
+        ] {
+            let mut request: ChatStreamRequest = serde_json::from_value(value).expect("request");
+            apply_chat_policy(&state, &workspace, session, &mut request).expect("policy");
+            assert!(!request.writes_allowed, "{}", request.prompt);
+            assert!(request.continuation_prompt.is_none());
+        }
     }
 
     #[test]
     fn natural_story_asset_write_phrases_enable_writes_without_promoting_advice() {
-        for prompt in ["写角色卡", "设计世界书", "编写一份人物卡"] {
+        for prompt in ["写角色卡", "设计世界书", "编写一份人物卡", "请新建角色卡"]
+        {
             let mut request: ChatStreamRequest = serde_json::from_value(json!({
                 "prompt": prompt
             }))

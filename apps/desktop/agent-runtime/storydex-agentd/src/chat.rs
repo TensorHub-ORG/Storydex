@@ -19,7 +19,7 @@ use axum::response::IntoResponse;
 use chrono::Utc;
 use coomi_services::ProviderRegistry;
 use futures_util::stream::unfold;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -42,7 +42,7 @@ const MAX_EXECUTION_TIMEOUT_MS: u64 = 600_000;
 const BRIDGE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const CONTROL_PLANE_PREFLIGHT_GRACE: Duration = Duration::from_millis(50);
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ChatStreamRequest {
     #[serde(default)]
@@ -86,6 +86,56 @@ pub(crate) struct ChatStreamRequest {
     pub(crate) clarification_artifact: Option<String>,
     #[serde(skip)]
     pub(crate) clarification_target: Option<String>,
+    #[serde(skip)]
+    pub(crate) base_permission_mode: Option<String>,
+    #[serde(skip)]
+    pub(crate) plan_resume_policy: Option<TurnWritePolicy>,
+    #[serde(skip)]
+    pub(crate) continuation_prompt: Option<String>,
+}
+
+/// Persist the actual authority of a task, rather than inferring it again from
+/// a short follow-up such as "continue". Explicit boundaries remain upper bounds.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TurnWritePolicy {
+    pub(crate) capability_mode: String,
+    pub(crate) writes_allowed: bool,
+    pub(crate) core_writes_allowed: Option<bool>,
+    pub(crate) allowed_write_roots: Vec<String>,
+    pub(crate) active_file: String,
+    pub(crate) source_prompt: String,
+}
+
+impl TurnWritePolicy {
+    pub(crate) fn from_request(payload: &ChatStreamRequest) -> Self {
+        Self {
+            capability_mode: payload.capability_mode.clone(),
+            writes_allowed: payload.writes_allowed,
+            core_writes_allowed: payload.core_writes_allowed,
+            allowed_write_roots: payload.allowed_write_roots.clone(),
+            active_file: if payload.active_file.trim().is_empty() {
+                payload
+                    .clarification_target
+                    .clone()
+                    .or_else(|| extract_explicit_target(&payload.prompt))
+                    .unwrap_or_default()
+            } else {
+                payload.active_file.clone()
+            },
+            source_prompt: payload
+                .continuation_prompt
+                .clone()
+                .unwrap_or_else(|| payload.prompt.clone()),
+        }
+    }
+
+    pub(crate) fn apply_to(&self, payload: &mut ChatStreamRequest) {
+        payload.capability_mode = self.capability_mode.clone();
+        payload.writes_allowed = self.writes_allowed;
+        payload.core_writes_allowed = self.core_writes_allowed;
+        payload.allowed_write_roots = self.allowed_write_roots.clone();
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -978,7 +1028,7 @@ async fn run_chat_with_timeout(execution: ChatExecution) {
     }
 }
 
-fn validate_refactor_request(
+pub(crate) fn validate_refactor_request(
     payload: &ChatStreamRequest,
     workspace: &Path,
 ) -> Result<(), (&'static str, &'static str)> {
@@ -1624,7 +1674,11 @@ fn resolve_asset_target(workspace: &Path, artifact: Option<&str>, subject: &str)
 }
 
 fn assess_turn_intent(payload: &ChatStreamRequest, workspace: &Path) -> TurnIntentAssessment {
-    let prompt = payload.prompt.trim();
+    let prompt = payload
+        .continuation_prompt
+        .as_deref()
+        .unwrap_or(&payload.prompt)
+        .trim();
     let lower = prompt.to_ascii_lowercase();
     let explicit_path = extract_explicit_target(prompt);
     let active_file = normalize_prompt_path(&payload.active_file);
@@ -1882,6 +1936,11 @@ fn assess_turn_intent(payload: &ChatStreamRequest, workspace: &Path) -> TurnInte
 }
 
 fn should_use_rust_modify_existing(payload: &ChatStreamRequest) -> bool {
+    // Continuations need the bound conversation, which the generic bridge
+    // restores. A standalone asset rewrite would only see "continue".
+    if payload.continuation_prompt.is_some() {
+        return false;
+    }
     let prompt = payload.prompt.to_ascii_lowercase();
     ![
         "write_file",
@@ -2347,6 +2406,11 @@ async fn run_chat(execution: ChatExecution) {
             }
         }
     }
+    let authorization = payload
+        .plan_resume_policy
+        .clone()
+        .unwrap_or_else(|| TurnWritePolicy::from_request(&payload));
+    trace_events.push(("TurnAuthorization".to_owned(), json!(authorization)));
     let published_plan_failed = turn_contract
         .get("turnPlan")
         .and_then(|plan| plan.get("chapterPlanValidation"))
@@ -3421,6 +3485,11 @@ async fn run_bridge(context: BridgeRunContext<'_>) -> anyhow::Result<()> {
                     }
                 };
                 let kind = packet.get("type").and_then(Value::as_str).unwrap_or_default();
+                if kind == "plan_mode_changed"
+                    && packet.pointer("/data/active").and_then(Value::as_bool) == Some(false)
+                {
+                    crate::agent_control::persist_plan_mode_exit(state, workspace, session_id)?;
+                }
                 if kind == "session_bound" {
                     persist_session_binding(
                         state,
@@ -3742,10 +3811,18 @@ fn bridge_request(
     session_id: &str,
     runtime_session_id: Option<Uuid>,
 ) -> anyhow::Result<Value> {
-    let assessment = assess_turn_intent(payload, workspace);
+    let mut execution_payload = payload.clone();
+    if let Some(policy) = &payload.plan_resume_policy {
+        policy.apply_to(&mut execution_payload);
+    }
+    let assessment = assess_turn_intent(&execution_payload, workspace);
     let (max_tool_rounds, allowed_tool_names) = bridge_tool_policy(payload, &assessment);
     let allowed_read_paths = bridge_allowed_read_paths(payload, workspace, &assessment);
-    let allowed_write_roots = payload
+    let write_policy = payload
+        .plan_resume_policy
+        .clone()
+        .unwrap_or_else(|| TurnWritePolicy::from_request(payload));
+    let allowed_write_roots = write_policy
         .allowed_write_roots
         .iter()
         .map(|value| {
@@ -3760,13 +3837,15 @@ fn bridge_request(
             })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let writes_authorized = payload.writes_allowed
+    let writes_authorized = write_policy.writes_allowed
         && matches!(
-            payload.capability_mode.trim(),
+            write_policy.capability_mode.trim(),
             "scoped_write" | "workspace_write"
         );
     const COOMI_IDENTITY_PROMPT: &str = "You are Coomi, the Storydex Agent. Your identity remains Coomi regardless of the permission mode or turn capability.";
-    let capability_boundary = if writes_authorized {
+    let capability_boundary = if payload.permission_mode == "plan_mode" {
+        "Plan mode is the current tool boundary: use read-only tools until planning is complete. Call exit_plan_mode to continue under the original task's compiled capability and configured permission mode; an explicitly read-only task remains read-only after exiting."
+    } else if writes_authorized {
         "This turn may modify only paths authorized by the compiled turn capability. Preserve unrelated work and report only verified results. Before a continuation read, reuse nextPage.byte_offset and nextPage.expected_revision exactly. If edit_file reports old_string_not_found, re-read the affected area and retry once with current exact text; never repeat an unchanged failed call. Do not retry a mutation rejected by the turn capability."
     } else {
         "This turn has no project-write authority. Use only tools allowed by the compiled turn capability and do not modify project files. Describe this as the current tool boundary, never as a different agent role."
@@ -3822,7 +3901,7 @@ fn bridge_request(
         .as_ref()
         .filter(|paths| !paths.is_empty())
     {
-        let can_discover_directories = allowed_tool_names.as_ref().is_some_and(|names| {
+        let can_discover_directories = allowed_tool_names.as_ref().is_none_or(|names| {
             names
                 .iter()
                 .any(|name| matches!(name.as_str(), "search" | "grep_files" | "list_dir"))
@@ -3848,17 +3927,18 @@ fn bridge_request(
         "systemPrompt": system_prompt,
         "storydexSessionId": session_id,
         "permissionMode": payload.permission_mode,
-        "basePermissionMode": payload.permission_mode,
-        "capabilityMode": payload.capability_mode,
+        "basePermissionMode": payload.base_permission_mode.as_deref().unwrap_or(&payload.permission_mode),
+        "capabilityMode": write_policy.capability_mode,
         "reasoningEffort": payload.reasoning_effort,
         "storyGeneration": payload.story_generation,
-        "writesAllowed": payload.writes_allowed,
-        "coreWritesAllowed": payload.core_writes_allowed.unwrap_or(payload.writes_allowed),
+        "writesAllowed": write_policy.writes_allowed,
+        "coreWritesAllowed": write_policy.core_writes_allowed.unwrap_or(write_policy.writes_allowed),
         "allowedWriteRoots": allowed_write_roots,
         "toolSpecs": storydex_tool_specs(),
         "mutatingToolNames": [],
         "maxToolRounds": max_tool_rounds,
         "allowedToolNames": allowed_tool_names,
+        "minimalContext": !writes_authorized || assessment.primary == "story_asset",
         "allowedReadPaths": allowed_read_paths,
     });
     if let Some(path) = state.replay_fixture() {
@@ -3874,38 +3954,19 @@ fn bridge_tool_policy(
     payload: &ChatStreamRequest,
     assessment: &TurnIntentAssessment,
 ) -> (usize, Option<Vec<String>>) {
-    let read_tools = || {
-        let mut tools = vec!["read_file".to_owned()];
-        let prompt = payload.prompt.to_ascii_lowercase();
-        let cross_asset = (assessment.artifact == "character_card"
-            && (prompt.contains("世界书")
-                || prompt.contains("世界观")
-                || prompt.contains("worldbook"))
-            && !prompt_excludes_asset(&prompt, &["世界书", "世界观", "worldbook"]))
-            || (assessment.artifact == "worldbook_entry"
-                && (prompt.contains("角色") || prompt.contains("character"))
-                && !prompt_excludes_asset(&prompt, &["角色", "character"]));
-        if assessment.target_scope != "file" || cross_asset {
-            tools.push("search".to_owned());
-            tools.push("list_dir".to_owned());
-        }
-        if prompt.contains("wiki") || prompt.contains("知识图谱") {
-            tools.push("StorydexWikiQuery".to_owned());
-        }
-        tools
-    };
-    let read_only = !payload.writes_allowed || payload.capability_mode == "read_only";
+    // Capability, plan mode and path policies are the authorization boundary.
+    // Asset classification must not silently remove tools such as clarification,
+    // web search, apply_patch or exit_plan_mode from an otherwise authorized task.
+    let policy = payload
+        .plan_resume_policy
+        .clone()
+        .unwrap_or_else(|| TurnWritePolicy::from_request(payload));
+    let read_only = !policy.writes_allowed || policy.capability_mode == "read_only";
     if read_only {
-        return (READ_ONLY_TOOL_ROUND_LIMIT, Some(read_tools()));
+        return (READ_ONLY_TOOL_ROUND_LIMIT, None);
     }
     if assessment.primary == "story_asset" {
-        let mut tools = read_tools();
-        tools.extend(
-            ["write_file", "edit_file"]
-                .into_iter()
-                .map(ToOwned::to_owned),
-        );
-        return (STORY_ASSET_TOOL_ROUND_LIMIT, Some(tools));
+        return (STORY_ASSET_TOOL_ROUND_LIMIT, None);
     }
     (GENERAL_TOOL_ROUND_LIMIT, None)
 }
@@ -3943,7 +4004,11 @@ fn bridge_allowed_read_paths(
     {
         add_path(workspace.join(relative));
     }
-    let lower = payload.prompt.to_ascii_lowercase();
+    let lower = payload
+        .continuation_prompt
+        .as_deref()
+        .unwrap_or(&payload.prompt)
+        .to_ascii_lowercase();
     let roots = [
         ("character_card", ".storydex/characters"),
         ("worldbook_entry", ".storydex/worldbook"),
@@ -5060,7 +5125,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_request_narrows_read_only_and_story_asset_tool_surfaces() {
+    fn bridge_request_keeps_path_boundaries_without_keyword_tool_allowlists() {
         let directory = tempdir().expect("tempdir");
         let workspace = directory.path().join("workspace");
         std::fs::create_dir_all(workspace.join(".storydex/characters")).expect("characters");
@@ -5096,10 +5161,8 @@ mod tests {
         let read_request = bridge_request(&state, &read_only, &workspace, "read", None)
             .expect("read bridge request");
         assert_eq!(read_request["maxToolRounds"], 5);
-        assert_eq!(
-            read_request["allowedToolNames"],
-            json!(["read_file", "search", "list_dir"])
-        );
+        assert!(read_request["allowedToolNames"].is_null());
+        assert_eq!(read_request["minimalContext"], true);
         assert!(
             read_request["allowedReadPaths"]
                 .as_array()
@@ -5124,10 +5187,8 @@ mod tests {
         assert!(write_prompt.contains("operation=modify_existing"));
         assert!(write_prompt.contains("targetState=existing_file"));
         assert_eq!(write_request["maxToolRounds"], 8);
-        assert_eq!(
-            write_request["allowedToolNames"],
-            json!(["read_file", "write_file", "edit_file"])
-        );
+        assert!(write_request["allowedToolNames"].is_null());
+        assert_eq!(write_request["minimalContext"], true);
         let write_paths = write_request["allowedReadPaths"]
             .as_array()
             .expect("write read paths");
@@ -5168,6 +5229,44 @@ mod tests {
             })
         }));
         assert_eq!(create_paths.len(), 1);
+    }
+
+    #[test]
+    fn plan_bridge_keeps_the_original_write_policy_for_explicit_exit() {
+        let directory = tempdir().expect("tempdir");
+        let workspace = directory.path().canonicalize().expect("workspace");
+        let state = AppState::with_paths(
+            "token",
+            directory.path().join("home"),
+            directory.path().join("bridge"),
+            Some(workspace.clone()),
+            None,
+        )
+        .expect("state");
+        let mut payload: ChatStreamRequest = serde_json::from_value(json!({
+            "prompt": "请新建角色卡 hero.md", "capabilityMode": "workspace_write",
+            "writesAllowed": true, "coreWritesAllowed": true
+        }))
+        .expect("request");
+        payload.plan_resume_policy = Some(TurnWritePolicy::from_request(&payload));
+        payload.permission_mode = "plan_mode".into();
+        payload.base_permission_mode = Some("ask_approval".into());
+        payload.capability_mode = "read_only".into();
+        payload.writes_allowed = false;
+        payload.core_writes_allowed = Some(false);
+        validate_refactor_request(&payload, &workspace).expect("plan remains read only upstream");
+        let request = bridge_request(&state, &payload, &workspace, "plan", None).expect("bridge");
+        assert_eq!(request["permissionMode"], "plan_mode");
+        assert_eq!(request["basePermissionMode"], "ask_approval");
+        assert_eq!(request["capabilityMode"], "workspace_write");
+        assert_eq!(request["writesAllowed"], true);
+        assert!(request["allowedToolNames"].is_null());
+        assert!(
+            request["systemPrompt"]
+                .as_str()
+                .expect("prompt")
+                .contains("exit_plan_mode")
+        );
     }
 
     #[tokio::test]
