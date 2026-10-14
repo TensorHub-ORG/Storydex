@@ -33,6 +33,14 @@
   </a>
 </p>
 
+## Star 趋势
+
+<p align="center">
+  <a href="https://www.star-history.com/#TensorHub-ORG/Storydex&Date">
+    <img src="https://api.star-history.com/svg?repos=TensorHub-ORG/Storydex&type=Date" alt="Storydex Star History" width="700" />
+  </a>
+</p>
+
 ## 简介
 
 Storydex 面向需要长期维护世界观、角色关系和章节连续性的小说作者。它以本地文件为事实源，把写作、资料整理、Agent 协作和版本控制放进同一个桌面工作台：你可以先查证项目资料，再让 Agent 生成或修改内容，并在提交前审阅 Diff。
