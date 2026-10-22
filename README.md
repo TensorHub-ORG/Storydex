@@ -5,8 +5,8 @@
 </p>
 
 <p align="center">
-  <strong>本地优先的 AI 长篇小说创作工作台</strong><br />
-  把正文、设定、Agent、检索、WIKI 和版本记录放在一个可审阅、可回滚的工作区。
+  <strong>为长篇小说创作设计的本地优先 AI 工作台</strong><br />
+  项目资料、正文与版本历史在同一工作区协作；Agent 先检索再生成，修改由作者审阅。
 </p>
 
 <p align="center">
@@ -43,7 +43,9 @@
 
 ## 简介
 
-Storydex 面向需要长期维护世界观、角色关系和章节连续性的小说作者。它以本地文件为事实源，把写作、资料整理、Agent 协作和版本控制放进同一个桌面工作台：你可以先查证项目资料，再让 Agent 生成或修改内容，并在提交前审阅 Diff。
+Storydex 服务于需要持续维护世界观、人物关系、伏笔与章节连续性的小说作者。它把章节、角色、世界书、WIKI、创作记忆与版本历史组织在本地项目中，由 Coomi Agent 围绕这些资料协助续写、整理、审阅和设定维护。
+
+创作从项目上下文开始：先查找相关正文与设定，再生成建议或修改内容；每次文件变更都可以审阅 Diff，确认后再提交。你可以随时查看历史、比较版本并回退。小说项目保存在普通本地目录，模型服务由你自行配置。
 
 Windows 当前源码主线的唯一桌面链路是 `Vue → Tauri 2 → storydex-agentd → Coomi Rust`。Python/FastAPI 仅保留非 Stable 的后端兼容与测试边界，不提供 Agent 产品入口；Electron 桌面运行时和旧打包入口已移除。已发布版本的具体资产格式以对应的 [GitHub Release](https://github.com/TensorHub-ORG/Storydex/releases) 为准，README 不复制逐版本历史说明。
 
