@@ -40,6 +40,31 @@ async function callExportedApiFunctions(module: Record<string, unknown>, exclude
 }
 
 describe("API envelope and transport contracts", () => {
+  it("sends explicit workspace identity for settings reads and both write endpoints", async () => {
+    const workspaceRoot = "C:/project A";
+    await workspaceApi.fetchStoryProjectSettings(workspaceRoot);
+    expect(apiClient.get).toHaveBeenLastCalledWith("/workspace/story/settings", { params: { workspaceRoot } });
+    await workspaceApi.updateStoryProjectSettings({ workspaceRoot, chapterLengthTier: "long" } as any);
+    expect(apiClient.put).toHaveBeenLastCalledWith("/workspace/story/settings", { workspaceRoot, chapterLengthTier: "long" });
+    await workspaceApi.updateStoryChapterCompletion({ workspaceRoot, chapterPath: "chapters/one", completed: true });
+    expect(apiClient.put).toHaveBeenLastCalledWith("/workspace/story/chapters/completion", { workspaceRoot, chapterPath: "chapters/one", completed: true });
+  });
+  it("distinguishes server errors, timeouts and unreadable responses", () => {
+    const error = { isAxiosError: true, message: "Network Error" };
+    expect(describeTransportError({ ...error, response: { status: 500, data: "error" } }, "fallback")).toContain("HTTP 500");
+    expect(describeTransportError({ ...error, request: { status: 503 } }, "fallback")).toContain("HTTP 503");
+    expect(describeTransportError({ ...error, response: { status: 500, data: { error: { message: "specific failure" } } } }, "fallback")).toBe("specific failure");
+    expect(describeTransportError({ ...error, code: "ECONNABORTED" }, "fallback")).toContain("超时");
+    expect(describeTransportError(error, "fallback")).toContain("未收到可读取的后端响应");
+    expect(describeTransportError(error, "fallback")).not.toContain("启动");
+  });
+
+  it("rejects oversized UTF-8 drafts before sending without truncating them", async () => {
+    const content = "文".repeat(3 * 1024 * 1024);
+    await expect(workspaceApi.writeWorkspaceFile({ relativePath: "large.md", content, expectedContentSha256: "v1" })).rejects.toThrow("8 MiB");
+    expect(apiClient.post).not.toHaveBeenCalled();
+  });
+
   it("covers successful calls for every non-stream API surface", async () => {
     const results = await Promise.all([
       callExportedApiFunctions(agentApi, ["streamAgentPrompt"]),

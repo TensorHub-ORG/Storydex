@@ -50,6 +50,8 @@ export interface AgentCoomiModelChoice {
 
 export interface AgentChatRequest {
   prompt: string;
+  taskMode?: "chat" | "generate_chapter";
+  editorDocuments?: Array<{ relativePath: string; content: string; baseRevision?: string; dirty: boolean }>;
   activeFile?: string;
   workspaceRoot?: string;
   reasoningEffort?: AgentReasoningEffort;
@@ -416,6 +418,7 @@ export interface AgentStreamPacket {
   chapterContentMode?: string;
   structurePassed?: boolean;
   writeToolApplied?: boolean;
+  outputTruncated?: boolean;
   preciseWordCountEnabled?: boolean;
   revisionApplied?: boolean;
   lengthControlStrategy?: string;

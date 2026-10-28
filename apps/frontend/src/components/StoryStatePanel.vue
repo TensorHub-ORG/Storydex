@@ -235,8 +235,8 @@
             </template>
             <div v-else class="ssp-wiki-graph-empty">
               <span class="material-symbols-rounded">hub</span>
-              <p>暂无知识图谱数据</p>
-              <small>点击右上角 ✦ 让 Agent 深度生成，或保存正文后自动同步。</small>
+              <p>{{ wikiErrorMessage || '暂无知识图谱数据' }}</p>
+              <small v-if="!wikiErrorMessage">点击右上角 ✦ 让 Agent 深度生成，或保存正文后自动同步。</small>
             </div>
           </section>
 
@@ -362,10 +362,8 @@
                     客体 ID
                     <input v-model="wikiReviewDraft(candidate).objectId" type="text" />
                   </label>
-                  <label class="ssp-wiki-review-field">
-                    正式写入路径
-                    <input v-model="wikiReviewDraft(candidate).targetSourcePath" type="text" placeholder="可选 .storydex/...md" />
-                  </label>
+                  <p v-if="candidate.reviewReason">{{ candidate.reviewReason }}</p>
+                  <small>确认结果保存到项目关系审核记录，图谱重建时保留。</small>
                   <div class="ssp-wiki-audit-grid compact">
                     <span>状态</span><strong>{{ candidate.reviewStatus || "review_required" }} / {{ candidate.knowledgeStatus || "observed" }}</strong>
                     <span>confidence</span><strong>{{ candidate.confidence ?? "-" }}</strong>
@@ -923,7 +921,8 @@ interface StoryWikiData {
 }
 
 interface StoryWikiGraphQueryResponse {
-  mode: "category" | "search" | "entry" | "node" | "overview";
+  mode: "category" | "search" | "entry" | "node" | "overview" | "unavailable";
+  queryStatus?: string;
   query: string;
   category: string;
   entryId: string;
@@ -2147,7 +2146,7 @@ async function loadWikiGraph(
     depth: params.depth ?? (params.nodeId ? 1 : 1),
     limit: 60,
     offset: Math.max(0, Number(params.offset ?? 0)),
-    includeReview: params.includeReview === false ? 0 : 1,
+    includeReview: params.includeReview === false ? "false" : "true",
   };
   if (params.nodeId) {
     queryParams.nodeId = params.nodeId;
@@ -2168,6 +2167,9 @@ async function loadWikiGraph(
       return;
     }
     const page = data.data ?? null;
+    if (page && (["error", "unavailable", "stale", "rebuilding"].includes(String(page.status)) || page.queryStatus === "unavailable")) {
+      throw new Error("知识图谱尚未成功生成，请检查同步错误后重试。");
+    }
     wikiErrorMessage.value = "";
     wikiGraphQueryData.value = append && page
       ? mergeWikiGraphPage(wikiGraphQueryData.value, page)
@@ -2347,6 +2349,7 @@ function runWikiAgentWorkflow(workflow: "generate" | "update" | "review"): void 
     review: "请全面审阅当前 Storydex 项目的 WIKI 与知识图谱，对照章节原文检查事实、角色、时间线和关系。请列出缺失、矛盾、过期和证据不足的条目，并在确认可靠后通过 Storydex 项目接口修正。"
   } as const;
   agentStore.promptInput = prompts[workflow];
+  agentStore.taskMode = "chat";
   uiStore.setAgentCollapsed(false);
   wikiAgentTone.value = "idle";
   wikiAgentStatus.value = "指令已填入 Agent 输入框，可检查或补充后发送。";

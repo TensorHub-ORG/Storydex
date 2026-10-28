@@ -1,5 +1,6 @@
 export interface WorkspaceFileReadRequest {
   relativePath: string;
+  workspaceRoot?: string;
 }
 
 export interface WorkspaceFileWindowRequest {
@@ -27,6 +28,8 @@ export interface WorkspaceFileWindowResponse {
 export interface WorkspaceFileWriteRequest {
   relativePath: string;
   content: string;
+  workspaceRoot?: string;
+  expectedContentSha256?: string;
 }
 
 export interface WorkspaceCreateFileRequest {
@@ -117,6 +120,8 @@ export interface WorkspaceImportFilesResponse {
 
 export interface WorkspaceFileDocument {
   relativePath: string;
+  workspaceRoot?: string;
+  fullContentSha256?: string;
   content: string;
   size: number;
   wordCount?: number;
@@ -494,6 +499,7 @@ export interface StoryProjectSettingsResponse {
 }
 
 export interface StoryProjectSettingsUpdateRequest {
+  workspaceRoot?: string;
   segmentExtension: StorySegmentExtension;
   storySegmentFormat?: string;
   maxSegmentsPerChapter: number;
@@ -540,6 +546,7 @@ export interface StoryProjectSettingsUpdateRequest {
 }
 
 export interface StoryChapterCompletionRequest {
+  workspaceRoot?: string;
   chapterPath: string;
   completed: boolean;
 }

@@ -11,7 +11,7 @@ const transport = vi.hoisted(() => ({
   delete: vi.fn().mockResolvedValue({ data: { ok: true, data: {}, trace: null, audit: [] } }),
   defaults: { headers: { common: {} } }, interceptors: { request: { use: vi.fn() }, response: { use: vi.fn() } }
 }));
-vi.mock("axios", () => ({ default: { create: () => transport, isAxiosError: () => false } }));
+vi.mock("axios", () => ({ default: { create: () => transport, isAxiosError: (error: any) => error?.isAxiosError === true } }));
 
 import StoryStatePanel from "@/components/StoryStatePanel.vue";
 import { useAgentStore } from "@/stores/agent";
@@ -32,6 +32,45 @@ afterEach(() => {
 });
 
 describe("StoryStatePanel deterministic graph and inspector behavior", () => {
+  it("shows a graph HTTP 500 as a server error without claiming the service is stopped", async () => {
+    const wrapper = mountPanel({ relationshipOnly: true });
+    await flushPromises();
+    transport.get.mockRejectedValueOnce({ isAxiosError: true, message: "Request failed with status code 500", response: { status: 500, data: "injected failure" } });
+    await (wrapper.vm as any).__testUtils.loadWikiGraph();
+    await flushPromises();
+    expect(wrapper.text()).toContain("后端处理请求失败（HTTP 500）");
+    expect(wrapper.text()).not.toContain("启动后端");
+    expect(wrapper.text()).not.toContain("暂无知识图谱数据");
+    wrapper.unmount();
+  });
+
+  it("sends graph booleans in the Rust query format and distinguishes errors from empty data", async () => {
+    const wrapper = mountPanel({ relationshipOnly: true });
+    await flushPromises();
+    const graphCall = transport.get.mock.calls.find(([url]) => url === "/story/wiki/graph");
+    expect(graphCall?.[1].params.includeReview).toBe("true");
+    transport.get.mockImplementation(async (url: string) => {
+      if (url === "/story/wiki/graph") throw new Error("图谱查询失败");
+      return envelope({});
+    });
+    const u = (wrapper.vm as any).__testUtils;
+    await u.loadWikiGraph();
+    await flushPromises();
+    expect(wrapper.text()).toContain("图谱查询失败");
+    expect(wrapper.text()).not.toContain("暂无知识图谱数据");
+    wrapper.unmount();
+    transport.get.mockImplementation(async () => envelope({}));
+  });
+  it("shows unavailable stale projections as failures even with HTTP success", async () => {
+    const wrapper = mountPanel({ relationshipOnly: true }); const u = (wrapper.vm as any).__testUtils;
+    await flushPromises();
+    transport.get.mockResolvedValueOnce({ data: { ok: true, data: { status: "stale", queryStatus: "unavailable", graph: { nodes: [], edges: [] } } } });
+    await u.loadWikiGraph();
+    await flushPromises();
+    expect(wrapper.text()).toContain("知识图谱尚未成功生成");
+    wrapper.unmount();
+  });
+
   it("fills the Agent composer and expands the panel for WIKI workflows", async () => {
     const wrapper = mountPanel();
     const u = (wrapper.vm as any).__testUtils;
@@ -291,7 +330,7 @@ describe("StoryStatePanel deterministic graph and inspector behavior", () => {
     await u.loadMoreWikiGraph();
 
     expect(transport.get).toHaveBeenCalledWith("/story/wiki/graph", {
-      params: expect.objectContaining({ offset: 60, includeReview: 1, category: "setting" }),
+      params: expect.objectContaining({ offset: 60, includeReview: "true", category: "setting" }),
     });
     expect(unref(u.wikiGraphStats)).toMatchObject({
       nodeCount: 62,

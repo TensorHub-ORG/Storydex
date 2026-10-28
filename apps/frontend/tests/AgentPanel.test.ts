@@ -13,6 +13,7 @@ const api = vi.hoisted(() => ({
 }));
 const git = vi.hoisted(() => ({ summary: null as any, refreshSummary: vi.fn().mockResolvedValue(undefined) }));
 const workspace = vi.hoisted(() => ({
+  documents: {}, refreshOpenDocuments: vi.fn().mockResolvedValue(undefined),
   launchScreenVisible: false,
   currentProject: { workspaceRoot: "C:/isolated/story" },
   health: null,
@@ -650,6 +651,23 @@ describe("AgentPanel", () => {
     wrapper.unmount();
   });
 
+  it.each(["allow", "deny"])("submits the actual %s permission button payload", async (decision) => {
+    const store = useAgentStore();
+    store.pendingApprovals = [{ approvalId: "permission-ui", kind: "permission", question: "允许写入？", allowText: false,
+      options: [{ value: "allow", label: "允许" }, { value: "deny", label: "拒绝" }] }];
+    const wrapper = shallowMount(AgentPanel);
+    await nextTick();
+    await wrapper.findAll(".coomi-approval-option")[decision === "allow" ? 0 : 1].trigger("mousedown");
+    await wrapper.find(".coomi-approval-action.primary").trigger("mousedown");
+    await flushPromises();
+    expect(api.resolveAgentCoomiApproval).toHaveBeenCalledWith(
+      "permission-ui", decision,
+      expect.objectContaining({ approved: decision === "allow", value: decision, option: decision }),
+      expect.any(Object)
+    );
+    wrapper.unmount();
+  });
+
   it("submits every selected question option as an explicit answer", async () => {
     const store = useAgentStore();
     store.pendingApprovals = [
@@ -967,8 +985,9 @@ describe("AgentPanel", () => {
       storyChapterTemplateId: "custom"
     } as any;
     utils.syncStoryGenerationOptionsFromProjectSettings(); expect(store.storyFragmentCount).toBe(3);
-    // Toggling the popover clears the editing guard, so external settings sync again.
-    utils.toggleStoryOptions(); await nextTick();
+    // Closing does not release the guard until pending settings writes finish.
+    utils.toggleStoryOptions(); await flushPromises();
+    if (utils.storyOptionsOpen.value) { utils.toggleStoryOptions(); await flushPromises(); }
     utils.syncStoryGenerationOptionsFromProjectSettings(); expect(store.storyFragmentCount).toBe(4);
     await utils.persistStoryGenerationOptions({ fragmentCount: 5 }); expect(workspace.updateStorySettings).toHaveBeenCalled();
 
@@ -990,7 +1009,7 @@ describe("AgentPanel", () => {
     wrapper.unmount();
   });
 
-  it("renders three continuation length tiers and persists only the selected tier", async () => {
+  it("uses length shortcuts to persist a visible target with strict checking off", async () => {
     workspace.storySettings.storyLengthTierEnabled = true;
     const store = useAgentStore();
     const wrapper = shallowMount(AgentPanel);
@@ -1003,20 +1022,108 @@ describe("AgentPanel", () => {
     expect(tierButtons).toHaveLength(3);
     expect(tierButtons.map((button) => button.text())).toEqual(["短", "中", "长"]);
     expect(tierButtons[1].attributes("aria-pressed")).toBe("true");
-    expect(wrapper.findAll('input[type="number"]')).toHaveLength(1);
+    expect(wrapper.findAll('input[type="number"]')).toHaveLength(2);
     expect(wrapper.find(".coomi-story-tier-field input").exists()).toBe(false);
     expect(wrapper.find(".coomi-story-precision-toggle").exists()).toBe(false);
-    expect(wrapper.text()).toContain("本次续写篇幅");
-    expect(wrapper.text()).not.toContain("目标字数");
+    expect(wrapper.text()).toContain("篇幅快捷选择");
+    expect(wrapper.text()).toContain("目标字数");
+    expect(wrapper.text()).toContain("不因字数偏差自动修订或拒绝保存");
+    expect((wrapper.find('.coomi-story-precision-field input').element as HTMLInputElement).checked).toBe(false);
 
     await tierButtons[2].trigger("click");
     await vi.waitFor(() => expect(workspace.updateStorySettings).toHaveBeenCalled());
     expect(store.chapterLengthTier).toBe("long");
     const persisted = workspace.updateStorySettings.mock.calls.at(-1)?.[0] as Record<string, unknown>;
-    expect(persisted).toMatchObject({ chapterLengthTier: "long" });
-    expect(persisted).not.toHaveProperty("chapterWordCountTarget");
-    expect(persisted).not.toHaveProperty("preciseWordCountEnabled");
+    expect(persisted).toMatchObject({ chapterLengthTier: "long", chapterWordCountTarget: 6000, preciseWordCountEnabled: false });
+    expect(store.chapterWordCountTarget).toBe(6000);
     expect(persisted).not.toHaveProperty("storyFragmentWordCount");
+    wrapper.unmount();
+  });
+
+  it("keeps precise controls when the popover closes before settings writes finish", async () => {
+    const store = useAgentStore();
+    const wrapper = shallowMount(AgentPanel);
+    await wrapper.find(".coomi-story-toggle").trigger("click");
+    const first = deferred<void>();
+    const second = deferred<void>();
+    workspace.updateStorySettings.mockImplementationOnce(() => first.promise).mockImplementationOnce(() => second.promise);
+    await wrapper.find('.coomi-story-precision-field input').setValue(true);
+    await wrapper.findAll('.coomi-story-popover input[type="number"]')[1].setValue("6000");
+    await wrapper.find(".coomi-story-toggle").trigger("click");
+    expect(store.preciseWordCountEnabled).toBe(true);
+    expect(store.chapterWordCountTarget).toBe(6000);
+    workspace.storySettings.preciseWordCountEnabled = true;
+    first.resolve(); await flushPromises();
+    expect(store.chapterWordCountTarget).toBe(6000);
+    workspace.storySettings.chapterWordCountTarget = 6000;
+    second.resolve(); await flushPromises();
+    await wrapper.find(".coomi-story-toggle").trigger("click");
+    expect((wrapper.find('.coomi-story-precision-field input').element as HTMLInputElement).checked).toBe(true);
+    expect((wrapper.findAll('.coomi-story-popover input[type="number"]')[1].element as HTMLInputElement).value).toBe("6000");
+    wrapper.unmount();
+  });
+
+  it("keeps the target editable and persisted after disabling strict checks", async () => {
+    workspace.storySettings.preciseWordCountEnabled = true;
+    workspace.storySettings.chapterWordCountTarget = 6000;
+    const wrapper = shallowMount(AgentPanel);
+    await wrapper.find('.coomi-story-toggle').trigger('click');
+    expect(wrapper.text()).toContain('最多自动修订一次');
+    await wrapper.find('.coomi-story-precision-field input').setValue(false);
+    await flushPromises();
+    expect(workspace.updateStorySettings.mock.calls.at(-1)?.[0]).toMatchObject({
+      preciseWordCountEnabled: false, chapterWordCountTarget: 6000
+    });
+    const targetInput = wrapper.findAll('.coomi-story-popover input[type="number"]')[1];
+    expect((targetInput.element as HTMLInputElement).value).toBe('6000');
+    await targetInput.setValue('5000');
+    await flushPromises();
+    expect(workspace.updateStorySettings.mock.calls.at(-1)?.[0]).toMatchObject({
+      preciseWordCountEnabled: false, chapterWordCountTarget: 5000
+    });
+    workspace.storySettings.preciseWordCountEnabled = false;
+    workspace.storySettings.chapterWordCountTarget = 5000;
+    await wrapper.find('.coomi-story-toggle').trigger('click');
+    await wrapper.find('.coomi-story-toggle').trigger('click');
+    expect((wrapper.find('.coomi-story-precision-field input').element as HTMLInputElement).checked).toBe(false);
+    expect(wrapper.text()).toContain('不因字数偏差自动修订或拒绝保存');
+    wrapper.unmount();
+  });
+
+  it("keeps the latest tier through a delayed earlier write and immediate popover close", async () => {
+    const store = useAgentStore();
+    const wrapper = shallowMount(AgentPanel);
+    await wrapper.find(".coomi-story-toggle").trigger("click");
+    const first = deferred<void>(); const second = deferred<void>();
+    workspace.updateStorySettings.mockImplementationOnce(() => first.promise).mockImplementationOnce(() => second.promise);
+    const buttons = wrapper.findAll('.coomi-story-tier-control button');
+    await buttons[0].trigger("click");
+    await buttons[2].trigger("click");
+    await wrapper.find(".coomi-story-toggle").trigger("click");
+    expect(store.chapterLengthTier).toBe("long");
+    workspace.storySettings.chapterLengthTier = "short";
+    first.resolve(); await flushPromises();
+    expect(store.chapterLengthTier).toBe("long");
+    workspace.storySettings.chapterLengthTier = "long";
+    second.resolve(); await flushPromises();
+    expect(store.chapterLengthTier).toBe("long");
+    wrapper.unmount();
+  });
+
+  it("returns to confirmed settings when consecutive changes fail", async () => {
+    const store = useAgentStore();
+    const wrapper = shallowMount(AgentPanel);
+    const utils = (wrapper.vm as any).__testUtils;
+    await wrapper.find(".coomi-story-toggle").trigger("click");
+    const first = deferred<void>(); const second = deferred<void>();
+    workspace.updateStorySettings.mockImplementationOnce(async () => { await first.promise; throw new Error("first write failed"); })
+      .mockImplementationOnce(async () => { await second.promise; throw new Error("second write failed"); });
+    const short = utils.persistStoryGenerationOptions({ chapterLengthTier: "short" });
+    const long = utils.persistStoryGenerationOptions({ chapterLengthTier: "long" });
+    first.resolve(); await short;
+    expect(store.chapterLengthTier).toBe("long");
+    second.resolve(); await long;
+    expect(store.chapterLengthTier).toBe("medium");
     wrapper.unmount();
   });
 
@@ -1069,17 +1176,19 @@ describe("AgentPanel", () => {
     wrapper.unmount();
   });
 
-  it("hides unaccepted continuation length tiers by default", async () => {
+  it("shows effective length tiers even with a legacy disabled setting", async () => {
     const wrapper = shallowMount(AgentPanel);
     const utils = (wrapper.vm as any).__testUtils;
 
     utils.toggleStoryOptions();
     await nextTick();
 
-    expect(wrapper.find('[role="radiogroup"][aria-label="本次续写篇幅"]').exists()).toBe(false);
-    expect(wrapper.text()).not.toContain("本次续写篇幅");
-    expect(wrapper.text()).not.toContain("1片段/中");
-    expect(wrapper.text()).toContain("1片段");
+    const tierControl = wrapper.find('[role="radiogroup"][aria-label="本次续写篇幅"]');
+    expect(tierControl.exists()).toBe(true);
+    expect(wrapper.text()).toContain("1片段/约2500字");
+    await tierControl.findAll("button")[0].trigger("click");
+    expect(useAgentStore().chapterLengthTier).toBe("short");
+    expect(wrapper.text()).toContain("1片段/约1500字");
     wrapper.unmount();
   });
 

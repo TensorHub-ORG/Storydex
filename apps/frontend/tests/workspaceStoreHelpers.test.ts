@@ -18,9 +18,9 @@ describe("workspace store deterministic helpers", () => {
       chapterLengthTier: "short",
       chapter_length_tier: "short"
     });
-    expect(payload).not.toHaveProperty("chapterWordCountTarget");
+    expect(payload).toHaveProperty("chapterWordCountTarget", 1800);
     expect(payload).not.toHaveProperty("chapter_word_count_target");
-    expect(payload).not.toHaveProperty("preciseWordCountEnabled");
+    expect(payload).toHaveProperty("preciseWordCountEnabled", true);
     expect(payload).not.toHaveProperty("precise_word_count_enabled");
 
     expect(
@@ -65,7 +65,7 @@ describe("workspace store deterministic helpers", () => {
       contextConcisionMaxInputTokens: 999999, chapterCompletion: { "chapters/a": { completed: true } as never }
     });
     expect(payload).toMatchObject({ segmentExtension: ".txt", maxSegmentsPerChapter: 99, storyFragmentCount: 1, chapterLengthTier: "long", chapter_length_tier: "long", storyChapterTemplateId: "single_file_chapter_directory", autoUpdateVariables: true, autoUpdateWiki: false, chapterDirectoryNamingMode: "auto", contextConcisionMaxCalls: 7 });
-    expect(payload).not.toHaveProperty("chapterWordCountTarget");
+    expect(payload).toHaveProperty("chapterWordCountTarget", 20000);
     expect(payload).not.toHaveProperty("storyFragmentWordCount");
     const fallback = { ...u.defaultStoryProjectSettings(), storyFragmentCount: 4, autoUpdateWiki: true };
     const response = u.normalizeStorySettingsResponse({ storySegmentFormat: "txt", max_segments_per_chapter: 5, story_length_tier_enabled: "true", story_fragment_word_count: 1200, story_chapter_template_id: "single_file_chapter_directory", auto_name_chapter_title: "manual", updatedAt: " now " } as never, { source: "api", fallbackPath: "fallback.json", fallbackSettings: fallback, currentSettings: null });

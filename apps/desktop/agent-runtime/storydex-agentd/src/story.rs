@@ -4,10 +4,11 @@
 
 use crate::workspace::{
     atomic_write, current_workspace, normalize_relative, resolve_existing, resolve_target,
+    resolve_workspace_for_request,
 };
 use crate::{AppState, error_response};
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
@@ -27,9 +28,45 @@ const CURRENT_STATE_RELATIVE_PATH: &str = ".storydex/memory/current-state/全部
 const LATEST_INDEX_RELATIVE_PATH: &str = ".storydex/memory/current-state/最新快照索引.json";
 const SNAPSHOT_ROOT_RELATIVE_PATH: &str = ".storydex/memory/chapters";
 
+pub(crate) async fn evolution_snapshot(State(state): State<AppState>) -> Response {
+    let started = Instant::now();
+    let workspace = match current_workspace(&state) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    let mut data = json!({"currentDir": ".storydex/memory/current"});
+    for (key, file) in [
+        ("changeLedger", "change_ledger.json"),
+        ("relationshipGraph", "relationship_graph.json"),
+        ("foreshadowLedger", "foreshadow_ledger.json"),
+        ("chapterOutline", "chapter_outline.json"),
+        ("characterConflicts", "character_conflicts.json"),
+        ("timeline", "timeline.json"),
+    ] {
+        let relative = format!(".storydex/memory/current/{file}");
+        match resolve_optional_path(&workspace, &relative) {
+            Ok(Some(path)) => match fs::read(&path)
+                .map_err(anyhow::Error::from)
+                .and_then(|bytes| {
+                    serde_json::from_slice::<Value>(&bytes).map_err(anyhow::Error::from)
+                }) {
+                Ok(value) => data[key] = value,
+                Err(error) => return io_error("Reading evolution state", error),
+            },
+            Ok(None) => {
+                data[key] = json!({});
+            }
+            Err(response) => return response,
+        }
+    }
+    success(data, started, "read_story_evolution_snapshot")
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StorySettingsInput {
+    #[serde(default)]
+    workspace_root: String,
     segment_extension: Option<String>,
     story_segment_format: Option<String>,
     max_segments_per_chapter: Option<i64>,
@@ -48,8 +85,7 @@ pub(crate) struct StorySettingsInput {
     context_concision_min_calls: Option<i64>,
     context_concision_max_calls: Option<i64>,
     context_concision_max_input_tokens: Option<i64>,
-    #[serde(default)]
-    chapter_completion: BTreeMap<String, bool>,
+    chapter_completion: Option<BTreeMap<String, bool>>,
 }
 
 fn trace(started: Instant) -> Value {
@@ -268,16 +304,19 @@ fn settings_response(workspace: &Path) -> Result<Value, Response> {
             json!(".storydex/memory/current-state"),
         );
         object.insert("memoryRoot".to_owned(), json!(".storydex/memory"));
-        object.insert("storyLengthTierEnabled".to_owned(), json!(false));
+        object.insert("storyLengthTierEnabled".to_owned(), json!(true));
         object.insert("chapterCompletion".to_owned(), completion);
         object.insert("source".to_owned(), json!("project_file"));
     }
     Ok(value)
 }
 
-pub(crate) async fn story_settings(State(state): State<AppState>) -> Response {
+pub(crate) async fn story_settings(
+    State(state): State<AppState>,
+    Query(query): Query<crate::project::WorkspaceQuery>,
+) -> Response {
     let started = Instant::now();
-    let workspace = match current_workspace(&state) {
+    let workspace = match resolve_workspace_for_request(&state, &query.workspace_root) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -292,9 +331,19 @@ pub(crate) async fn update_story_settings(
     Json(input): Json<StorySettingsInput>,
 ) -> Response {
     let started = Instant::now();
-    let workspace = match current_workspace(&state) {
+    let workspace = match resolve_workspace_for_request(&state, &input.workspace_root) {
         Ok(value) => value,
         Err(response) => return response,
+    };
+    let _write_lock = match coomi_services::ProjectWriteLock::acquire(&workspace) {
+        Ok(lock) => lock,
+        Err(error) => {
+            return story_error(
+                StatusCode::CONFLICT,
+                "workspace_write_busy",
+                error.to_string(),
+            );
+        }
     };
     let current = match read_settings(&workspace) {
         Ok(value) => value,
@@ -349,10 +398,13 @@ pub(crate) async fn update_story_settings(
         );
         object.insert("chapterWordCountTarget".to_owned(), json!(target));
         object.insert("storyFragmentWordCount".to_owned(), json!(target));
+        // An explicit canonical target supersedes old range aliases. Preserve
+        // legacy range-only requests until those clients migrate.
+        let canonical_target = input.chapter_word_count_target.map(|_| target);
         object.insert(
             "storyFragmentWordCountMin".to_owned(),
             json!(i64_value(
-                input.story_fragment_word_count_min,
+                canonical_target.or(input.story_fragment_word_count_min),
                 &baseline,
                 "storyFragmentWordCountMin",
                 target,
@@ -363,7 +415,7 @@ pub(crate) async fn update_story_settings(
         object.insert(
             "storyFragmentWordCountMax".to_owned(),
             json!(i64_value(
-                input.story_fragment_word_count_max,
+                canonical_target.or(input.story_fragment_word_count_max),
                 &baseline,
                 "storyFragmentWordCountMax",
                 target,
@@ -464,7 +516,9 @@ pub(crate) async fn update_story_settings(
     if let Err(error) = write_json(&settings_file, &updated) {
         return io_error("Writing story settings atomically", error);
     }
-    if let Err(response) = replace_chapter_completion(&workspace, &input.chapter_completion) {
+    if let Some(completion) = &input.chapter_completion
+        && let Err(response) = replace_chapter_completion(&workspace, completion)
+    {
         return response;
     }
     match settings_response(&workspace) {
@@ -689,9 +743,22 @@ pub(crate) async fn update_chapter_completion(
     Json(input): Json<Value>,
 ) -> Response {
     let started = Instant::now();
-    let workspace = match current_workspace(&state) {
+    let workspace = match resolve_workspace_for_request(
+        &state,
+        input["workspaceRoot"].as_str().unwrap_or_default(),
+    ) {
         Ok(value) => value,
         Err(response) => return response,
+    };
+    let _write_lock = match coomi_services::ProjectWriteLock::acquire(&workspace) {
+        Ok(lock) => lock,
+        Err(error) => {
+            return story_error(
+                StatusCode::CONFLICT,
+                "workspace_write_busy",
+                error.to_string(),
+            );
+        }
     };
     let raw_relative = input
         .get("chapterPath")

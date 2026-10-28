@@ -168,6 +168,23 @@ describe("high-density component handler matrices", () => {
     wrapper.unmount();
   });
 
+  it("keeps backup and save failures visible and provides an explicit backup retry", async () => {
+    const store = useWorkspaceStore(); store.launchScreenVisible = false;
+    store.applyFileDocument({ relativePath: "large.md", content: "draft", extension: ".md", size: 5, updatedAt: "now", kind: "file" });
+    store.documents["large.md"].saveError = "内容超过 8 MiB 保存上限";
+    store.draftPersistenceError = "草稿自动备份失败";
+    const retry = vi.spyOn(store, "persistDrafts").mockResolvedValue(true);
+    const wrapper = mount(EditorPane, { global: { stubs: { teleport: true, WelcomeStartPage: true, GitReviewPane: true } } });
+    expect(wrapper.text()).toContain("8 MiB");
+    expect(wrapper.text()).toContain("草稿自动备份失败");
+    await wrapper.findAll('button').find(button => button.text() === "重试草稿备份")!.trigger("click");
+    expect(retry).toHaveBeenCalledOnce();
+    store.workspaceError = "";
+    await nextTick();
+    expect(wrapper.text()).toContain("8 MiB");
+    wrapper.unmount();
+  });
+
   it("executes EditorPane document, tab, markdown and formatting handlers", async () => {
     const store = useWorkspaceStore();
     store.launchScreenVisible = false;
@@ -196,6 +213,38 @@ describe("high-density component handler matrices", () => {
       (utils.renderCharacterJsonAsMarkdown as Function)(content);
       (utils.parseCharacterJson as Function)(content);
     }
+    wrapper.unmount();
+  });
+
+  it("keeps preview input and disk conflict versions across saves and reloads", async () => {
+    const router = createRouter({ history: createMemoryHistory(), routes: [{ path: "/preview", component: FilePreviewView }] });
+    await router.push("/preview"); await router.isReady();
+    const wrapper = mount(FilePreviewView, { global: { plugins: [router] } });
+    const utils = (wrapper.vm as any).__testUtils;
+    const tab = utils.ensureTab("draft.md");
+    Object.assign(tab, { content: "submitted", savedContent: "original", fullContentSha256: "v1", workspaceRoot: "C:/project" });
+    let finish!: (result: unknown) => void;
+    previewApi.writeWorkspaceFile.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const saving = utils.saveTab(tab);
+    tab.content = "submitted plus typing";
+    finish({ data: { content: "submitted", fullContentSha256: "v2" } });
+    expect(await saving).toBe(false);
+    expect(tab.content).toBe("submitted plus typing");
+    expect(tab.savedContent).toBe("submitted");
+    expect(tab.fullContentSha256).toBe("v2");
+    previewApi.readWorkspaceFile.mockResolvedValueOnce({ data: { relativePath: "draft.md", content: "agent edit", fullContentSha256: "v3" } } as any);
+    await utils.loadTabContent(tab);
+    expect(tab.content).toBe("submitted plus typing");
+    expect(tab.conflict.content).toBe("agent edit");
+    expect(await utils.saveTab(tab)).toBe(false);
+    previewApi.readWorkspaceFile.mockRejectedValueOnce(new Error("offline"));
+    await utils.loadTabContent(tab);
+    expect(tab.content).toBe("submitted plus typing");
+    expect(tab.conflict.content).toBe("agent edit");
+    previewApi.writeWorkspaceFile.mockImplementationOnce(({ content }) => Promise.resolve({ data: { content, fullContentSha256: "v4" } } as any));
+    await utils.resolveConflict(tab);
+    expect(previewApi.writeWorkspaceFile).toHaveBeenLastCalledWith(expect.objectContaining({ expectedContentSha256: "v3", workspaceRoot: "C:/project" }));
+    expect(tab.savedContent).toBe(tab.content);
     wrapper.unmount();
   });
 

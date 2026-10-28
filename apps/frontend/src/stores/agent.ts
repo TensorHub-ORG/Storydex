@@ -97,6 +97,7 @@ interface AgentState {
   commitActionLabel: string;
   reasoningEffort: AgentReasoningEffort;
   storyFragmentCount: number;
+  taskMode: "chat" | "generate_chapter";
   chapterLengthTier: ChapterLengthTier;
   chapterWordCountTarget: number;
   preciseWordCountEnabled: boolean;
@@ -165,6 +166,7 @@ export const useAgentStore = defineStore("agent", {
     commitActionLabel: "",
     reasoningEffort: "high",
     storyFragmentCount: 1,
+    taskMode: "chat",
     chapterLengthTier: "medium",
     chapterWordCountTarget: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
     preciseWordCountEnabled: false,
@@ -907,9 +909,8 @@ export const useAgentStore = defineStore("agent", {
             storyGeneration: {
               fragmentCount: this.storyFragmentCount,
               chapterLengthTier: this.chapterLengthTier,
-              ...(this.preciseWordCountEnabled
-                ? { chapterWordCountTarget: this.chapterWordCountTarget, preciseWordCountEnabled: true }
-                : {}),
+              chapterWordCountTarget: this.chapterWordCountTarget,
+              preciseWordCountEnabled: this.preciseWordCountEnabled,
               chapterTemplateId: this.storyChapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID
             },
             sourceFollowupMessageId: next.messageId,
@@ -1018,9 +1019,8 @@ export const useAgentStore = defineStore("agent", {
         storyGeneration: {
           fragmentCount: this.storyFragmentCount,
           chapterLengthTier: this.chapterLengthTier,
-          ...(this.preciseWordCountEnabled
-            ? { chapterWordCountTarget: this.chapterWordCountTarget, preciseWordCountEnabled: true }
-            : {}),
+          chapterWordCountTarget: this.chapterWordCountTarget,
+          preciseWordCountEnabled: this.preciseWordCountEnabled,
           chapterTemplateId: this.storyChapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID
         },
         replaceLatestTraceId: expectedTraceId
@@ -1080,9 +1080,8 @@ export const useAgentStore = defineStore("agent", {
         storyGeneration: {
           fragmentCount: this.storyFragmentCount,
           chapterLengthTier: this.chapterLengthTier,
-          ...(this.preciseWordCountEnabled
-            ? { chapterWordCountTarget: this.chapterWordCountTarget, preciseWordCountEnabled: true }
-            : {}),
+          chapterWordCountTarget: this.chapterWordCountTarget,
+          preciseWordCountEnabled: this.preciseWordCountEnabled,
           chapterTemplateId: this.storyChapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID
         }
       };
@@ -1225,6 +1224,7 @@ export const useAgentStore = defineStore("agent", {
       const workspaceStore = useWorkspaceStore();
       const request: AgentChatRequest = {
         prompt,
+        taskMode: this.taskMode,
         activeFile: workspaceStore.activeFileBindingOrPath || workspaceStore.activeFile || "",
         workspaceRoot: workspaceStore.currentProject?.workspaceRoot || workspaceStore.health?.workspaceRoot || "",
         reasoningEffort: resolveReasoningEffort(
@@ -1234,12 +1234,12 @@ export const useAgentStore = defineStore("agent", {
         storyGeneration: {
           fragmentCount: this.storyFragmentCount,
           chapterLengthTier: this.chapterLengthTier,
-          ...(this.preciseWordCountEnabled
-            ? { chapterWordCountTarget: this.chapterWordCountTarget, preciseWordCountEnabled: true }
-            : {}),
+          chapterWordCountTarget: this.chapterWordCountTarget,
+          preciseWordCountEnabled: this.preciseWordCountEnabled,
           chapterTemplateId: this.storyChapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID
         }
       };
+      this.taskMode = "chat";
       await this.executePromptRequest(request);
     },
 
@@ -1272,6 +1272,14 @@ export const useAgentStore = defineStore("agent", {
       if (!prompt || this.isRunning) {
         return false;
       }
+      const workspace = useWorkspaceStore();
+      request = {
+        ...request,
+        taskMode: request.taskMode || "chat",
+        editorDocuments: Object.values(workspace.documents).filter(doc => doc.dirty && !doc.transient).map(doc => ({
+          relativePath: doc.relativePath, content: doc.content, baseRevision: doc.fullContentSha256, dirty: true,
+        })),
+      };
       const sessionId = options?.sessionId || this.currentSessionId || "default";
       const traceId = createTraceId();
       const now = new Date().toISOString();
@@ -1382,6 +1390,7 @@ export const useAgentStore = defineStore("agent", {
         this.isRunning = false;
         this.runStartedAt = null;
         activeStreamAbortController = null;
+        await workspace.refreshOpenDocuments();
       }
       return succeeded;
     },
@@ -1564,8 +1573,15 @@ export const useAgentStore = defineStore("agent", {
         }
         if (precisePlan) {
           this.setStoryGenerationOptions({
+            chapterLengthTier: this.chapterLengthTier,
             chapterWordCountTarget: preciseTarget,
             preciseWordCountEnabled: true
+          });
+        } else if (wordCountPolicy.mode === "guidance" && preciseTarget !== null) {
+          this.setStoryGenerationOptions({
+            chapterLengthTier: this.chapterLengthTier,
+            chapterWordCountTarget: preciseTarget,
+            preciseWordCountEnabled: false
           });
         } else if (turnPlan.chapterLengthTier !== undefined) {
           this.preciseWordCountEnabled = false;
@@ -2187,6 +2203,7 @@ function statusForPacket(eventName: string, packet: AgentStreamPacket): CoomiWat
   }
   if (eventName === "StoryGenerationValidation") {
     if (!packet.passed) return "warning";
+    if (packet.preciseWordCountEnabled === false) return "success";
     if (packet.chapterLengthTier && packet.tierHit === false) return "warning";
     const precisionMiss = packet.preciseWordCountEnabled === true && packet.precisionAchieved === false;
     return packet.passed && !packet.belowBudget && !packet.overBudget && !precisionMiss ? "success" : "warning";
@@ -2398,9 +2415,13 @@ function summarizeTurnContractPacket(packet: AgentStreamPacket): string {
     ?? firstNumber(wordCountPolicy, ["target"])
     ?? Math.round((fragmentWordCountMin + fragmentWordCountMax) / 2);
   const acceptWordCountMin = firstNumber(wordCountPolicy, ["acceptanceMinimum"])
-    ?? Math.max(50, Math.round(fragmentWordCountMin * 0.70));
+    ?? (wordCountPolicy.mode === "precise"
+      ? Math.ceil(chapterWordCountTarget * 0.90)
+      : Math.max(50, Math.round(fragmentWordCountMin * 0.70)));
   const acceptWordCountMax = firstNumber(wordCountPolicy, ["acceptanceMaximum"])
-    ?? Math.round(fragmentWordCountMax * 1.30);
+    ?? (wordCountPolicy.mode === "precise"
+      ? Math.floor(chapterWordCountTarget * 1.10)
+      : Math.round(fragmentWordCountMax * 1.30));
   const requiresTemplate = Boolean(turnPlan.requiresChapterTemplateSelection);
   const selectedTemplate = firstString(turnPlan, ["selectedChapterTemplate"]);
   const selectedTemplateDetail = toRecord(turnPlan.selectedChapterTemplateDetail) || {};
@@ -2436,6 +2457,8 @@ function summarizeTurnContractPacket(packet: AgentStreamPacket): string {
     `片段：${fragmentCount} 条`,
     ...(tierMode
       ? [`本次续写篇幅：${chapterLengthTierLabel(chapterLengthTier)}`]
+      : wordCountPolicy.mode === "guidance"
+        ? [turnPlan.chapterWordCountTarget ? `参考目标：约 ${chapterWordCountTarget} 字` : `参考篇幅：${chapterLengthTierLabel(chapterLengthTier)}`, "严格字数检查：关闭"]
       : [
           `章目标：${chapterWordCountTarget} 字`,
           `可接受：${acceptWordCountMin}-${acceptWordCountMax} 字`
@@ -2499,10 +2522,12 @@ function summarizeStoryDraftMeasuredPacket(packet: AgentStreamPacket): string {
   const retainedWordCount = firstNumber(record, ["retainedWordCount"]);
   const resultingWordCount = firstNumber(record, ["resultingWordCount"]);
   const generatedWordCount = firstNumber(record, ["generatedWordCount", "draftGeneratedWordCount"]);
-  const tier = packet.chapterLengthTier
+  const tier = packet.chapterWordCountTarget
+    ? ` · ${packet.preciseWordCountEnabled ? '目标' : '参考目标约'} ${packet.chapterWordCountTarget} 字`
+    : packet.chapterLengthTier
     ? ` · ${chapterLengthTierLabel(packet.chapterLengthTier)}`
     : "";
-  const hit = packet.chapterLengthTier
+  const hit = packet.preciseWordCountEnabled === false ? "" : packet.chapterLengthTier
     ? packet.tierHit === true ? " · 已命中" : " · 未命中"
     : "";
   const tierCandidate = Boolean(
@@ -2516,7 +2541,9 @@ function summarizeStoryDraftMeasuredPacket(packet: AgentStreamPacket): string {
   if (retainedWordCount !== null) {
     pieces.push(`保留正文：${retainedWordCount} 字`);
   }
-  if (tierCandidate && resultingWordCount !== null) {
+  if (packet.preciseWordCountEnabled !== undefined) {
+    pieces.push("尚未写入");
+  } else if (tierCandidate && resultingWordCount !== null) {
     pieces.push(`落盘后本章：${resultingWordCount} 字`);
   } else if (generatedWordCount !== null) {
     pieces.push(`本轮新增：${generatedWordCount} 字`);
@@ -2570,9 +2597,15 @@ function summarizeStoryGenerationValidationPacket(packet: AgentStreamPacket): st
       ? "章节已写入"
       : "候选未写入";
     const hitStatus = packet.tierHit === true ? "档位已命中" : "档位未命中";
+    const lengthStatus = packet.preciseWordCountEnabled === false
+      ? packet.chapterWordCountTarget ? `参考目标：约 ${packet.chapterWordCountTarget} 字` : `参考篇幅：${tierLabel}`
+      : packet.preciseWordCountEnabled === true
+        ? `目标 ${packet.chapterWordCountTarget} 字 · ${packet.precisionAchieved ? "字数检查通过" : "字数未达标"}`
+        : `${tierLabel} · ${hitStatus}`;
     const structureStatus = packet.structurePassed === false ? "章节结构未通过" : "章节结构通过";
     const qualityStatus = packet.machineQualityPassed === false ? "质量门禁未通过" : "质量门禁通过";
-    return `${writeStatus} · 本次续写：${actualWordCount} 字 · ${tierLabel} · ${hitStatus} · ${structureStatus} · ${qualityStatus}`;
+    const completionStatus = packet.outputTruncated === true ? " · 输出不完整" : "";
+    return `${writeStatus} · 本次续写：${actualWordCount} 字 · ${lengthStatus} · ${structureStatus} · ${qualityStatus}${completionStatus}`;
   }
   const fragments = Array.isArray(packet.fragments) ? packet.fragments : [];
   const packetTargetMin = Number(packet.targetWordCountMin ?? packet.targetWordCount ?? 0);

@@ -203,12 +203,23 @@
             @click="toggleStoryOptions"
           >
             <span class="material-symbols-rounded">tune</span>
-            <span>{{ storyOptionsLabel }}</span>
+            <span>{{ agentStore.taskMode === 'generate_chapter' ? '生成新章节' : storyOptionsLabel }}</span>
             <span class="material-symbols-rounded coomi-story-caret">
               {{ storyOptionsOpen ? "expand_more" : "chevron_right" }}
             </span>
           </button>
           <div v-if="storyOptionsOpen" class="coomi-status-popover coomi-story-popover">
+            <label class="coomi-story-field">
+              <span>本次任务</span>
+              <select v-model="agentStore.taskMode">
+                <option value="chat">普通任务</option>
+                <option value="generate_chapter">按模板生成新章节</option>
+              </select>
+            </label>
+            <small v-if="workspaceStore.storySettingsError" class="coomi-story-template-hint error" role="alert">
+              {{ workspaceStore.storySettingsError }}
+              <button type="button" @click="workspaceStore.dismissStorySettingsError()">知道了</button>
+            </small>
             <label class="coomi-story-field">
               <span>片段数量</span>
               <input
@@ -221,13 +232,14 @@
                 @input="updateStoryFragmentCount"
               />
             </label>
-            <div v-if="storyLengthTierEnabled" class="coomi-story-field coomi-story-tier-field">
-              <span>本次续写篇幅</span>
+            <div class="coomi-story-field coomi-story-tier-field">
+              <span>篇幅快捷选择</span>
               <div class="coomi-story-tier-control" role="radiogroup" aria-label="本次续写篇幅">
                 <button
                   v-for="option in chapterLengthTierOptions"
                   :key="option.value"
                   type="button"
+                  :title="`目标约 ${{ short: 1500, medium: 3000, long: 6000 }[option.value]} 字，可自行调整`"
                   :class="{ active: agentStore.chapterLengthTier === option.value }"
                   :aria-pressed="agentStore.chapterLengthTier === option.value"
                   @click="updateChapterLengthTier(option.value)"
@@ -237,14 +249,20 @@
               </div>
             </div>
             <label class="coomi-story-field coomi-story-precision-field">
-              <span>精确目标</span>
+              <span>严格字数检查</span>
               <input
                 type="checkbox"
                 :checked="agentStore.preciseWordCountEnabled"
                 @change="updatePreciseWordCountEnabled"
               />
             </label>
-            <label v-if="agentStore.preciseWordCountEnabled" class="coomi-story-field">
+            <small class="coomi-story-template-hint">
+              {{ agentStore.preciseWordCountEnabled
+                ? '开启：按目标字数上下浮动 10% 验收，未达标时最多自动修订一次，会增加时间和用量；仍未达标则保留候选稿，不写入章节。'
+                : '关闭：目标字数仅作写作提示，按实际篇幅保存，不因字数偏差自动修订或拒绝保存。' }}
+              AI 不保证达到目标。字数按非空白字符计算（含标点），片段共用整章目标；空正文或检测到截断时不写入，有内容时保留候选稿并说明原因。
+            </small>
+            <label class="coomi-story-field">
               <span>目标字数</span>
               <input
                 type="number"
@@ -735,6 +753,8 @@ const storyOptionsOpen = ref(false);
 // authoritative: a settings refresh kicked off when the popover opened must not
 // clobber a just-typed value if it resolves late (read/write race).
 const storyOptionsEditing = ref(false);
+const storyOptionsPending = ref(0);
+let storyOptionsRevision = 0;
 const selectedCommandIndex = ref(0);
 const foldState = ref<Record<string, boolean>>({});
 const toolChunkState = ref<Record<string, boolean>>({});
@@ -830,7 +850,7 @@ const slashCommands = [
   { value: "/loop ", description: "运行循环任务" }
 ];
 const permissionOptions: Array<{ value: PermissionChoice; label: string; description: string }> = [
-  { value: "ask_approval", label: "询问确认", description: "关键操作前等待你确认。" },
+  { value: "ask_approval", label: "询问确认", description: "Agent 写入、编辑、补丁、章节生成和 WIKI 更新均需确认；命令按权限策略确认，读取无需确认。" },
   { value: "approve_for_me", label: "自动批准", description: "常规操作自动通过。" },
   { value: "full_access", label: "完全访问", description: "允许 Coomi 直接执行任务。" }
 ];
@@ -951,15 +971,8 @@ const selectedReasoningOption = computed(
 const reasoningLabel = computed(() => {
   return `推理：${selectedReasoningOption.value?.shortLabel || selectedReasoningMode.value}`;
 });
-const storyLengthTierEnabled = computed(
-  () => workspaceStore.storySettings.storyLengthTierEnabled === true
-);
 const storyOptionsLabel = computed(() =>
-  agentStore.preciseWordCountEnabled
-    ? `${agentStore.storyFragmentCount}片段/${agentStore.chapterWordCountTarget}字`
-    : storyLengthTierEnabled.value
-    ? `${agentStore.storyFragmentCount}片段/${chapterLengthTierLabel(agentStore.chapterLengthTier)}`
-    : `${agentStore.storyFragmentCount}片段`
+  `${agentStore.storyFragmentCount}片段/${agentStore.preciseWordCountEnabled ? '' : '约'}${agentStore.chapterWordCountTarget}字`
 );
 const selectedChapterTemplate = computed(() =>
   agentStore.storyChapterTemplates.find((template) => template.id === agentStore.storyChapterTemplateId) || null
@@ -1225,11 +1238,19 @@ watch(executionFloatSignature, (signature, previousSignature) => {
   }
 });
 
+watch(() => workspaceStore.currentProject?.workspaceRoot, () => {
+  storyOptionsEditing.value = false;
+  storyOptionsOpen.value = false;
+  syncStoryGenerationOptionsFromProjectSettings();
+});
+
 watch(
   () => [
     workspaceStore.currentProject?.workspaceRoot || "",
     workspaceStore.storySettings.storyFragmentCount,
     workspaceStore.storySettings.chapterLengthTier,
+    workspaceStore.storySettings.preciseWordCountEnabled,
+    workspaceStore.storySettings.chapterWordCountTarget,
     workspaceStore.storySettings.storyChapterTemplateId
   ],
   () => {
@@ -1241,7 +1262,10 @@ watch(
 // Opening the popover starts a fresh editing session (a refresh may repopulate the
 // fields); closing it clears the guard so external settings changes sync again.
 watch(storyOptionsOpen, () => {
-  storyOptionsEditing.value = false;
+  if (!storyOptionsPending.value) {
+    storyOptionsEditing.value = false;
+    syncStoryGenerationOptionsFromProjectSettings();
+  }
 });
 
 async function handleSubmitOrStop(): Promise<void> {
@@ -1388,12 +1412,9 @@ function updateStoryFragmentCount(event: Event): void {
   void persistStoryGenerationOptions({ fragmentCount: Number(target?.value || 1) });
 }
 
-function chapterLengthTierLabel(tier: ChapterLengthTier): string {
-  return tier === "short" ? "短档" : tier === "long" ? "长档" : "中档";
-}
-
 function updateChapterLengthTier(tier: ChapterLengthTier): void {
-  void persistStoryGenerationOptions({ chapterLengthTier: tier });
+  const target = { short: 1500, medium: 3000, long: 6000 }[tier];
+  void persistStoryGenerationOptions({ chapterLengthTier: tier, chapterWordCountTarget: target });
 }
 
 function updatePreciseWordCountEnabled(event: Event): void {
@@ -1418,7 +1439,7 @@ function syncStoryGenerationOptionsFromProjectSettings(): void {
     return;
   }
   // Don't overwrite the user's in-flight edits with a (possibly stale) refresh.
-  if (storyOptionsEditing.value) {
+  if (storyOptionsEditing.value || storyOptionsPending.value || workspaceStore.storySettingsWritesPending) {
     return;
   }
   agentStore.setStoryGenerationOptions({
@@ -1437,35 +1458,40 @@ async function persistStoryGenerationOptions(options: {
   preciseWordCountEnabled?: boolean;
   chapterTemplateId?: string;
 }): Promise<void> {
-  const previousOptions = {
-    fragmentCount: agentStore.storyFragmentCount,
-    chapterLengthTier: agentStore.chapterLengthTier,
-    chapterWordCountTarget: agentStore.chapterWordCountTarget,
-    preciseWordCountEnabled: agentStore.preciseWordCountEnabled,
-    chapterTemplateId: agentStore.storyChapterTemplateId
-  };
   storyOptionsEditing.value = true;
+  const revision = ++storyOptionsRevision;
+  const projectRoot = workspaceStore.currentProject?.workspaceRoot;
   agentStore.setStoryGenerationOptions(options);
   if (workspaceStore.launchScreenVisible || !workspaceStore.currentProject) {
     return;
   }
+  storyOptionsPending.value += 1;
   try {
-    const preciseSettings = options.preciseWordCountEnabled !== undefined
-      || options.chapterWordCountTarget !== undefined
-      ? {
-          chapterWordCountTarget: agentStore.chapterWordCountTarget,
-          preciseWordCountEnabled: agentStore.preciseWordCountEnabled
-        }
-      : {};
     await workspaceStore.updateStorySettings({
       storyFragmentCount: agentStore.storyFragmentCount,
       chapterLengthTier: agentStore.chapterLengthTier,
-      ...preciseSettings,
+      chapterWordCountTarget: agentStore.chapterWordCountTarget,
+      preciseWordCountEnabled: agentStore.preciseWordCountEnabled,
       storyChapterTemplateId: agentStore.storyChapterTemplateId
     });
   } catch (error: unknown) {
-    agentStore.setStoryGenerationOptions(previousOptions);
+    if (revision === storyOptionsRevision && projectRoot === workspaceStore.currentProject?.workspaceRoot) {
+      // Roll back to confirmed project settings, not another unconfirmed edit.
+      agentStore.setStoryGenerationOptions({
+        fragmentCount: workspaceStore.storySettings.storyFragmentCount,
+        chapterLengthTier: workspaceStore.storySettings.chapterLengthTier,
+        chapterWordCountTarget: workspaceStore.storySettings.chapterWordCountTarget,
+        preciseWordCountEnabled: workspaceStore.storySettings.preciseWordCountEnabled,
+        chapterTemplateId: workspaceStore.storySettings.storyChapterTemplateId
+      });
+    }
     console.warn("Failed to persist Storydex story generation options.", error);
+  } finally {
+    storyOptionsPending.value -= 1;
+    if (!storyOptionsPending.value && !storyOptionsOpen.value) {
+      storyOptionsEditing.value = false;
+      syncStoryGenerationOptionsFromProjectSettings();
+    }
   }
 }
 
@@ -1817,6 +1843,7 @@ async function handleApprovalConfirm(): Promise<void> {
     const otherText = draft.text.trim();
     const selectedLabel = selectedOption?.label || selectedValue;
     const response = {
+      ...(approval.kind === "permission" ? { approved: selectedValue === "allow" } : {}),
       answer: otherText || selectedLabel,
       value: selectedValue,
       option: selectedValue,
@@ -1824,7 +1851,7 @@ async function handleApprovalConfirm(): Promise<void> {
       other_text: otherText || null
     };
     const decision: "allow" | "deny" | "answer" =
-      selectedValue === "allow" ? "allow" : selectedValue === "deny" ? "deny" : "answer";
+      approval.kind === "question" ? "answer" : selectedValue === "allow" ? "allow" : selectedValue === "deny" ? "deny" : "answer";
     await agentStore.resolvePendingApproval(decision, response, approval.approvalId);
   }
 }

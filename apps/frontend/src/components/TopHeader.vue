@@ -799,7 +799,7 @@ async function handleReturnWelcomePage(): Promise<void> {
   closeMenus();
   const saved = await workspaceStore.saveDirtyActiveFileIfNeeded();
   if (saved) {
-    workspaceStore.enterLaunchScreen();
+    try { await workspaceStore.enterLaunchScreen(); } catch { /* store keeps the draft and error */ }
   }
 }
 

@@ -1,9 +1,4 @@
-//! Candidate Rust project-boundary routes.
-//!
-//! These routes are deliberately scoped to the isolated refactor fixture root
-//! configured on `AppState`.  They provide the first real HTTP consumer of the
-//! shared Git and WIKI projection primitives; Stable FastAPI routes remain
-//! untouched until the complete candidate contract is closed.
+//! Project routes for the desktop Rust backend, scoped to the selected workspace.
 
 use crate::AppState;
 use crate::error_response;
@@ -27,6 +22,101 @@ use std::time::Instant;
 pub(crate) struct WorkspaceQuery {
     #[serde(default)]
     pub workspace_root: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RelationReviewQuery {
+    #[serde(default)]
+    workspace_root: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    offset: usize,
+    #[serde(default = "default_wiki_limit")]
+    limit: usize,
+}
+
+pub(crate) async fn wiki_relation_review(
+    State(state): State<AppState>,
+    Query(query): Query<RelationReviewQuery>,
+) -> Response {
+    let started = Instant::now();
+    let workspace = match resolve_workspace(&state, &query.workspace_root) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    match StorydexKnowledge::new(&workspace).and_then(|service| service.sync(false)) {
+        Ok(payload) => {
+            let items: Vec<Value> = payload["relations"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|item| query.status.is_empty() || item["reviewStatus"] == query.status)
+                .cloned()
+                .collect();
+            let total = items.len();
+            let limit = query.limit.clamp(1, 500);
+            let end = query.offset.saturating_add(limit).min(total);
+            success(json!({"relations": items.into_iter().skip(query.offset).take(limit).collect::<Vec<_>>(),
+                "total": total, "offset": query.offset, "limit": limit, "hasMore": end < total,
+                "nextOffset": if end < total { Some(end) } else { None }}), started, "wiki_relation_review").into_response()
+        }
+        Err(error) => error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "wiki_relation_review_failed",
+            &error.to_string(),
+        ),
+    }
+}
+
+pub(crate) async fn wiki_relation_confirm(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    review_relation(state, id, body, "confirmed")
+}
+
+pub(crate) async fn wiki_relation_reject(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    review_relation(state, id, body, "rejected")
+}
+
+fn review_relation(state: AppState, id: String, body: Value, decision: &str) -> Response {
+    let started = Instant::now();
+    let workspace =
+        match resolve_workspace(&state, body["workspaceRoot"].as_str().unwrap_or_default()) {
+            Ok(path) => path,
+            Err(response) => return response,
+        };
+    let expected = body["expectedFingerprint"].as_str().unwrap_or_default();
+    if expected.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "relation_fingerprint_required",
+            "expectedFingerprint is required",
+        );
+    }
+    match StorydexKnowledge::new(&workspace)
+        .and_then(|service| service.review_relation(&id, expected, decision, &body))
+    {
+        Ok(payload) => success(payload, started, "wiki_relation_decision").into_response(),
+        Err(error) => {
+            let message = error.to_string();
+            let code = if message == "relation_version_conflict" {
+                StatusCode::CONFLICT
+            } else if message == "relation_not_found" {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::UNPROCESSABLE_ENTITY
+            };
+            error_response(code, "wiki_relation_decision_failed", &message)
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1036,6 +1126,16 @@ pub(crate) async fn wiki_write(
     let workspace = match resolve_workspace(&state, &request.workspace_root) {
         Ok(path) => path,
         Err(response) => return response,
+    };
+    let _write_lock = match coomi_services::ProjectWriteLock::acquire(&workspace) {
+        Ok(lock) => lock,
+        Err(error) => {
+            return error_response(
+                StatusCode::CONFLICT,
+                "workspace_write_busy",
+                &error.to_string(),
+            );
+        }
     };
     let mut status = request.status;
     let checksum = match graph_checksum(&request.payload) {

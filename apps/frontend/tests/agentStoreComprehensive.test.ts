@@ -12,6 +12,7 @@ const api = vi.hoisted(() => ({
 const chapterApi = vi.hoisted(() => ({ fetchStoryChapterTemplates: vi.fn() }));
 const git = vi.hoisted(() => ({ refreshSummary: vi.fn() }));
 const workspace = vi.hoisted(() => ({
+  documents: {}, refreshOpenDocuments: vi.fn().mockResolvedValue(undefined),
   activeFileBindingOrPath: "chapters/001.md", activeFile: "chapters/001.md",
   currentProject: { workspaceRoot: "C:/isolated/story" }, health: null
 }));

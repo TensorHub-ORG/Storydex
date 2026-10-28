@@ -32,6 +32,8 @@ const STORYDEX_DIR: &str = ".storydex";
 const MAX_TREE_NODES: usize = 20_000;
 const MAX_SEARCH_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_FULL_READ_BYTES: u64 = 8 * 1024 * 1024;
+// JSON may encode one content byte as six bytes (e.g. a control character).
+pub(crate) const FILE_WRITE_BODY_LIMIT: usize = MAX_FULL_READ_BYTES as usize * 6 + 64 * 1024;
 const WINDOWS_FILE_OPERATION_ATTEMPTS: usize = 5;
 
 const STANDARD_DIRECTORIES: &[&str] = &[
@@ -92,6 +94,8 @@ pub(crate) struct ProjectPathRequest {
 pub(crate) struct FileReadRequest {
     #[serde(default)]
     relative_path: String,
+    #[serde(default)]
+    workspace_root: String,
     offset: Option<usize>,
     limit: Option<usize>,
 }
@@ -114,6 +118,9 @@ pub(crate) struct FileWriteRequest {
     relative_path: String,
     #[serde(default)]
     content: String,
+    #[serde(default)]
+    workspace_root: String,
+    expected_content_sha256: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -709,7 +716,7 @@ fn describe_document(
         return Err(workspace_error(
             StatusCode::PAYLOAD_TOO_LARGE,
             "file_too_large",
-            "Use the bounded file window endpoint to read this large file.",
+            "文件超过 8 MiB，当前仅支持分页只读查看。",
         ));
     }
     let bytes = fs::read(path).map_err(|error| io_error("Reading the workspace file", error))?;
@@ -1179,7 +1186,7 @@ pub(crate) async fn read_file(
     Json(request): Json<FileReadRequest>,
 ) -> Response {
     let started = Instant::now();
-    let workspace = match current_workspace(&state) {
+    let workspace = match resolve_workspace_for_request(&state, &request.workspace_root) {
         Ok(workspace) => workspace,
         Err(response) => return response,
     };
@@ -1188,7 +1195,10 @@ pub(crate) async fn read_file(
         Err(response) => return response,
     };
     match describe_document(&relative, &path, request.offset, request.limit) {
-        Ok(document) => success(document, started, "read_file"),
+        Ok(mut document) => {
+            document["workspaceRoot"] = json!(workspace);
+            success(document, started, "read_file")
+        }
         Err(response) => response,
     }
 }
@@ -1263,9 +1273,26 @@ pub(crate) async fn write_file(
     Json(request): Json<FileWriteRequest>,
 ) -> Response {
     let started = Instant::now();
-    let workspace = match current_workspace(&state) {
+    if request.content.len() as u64 > MAX_FULL_READ_BYTES {
+        return workspace_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "file_too_large",
+            "内容超过 8 MiB 保存上限，草稿仍保留，请缩减内容或拆分文件。",
+        );
+    }
+    let workspace = match resolve_workspace_for_request(&state, &request.workspace_root) {
         Ok(workspace) => workspace,
         Err(response) => return response,
+    };
+    let _write_lock = match coomi_services::ProjectWriteLock::acquire(&workspace) {
+        Ok(lock) => lock,
+        Err(error) => {
+            return workspace_error(
+                StatusCode::CONFLICT,
+                "workspace_write_busy",
+                error.to_string(),
+            );
+        }
     };
     let (relative, path) = match resolve_target(&workspace, &request.relative_path) {
         Ok(value) => value,
@@ -1276,6 +1303,25 @@ pub(crate) async fn write_file(
             StatusCode::FORBIDDEN,
             "workspace_protected_path",
             "Writing directly to a protected Storydex directory is forbidden.",
+        );
+    }
+    let current = match describe_document(&relative, &path, None, None) {
+        Ok(document) => document,
+        Err(response) => return response,
+    };
+    let Some(expected) = request.expected_content_sha256.as_deref() else {
+        return workspace_error(
+            StatusCode::PRECONDITION_REQUIRED,
+            "file_version_required",
+            "保存需要读取时的文件版本，请重新读取文件。",
+        );
+    };
+    if current["fullContentSha256"].as_str() != Some(expected) {
+        return crate::error_response_with_details(
+            StatusCode::CONFLICT,
+            "file_version_conflict",
+            "磁盘内容已改变，草稿仍保留，请处理版本冲突。",
+            Some(json!({"currentDocument": current})),
         );
     }
     if let Err(error) = atomic_write(&path, request.content.as_bytes()) {

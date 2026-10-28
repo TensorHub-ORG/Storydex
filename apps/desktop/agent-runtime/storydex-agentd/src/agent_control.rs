@@ -370,199 +370,6 @@ fn has_explicit_write_policy(payload: &ChatStreamRequest) -> bool {
         || !payload.allowed_write_roots.is_empty()
 }
 
-fn clause_has_broad_no_write(clause: &str) -> bool {
-    let normalized = clause.to_ascii_lowercase();
-    [
-        "只读",
-        "不要修改任何",
-        "不得修改任何",
-        "不要写入任何",
-        "不得写入任何",
-        "不要改动任何",
-        "不得改动任何",
-        "read-only",
-        "read only",
-        "do not modify any",
-        "don't modify any",
-        "do not write any",
-        "don't write any",
-        "never modify any",
-        "never write any",
-    ]
-    .iter()
-    .any(|signal| normalized.contains(signal))
-}
-
-const WRITE_INTENT_SIGNALS: &[&str] = &[
-    "修改",
-    "更新",
-    "调整",
-    "重写",
-    "改写",
-    "编辑",
-    "完善",
-    "优化",
-    "润色",
-    "补充",
-    "扩写",
-    "重构",
-    "编写",
-    "撰写",
-    "制作",
-    "设计",
-    "写一个",
-    "写一张",
-    "写一份",
-    "写一篇",
-    "写一段",
-    "写一条",
-    "写角色卡",
-    "写人物卡",
-    "写世界书",
-    "写世界观",
-    "写章节",
-    "写正文",
-    "写故事",
-    "续写",
-    "创建",
-    "新建",
-    "新增",
-    "生成",
-    "删除",
-    "整理",
-    "同步",
-    "实现",
-    "修复",
-    "写入",
-    "保存",
-    "创作",
-    "edit",
-    "update",
-    "adjust",
-    "rewrite",
-    "continue writing",
-    "create",
-    "add",
-    "generate",
-    "delete",
-    "organize",
-    "sync",
-    "implement",
-    "fix",
-    "write",
-    "save",
-];
-
-fn strip_directive_prefix(mut value: &str) -> &str {
-    loop {
-        let before = value;
-        for prefix in [
-            "请",
-            "帮我",
-            "替我",
-            "直接",
-            "立即",
-            "现在",
-            "please",
-            "can you",
-            "could you",
-        ] {
-            if let Some(rest) = value.strip_prefix(prefix) {
-                value = rest.trim_start();
-                break;
-            }
-        }
-        if value.len() == before.len() {
-            return value;
-        }
-    }
-}
-
-fn starts_with_write_intent(value: &str) -> bool {
-    let value = strip_directive_prefix(value.trim_start());
-    WRITE_INTENT_SIGNALS
-        .iter()
-        .any(|signal| value.starts_with(signal))
-}
-
-fn has_direct_write_directive(value: &str) -> bool {
-    if starts_with_write_intent(value) {
-        return true;
-    }
-    [
-        "并", "然后", "再", "同时", "接着", "而是", " and ", " then ", " but ",
-    ]
-    .iter()
-    .filter_map(|connector| value.rsplit_once(connector).map(|(_, suffix)| suffix))
-    .any(starts_with_write_intent)
-}
-
-fn last_signal_position(value: &str, signals: &[&str]) -> Option<usize> {
-    signals
-        .iter()
-        .filter_map(|signal| value.rfind(signal))
-        .max()
-}
-
-fn clause_has_positive_write(clause: &str) -> bool {
-    let normalized = clause.to_ascii_lowercase();
-    if clause_has_broad_no_write(&normalized) {
-        return false;
-    }
-    if !WRITE_INTENT_SIGNALS
-        .iter()
-        .any(|signal| normalized.contains(signal))
-    {
-        return false;
-    }
-    let last_negation = last_signal_position(
-        &normalized,
-        &[
-            "不要", "不得", "禁止", "请勿", "无需", "无须", "不用", "不必", "避免", "切勿", "别",
-            "do not", "don't", "must not", "never",
-        ],
-    );
-    let last_reset = last_signal_position(
-        &normalized,
-        &["但", "但是", "不过", "而是", " instead ", " but "],
-    );
-    if last_negation.is_some_and(|negation| last_reset.is_none_or(|reset| reset < negation)) {
-        return false;
-    }
-    let advisory = [
-        "如何",
-        "怎样",
-        "为什么",
-        "建议",
-        "意见",
-        "评价",
-        "点评",
-        "评估",
-        "分析",
-        "怎么看",
-        "怎么样",
-        "怎么理解",
-        "说明",
-        "讲解",
-        "how to",
-        "why ",
-        "explain",
-        "advice",
-        "suggest",
-        "review",
-        "evaluate",
-        "assessment",
-        "opinion",
-        "what do you think",
-    ]
-    .iter()
-    .any(|signal| normalized.contains(signal));
-    if advisory && !has_direct_write_directive(&normalized) {
-        return false;
-    }
-    true
-}
-
 fn extract_model_ids(payload: &Value) -> Vec<String> {
     let values = match payload {
         Value::Array(values) => values.as_slice(),
@@ -601,13 +408,7 @@ fn extract_model_ids(payload: &Value) -> Vec<String> {
     models
 }
 
-pub(crate) fn inferred_write_intent(prompt: &str) -> bool {
-    prompt
-        .split(['，', ',', '。', '！', '!', '？', '?', '；', ';', '\n'])
-        .any(clause_has_positive_write)
-}
-
-fn apply_inferred_capability(payload: &mut ChatStreamRequest) {
+fn apply_default_capability(payload: &mut ChatStreamRequest) {
     if has_explicit_write_policy(payload) {
         if payload.capability_mode.trim().is_empty() {
             payload.capability_mode = if payload.writes_allowed {
@@ -623,30 +424,16 @@ fn apply_inferred_capability(payload: &mut ChatStreamRequest) {
         }
         return;
     }
-    let writes_allowed = inferred_write_intent(&payload.prompt);
-    payload.capability_mode = if writes_allowed {
-        "workspace_write"
-    } else {
-        "read_only"
-    }
-    .to_owned();
-    payload.writes_allowed = writes_allowed;
-    payload.core_writes_allowed = Some(writes_allowed);
+    payload.capability_mode = "workspace_write".to_owned();
+    payload.writes_allowed = true;
+    payload.core_writes_allowed = Some(true);
     payload.allowed_write_roots.clear();
 }
 
-fn apply_configured_capability(payload: &mut ChatStreamRequest, permission_mode: &str) {
-    // Full Access is an explicit session choice. When the caller does not
-    // provide a narrower turn contract, keep the workspace writable instead
-    // of downgrading the turn based on fragile prompt keyword inference.
-    if permission_mode == "full_access" && !has_explicit_write_policy(payload) {
-        payload.capability_mode = "workspace_write".to_owned();
-        payload.writes_allowed = true;
-        payload.core_writes_allowed = Some(true);
-        payload.allowed_write_roots.clear();
-        return;
-    }
-    apply_inferred_capability(payload);
+fn apply_configured_capability(payload: &mut ChatStreamRequest, _permission_mode: &str) {
+    // Tool availability follows explicit capability and session permission.
+    // Understanding user intent belongs to the model, not keyword matching.
+    apply_default_capability(payload);
 }
 
 fn is_task_continuation(prompt: &str) -> bool {
@@ -2996,49 +2783,22 @@ mod tests {
     }
 
     #[test]
-    fn inferred_write_intent_keeps_advisory_prompts_read_only() {
-        for prompt in [
-            "请解释如何修改代码",
-            "请说明怎样更新章节",
-            "帮我分析如何重写这个文件",
-            "请讲解如何设计世界书",
-            "请说明写角色卡的方法",
-            "please explain how to update this chapter",
-            "不要修改代码",
-            "请勿删除章节",
-        ] {
-            assert!(!inferred_write_intent(prompt), "{prompt}");
-        }
-        for prompt in [
-            "请修改代码并保存",
-            "请重写当前章节",
-            "请写一张角色卡并保存",
-            "请设计世界书并写入文件",
-            "please update this chapter",
-            "请分析问题并修改代码",
-            "不要只解释，但请直接修改代码",
-        ] {
-            assert!(inferred_write_intent(prompt), "{prompt}");
-        }
-    }
-
-    #[test]
     fn omitted_turn_capability_is_compiled_without_overriding_explicit_boundaries() {
         let mut greeting: ChatStreamRequest = serde_json::from_value(json!({
             "prompt": "你好，你是谁"
         }))
         .expect("greeting request");
         assert!(greeting.capability_mode.is_empty());
-        apply_inferred_capability(&mut greeting);
-        assert_eq!(greeting.capability_mode, "read_only");
-        assert!(!greeting.writes_allowed);
-        assert_eq!(greeting.core_writes_allowed, Some(false));
+        apply_default_capability(&mut greeting);
+        assert_eq!(greeting.capability_mode, "workspace_write");
+        assert!(greeting.writes_allowed);
+        assert_eq!(greeting.core_writes_allowed, Some(true));
 
         let mut write_request: ChatStreamRequest = serde_json::from_value(json!({
             "prompt": "请修复 src/lib.rs 中的错误"
         }))
         .expect("write request");
-        apply_inferred_capability(&mut write_request);
+        apply_default_capability(&mut write_request);
         assert_eq!(write_request.capability_mode, "workspace_write");
         assert!(write_request.writes_allowed);
         assert_eq!(write_request.core_writes_allowed, Some(true));
@@ -3048,7 +2808,7 @@ mod tests {
             "capabilityMode": "read_only"
         }))
         .expect("explicit read-only request");
-        apply_inferred_capability(&mut explicit_read_only);
+        apply_default_capability(&mut explicit_read_only);
         assert_eq!(explicit_read_only.capability_mode, "read_only");
         assert!(!explicit_read_only.writes_allowed);
         assert_eq!(explicit_read_only.core_writes_allowed, None);
@@ -3058,7 +2818,7 @@ mod tests {
             "writesAllowed": true
         }))
         .expect("legacy write request");
-        apply_inferred_capability(&mut legacy_write_fields);
+        apply_default_capability(&mut legacy_write_fields);
         assert_eq!(legacy_write_fields.capability_mode, "workspace_write");
         assert!(legacy_write_fields.writes_allowed);
     }
@@ -3097,7 +2857,7 @@ mod tests {
             apply_chat_policy(&state, &workspace, "session", &mut greeting)
                 .expect("greeting chat policy");
             assert_eq!(greeting.permission_mode, permission_mode);
-            assert_eq!(greeting.capability_mode, "read_only");
+            assert_eq!(greeting.capability_mode, "workspace_write");
 
             let mut write_request: ChatStreamRequest = serde_json::from_value(json!({
                 "prompt": "请修复 src/lib.rs 中的错误"
@@ -3253,7 +3013,12 @@ mod tests {
         ] {
             let mut request: ChatStreamRequest = serde_json::from_value(value).expect("request");
             apply_chat_policy(&state, &workspace, session, &mut request).expect("policy");
-            assert!(!request.writes_allowed, "{}", request.prompt);
+            assert_eq!(
+                request.writes_allowed,
+                request.capability_mode != "read_only",
+                "{}",
+                request.prompt
+            );
             assert!(request.continuation_prompt.is_none());
         }
     }
@@ -3266,7 +3031,7 @@ mod tests {
                 "prompt": prompt
             }))
             .expect("asset write request");
-            apply_inferred_capability(&mut request);
+            apply_default_capability(&mut request);
             assert_eq!(request.capability_mode, "workspace_write", "{prompt}");
             assert!(request.writes_allowed, "{prompt}");
         }
@@ -3275,9 +3040,9 @@ mod tests {
                 "prompt": prompt
             }))
             .expect("asset advice request");
-            apply_inferred_capability(&mut request);
-            assert_eq!(request.capability_mode, "read_only", "{prompt}");
-            assert!(!request.writes_allowed, "{prompt}");
+            apply_default_capability(&mut request);
+            assert_eq!(request.capability_mode, "workspace_write", "{prompt}");
+            assert!(request.writes_allowed, "{prompt}");
         }
     }
 

@@ -6,6 +6,9 @@ import EditorPane from "@/components/EditorPane.vue";
 import WorldlineMapPane from "@/components/WorldlineMapPane.vue";
 import { useGitStore } from "@/stores/git";
 import { useWorkspaceStore } from "@/stores/workspace";
+import { paneFontScaleStyle } from "@/utils/paneFontScale";
+const preview = vi.hoisted(() => ({ open: vi.fn().mockResolvedValue(true) }));
+vi.mock("@/utils/filePreview", () => ({ openFilePreviewWindow: preview.open }));
 
 function setDirtyWorldlineState(): ReturnType<typeof useGitStore> {
   const gitStore = useGitStore();
@@ -32,6 +35,22 @@ function setDirtyWorldlineState(): ReturnType<typeof useGitStore> {
 describe("时空线主区预览", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
+    preview.open.mockClear();
+  });
+
+  it("opens a saved document from the toolbar without saving the current draft", async () => {
+    const store = useWorkspaceStore();
+    store.launchScreenVisible = false;
+    store.applyFileDocument({ relativePath: "notes/a.md", content: "saved", kind: "file", extension: ".md", size: 5 } as any);
+    store.setEditorContent("unsaved draft");
+    const save = vi.spyOn(store, "saveActiveFile");
+    const wrapper = mount(EditorPane, { global: { stubs: { teleport: true } } });
+    await wrapper.find('[aria-label="打开独立预览窗口"]').trigger("click");
+    expect(preview.open).toHaveBeenCalledWith("notes/a.md");
+    expect(save).not.toHaveBeenCalled();
+    expect(store.editorContent).toBe("unsaved draft");
+    expect(store.isDirty).toBe(true);
+    wrapper.unmount();
   });
 
   it("把必要状态并入唯一标题栏并移除虚拟文件元信息", async () => {
@@ -41,6 +60,7 @@ describe("时空线主区预览", () => {
     const gitStore = setDirtyWorldlineState();
 
     const wrapper = mount(EditorPane, {
+      attrs: { style: paneFontScaleStyle(150) },
       global: {
         stubs: {
           teleport: true,
@@ -52,6 +72,7 @@ describe("时空线主区预览", () => {
       }
     });
     await nextTick();
+    expect((wrapper.find(".editor-workbench").element as HTMLElement).style.getPropertyValue("--ui-pane-scaled-px-16")).toBe("24px");
 
     const header = wrapper.find(".editor-pane-head");
     expect(header.text()).toContain("时空线");

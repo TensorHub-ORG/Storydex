@@ -30,6 +30,7 @@ const git = vi.hoisted(() => ({ refreshSummary: vi.fn() }));
 // `workspaceStore.currentProject?.workspaceRoot || workspaceStore.health?.workspaceRoot || ""`
 // and `activeFileBindingOrPath || activeFile || ""` down to the empty-string fallback.
 const workspace = vi.hoisted(() => ({
+  documents: {}, refreshOpenDocuments: vi.fn().mockResolvedValue(undefined),
   activeFileBindingOrPath: "",
   activeFile: "",
   currentProject: null as { workspaceRoot?: string } | null,
@@ -205,8 +206,8 @@ describe("agent store action fallbacks with an empty workspace", () => {
       expect(request.sourceFollowupExpectedTraceId).toBe("");
       expect(request.storyGeneration.chapterTemplateId).toBeTruthy();
       expect(request.storyGeneration.chapterLengthTier).toBe("long");
-      expect(request.storyGeneration).not.toHaveProperty("chapterWordCountTarget");
-      expect(request.storyGeneration).not.toHaveProperty("preciseWordCountEnabled");
+      expect(request.storyGeneration.chapterWordCountTarget).toBe(3000);
+      expect(request.storyGeneration.preciseWordCountEnabled).toBe(false);
       onPacket({ _type: "AgentCompleted" });
     });
     await store.resumeFollowups();
@@ -242,8 +243,8 @@ describe("agent store action fallbacks with an empty workspace", () => {
       expect(request.activeFile).toBe("");
       expect(request.storyGeneration.chapterTemplateId).toBeTruthy();
       expect(request.storyGeneration.chapterLengthTier).toBe("short");
-      expect(request.storyGeneration).not.toHaveProperty("chapterWordCountTarget");
-      expect(request.storyGeneration).not.toHaveProperty("preciseWordCountEnabled");
+      expect(request.storyGeneration.chapterWordCountTarget).toBe(3000);
+      expect(request.storyGeneration.preciseWordCountEnabled).toBe(false);
       onPacket({ _type: "AgentCompleted" });
     });
     await store.runPrompt();

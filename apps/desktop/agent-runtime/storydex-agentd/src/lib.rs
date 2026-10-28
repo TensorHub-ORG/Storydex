@@ -56,6 +56,7 @@ mod presets;
 mod project;
 mod replacement;
 mod story;
+mod story_context;
 mod story_generation;
 mod system;
 mod workspace;
@@ -884,7 +885,12 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/file/read", post(workspace::read_file))
         .route("/api/v1/file/window", post(workspace::read_file_window))
-        .route("/api/v1/file/write", post(workspace::write_file))
+        .route(
+            "/api/v1/file/write",
+            post(workspace::write_file).layer(axum::extract::DefaultBodyLimit::max(
+                workspace::FILE_WRITE_BODY_LIMIT,
+            )),
+        )
         .route(
             "/api/v1/workspace/file/create",
             post(workspace::create_file),
@@ -976,10 +982,26 @@ pub fn router(state: AppState) -> Router {
             post(project::git_worldline_delete),
         )
         .route("/api/v1/story/wiki", get(project::wiki_read))
+        .route(
+            "/api/v1/story/evolution-snapshot",
+            get(story::evolution_snapshot),
+        )
         .route("/api/v1/story/wiki/projection", post(project::wiki_write))
         .route("/api/v1/story/wiki/sync", post(project::wiki_sync))
         .route("/api/v1/story/wiki/rebuild", post(project::wiki_rebuild))
         .route("/api/v1/story/wiki/graph", get(project::wiki_graph))
+        .route(
+            "/api/v1/story/wiki/relations/review",
+            get(project::wiki_relation_review),
+        )
+        .route(
+            "/api/v1/story/wiki/relations/{id}/confirm",
+            post(project::wiki_relation_confirm),
+        )
+        .route(
+            "/api/v1/story/wiki/relations/{id}/reject",
+            post(project::wiki_relation_reject),
+        )
         .route(
             "/api/v1/agent/followups",
             get(chat::list_followups).post(chat::enqueue_followup),
@@ -1072,6 +1094,186 @@ mod tests {
             .header(header::AUTHORIZATION, "Bearer test-token")
             .body(Body::empty())
             .expect("request")
+    }
+
+    #[tokio::test]
+    async fn reliability_large_file_full_read_edit_save_and_limit_are_consistent() {
+        let root = tempdir().expect("workspace");
+        let workspace = root.path().canonicalize().expect("root");
+        let original = "正文内容\t\"引用\"\n".repeat(120_000);
+        assert!(original.len() > 2 * 1024 * 1024);
+        let path = workspace.join("large.md");
+        std::fs::write(&path, &original).expect("file");
+        let state = AppState::with_paths(
+            "test-token",
+            root.path().join("home"),
+            root.path().join("bridge"),
+            Some(workspace),
+            None,
+        )
+        .expect("state");
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/file/read",
+                json!({"relativePath": "large.md"}),
+            ))
+            .await
+            .expect("read");
+        assert_eq!(response.status(), StatusCode::OK);
+        let document: Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), workspace::FILE_WRITE_BODY_LIMIT)
+                .await
+                .expect("body"),
+        )
+        .expect("json");
+        assert_eq!(document["data"]["content"], original);
+        let updated = format!("{original}TAIL_MARKER");
+        let saved = router(state.clone()).oneshot(protected_json_request("/api/v1/file/write", json!({
+            "relativePath": "large.md", "content": updated, "expectedContentSha256": document["data"]["fullContentSha256"]
+        }))).await.expect("save");
+        assert_eq!(saved.status(), StatusCode::OK);
+        let saved: Value = serde_json::from_slice(
+            &to_bytes(saved.into_body(), workspace::FILE_WRITE_BODY_LIMIT)
+                .await
+                .expect("body"),
+        )
+        .expect("json");
+        assert_eq!(std::fs::read_to_string(&path).expect("disk"), updated);
+        assert_eq!(saved["data"]["content"], updated);
+        // Saving too much must fail before changing the file, including JSON expansion.
+        let too_large = router(state)
+            .oneshot(protected_json_request(
+                "/api/v1/file/write",
+                json!({
+                    "relativePath": "large.md", "content": "x".repeat(8 * 1024 * 1024 + 1),
+                    "expectedContentSha256": saved["data"]["fullContentSha256"]
+                }),
+            ))
+            .await
+            .expect("oversize");
+        assert_eq!(too_large.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            response_json(too_large).await["error"]["code"],
+            "file_too_large"
+        );
+        assert_eq!(std::fs::read_to_string(&path).expect("disk"), updated);
+    }
+
+    #[tokio::test]
+    async fn reliability_file_versions_reject_stale_and_unversioned_writes() {
+        let root = tempdir().expect("test fixture");
+        let workspace = root.path().canonicalize().expect("test fixture");
+        std::fs::write(workspace.join("note.md"), "original").expect("test fixture");
+        let state = AppState::with_paths(
+            "test-token",
+            root.path().join("home"),
+            root.path().join("bridge"),
+            Some(workspace.clone()),
+            None,
+        )
+        .expect("test fixture");
+        let response = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/file/read",
+                json!({"relativePath": "note.md"}),
+            ))
+            .await
+            .expect("test fixture");
+        let document = response_json(response).await["data"].clone();
+        assert!(
+            !document["fullContentSha256"]
+                .as_str()
+                .expect("test fixture")
+                .is_empty()
+        );
+        let no_version = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/file/write",
+                json!({"relativePath": "note.md", "content": "stale"}),
+            ))
+            .await
+            .expect("test fixture");
+        assert_eq!(no_version.status(), StatusCode::PRECONDITION_REQUIRED);
+        std::fs::write(workspace.join("note.md"), "agent edit").expect("test fixture");
+        let stale = router(state.clone()).oneshot(protected_json_request("/api/v1/file/write", json!({"relativePath": "note.md", "content": "stale", "expectedContentSha256": document["fullContentSha256"]}))).await.expect("test fixture");
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+        let conflict = response_json(stale).await;
+        assert_eq!(
+            conflict["error"]["details"]["currentDocument"]["content"],
+            "agent edit"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("note.md")).expect("test fixture"),
+            "agent edit"
+        );
+        let accepted = router(state).oneshot(protected_json_request("/api/v1/file/write", json!({"relativePath": "note.md", "content": "merged", "expectedContentSha256": conflict["error"]["details"]["currentDocument"]["fullContentSha256"]}))).await.expect("test fixture");
+        assert_eq!(accepted.status(), StatusCode::OK);
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("note.md")).expect("test fixture"),
+            "merged"
+        );
+    }
+
+    #[tokio::test]
+    async fn reliability_wiki_review_routes_round_trip_and_accept_browser_query() {
+        let root = tempdir().expect("test fixture");
+        let workspace = root.path().canonicalize().expect("test fixture");
+        std::fs::create_dir_all(workspace.join(".storydex/characters")).expect("test fixture");
+        std::fs::create_dir_all(workspace.join(".storydex/knowledge")).expect("test fixture");
+        std::fs::write(workspace.join(".storydex/characters/a.md"), "a knows b")
+            .expect("test fixture");
+        std::fs::write(workspace.join(".storydex/characters/b.md"), "b").expect("test fixture");
+        let service = coomi_services::StorydexKnowledge::new(&workspace).expect("test fixture");
+        let initial = service.sync(false).expect("test fixture");
+        let nodes = initial["graph"]["nodes"].as_array().expect("test fixture");
+        let node = |label| {
+            nodes
+                .iter()
+                .find(|node| node["label"] == label)
+                .expect("test fixture")["id"]
+                .clone()
+        };
+        std::fs::write(workspace.join(".storydex/knowledge/relations.json"), serde_json::to_vec(&json!({"relations": [{"id": "r1", "subjectId": node("a"), "objectId": node("b"), "predicate": "knows", "sourceRefs": [{"path": ".storydex/characters/a.md", "quote": "a knows b"}]}]})).expect("test fixture")).expect("test fixture");
+        let state = AppState::with_paths(
+            "test-token",
+            root.path().join("home"),
+            root.path().join("bridge"),
+            Some(workspace),
+            None,
+        )
+        .expect("test fixture");
+        let review = router(state.clone())
+            .oneshot(protected_get_request(
+                "/api/v1/story/wiki/relations/review?status=review_required&limit=500&offset=0",
+            ))
+            .await
+            .expect("test fixture");
+        assert_eq!(review.status(), StatusCode::OK);
+        let body = response_json(review).await;
+        assert_eq!(body["data"]["total"], 1);
+        let expected = body["data"]["relations"][0]["fingerprint"].clone();
+        let confirmed = router(state.clone())
+            .oneshot(protected_json_request(
+                "/api/v1/story/wiki/relations/r1/confirm",
+                json!({"expectedFingerprint": expected}),
+            ))
+            .await
+            .expect("test fixture");
+        assert_eq!(confirmed.status(), StatusCode::OK);
+        let graph = router(state.clone()).oneshot(protected_get_request("/api/v1/story/wiki/graph?includeReview=true&depth=1&limit=60&offset=0&category=characters")).await.expect("test fixture");
+        assert_eq!(graph.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(graph).await["data"]["graph"]["edges"][0]["reviewStatus"],
+            "confirmed"
+        );
+        let stale = router(state)
+            .oneshot(protected_json_request(
+                "/api/v1/story/wiki/relations/r1/reject",
+                json!({"expectedFingerprint": expected}),
+            ))
+            .await
+            .expect("test fixture");
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
     }
 
     fn encode_query_value(value: &Path) -> String {
@@ -1558,7 +1760,7 @@ mod tests {
         let response = router(state.clone())
             .oneshot(protected_json_request(
                 "/api/v1/file/write",
-                json!({"relativePath": "notes/a.md", "content": "updated\nworld"}),
+                json!({"relativePath": "notes/a.md", "content": "updated\nworld", "expectedContentSha256": ({ use sha2::Digest; format!("{:x}", sha2::Sha256::digest(b"hello\nworld")) })}),
             ))
             .await
             .expect("write file response");
@@ -1902,6 +2104,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn story_settings_requests_never_follow_a_project_switch() {
+        let root = tempdir().expect("root");
+        let a = root.path().join("A");
+        let b = root.path().join("B");
+        std::fs::create_dir_all(&a).expect("A");
+        std::fs::create_dir_all(&b).expect("B");
+        let state = AppState::with_paths(
+            "test-token",
+            root.path().join("home"),
+            root.path().join("bridge"),
+            None,
+            None,
+        )
+        .expect("state");
+        state.select_workspace(a.clone()).expect("select A");
+        let response = router(state.clone())
+            .oneshot(protected_json_request_with_method(
+                "PUT",
+                "/api/v1/workspace/story/settings",
+                json!({"workspaceRoot": a, "chapterLengthTier": "long"}),
+            ))
+            .await
+            .expect("settings");
+        assert_eq!(response.status(), StatusCode::OK);
+        let before =
+            std::fs::read(a.join(".storydex/config/project-settings.json")).expect("A settings");
+        state.select_workspace(b.clone()).expect("select B");
+        for (path, body) in [
+            (
+                "/api/v1/workspace/story/settings",
+                json!({"workspaceRoot": a, "chapterLengthTier": "short"}),
+            ),
+            (
+                "/api/v1/workspace/story/chapters/completion",
+                json!({"workspaceRoot": a, "chapterPath": "chapters/第1章", "completed": true}),
+            ),
+        ] {
+            let response = router(state.clone())
+                .oneshot(protected_json_request_with_method("PUT", path, body))
+                .await
+                .expect("stale write");
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(
+                response_json(response).await["error"]["code"],
+                "workspace_not_selected"
+            );
+        }
+        let query = test_contract_path(&a)
+            .replace('\\', "/")
+            .replace(':', "%3A")
+            .replace(' ', "%20");
+        let response = router(state.clone())
+            .oneshot(protected_get_request(&format!(
+                "/api/v1/workspace/story/settings?workspaceRoot={query}"
+            )))
+            .await
+            .expect("stale read");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            std::fs::read(a.join(".storydex/config/project-settings.json")).expect("unchanged A"),
+            before
+        );
+        assert!(!b.join(".storydex/config/project-settings.json").exists());
+        assert!(!b.join(".storydex/memory/chapter-progress.json").exists());
+    }
+
+    #[tokio::test]
     async fn story_and_system_routes_persist_candidate_state() {
         let root = tempdir().expect("root");
         let (state, workspace) = workspace_test_state(root.path());
@@ -1936,6 +2205,8 @@ mod tests {
                     "storyFragmentCount": 2,
                     "chapterLengthTier": "long",
                     "chapterWordCountTarget": 6000,
+                    "storyFragmentWordCountMin": 3000,
+                    "storyFragmentWordCountMax": 4800,
                     "preciseWordCountEnabled": true,
                     "autoUpdateVariables": true,
                     "autoUpdateWiki": true,
@@ -1953,7 +2224,10 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(body["data"]["segmentExtension"], ".txt");
         assert_eq!(body["data"]["chapterLengthTier"], "long");
+        assert_eq!(body["data"]["storyLengthTierEnabled"], true);
         assert_eq!(body["data"]["chapterWordCountTarget"], 6000);
+        assert_eq!(body["data"]["storyFragmentWordCountMin"], 6000);
+        assert_eq!(body["data"]["storyFragmentWordCountMax"], 6000);
         assert_eq!(body["data"]["preciseWordCountEnabled"], true);
 
         let response = router(state.clone())
@@ -1970,6 +2244,25 @@ mod tests {
         assert_eq!(body["data"]["segmentExtension"], ".txt");
         assert_eq!(body["data"]["chapterWordCountTarget"], 6000);
         assert_eq!(body["data"]["preciseWordCountEnabled"], true);
+
+        // Disabling strict checking preserves the target through disk persistence.
+        let response = router(state.clone())
+            .oneshot(protected_json_request_with_method(
+                "PUT",
+                "/api/v1/workspace/story/settings",
+                json!({"preciseWordCountEnabled": false}),
+            ))
+            .await
+            .expect("disable strict checking");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = router(state.clone())
+            .oneshot(protected_get_request("/api/v1/workspace/story/settings"))
+            .await
+            .expect("reload settings");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["data"]["chapterWordCountTarget"], 6000);
+        assert_eq!(body["data"]["preciseWordCountEnabled"], false);
 
         let response = router(state.clone())
             .oneshot(protected_get_request("/api/v1/story/chapters"))

@@ -1,5 +1,7 @@
 import { defineStore } from "pinia";
 import { ApiResponseError, describeTransportError } from "@/api/client";
+import { toRaw } from "vue";
+import { readProjectDrafts, updateProjectDrafts } from "@/utils/draftStorage";
 import { fetchAgentRunDiff } from "@/api/agent";
 import { fetchHelpGuide } from "@/api/help";
 import { fetchSystemBootstrap, fetchSystemHealth } from "@/api/system";
@@ -57,6 +59,8 @@ const DEFAULT_CHAPTER_WORD_COUNT_TARGET = 3000;
 interface CachedWorkspaceDocument extends WorkspaceFileDocument {
   savedContent: string;
   dirty: boolean;
+  conflict?: WorkspaceFileDocument;
+  saveError?: string;
 }
 
 interface WorkspaceState {
@@ -76,6 +80,14 @@ interface WorkspaceState {
   tree: WorkspaceTreeNode[];
   openTabs: WorkspaceEditorTab[];
   documents: Record<string, CachedWorkspaceDocument>;
+  documentEpoch: number;
+  fileRequestId: number;
+  draftPersistenceError: string;
+  draftWritesPending: number;
+  storySettingsRevision: number;
+  storySettingsReadId: number;
+  storySettingsWritesPending: number;
+  storySettingsWriteError: string;
   diagnostics: WorkspaceDiagnosticItem[];
   acknowledgedDiagnostics: string[];
   activeFile: string;
@@ -120,6 +132,27 @@ let largeFileAbortController: AbortController | null = null;
 // 缓存上次目录树序列化签名，refreshTree 在内容未变时跳过 this.tree 重赋值，
 // 避免 4 秒自动刷新触发无谓的整树重渲染（会加剧主线程压力、与内联输入竞态）。
 let lastTreeSignature = "";
+// Pinia devtools creates a fresh Proxy for every options-store action. Key by
+// the raw store instance so development, production and separate apps agree.
+function storeMap<T>() {
+  const entries = new WeakMap<object, T>();
+  return {
+    get: (store: object) => entries.get(toRaw(store)),
+    set: (store: object, value: T) => entries.set(toRaw(store), value),
+  };
+}
+const settingsWriteQueues = storeMap<Promise<unknown>>();
+const draftWriteQueues = storeMap<Promise<unknown>>();
+const draftRevisions = storeMap<Map<string, number>>();
+const draftChanges = storeMap<Map<string, Record<string, unknown | null>>>();
+
+// Renamed documents can contain reactive metadata nested inside a plain object.
+// Unwrap recursively for IndexedDB without serializing/copying the prose strings.
+function draftSnapshot<T>(value: T): T {
+  if (!value || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(item => draftSnapshot(item)) as T;
+  return Object.fromEntries(Object.entries(toRaw(value)).map(([key, item]) => [key, draftSnapshot(item)])) as T;
+}
 
 export const useWorkspaceStore = defineStore("workspace", {
   state: (): WorkspaceState => ({
@@ -139,6 +172,14 @@ export const useWorkspaceStore = defineStore("workspace", {
     tree: [],
     openTabs: [],
     documents: {},
+    documentEpoch: 0,
+    fileRequestId: 0,
+    draftPersistenceError: "",
+    draftWritesPending: 0,
+    storySettingsRevision: 0,
+    storySettingsReadId: 0,
+    storySettingsWritesPending: 0,
+    storySettingsWriteError: "",
     diagnostics: [],
     acknowledgedDiagnostics: [],
     activeFile: "",
@@ -177,6 +218,9 @@ export const useWorkspaceStore = defineStore("workspace", {
   }),
 
   getters: {
+    activeConflict(state): WorkspaceFileDocument | undefined {
+      return state.documents[state.activeFile]?.conflict;
+    },
     visibleDiagnostics(state): WorkspaceDiagnosticItem[] {
       const acknowledged = new Set(state.acknowledgedDiagnostics);
       return state.diagnostics.filter((item) => !acknowledged.has(workspaceDiagnosticKey(item)));
@@ -482,7 +526,7 @@ export const useWorkspaceStore = defineStore("workspace", {
         this.initialized = true;
       } catch (error: unknown) {
         if (isRuntimeMismatchError(error)) {
-          this.markRuntimeMismatch(error);
+          await this.markRuntimeMismatch(error);
         } else {
           this.workspaceError = normalizeWorkspaceError(error);
         }
@@ -495,15 +539,18 @@ export const useWorkspaceStore = defineStore("workspace", {
       if (this.runtimeMismatch) {
         return;
       }
+      const epoch = this.documentEpoch;
       try {
         const result = await fetchSystemHealth();
+        if (epoch !== this.documentEpoch) return;
         this.health = result.data;
         this.healthTrace = result.trace;
         this.runtimeMismatch = false;
         this.workspaceError = "";
       } catch (error: unknown) {
+        if (epoch !== this.documentEpoch) return;
         if (isRuntimeMismatchError(error)) {
-          this.markRuntimeMismatch(error);
+          await this.markRuntimeMismatch(error);
         } else {
           this.workspaceError = normalizeWorkspaceError(error);
         }
@@ -511,34 +558,37 @@ export const useWorkspaceStore = defineStore("workspace", {
     },
 
     async refreshProject(): Promise<void> {
+      const epoch = this.documentEpoch;
+      const expectedRoot = this.currentProject?.workspaceRoot;
       try {
         const result = await fetchCurrentProject();
+        if (epoch !== this.documentEpoch) return;
+        // Only open/create/initialize may change project identity. A poll during
+        // a backend switch must not rebind the old project's in-memory drafts.
+        if (expectedRoot && !workspaceRootsMatch(result.data.workspaceRoot, expectedRoot)) return;
         this.currentProject = result.data;
         this.workspaceError = "";
       } catch (error: unknown) {
+        if (epoch !== this.documentEpoch) return;
         this.workspaceError = normalizeWorkspaceError(error);
       }
     },
 
     async refreshTree(options?: { silent?: boolean }): Promise<void> {
       const silent = options?.silent ?? true;
+      const epoch = this.documentEpoch;
       if (!silent) {
         this.isTreeLoading = true;
       }
       try {
         const expectedWorkspaceRoot = this.currentProject?.workspaceRoot || "";
-        let result = await fetchWorkspaceTree();
+        const result = await fetchWorkspaceTree();
+        if (epoch !== this.documentEpoch) return;
         if (
           expectedWorkspaceRoot &&
           !workspaceRootsMatch(result.data.workspaceRoot, expectedWorkspaceRoot)
         ) {
-          await openWorkspaceProject({ projectPath: expectedWorkspaceRoot });
-          result = await fetchWorkspaceTree();
-          if (!workspaceRootsMatch(result.data.workspaceRoot, expectedWorkspaceRoot)) {
-            throw new Error(
-              `工作区根目录不一致：预期 ${expectedWorkspaceRoot}，后端返回 ${result.data.workspaceRoot}`
-            );
-          }
+          throw new Error(`工作区根目录不一致：预期 ${expectedWorkspaceRoot}，后端返回 ${result.data.workspaceRoot}`);
         }
         const nextTreeSignature = JSON.stringify(result.data.roots);
         if (nextTreeSignature !== lastTreeSignature) {
@@ -549,20 +599,29 @@ export const useWorkspaceStore = defineStore("workspace", {
         this.applyTreeProjectInfo(result.data);
         this.reconcileWorkspaceStateWithTree();
         await Promise.all([this.refreshStorySettings(), this.refreshDiagnostics()]);
+        if (epoch !== this.documentEpoch) return;
         this.workspaceError = "";
+        if (!this.isSaving && !this.isProjectSwitching && !this.isProjectCreating) await this.refreshOpenDocuments();
         if (!this.launchScreenVisible) {
           void useGitStore().refreshSummary({ silent: true });
         }
       } catch (error: unknown) {
+        if (epoch !== this.documentEpoch) return;
         this.workspaceError = normalizeWorkspaceError(error);
       } finally {
-        if (!silent) {
+        if (!silent && epoch === this.documentEpoch) {
           this.isTreeLoading = false;
         }
       }
     },
 
     async refreshStorySettings(): Promise<void> {
+      if (this.storySettingsWritesPending) return;
+      const epoch = this.documentEpoch;
+      const revision = this.storySettingsRevision;
+      const readId = ++this.storySettingsReadId;
+      const workspaceRoot = this.currentProject?.workspaceRoot;
+      const stillCurrent = () => epoch === this.documentEpoch && revision === this.storySettingsRevision && readId === this.storySettingsReadId && !this.storySettingsWritesPending;
       if (this.launchScreenVisible || !this.currentProject) {
         this.storySettings = defaultStoryProjectSettings();
         this.storySettingsTrace = null;
@@ -571,9 +630,9 @@ export const useWorkspaceStore = defineStore("workspace", {
       }
 
       this.isStorySettingsLoading = true;
-      this.storySettingsError = "";
       try {
-        const result = await fetchStoryProjectSettings();
+        const result = await fetchStoryProjectSettings(workspaceRoot);
+        if (!stillCurrent()) return;
         let fallbackSettings: StoryProjectSettings | null = null;
         if (!hasExtendedStorySettingsPayload(result.data)) {
           try {
@@ -582,6 +641,7 @@ export const useWorkspaceStore = defineStore("workspace", {
             fallbackSettings = null;
           }
         }
+        if (!stillCurrent()) return;
         this.storySettings = normalizeStorySettingsResponse(result.data, {
           source: "api",
           fallbackPath: storyProjectConfigRelativePath(this.currentProject.storydexDirName),
@@ -589,29 +649,52 @@ export const useWorkspaceStore = defineStore("workspace", {
           currentSettings: this.storySettings
         });
         this.storySettingsTrace = result.trace;
+        this.storySettingsError = this.storySettingsWriteError;
       } catch (error: unknown) {
+        if (!stillCurrent()) return;
         try {
-          this.storySettings = await this.readStorySettingsFromProjectFile();
+          const fallback = await this.readStorySettingsFromProjectFile();
+          if (!stillCurrent()) return;
+          this.storySettings = fallback;
           this.storySettingsTrace = null;
+          this.storySettingsError = this.storySettingsWriteError;
         } catch (fallbackError: unknown) {
-          this.storySettings = defaultStoryProjectSettings(
-            storyProjectConfigRelativePath(this.currentProject.storydexDirName)
-          );
+          if (!stillCurrent()) return;
           this.storySettingsTrace = null;
-          this.storySettingsError = normalizeWorkspaceError(fallbackError ?? error);
+          this.storySettingsError = this.storySettingsWriteError || normalizeWorkspaceError(fallbackError ?? error);
         }
       } finally {
-        this.isStorySettingsLoading = false;
+        if (stillCurrent()) this.isStorySettingsLoading = false;
       }
     },
 
     async updateStorySettings(
-      patch: Partial<StoryProjectSettingsUpdateRequest>
+      patch: Partial<StoryProjectSettingsUpdateRequest>,
+      completion?: { chapterPath: string; completed: boolean }
     ): Promise<StoryProjectSettings> {
       if (this.launchScreenVisible || !this.currentProject) {
         return this.storySettings;
       }
-
+      if (this.isProjectSwitching || this.isProjectCreating || this.isProjectInitializing) {
+        this.storySettingsError = "项目正在切换，请完成后再修改故事设置。";
+        throw new Error(this.storySettingsError);
+      }
+      const epoch = this.documentEpoch;
+      const workspaceRoot = this.currentProject.workspaceRoot;
+      const revision = ++this.storySettingsRevision;
+      const previousWrite = settingsWriteQueues.get(this);
+      this.storySettingsWritesPending += 1;
+      let release!: () => void;
+      const pending = new Promise<void>(resolve => { release = resolve; });
+      settingsWriteQueues.set(this, pending);
+      await previousWrite;
+      if (epoch !== this.documentEpoch) {
+        this.storySettingsWritesPending -= 1;
+        release();
+        return this.storySettings;
+      }
+      this.isStorySettingsLoading = true;
+      try {
         const payload = normalizeStorySettingsPayload({
           segmentExtension: patch.segmentExtension ?? this.storySettings.segmentExtension,
           maxSegmentsPerChapter: patch.maxSegmentsPerChapter ?? this.storySettings.maxSegmentsPerChapter,
@@ -620,6 +703,8 @@ export const useWorkspaceStore = defineStore("workspace", {
             patch.chapterLengthTier
               ?? patch.chapter_length_tier
               ?? this.storySettings.chapterLengthTier,
+          chapterWordCountTarget: patch.chapterWordCountTarget ?? patch.chapter_word_count_target ?? this.storySettings.chapterWordCountTarget,
+          preciseWordCountEnabled: patch.preciseWordCountEnabled ?? patch.precise_word_count_enabled ?? this.storySettings.preciseWordCountEnabled,
           storyChapterTemplateId:
             patch.storyChapterTemplateId ?? this.storySettings.storyChapterTemplateId,
           autoUpdateVariables: patch.autoUpdateVariables ?? this.storySettings.autoUpdateVariables,
@@ -632,35 +717,37 @@ export const useWorkspaceStore = defineStore("workspace", {
           contextConcisionMaxCalls: patch.contextConcisionMaxCalls ?? this.storySettings.contextConcisionMaxCalls,
           contextConcisionMaxInputTokens:
             patch.contextConcisionMaxInputTokens ?? this.storySettings.contextConcisionMaxInputTokens,
-          chapterCompletion: patch.chapterCompletion ?? this.storySettings.chapterCompletion
+          chapterCompletion: { ...this.storySettings.chapterCompletion, ...patch.chapterCompletion }
         });
 
-      this.isStorySettingsLoading = true;
-      this.storySettingsError = "";
-      try {
-        const result = await updateStoryProjectSettings(payload);
-        const fileSettings = await this.writeStorySettingsToProjectFile(payload);
+        const result = completion
+          ? await updateStoryChapterCompletion({ ...completion, workspaceRoot })
+          : await updateStoryProjectSettings({ ...payload, workspaceRoot });
+        if (epoch !== this.documentEpoch) return this.storySettings;
         const nextSettings = normalizeStorySettingsResponse(result.data, {
           source: "api",
           fallbackPath: storyProjectConfigRelativePath(this.currentProject.storydexDirName),
-          fallbackSettings: fileSettings,
           currentSettings: this.storySettings
         });
         this.storySettings = nextSettings;
         this.storySettingsTrace = result.trace;
+        this.storySettingsWriteError = "";
+        this.storySettingsError = "";
+        await this.refreshOpenDocuments([
+          storyProjectConfigRelativePath(this.currentProject.storydexDirName),
+          storyChapterProgressRelativePath(this.currentProject.storydexDirName),
+        ]);
         return nextSettings;
       } catch (error: unknown) {
-        try {
-          const nextSettings = await this.writeStorySettingsToProjectFile(payload);
-          this.storySettings = nextSettings;
-          this.storySettingsTrace = null;
-          return nextSettings;
-        } catch (fallbackError: unknown) {
-          this.storySettingsError = normalizeWorkspaceError(fallbackError ?? error);
-          throw fallbackError;
+        if (epoch === this.documentEpoch && revision === this.storySettingsRevision) {
+          this.storySettingsWriteError = normalizeWorkspaceError(error);
+          this.storySettingsError = this.storySettingsWriteError;
         }
+        throw error;
       } finally {
-        this.isStorySettingsLoading = false;
+        this.storySettingsWritesPending -= 1;
+        if (epoch === this.documentEpoch) this.isStorySettingsLoading = this.storySettingsWritesPending > 0;
+        release();
       }
     },
 
@@ -674,25 +761,12 @@ export const useWorkspaceStore = defineStore("workspace", {
         return this.storySettings;
       }
 
-      try {
-        const result = await updateStoryChapterCompletion({
-          chapterPath: normalizedChapterPath,
-          completed
-        });
-        const nextSettings = normalizeStorySettingsResponse(result.data, {
-          source: "api",
-          fallbackPath: storyProjectConfigRelativePath(this.currentProject.storydexDirName)
-        });
-        this.storySettings = nextSettings;
-        this.storySettingsTrace = result.trace;
-        return nextSettings;
-      } catch {
-        const nextChapterCompletion = {
-          ...this.storySettings.chapterCompletion,
-          [normalizedChapterPath]: completed
-        };
-        return this.updateStorySettings({ chapterCompletion: nextChapterCompletion });
-      }
+      return this.updateStorySettings({}, { chapterPath: normalizedChapterPath, completed });
+    },
+
+    dismissStorySettingsError(): void {
+      this.storySettingsWriteError = "";
+      this.storySettingsError = "";
     },
 
     async refreshDiagnostics(): Promise<void> {
@@ -728,12 +802,19 @@ export const useWorkspaceStore = defineStore("workspace", {
 
     async openProject(projectPath: string): Promise<WorkspaceProjectInfo> {
       this.ensureRuntimeAvailable();
+      if (this.isProjectSwitching || this.isProjectCreating || this.isProjectInitializing) {
+        throw new Error("项目操作正在进行，请稍候。");
+      }
       this.isProjectSwitching = true;
       this.workspaceError = "";
       this.lastProjectAction = "";
 
       try {
+        await this.preserveProjectDrafts();
+        this.documentEpoch += 1;
+        this.isFileLoading = false;
         const result = await openWorkspaceProject({ projectPath });
+        await this.preserveProjectDrafts();
         this.launchScreenVisible = false;
         this.currentProject = result.data;
         this.rememberRecentProject(result.data);
@@ -763,12 +844,19 @@ export const useWorkspaceStore = defineStore("workspace", {
 
     async createProject(projectPath: string, architecture: "standard" | "free" = "standard"): Promise<WorkspaceProjectInfo> {
       this.ensureRuntimeAvailable();
+      if (this.isProjectSwitching || this.isProjectCreating || this.isProjectInitializing) {
+        throw new Error("项目操作正在进行，请稍候。");
+      }
       this.isProjectCreating = true;
       this.workspaceError = "";
       this.lastProjectAction = "";
 
       try {
+        await this.preserveProjectDrafts();
+        this.documentEpoch += 1;
+        this.isFileLoading = false;
         const result = await createWorkspaceProject({ projectPath, architecture });
+        await this.preserveProjectDrafts();
         this.launchScreenVisible = false;
         this.currentProject = result.data;
         this.rememberRecentProject(result.data);
@@ -785,12 +873,19 @@ export const useWorkspaceStore = defineStore("workspace", {
 
     async initializeCurrentProject(projectPath = ""): Promise<WorkspaceProjectInfo> {
       this.ensureRuntimeAvailable();
+      if (this.isProjectSwitching || this.isProjectCreating || this.isProjectInitializing) {
+        throw new Error("项目操作正在进行，请稍候。");
+      }
       this.isProjectInitializing = true;
       this.workspaceError = "";
       this.lastProjectAction = "";
 
       try {
+        await this.preserveProjectDrafts();
+        this.documentEpoch += 1;
+        this.isFileLoading = false;
         const result = await initializeWorkspaceProject(projectPath ? { projectPath } : undefined);
+        await this.preserveProjectDrafts();
         this.launchScreenVisible = false;
         this.currentProject = result.data;
         this.rememberRecentProject(result.data);
@@ -810,46 +905,60 @@ export const useWorkspaceStore = defineStore("workspace", {
         return;
       }
 
-      const switchingTarget = relativePath !== this.activeFile || Boolean(options?.forceReload);
-      if (switchingTarget) {
-        const saved = await this.saveDirtyActiveFileIfNeeded();
-        if (!saved) {
-          return;
-        }
-      }
-
       this.syncActiveDocument();
+      this.persistDrafts();
       const cached = this.documents[relativePath];
+      if (cached?.dirty && options?.forceReload) {
+        this.fileRequestId += 1;
+        this.isFileLoading = false;
+        this.activateCachedDocument(relativePath);
+        await this.refreshOpenDocuments([relativePath]);
+        return;
+      }
       if (cached && !options?.forceReload) {
+        this.fileRequestId += 1;
+        this.isFileLoading = false;
         this.activateCachedDocument(relativePath);
         this.workspaceError = "";
         return;
       }
 
       this.isFileLoading = true;
+      const epoch = this.documentEpoch;
+      const requestId = ++this.fileRequestId;
       try {
         const treeNode = findTreeNode(this.tree, relativePath);
         const knownSize = Number(treeNode?.size || 0);
         if (!options?.forceFull && knownSize >= PROGRESSIVE_FILE_BYTES) {
           const result = await readWorkspaceFileWindow({ relativePath, startLine: 0, lineCount: 400 });
+          if (epoch !== this.documentEpoch || requestId !== this.fileRequestId) return;
           this.applyLargeFileWindow(result.data);
           this.fileTrace = result.trace;
         } else {
-          const result = await readWorkspaceFile({ relativePath });
-          this.applyFileDocument(result.data);
+          const result = await readWorkspaceFile({ relativePath, workspaceRoot: this.currentProject?.workspaceRoot });
+          if (epoch !== this.documentEpoch || requestId !== this.fileRequestId) return;
+          const current = this.documents[relativePath];
+          if (current?.dirty) {
+            if (current.savedContent !== result.data.content) current.conflict = result.data;
+            this.activateCachedDocument(relativePath);
+          } else {
+            this.applyFileDocument(result.data);
+          }
           this.fileTrace = result.trace;
         }
         this.workspaceError = "";
       } catch (error: unknown) {
-        this.workspaceError = normalizeWorkspaceError(error);
+        if (epoch === this.documentEpoch && requestId === this.fileRequestId) this.workspaceError = normalizeWorkspaceError(error);
       } finally {
-        this.isFileLoading = false;
+        if (epoch === this.documentEpoch && requestId === this.fileRequestId) this.isFileLoading = false;
       }
     },
 
     async loadLargeFileWindow(startLine: number): Promise<void> {
       if (!this.activeFile || !this.activeLargeFileWindow) return;
       largeFileAbortController?.abort();
+      const epoch = this.documentEpoch;
+      const requestId = this.fileRequestId;
       const controller = new AbortController();
       largeFileAbortController = controller;
       try {
@@ -857,7 +966,7 @@ export const useWorkspaceStore = defineStore("workspace", {
           { relativePath: this.activeFile, startLine: Math.max(0, Math.floor(startLine)), lineCount: 400 },
           controller.signal
         );
-        if (!controller.signal.aborted && this.activeFile === result.data.relativePath) {
+        if (epoch === this.documentEpoch && requestId === this.fileRequestId && !controller.signal.aborted && this.activeFile === result.data.relativePath) {
           this.applyLargeFileWindow(result.data);
         }
       } catch (error: unknown) {
@@ -875,6 +984,10 @@ export const useWorkspaceStore = defineStore("workspace", {
 
     async loadActiveFileFully(): Promise<void> {
       if (!this.activeFile) return;
+      if (this.activeLargeFileWindow?.readOnly) {
+        this.workspaceError = "文件超过 8 MiB，当前仅支持分页只读查看。";
+        return;
+      }
       await this.openFile(this.activeFile, { forceReload: true, forceFull: true });
     },
 
@@ -882,13 +995,10 @@ export const useWorkspaceStore = defineStore("workspace", {
       if (!relativePath || !this.documents[relativePath]) {
         return;
       }
-      if (relativePath !== this.activeFile) {
-        const saved = await this.saveDirtyActiveFileIfNeeded();
-        if (!saved) {
-          return;
-        }
-      }
       this.syncActiveDocument();
+      this.fileRequestId += 1;
+      this.isFileLoading = false;
+      this.persistDrafts();
       this.activateCachedDocument(relativePath);
     },
 
@@ -897,7 +1007,9 @@ export const useWorkspaceStore = defineStore("workspace", {
         return;
       }
 
-      if (this.activeFile === relativePath) {
+      if (this.documents[relativePath]?.dirty) {
+        this.syncActiveDocument();
+        this.activateCachedDocument(relativePath);
         const saved = await this.saveDirtyActiveFileIfNeeded();
         if (!saved) {
           return;
@@ -905,6 +1017,7 @@ export const useWorkspaceStore = defineStore("workspace", {
       }
 
       this.syncActiveDocument();
+      this.persistDrafts();
       const closingIndex = this.openTabs.findIndex((tab) => tab.relativePath === relativePath);
       if (closingIndex < 0) {
         return;
@@ -950,30 +1063,62 @@ export const useWorkspaceStore = defineStore("workspace", {
       document.size = estimateUtf8Size(content);
       this.isDirty = document.dirty;
       this.updateTabState(this.activeFile);
+      this.persistDrafts();
     },
 
     async saveActiveFile(): Promise<void> {
-      if (!this.activeFile || !this.isDirty || this.isSaving) {
+      if (!this.activeFile || !this.isDirty || this.isSaving || this.isProjectSwitching || this.isProjectCreating) {
         return;
       }
       const activeDocument = this.documents[this.activeFile];
       if (activeDocument?.readOnly) {
         return;
       }
+      if (activeDocument?.conflict) {
+        this.workspaceError = activeDocument.saveError = "磁盘版本已改变，请先处理编辑器中的冲突。";
+        return;
+      }
 
+      const relativePath = this.activeFile;
+      const content = this.editorContent;
+      const epoch = this.documentEpoch;
       this.isSaving = true;
       try {
         const result = await writeWorkspaceFile({
-          relativePath: this.activeFile,
-          content: this.editorContent
+          relativePath,
+          content,
+          workspaceRoot: this.currentProject?.workspaceRoot,
+          expectedContentSha256: activeDocument.fullContentSha256
         });
-        this.applyFileDocument(result.data);
+        if (epoch !== this.documentEpoch) return;
+        const current = this.documents[relativePath];
+        if (!current) return;
+        const currentContent = current.content;
+        this.documents[relativePath] = {
+          ...result.data,
+          content: currentContent,
+          savedContent: result.data.content,
+          dirty: currentContent !== result.data.content,
+        };
+        this.updateTabState(relativePath);
+        if (this.activeFile === relativePath) this.activateCachedDocument(relativePath);
+        this.persistDrafts();
         this.saveTrace = result.trace;
         this.lastSavedAt = result.data.updatedAt;
         this.workspaceError = "";
         await this.refreshTree();
       } catch (error: unknown) {
+        if (epoch !== this.documentEpoch) return;
         this.workspaceError = normalizeWorkspaceError(error);
+        if (this.documents[relativePath]) this.documents[relativePath].saveError = this.workspaceError;
+        void this.persistDrafts();
+        const conflict = (error as { response?: { data?: { error?: { details?: { currentDocument?: WorkspaceFileDocument } } } } })?.response?.data?.error?.details?.currentDocument;
+        if (conflict && this.documents[relativePath]) {
+          this.documents[relativePath].conflict = conflict;
+          this.persistDrafts();
+        }
+        this.isSaving = false;
+        await this.refreshOpenDocuments([relativePath]);
       } finally {
         this.isSaving = false;
       }
@@ -1479,16 +1624,19 @@ export const useWorkspaceStore = defineStore("workspace", {
     },
 
     async reloadProjectContext(): Promise<void> {
+      if (!this.isProjectSwitching && !this.isProjectCreating && !this.isProjectInitializing) await this.preserveProjectDrafts();
       const agentStore = useAgentStore();
       agentStore.resetSession({ clearSessionId: true, clearAvailableSessions: true });
       this.launchScreenVisible = false;
       this.treeResetToken += 1;
       lastTreeSignature = "";
+      this.documentEpoch += 1;
 
       this.openTabs = [];
       this.documents = {};
       this.resetStoryWorkspaceState();
       this.clearActiveFile();
+      await this.restoreProjectDrafts();
 
       await Promise.all([this.refreshHealth(), this.refreshProject(), this.refreshTree()]);
       if (!this.currentProject?.requiresInitialization) {
@@ -1496,7 +1644,9 @@ export const useWorkspaceStore = defineStore("workspace", {
         await agentStore.loadHistory();
       }
 
-      this.clearActiveFile();
+      const draftPath = this.openTabs[0]?.relativePath;
+      if (draftPath) this.activateCachedDocument(draftPath);
+      await this.refreshOpenDocuments();
       this.initialized = true;
     },
 
@@ -1504,7 +1654,9 @@ export const useWorkspaceStore = defineStore("workspace", {
       this.treeResetToken += 1;
     },
 
-    enterLaunchScreen(): void {
+    async enterLaunchScreen(): Promise<void> {
+      await this.preserveProjectDrafts();
+      this.documentEpoch += 1;
       useAgentStore().resetSession({ clearSessionId: true, clearAvailableSessions: true });
       useGitStore().reset();
       this.launchScreenVisible = true;
@@ -1519,9 +1671,9 @@ export const useWorkspaceStore = defineStore("workspace", {
       this.clearActiveFile();
     },
 
-    markRuntimeMismatch(error: unknown): void {
+    async markRuntimeMismatch(error: unknown): Promise<void> {
       this.runtimeMismatch = true;
-      this.enterLaunchScreen();
+      await this.enterLaunchScreen();
       this.health = null;
       this.healthTrace = null;
       this.initialized = false;
@@ -1547,6 +1699,7 @@ export const useWorkspaceStore = defineStore("workspace", {
       this.storySettingsTrace = null;
       this.storySettings = defaultStoryProjectSettings();
       this.storySettingsError = "";
+      this.storySettingsWriteError = "";
       this.diagnosticsError = "";
       this.gitReviewDiff = null;
       this.gitReviewFocusPath = "";
@@ -1558,123 +1711,33 @@ export const useWorkspaceStore = defineStore("workspace", {
     },
 
     async readStorySettingsFromProjectFile(): Promise<StoryProjectSettings> {
+      const workspaceRoot = this.currentProject?.workspaceRoot;
       const configPath = storyProjectConfigRelativePath(this.currentProject?.storydexDirName);
       const progressPath = storyChapterProgressRelativePath(this.currentProject?.storydexDirName);
       const cachedConfigContent = this.documents[configPath]?.content;
       const cachedProgressContent = this.documents[progressPath]?.content;
       const configPayload = cachedConfigContent
         ? parseJsonObject(cachedConfigContent)
-        : parseJsonObject((await readWorkspaceFile({ relativePath: configPath })).data.content);
+        : parseJsonObject((await readWorkspaceFile({ relativePath: configPath, workspaceRoot })).data.content);
       let progressPayload: Record<string, unknown> = {};
       try {
         progressPayload = cachedProgressContent
           ? parseJsonObject(cachedProgressContent)
-          : parseJsonObject((await readWorkspaceFile({ relativePath: progressPath })).data.content);
+          : parseJsonObject((await readWorkspaceFile({ relativePath: progressPath, workspaceRoot })).data.content);
       } catch {
         progressPayload = {};
       }
       return normalizeStorySettingsFromProjectFile(configPayload, configPath, progressPayload);
     },
 
-    async writeStorySettingsToProjectFile(
-      payload: StoryProjectSettingsUpdateRequest
-    ): Promise<StoryProjectSettings> {
-      const configPath = storyProjectConfigRelativePath(this.currentProject?.storydexDirName);
-      const progressPath = storyChapterProgressRelativePath(this.currentProject?.storydexDirName);
-      let projectPayload = this.documents[configPath]?.content
-        ? parseJsonObject(this.documents[configPath].content)
-        : {};
-      if (!Object.keys(projectPayload).length) {
-        try {
-          projectPayload = parseJsonObject((await readWorkspaceFile({ relativePath: configPath })).data.content);
-        } catch {
-          projectPayload = {};
-        }
-      }
-      let progressPayload = this.documents[progressPath]?.content
-        ? parseJsonObject(this.documents[progressPath].content)
-        : {};
-      if (!Object.keys(progressPayload).length) {
-        try {
-          progressPayload = parseJsonObject((await readWorkspaceFile({ relativePath: progressPath })).data.content);
-        } catch {
-          progressPayload = {};
-        }
-      }
-      const updatedAt = new Date().toISOString();
-      const nextProjectPayload = {
-        ...projectPayload,
-        version: Number(projectPayload.version || 1) || 1,
-        storySegmentFormat: payload.segmentExtension.replace(/^\./, ""),
-        autoNameChapterTitle: payload.autoNameChapterDirectories,
-        auto_name_chapter_title: payload.autoNameChapterDirectories,
-        maxSegmentsPerChapter: payload.maxSegmentsPerChapter,
-        max_segments_per_chapter: payload.maxSegmentsPerChapter,
-        chapterSegmentLimit: payload.maxSegmentsPerChapter,
-        chapter_segment_limit: payload.maxSegmentsPerChapter,
-        storyFragmentCount: payload.storyFragmentCount,
-        story_fragment_count: payload.storyFragmentCount,
-        chapterLengthTier: payload.chapterLengthTier,
-        chapter_length_tier: payload.chapterLengthTier,
-        storyChapterTemplateId: payload.storyChapterTemplateId,
-        story_chapter_template_id: payload.storyChapterTemplateId,
-        autoUpdateVariables: payload.autoUpdateVariables,
-        auto_update_variables: payload.autoUpdateVariables,
-        autoUpdateWiki: payload.autoUpdateWiki,
-        auto_update_wiki: payload.autoUpdateWiki,
-        autoUpdateVariablesNote: "自动更新变量需要较多耗时，建议每次仅生成单条剧情片段。",
-        auto_update_variables_note: "自动更新变量需要较多耗时，建议每次仅生成单条剧情片段。",
-        agentCommitPromptEnabled: payload.agentCommitPromptEnabled,
-        agent_commit_prompt_enabled: payload.agentCommitPromptEnabled,
-        autoNameChapterDirectories: payload.autoNameChapterDirectories,
-        auto_name_chapter_directories: payload.autoNameChapterDirectories,
-        chapterDirectoryNamingMode: payload.autoNameChapterDirectories ? "auto" : "manual",
-        chapter_directory_naming_mode: payload.autoNameChapterDirectories ? "auto" : "manual",
-        chapterNamingMode: payload.autoNameChapterDirectories ? "auto" : "manual",
-        chapter_naming_mode: payload.autoNameChapterDirectories ? "auto" : "manual",
-        contextConcisionMinCalls: payload.contextConcisionMinCalls,
-        context_concision_min_calls: payload.contextConcisionMinCalls,
-        contextConcisionMaxCalls: payload.contextConcisionMaxCalls,
-        context_concision_max_calls: payload.contextConcisionMaxCalls,
-        contextConcisionMaxInputTokens: payload.contextConcisionMaxInputTokens,
-        context_concision_max_input_tokens: payload.contextConcisionMaxInputTokens,
-        defaultDialogueQuote: String(projectPayload.defaultDialogueQuote || "cn_double"),
-        segmentNamingMode: String(projectPayload.segmentNamingMode || "auto"),
-        updatedAt
-      };
-      const nextProgressPayload = {
-        version: Number(progressPayload.version || 1) || 1,
-        updatedAt,
-        chapters: Object.fromEntries(
-          Object.entries(payload.chapterCompletion).map(([relativePath, completed]) => [
-            relativePath,
-            {
-              completed: Boolean(completed),
-              updatedAt,
-              displayName: fileNameFromPath(relativePath)
-            }
-          ])
-        )
-      };
-
-      const serialized = `${JSON.stringify(nextProjectPayload, null, 2)}\n`;
-      const progressSerialized = `${JSON.stringify(nextProgressPayload, null, 2)}\n`;
-      const updatedDocument = await writeWorkspaceFile({
-        relativePath: configPath,
-        content: serialized
-      });
-      const updatedProgressDocument = await writeWorkspaceFile({
-        relativePath: progressPath,
-        content: progressSerialized
-      });
-      this.syncAuxiliaryDocument(updatedDocument.data);
-      this.syncAuxiliaryDocument(updatedProgressDocument.data);
-      return normalizeStorySettingsFromProjectFile(nextProjectPayload, configPath, nextProgressPayload);
-    },
-
     syncAuxiliaryDocument(document: WorkspaceFileDocument): void {
       const existing = this.documents[document.relativePath];
       if (!existing) {
+        return;
+      }
+      if (existing.dirty) {
+        existing.conflict = document;
+        this.persistDrafts();
         return;
       }
 
@@ -1761,6 +1824,10 @@ export const useWorkspaceStore = defineStore("workspace", {
     },
 
     clearActiveFile(): void {
+      this.isFileLoading = false;
+      this.fileRequestId += 1;
+      largeFileAbortController?.abort();
+      largeFileAbortController = null;
       this.activeFile = "";
       this.activeFileContent = "";
       this.editorContent = "";
@@ -1805,7 +1872,7 @@ export const useWorkspaceStore = defineStore("workspace", {
         updatedAt: new Date(window.mtimeMs).toISOString(),
         extension: fileExtensionFromPath(window.relativePath),
         kind: "file",
-        readOnly: window.readOnly,
+        readOnly: true,
         isPartialView: true,
         media: { ...(existing?.media || {}), largeFileWindow: window }
       };
@@ -1913,7 +1980,7 @@ export const useWorkspaceStore = defineStore("workspace", {
       const existingPaths = collectFilePaths(this.tree);
       const transientPaths = new Set(
         Object.entries(this.documents)
-          .filter(([, document]) => Boolean(document?.transient))
+          .filter(([, document]) => Boolean(document?.transient || document?.dirty || document?.conflict))
           .map(([relativePath]) => relativePath)
       );
       const stalePaths = Object.keys(this.documents).filter(
@@ -1949,8 +2016,10 @@ export const useWorkspaceStore = defineStore("workspace", {
       }
 
       const remappedDocuments: Record<string, CachedWorkspaceDocument> = {};
+      const removedDraftPaths: string[] = [];
       for (const [relativePath, document] of Object.entries(this.documents)) {
         const nextPath = rebaseRelativePath(relativePath, normalizedFrom, normalizedTo);
+        if (nextPath !== relativePath) removedDraftPaths.push(relativePath);
         remappedDocuments[nextPath] =
           nextPath === relativePath
             ? document
@@ -1960,6 +2029,7 @@ export const useWorkspaceStore = defineStore("workspace", {
               };
       }
       this.documents = remappedDocuments;
+      void this.persistDrafts(removedDraftPaths);
 
       this.openTabs = this.openTabs.map((tab) => {
         const nextPath = rebaseRelativePath(tab.relativePath, normalizedFrom, normalizedTo);
@@ -1986,11 +2056,14 @@ export const useWorkspaceStore = defineStore("workspace", {
         return;
       }
 
+      const removedDraftPaths: string[] = [];
       for (const key of Object.keys(this.documents)) {
         if (isSameOrNestedPath(key, normalizedPath)) {
+          removedDraftPaths.push(key);
           delete this.documents[key];
         }
       }
+      void this.persistDrafts(removedDraftPaths);
 
       this.openTabs = this.openTabs.filter((tab) => !isSameOrNestedPath(tab.relativePath, normalizedPath));
 
@@ -2005,11 +2078,138 @@ export const useWorkspaceStore = defineStore("workspace", {
     },
 
     async saveDirtyActiveFileIfNeeded(): Promise<boolean> {
-      if (!this.activeFile || !this.isDirty || this.isSaving) {
+      if (this.isSaving) return false;
+      if (!this.activeFile || !this.isDirty) {
         return true;
       }
       await this.saveActiveFile();
       return !this.isDirty;
+    },
+
+    async persistDrafts(removedPaths: string[] = []): Promise<boolean> {
+      const root = this.currentProject?.workspaceRoot;
+      if (!root) return true;
+      const epoch = this.documentEpoch;
+      const previous = draftWriteQueues.get(this);
+      const revisions = draftRevisions.get(this) || new Map<string, number>();
+      draftRevisions.set(this, revisions);
+      const revision = (revisions.get(root) || 0) + 1;
+      revisions.set(root, revision);
+      this.draftWritesPending += 1;
+      let release!: () => void;
+      draftWriteQueues.set(this, new Promise<void>(resolve => { release = resolve; }));
+      try {
+        const drafts = Object.fromEntries(Object.entries(this.documents)
+          .filter(([, document]) => !document.transient)
+          .map(([path, document]) => [path, document.dirty || document.conflict
+            ? draftSnapshot(document)
+            : null]));
+        const pendingChanges = draftChanges.get(this) || new Map<string, Record<string, unknown | null>>();
+        draftChanges.set(this, pendingChanges);
+        pendingChanges.set(root, { ...pendingChanges.get(root), ...drafts, ...Object.fromEntries(removedPaths.map(path => [path, null])) });
+        await previous;
+        if (revision !== revisions.get(root)) return true;
+        await updateProjectDrafts(root, pendingChanges.get(root)!);
+        if (revision === revisions.get(root)) pendingChanges.delete(root);
+        if (epoch === this.documentEpoch) this.draftPersistenceError = "";
+        return true;
+      } catch {
+        if (epoch === this.documentEpoch) this.draftPersistenceError = "草稿自动备份失败，内容仍在当前窗口。请保存或复制正文后再刷新、关闭或切换项目。";
+        return false;
+      } finally {
+        this.draftWritesPending -= 1;
+        release();
+      }
+    },
+
+    async preserveProjectDrafts(): Promise<void> {
+      if (this.isSaving) throw new Error("文件正在保存，请保存完成后切换项目。");
+      this.syncActiveDocument();
+      await this.persistDrafts();
+      // A newer edit may supersede the snapshot above while its transaction is
+      // pending. Wait for the latest queued snapshot before clearing this project.
+      let pendingDrafts: Promise<unknown> | undefined;
+      let pendingSettings: Promise<unknown> | undefined;
+      do {
+        pendingDrafts = draftWriteQueues.get(this);
+        pendingSettings = settingsWriteQueues.get(this);
+        // Settings endpoints address the active project. Wait for both queues,
+        // including edits made while a settings request was still pending.
+        await Promise.all([pendingDrafts, pendingSettings]);
+      } while (pendingDrafts !== draftWriteQueues.get(this) || pendingSettings !== settingsWriteQueues.get(this));
+      if (this.draftPersistenceError) throw new Error(this.draftPersistenceError);
+      if (this.isSaving) throw new Error("文件正在保存，请保存完成后切换项目。");
+    },
+
+    async restoreProjectDrafts(): Promise<void> {
+      const root = this.currentProject?.workspaceRoot;
+      if (!root) return;
+      const epoch = this.documentEpoch;
+      let drafts: Record<string, CachedWorkspaceDocument>;
+      try {
+        drafts = await readProjectDrafts<CachedWorkspaceDocument>(root);
+      } catch {
+        if (epoch !== this.documentEpoch) return;
+        this.draftPersistenceError = "无法读取草稿备份，请重试；已有备份未删除。";
+        throw new Error(this.draftPersistenceError);
+      }
+      if (epoch !== this.documentEpoch) return;
+      this.draftPersistenceError = "";
+      for (const [path, document] of Object.entries(drafts)) {
+        this.documents[path] = document;
+        this.ensureOpenTab(path, document.extension, document.dirty, document.title);
+      }
+    },
+
+    async refreshOpenDocuments(paths?: string[]): Promise<void> {
+      const epoch = this.documentEpoch;
+      const workspaceRoot = this.currentProject?.workspaceRoot;
+      for (const relativePath of paths || Object.keys(this.documents)) {
+        const previous = this.documents[relativePath];
+        if (!previous || previous.transient || previous.isPartialView || this.isSaving) continue;
+        try {
+          const { data } = await readWorkspaceFile({ relativePath, workspaceRoot });
+          if (epoch !== this.documentEpoch || this.isSaving) return;
+          const current = this.documents[relativePath];
+          if (!current || current !== previous || data.content === current.savedContent) continue;
+          if (current.dirty && current.content !== data.content) {
+            current.conflict = data;
+          } else {
+            this.documents[relativePath] = { ...data, savedContent: data.content, dirty: false };
+          }
+          this.updateTabState(relativePath);
+          if (this.activeFile === relativePath) this.activateCachedDocument(relativePath);
+          this.persistDrafts();
+        } catch (error) {
+          if (epoch === this.documentEpoch) this.workspaceError = normalizeWorkspaceError(error);
+        }
+      }
+    },
+
+    openConflictCopy(): void {
+      const conflict = this.activeConflict;
+      if (!conflict) return;
+      this.syncActiveDocument();
+      this.applyFileDocument({ ...conflict, relativePath: `conflict://${conflict.relativePath}`, title: `磁盘版本：${fileNameFromPath(conflict.relativePath)}`, transient: true, readOnly: true });
+    },
+
+    async resolveActiveConflict(): Promise<void> {
+      const document = this.documents[this.activeFile];
+      if (!document?.conflict) return;
+      this.openConflictBackup(document.conflict);
+      document.savedContent = document.conflict.content;
+      document.fullContentSha256 = document.conflict.fullContentSha256;
+      delete document.conflict;
+      document.dirty = document.content !== document.savedContent;
+      this.activateCachedDocument(document.relativePath);
+      await this.saveActiveFile();
+      this.persistDrafts();
+    },
+
+    openConflictBackup(conflict: WorkspaceFileDocument): void {
+      const relativePath = `conflict://${conflict.relativePath}`;
+      this.documents[relativePath] = { ...conflict, relativePath, title: `磁盘版本：${fileNameFromPath(conflict.relativePath)}`, transient: true, readOnly: true, savedContent: conflict.content, dirty: false };
+      this.ensureOpenTab(relativePath, conflict.extension, false, this.documents[relativePath].title);
     }
   }
 });
@@ -2065,6 +2265,8 @@ function normalizeStorySettingsPayload(
     payload.storyChapterTemplateId ?? payload.story_chapter_template_id
   );
   const autoUpdateVariables = normalizeBooleanFlag(payload.autoUpdateVariables, false);
+  const chapterWordCountTarget = resolveChapterWordCountTarget(payload);
+  const preciseWordCountEnabled = normalizeBooleanFlag(payload.preciseWordCountEnabled ?? payload.precise_word_count_enabled, false);
   const autoUpdateWiki = normalizeBooleanFlag(payload.autoUpdateWiki, false);
   const agentCommitPromptEnabled = normalizeBooleanFlag(payload.agentCommitPromptEnabled, true);
   const autoNameChapterDirectories = normalizeStoryAutoNameChapterDirectories(payload.autoNameChapterDirectories);
@@ -2085,6 +2287,8 @@ function normalizeStorySettingsPayload(
     story_fragment_count: storyFragmentCount,
     chapterLengthTier,
     chapter_length_tier: chapterLengthTier,
+    chapterWordCountTarget,
+    preciseWordCountEnabled,
     storyChapterTemplateId,
     story_chapter_template_id: storyChapterTemplateId,
     autoUpdateVariables,

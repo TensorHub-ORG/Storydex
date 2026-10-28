@@ -110,18 +110,25 @@ export function unwrapEnvelope<T>(body: ApiEnvelope<T>, fallbackMessage: string)
 
 export function describeTransportError(error: unknown, fallbackMessage: string): string {
   if (axios.isAxiosError(error)) {
-    if (!error.response) {
+    const status = error.response?.status || Number(error.request?.status || 0);
+    if (!error.response && !status) {
       if (error.code === "ECONNABORTED") {
         return "后端请求超时，请稍后重试。";
       }
-      return "无法连接后端服务，请确认应用后端已经启动。";
+      return "未收到可读取的后端响应，请检查连接或代理设置后重试。";
     }
     // 后端 StorydexError 会把真实错误消息放在 envelope.error.message 里。
     // axios 收到 4xx/5xx 会直接抛 AxiosError，跳过 unwrapEnvelope，
     // 所以需要从 error.response.data 读取 envelope 里的消息展示给用户。
-    const envelopeMessage = readEnvelopeErrorMessage(error.response.data);
+    const envelopeMessage = readEnvelopeErrorMessage(error.response?.data);
     if (envelopeMessage) {
       return envelopeMessage;
+    }
+    if (status >= 500) {
+      return `后端处理请求失败（HTTP ${status}），请稍后重试或查看后端日志。`;
+    }
+    if (status === 413) {
+      return "请求内容超过后端大小限制，草稿仍保留，请缩减内容或拆分文件。";
     }
     return error.message || fallbackMessage;
   }

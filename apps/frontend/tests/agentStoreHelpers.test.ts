@@ -7,6 +7,36 @@ const u = __agentStoreTestUtils!;
 const packet = (value: Record<string, unknown>) => value as never;
 
 describe("agent store deterministic helpers", () => {
+  it("reports an advisory length miss as saved without a strict-check warning", () => {
+    const validation = packet({
+      chapterLengthTier: "long", chapterWordCountTarget: 6000, preciseWordCountEnabled: false,
+      actualWordCount: 3201, passed: true, writeToolApplied: true, tierHit: false,
+      structurePassed: true, machineQualityPassed: true
+    });
+    expect(u.statusForPacket("StoryGenerationValidation", validation)).toBe("success");
+    const summary = u.summarizeStoryGenerationValidationPacket(validation);
+    expect(summary).toContain("章节已写入");
+    expect(summary).toContain("3201 字");
+    expect(summary).toContain("参考目标：约 6000 字");
+    expect(summary).not.toContain("未命中");
+    const draft = u.streamPacketToWaterfallItem("guidance-trace", packet({
+      _type: "StoryDraftMeasured", chapterLengthTier: "long", chapterWordCountTarget: 6000,
+      preciseWordCountEnabled: false, actualWordCount: 3201, tierHit: false, resultingWordCount: 3201
+    }), []);
+    expect(draft?.content).toContain("尚未写入");
+    expect(draft?.content).not.toContain("未命中");
+    expect(draft?.content).not.toContain("落盘后");
+    const guidance = u.summarizeTurnContractPacket(packet({ turnPlan: {
+      chapterWordCountTarget: 6000, chapterLengthTier: "long", wordCountPolicy: { mode: "guidance", target: 6000 }
+    } }));
+    expect(guidance).toContain("严格字数检查：关闭");
+    expect(guidance).not.toContain("可接受：");
+    const strict = u.summarizeTurnContractPacket(packet({ turnPlan: {
+      chapterWordCountTarget: 6000, chapterLengthTier: "long", wordCountPolicy: { mode: "precise", target: 6000 }
+    } }));
+    expect(strict).toContain("可接受：5400-6600 字");
+  });
+
   it("uses the medium tier as the generation default and keeps legacy migration local", () => {
     setActivePinia(createPinia());
     const store = useAgentStore();

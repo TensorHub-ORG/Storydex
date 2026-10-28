@@ -19,6 +19,7 @@ const api = vi.hoisted(() => ({
 }));
 const git = vi.hoisted(() => ({ refreshSummary: vi.fn() }));
 const workspace = vi.hoisted(() => ({
+  documents: {}, refreshOpenDocuments: vi.fn().mockResolvedValue(undefined),
   activeFileBindingOrPath: "chapters/001.md",
   activeFile: "chapters/001.md",
   currentProject: { workspaceRoot: "C:/isolated/story" },
@@ -57,6 +58,7 @@ beforeEach(() => {
   workspace.activeFile = "chapters/001.md";
   workspace.currentProject = { workspaceRoot: "C:/isolated/story" };
   workspace.health = null;
+  workspace.documents = {};
   api.fetchAgentSessions.mockResolvedValue(sessions([]));
   api.fetchAgentCoomiStatus.mockResolvedValue({
     data: { runtime: "coomi", installed: true, model: "fake", permissionMode: "full_access" }
@@ -122,6 +124,30 @@ describe("agent store streaming", () => {
     expect(store.executionHistory[0].reply).toContain("退出计划模式");
   });
 
+  it("sends drafts as context and applies explicit chapter mode to one turn", async () => {
+    api.streamAgentPrompt.mockImplementation(async (_request, onPacket) => {
+      onPacket({ _type: "AgentCompleted", status: "success" });
+    });
+    workspace.documents = {
+      "draft.md": { relativePath: "draft.md", content: "unsaved", fullContentSha256: "v1", dirty: true },
+      "disk.md": { relativePath: "disk.md", content: "saved", dirty: false },
+      "conflict://draft.md": { relativePath: "conflict://draft.md", content: "copy", dirty: true, transient: true },
+    };
+    const store = useAgentStore();
+    store.taskMode = "generate_chapter";
+    store.promptInput = "生成下一章";
+    await store.runPrompt();
+    expect(api.streamAgentPrompt.mock.calls[0][0]).toMatchObject({
+      taskMode: "generate_chapter",
+      editorDocuments: [{ relativePath: "draft.md", content: "unsaved", baseRevision: "v1", dirty: true }],
+    });
+    expect(store.taskMode).toBe("chat");
+    expect(workspace.refreshOpenDocuments).toHaveBeenCalled();
+    store.promptInput = "只修改标点，不生成章节";
+    await store.runPrompt();
+    expect(api.streamAgentPrompt.mock.calls[1][0].taskMode).toBe("chat");
+  });
+
   it("publishes immediate phases, updates heartbeats in place, and appends text chunks", async () => {
     api.streamAgentPrompt.mockImplementation(async (_request: unknown, onPacket: (packet: unknown) => void) => {
       onPacket({ _type: "RunAccepted", phase: "request", status: "running", elapsedMs: 1, label: "请求已接收" });
@@ -142,10 +168,10 @@ describe("agent store streaming", () => {
     expect(request.storyGeneration).toEqual({
       fragmentCount: 1,
       chapterLengthTier: "medium",
+      chapterWordCountTarget: 3000,
+      preciseWordCountEnabled: false,
       chapterTemplateId: "default_chapter_directory"
     });
-    expect(request.storyGeneration).not.toHaveProperty("chapterWordCountTarget");
-    expect(request.storyGeneration).not.toHaveProperty("preciseWordCountEnabled");
     expect(request.storyGeneration).not.toHaveProperty("fragmentWordCount");
     expect(store.isRunning).toBe(false);
     expect(store.lastReply).toBe("第一段输出");
@@ -553,6 +579,8 @@ describe("agent store sessions and Git decision UX", () => {
     expect(request.storyGeneration).toEqual({
       fragmentCount: 1,
       chapterLengthTier: "long",
+      chapterWordCountTarget: 3000,
+      preciseWordCountEnabled: false,
       chapterTemplateId: "default_chapter_directory"
     });
     expect(store.executionHistory).toHaveLength(1);
@@ -1007,14 +1035,14 @@ describe("agent store coomi status normalization boundaries", () => {
     ]);
   });
 
-  it("sends the exact word-count target only when precise mode is enabled", async () => {
+  it.each([false, true])("sends the target and preserves strict checking = %s", async (strict) => {
     api.streamAgentPrompt.mockImplementation(async (_request: unknown, onPacket: (packet: unknown) => void) => {
       onPacket({
         _type: "TurnContract",
         turnPlan: {
           chapterLengthTier: "medium",
           chapterWordCountTarget: 4200,
-          wordCountPolicy: { mode: "precise", target: 4200 }
+          wordCountPolicy: { mode: strict ? "precise" : "guidance", target: 4200 }
         }
       });
       onPacket({ _type: "AgentCompleted", status: "success" });
@@ -1022,7 +1050,7 @@ describe("agent store coomi status normalization boundaries", () => {
     const store = useAgentStore();
     store.setStoryGenerationOptions({
       chapterWordCountTarget: 4200,
-      preciseWordCountEnabled: true
+      preciseWordCountEnabled: strict
     });
     store.promptInput = "生成精确长度正文";
 
@@ -1030,10 +1058,10 @@ describe("agent store coomi status normalization boundaries", () => {
 
     expect(api.streamAgentPrompt.mock.calls[0][0].storyGeneration).toMatchObject({
       chapterWordCountTarget: 4200,
-      preciseWordCountEnabled: true
+      preciseWordCountEnabled: strict
     });
     expect(store.chapterWordCountTarget).toBe(4200);
-    expect(store.preciseWordCountEnabled).toBe(true);
+    expect(store.preciseWordCountEnabled).toBe(strict);
   });
 
   it("derives reasoning control from wire fields and prompt fallback", () => {

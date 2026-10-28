@@ -65,6 +65,11 @@
         <div v-if="activeTab.saveErrorMessage" class="preview-window-feedback is-error">
           {{ activeTab.saveErrorMessage }}
         </div>
+        <details v-if="activeTab.conflict" class="preview-window-feedback is-error">
+          <summary>磁盘内容已改变，当前草稿已保留。查看磁盘版本</summary>
+          <pre>{{ activeTab.conflict.content }}</pre>
+          <button type="button" @click="resolveConflict(activeTab)">整理后用当前内容保存</button>
+        </details>
 
         <div
           v-if="activeTab.editorMode === 'edit' && !activeTab.readOnly"
@@ -100,6 +105,8 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue"
 import { useRoute } from "vue-router";
 import { fetchUiPreferences } from "@/api/system";
 import { readWorkspaceFile, writeWorkspaceFile } from "@/api/workspace";
+import { describeTransportError } from "@/api/client";
+import type { WorkspaceFileDocument } from "@/types/workspace";
 import { isThemeCode } from "@/constants/themes";
 import { useTheme } from "@/composables/useTheme";
 import { readCachedThemeCode, writeCachedThemeCode } from "@/utils/appearance";
@@ -120,6 +127,9 @@ interface PreviewTab {
   displayPath: string;
   content: string;
   savedContent: string;
+  fullContentSha256?: string;
+  workspaceRoot?: string;
+  conflict?: WorkspaceFileDocument;
   size: number;
   wordCount: number;
   lineCount: number;
@@ -325,13 +335,19 @@ async function loadTabContent(tab: PreviewTab): Promise<void> {
   tab.previewUnsupportedMessage = "";
 
   try {
-    const result = await readWorkspaceFile({ relativePath: tab.relativePath });
+    const result = await readWorkspaceFile({ relativePath: tab.relativePath, workspaceRoot: tab.workspaceRoot });
     if (tab.requestToken !== requestToken) {
       return;
     }
 
+    if (isTabDirty(tab)) {
+      if (tab.savedContent !== result.data.content) tab.conflict = result.data;
+      return;
+    }
     tab.content = String(result.data.content || "");
     tab.savedContent = tab.content;
+    tab.fullContentSha256 = result.data.fullContentSha256;
+    tab.workspaceRoot = result.data.workspaceRoot;
     tab.size = Number(result.data.size || 0);
     tab.wordCount = Number(result.data.wordCount || countStoryTextWords(tab.content));
     tab.lineCount = Number(result.data.lineCount || countLines(tab.content));
@@ -351,11 +367,6 @@ async function loadTabContent(tab: PreviewTab): Promise<void> {
       return;
     }
 
-    tab.content = "";
-    tab.savedContent = "";
-    tab.size = 0;
-    tab.wordCount = 0;
-    tab.lineCount = 0;
     tab.loadErrorMessage = error instanceof Error && error.message ? error.message : "文件读取失败。";
     tab.extension = extensionFromPath(tab.relativePath);
     tab.displayPath = tab.relativePath;
@@ -432,7 +443,9 @@ function handleEditorInput(event: Event): void {
 }
 
 async function saveTab(tab: PreviewTab): Promise<boolean> {
-  if (tab.readOnly || !isTabDirty(tab) || tab.isSaving) {
+  if (tab.isSaving) return false;
+  if (tab.conflict) return false;
+  if (tab.readOnly || !isTabDirty(tab)) {
     return true;
   }
 
@@ -442,10 +455,12 @@ async function saveTab(tab: PreviewTab): Promise<boolean> {
   try {
     const result = await writeWorkspaceFile({
       relativePath: tab.relativePath,
-      content: tab.content
+      content: tab.content,
+      expectedContentSha256: tab.fullContentSha256,
+      workspaceRoot: tab.workspaceRoot,
     });
-    tab.content = String(result.data.content || "");
-    tab.savedContent = tab.content;
+    tab.savedContent = result.data.content;
+    tab.fullContentSha256 = result.data.fullContentSha256;
     tab.size = Number(result.data.size || 0);
     tab.wordCount = Number(result.data.wordCount || countStoryTextWords(tab.content));
     tab.lineCount = Number(result.data.lineCount || countLines(tab.content));
@@ -457,13 +472,23 @@ async function saveTab(tab: PreviewTab): Promise<boolean> {
     tab.previewUnsupportedMessage = Boolean(result.data.media?.previewUnsupported)
       ? String(result.data.media?.message || "当前文件暂不支持直接预览。")
       : "";
-    return true;
+    return !isTabDirty(tab);
   } catch (error: unknown) {
-    tab.saveErrorMessage = error instanceof Error && error.message ? error.message : "文件保存失败。";
+    tab.saveErrorMessage = describeTransportError(error, "文件保存失败。");
+    const current = (error as { response?: { data?: { error?: { details?: { currentDocument?: WorkspaceFileDocument } } } } })?.response?.data?.error?.details?.currentDocument;
+    if (current) tab.conflict = current;
     return false;
   } finally {
     tab.isSaving = false;
   }
+}
+
+async function resolveConflict(tab: PreviewTab): Promise<void> {
+  if (!tab.conflict) return;
+  tab.savedContent = tab.conflict.content;
+  tab.fullContentSha256 = tab.conflict.fullContentSha256;
+  tab.conflict = undefined;
+  await saveTab(tab);
 }
 
 function isTabDirty(tab: PreviewTab): boolean {
@@ -593,7 +618,7 @@ defineExpose({
   __testUtils: import.meta.env.MODE === "test" ? {
     tabs, activeRelativePath, activeTab, activeFileStats, renderedMarkdown, isActiveTabDirty,
     applyPersistedAppearance, handleWindowFocus, handleWindowBlur, handleWindowPageHide, handleWindowKeydown,
-    handleMarkdownLinkClick, openOrActivateTab, ensureTab, loadTabContent, activateTab, closeTab,
+    handleMarkdownLinkClick, openOrActivateTab, ensureTab, loadTabContent, activateTab, closeTab, resolveConflict,
     handleModeChange, handleEditorInput, saveTab, isTabDirty, scheduleActiveTabAutoSave, clearAutoSaveTimer,
     flushActiveTabAutoSave, persistTabBeforeLeaving, saveAllTabs, iconFor, extensionFromPath,
     countStoryTextWords, countLines, formatInteger, formatBytes, normalizeRelativePath, fileNameFromPath

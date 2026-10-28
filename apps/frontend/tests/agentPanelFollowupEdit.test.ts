@@ -18,6 +18,7 @@ const api = vi.hoisted(() => ({
 }));
 const git = vi.hoisted(() => ({ summary: null as any, refreshSummary: vi.fn().mockResolvedValue(undefined) }));
 const workspace = vi.hoisted(() => ({
+  documents: {}, refreshOpenDocuments: vi.fn().mockResolvedValue(undefined),
   launchScreenVisible: false,
   currentProject: { workspaceRoot: "C:/isolated/story" },
   health: null,

@@ -1,5 +1,5 @@
 <template>
-  <main class="editor-workbench">
+  <main class="editor-workbench" v-bind="$attrs">
     <template v-if="showLaunchScreen">
       <div class="editor-tabs editor-tabs-launch">
         <div class="editor-tab active is-launch">
@@ -34,6 +34,11 @@
       </div>
 
       <div class="editor-surface-wrap">
+        <div v-if="workspaceStore.draftPersistenceError" class="editor-error" role="alert">
+          {{ workspaceStore.draftPersistenceError }}
+          <button type="button" @click="workspaceStore.persistDrafts()">重试草稿备份</button>
+        </div>
+        <div v-else-if="workspaceStore.draftWritesPending" role="status">正在备份草稿…</div>
         <div v-if="workspaceStore.isBootstrapping || workspaceStore.isFileLoading" class="editor-empty">
           正在读取文件内容...
         </div>
@@ -44,6 +49,15 @@
           从左侧资源管理器选择文件，或点击待审批文件查看临时预览。
         </div>
         <section v-else ref="editorPaneRef" class="editor-pane">
+          <div v-if="workspaceStore.activeConflict" class="editor-conflict" role="alert">
+            <p>磁盘内容已改变，当前草稿已保留。请查看磁盘版本并整理当前内容后保存。</p>
+            <button type="button" @click="workspaceStore.openConflictCopy()">查看磁盘版本</button>
+            <button type="button" :disabled="workspaceStore.isSaving" @click="workspaceStore.resolveActiveConflict()">用当前内容解决冲突</button>
+          </div>
+          <div v-if="workspaceStore.workspaceError" class="editor-error" role="alert">{{ workspaceStore.workspaceError }}</div>
+          <div v-if="workspaceStore.documents[workspaceStore.activeFile]?.saveError && workspaceStore.documents[workspaceStore.activeFile]?.saveError !== workspaceStore.workspaceError" class="editor-error" role="alert">
+            {{ workspaceStore.documents[workspaceStore.activeFile]?.saveError }}
+          </div>
           <div class="editor-pane-head" :class="{ 'is-worldline-map': workspaceStore.isWorldlineMapActive }">
             <div class="editor-pane-heading">
               <div class="editor-pane-title">{{ workspaceStore.activeFileName }}</div>
@@ -55,6 +69,10 @@
             </div>
 
             <div class="editor-pane-actions">
+              <button v-if="canOpenPreviewWindow" class="editor-mode-btn" type="button"
+                title="独立预览窗口（读取已保存的磁盘内容）" aria-label="打开独立预览窗口" @click="handleOpenPreviewWindow">
+                <span class="material-symbols-rounded">open_in_new</span>
+              </button>
               <button v-if="!workspaceStore.isWorldlineMapActive" class="editor-mode-btn" type="button" title="在文件中查找" aria-label="在文件中查找" @click="toggleFind">
                 <span class="material-symbols-rounded">find_in_page</span>
               </button>
@@ -274,6 +292,7 @@
 </template>
 
 <script setup lang="ts">
+defineOptions({ inheritAttrs: false });
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import GitReviewPane from "@/components/GitReviewPane.vue";
 import WorldlineMapPane from "@/components/WorldlineMapPane.vue";
@@ -283,6 +302,7 @@ import { useGitStore } from "@/stores/git";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type { WorkspaceEditorTab } from "@/types/workspace";
 import { createMarkdownRenderer } from "@/utils/markdown";
+import { openFilePreviewWindow } from "@/utils/filePreview";
 import {
   findMarkdownLinkAnchor,
   isExternalMarkdownHref,
@@ -294,6 +314,10 @@ const gitStore = useGitStore();
 const markdown = createMarkdownRenderer();
 
 const showLaunchScreen = computed(() => workspaceStore.launchScreenVisible && !workspaceStore.isHelpGuideActive);
+const canOpenPreviewWindow = computed(() => {
+  const document = workspaceStore.documents[workspaceStore.activeFile];
+  return Boolean(document && !document.transient && document.kind !== "directory" && !workspaceStore.activeLargeFileWindow?.readOnly);
+});
 const renderedMarkdown = computed(() => markdown.render(workspaceStore.editorContent || ""));
 const renderedCharacterJsonMarkdown = computed(() => {
   if (!isCharacterJsonDocument.value) {
@@ -410,6 +434,17 @@ watch(
 function handleInput(event: Event): void {
   const target = event.target as HTMLTextAreaElement;
   workspaceStore.setEditorContent(target.value);
+}
+
+async function handleOpenPreviewWindow(): Promise<void> {
+  if (!canOpenPreviewWindow.value) return;
+  try {
+    if (!await openFilePreviewWindow(workspaceStore.activeFile)) {
+      workspaceStore.workspaceError = "无法打开独立预览窗口，请检查浏览器是否拦截了弹出窗口。";
+    }
+  } catch (error: unknown) {
+    workspaceStore.workspaceError = error instanceof Error ? error.message : "无法打开独立预览窗口。";
+  }
 }
 
 function toggleFind(): void {
@@ -911,7 +946,11 @@ defineExpose({
   flex-wrap: wrap;
 }
 
-.editor-pane { position: relative; min-height: 0; height: 100%; }
+.editor-surface-wrap { display: flex; flex-direction: column; }
+.editor-surface-wrap > .editor-error,
+.editor-surface-wrap > [role="status"] { flex-shrink: 0; padding: 8px 16px; }
+.editor-surface-wrap > .editor-empty { flex: 1; min-height: 0; height: auto; }
+.editor-pane { position: relative; flex: 1; min-height: 0; height: auto; }
 .editor-pane-heading { min-width: 0; }
 .editor-pane-head.is-worldline-map { align-items: center; }
 .doc-editor,

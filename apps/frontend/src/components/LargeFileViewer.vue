@@ -5,7 +5,8 @@
         <strong>{{ isReadOnly ? "大文件快速预览" : "渐进加载" }}</strong>
         <span>已加载第 {{ startLine + 1 }}～{{ endLine }} 行，共约 {{ formatInteger(totalLines) }} 行<template v-if="!windowData.lineCountExact">（后台索引中）</template></span>
       </div>
-      <button type="button" @click="loadFully">完整加载并编辑</button>
+      <span v-if="isReadOnly">超过 8 MiB，仅支持分页只读查看</span>
+      <button v-else type="button" :disabled="workspaceStore.isFileLoading" @click="loadFully">完整加载并编辑</button>
     </header>
     <div ref="scroller" class="large-file-scroll" @scroll.passive="handleScroll">
       <div class="large-file-spacer" :style="{ height: `${virtualHeight}px` }">
@@ -42,7 +43,7 @@ function handleScroll(): void {
 }
 
 async function loadFully(): Promise<void> {
-  if (isReadOnly.value && !window.confirm("该文件超过20MB，完整加载和编辑可能占用大量内存。是否继续？")) return;
+  if (isReadOnly.value) return;
   await workspaceStore.loadActiveFileFully();
   await workspaceStore.setEditorMode("edit");
 }

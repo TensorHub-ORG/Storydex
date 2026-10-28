@@ -130,6 +130,9 @@ export async function readWorkspaceFile(
 export async function writeWorkspaceFile(
   payload: WorkspaceFileWriteRequest
 ): Promise<ApiResult<WorkspaceFileDocument>> {
+  if (new TextEncoder().encode(payload.content).byteLength > 8 * 1024 * 1024) {
+    throw new WorkspaceApiError("内容超过 8 MiB 保存上限，草稿仍保留，请缩减内容或拆分文件。", "file_too_large");
+  }
   const response = await apiClient.post<ApiEnvelope<WorkspaceFileDocument>>("/file/write", payload);
   try {
     return unwrapEnvelope(response.data, "Workspace file write failed.");
@@ -521,8 +524,8 @@ export async function fetchStoryLatestSnapshot(): Promise<ApiResult<StoryLatestS
   }
 }
 
-export async function fetchStoryProjectSettings(): Promise<ApiResult<StoryProjectSettingsResponse>> {
-  const response = await apiClient.get<ApiEnvelope<StoryProjectSettingsResponse>>("/workspace/story/settings");
+export async function fetchStoryProjectSettings(workspaceRoot?: string): Promise<ApiResult<StoryProjectSettingsResponse>> {
+  const response = await apiClient.get<ApiEnvelope<StoryProjectSettingsResponse>>("/workspace/story/settings", { params: { workspaceRoot } });
   try {
     return unwrapEnvelope(response.data, "Story settings request failed.");
   } catch (error: unknown) {

@@ -1,4 +1,7 @@
-import { afterEach, vi } from "vitest";
+import { afterEach, beforeEach, vi } from "vitest";
+import { IDBFactory } from "fake-indexeddb";
+
+beforeEach(() => { vi.stubGlobal("indexedDB", new IDBFactory()); });
 
 Object.defineProperty(window, "confirm", {
   configurable: true,
