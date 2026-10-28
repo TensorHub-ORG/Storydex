@@ -342,7 +342,95 @@ impl StorydexKnowledge {
         &self.project_root
     }
 
+    /// Relation candidates are source data; human decisions are a separate ledger.
+    /// A changed candidate or source invalidates its decision, never its evidence.
+    pub fn review_relation(
+        &self,
+        id: &str,
+        expected: &str,
+        decision: &str,
+        changes: &Value,
+    ) -> Result<Value> {
+        let _lock = crate::ProjectWriteLock::acquire(&self.project_root)?;
+        ensure!(
+            matches!(decision, "confirmed" | "rejected"),
+            "invalid relation decision"
+        );
+        let payload = self.sync_unlocked(false)?;
+        let candidate = payload["relations"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["id"] == id))
+            .context("relation_not_found")?;
+        ensure!(
+            candidate["fingerprint"].as_str() == Some(expected),
+            "relation_version_conflict"
+        );
+        if decision == "confirmed" {
+            ensure!(
+                candidate["evidenceValid"] == true,
+                "relation evidence is missing or has changed; update the candidate first"
+            );
+            let nodes = payload["graph"]["nodes"]
+                .as_array()
+                .context("graph nodes missing")?;
+            for key in ["subjectId", "objectId"] {
+                let value = changes
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| candidate[key].as_str())
+                    .unwrap_or_default();
+                ensure!(
+                    nodes.iter().any(|node| node["id"] == value),
+                    "unknown relation endpoint: {value}"
+                );
+            }
+            ensure!(
+                !changes
+                    .get("predicate")
+                    .unwrap_or(&candidate["predicate"])
+                    .as_str()
+                    .unwrap_or_default()
+                    .trim()
+                    .is_empty(),
+                "relation predicate is empty"
+            );
+        }
+        let path = self
+            .project_root
+            .join(".storydex/knowledge/relation-reviews.json");
+        let mut ledger = read_json_if_present(&path)?.unwrap_or_else(|| json!({}));
+        ensure!(
+            ledger.is_object(),
+            "relation review ledger must be an object"
+        );
+        ledger[id] = json!({"baseFingerprint": candidate["baseFingerprint"], "decision": decision,
+            "changes": changes, "reviewedAt": now_rfc3339()});
+        ProjectionBundleWriter::new(&self.project_root)?
+            .write_targets(vec![(path, pretty_json_bytes(&ledger)?)])?;
+        self.sync_unlocked(false)
+    }
+
     pub fn sync(&self, force: bool) -> Result<Value> {
+        let _lock = crate::ProjectWriteLock::acquire(&self.project_root)?;
+        self.sync_unlocked(force)
+    }
+
+    fn sync_unlocked(&self, force: bool) -> Result<Value> {
+        let result = self.build_projection(force);
+        if let Err(error) = &result {
+            let writer = ProjectionBundleWriter::new(&self.project_root)?;
+            let mut status = writer.read_status()?.unwrap_or_else(|| json!({}));
+            status["status"] = json!("error");
+            status["projectionFreshness"] = json!("stale");
+            status["diagnostics"] = json!([{"code": "wiki.sync_failed", "severity": "error", "message": error.to_string()}]);
+            status["updatedAt"] = json!(now_rfc3339());
+            writer.write_status(&status)?;
+        }
+        result
+    }
+
+    fn build_projection(&self, force: bool) -> Result<Value> {
         let writer = ProjectionBundleWriter::new(&self.project_root)?;
         let sources = self.collect_sources()?;
         let source_snapshot = self.source_snapshot(&sources);
@@ -372,6 +460,9 @@ impl StorydexKnowledge {
                 .is_none_or(|status| status == "ready");
         if !force
             && existing_ready
+            && existing
+                .as_ref()
+                .is_some_and(|value| value["relations"].is_array())
             && diff["changedSourcePaths"]
                 .as_array()
                 .is_some_and(Vec::is_empty)
@@ -415,6 +506,7 @@ impl StorydexKnowledge {
             previous_revision
         };
         let mut payload = self.build_payload(&sources, next_revision, &source_checksum)?;
+        self.project_relations(&sources, existing.as_ref(), &mut payload)?;
         let graph = graph_checksum(&payload)?;
         if let Some(object) = payload.as_object_mut() {
             object.insert("graphChecksum".to_owned(), Value::String(graph.clone()));
@@ -465,34 +557,17 @@ impl StorydexKnowledge {
         });
         let index = self.build_index(&sources, &payload, &status, &diff);
         let markdown = self.render_markdown(&payload);
-        match writer.write(&ProjectionBundle {
-            payload: payload.clone(),
-            markdown,
-            index,
-            status,
-            source_snapshot: Some(source_snapshot),
-            change_set: Some(diff),
-        }) {
-            Ok(_) => Ok(payload),
-            Err(error) => {
-                let last_good = previous_revision;
-                let failure = json!({
-                    "schemaVersion": 3,
-                    "status": "error",
-                    "projectionFreshness": "stale",
-                    "knowledgeRevision": existing.as_ref().and_then(|value| value.get("knowledgeRevision")).cloned().unwrap_or(json!(last_good)),
-                    "builtFromRevision": existing.as_ref().and_then(|value| value.get("builtFromRevision")).cloned().unwrap_or(json!(last_good)),
-                    "lastSuccessfulRevision": last_good,
-                    "sourceSetChecksum": existing.as_ref().and_then(|value| value.get("sourceSetChecksum")).cloned().unwrap_or(Value::Null),
-                    "attemptedSourceSetChecksum": source_checksum,
-                    "diagnostics": [{"code": "wiki.write_failed", "severity": "error", "message": error.to_string()}],
-                    "updatedAt": now_rfc3339(),
-                });
-                let _ = writer.write_status(&failure);
-                Err(error
-                    .context("Rust WIKI projection write failed; last-good projection preserved"))
-            }
-        }
+        writer
+            .write(&ProjectionBundle {
+                payload: payload.clone(),
+                markdown,
+                index,
+                status,
+                source_snapshot: Some(source_snapshot),
+                change_set: Some(diff),
+            })
+            .context("Rust WIKI projection write failed; last-good projection preserved")?;
+        Ok(payload)
     }
 
     fn collect_sources(&self) -> Result<Vec<ProjectionSource>> {
@@ -500,6 +575,180 @@ impl StorydexKnowledge {
         collect_source_files(&self.project_root, &self.project_root, &mut files)?;
         files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
         Ok(files)
+    }
+
+    fn project_relations(
+        &self,
+        sources: &[ProjectionSource],
+        existing: Option<&Value>,
+        payload: &mut Value,
+    ) -> Result<()> {
+        let input =
+            read_json_if_present(&self.project_root.join(".storydex/knowledge/relations.json"))?
+                .unwrap_or_else(|| json!({"relations": []}));
+        let ledger = read_json_if_present(
+            &self
+                .project_root
+                .join(".storydex/knowledge/relation-reviews.json"),
+        )?
+        .unwrap_or_else(|| json!({}));
+        let candidates = input["relations"]
+            .as_array()
+            .context("relations.json requires a relations array")?;
+        let mut raw_candidates: Vec<(Value, bool)> = candidates
+            .iter()
+            .cloned()
+            .map(|item| (item, false))
+            .collect();
+        if let Some(previous) = existing.and_then(|value| value["relations"].as_array()) {
+            for item in previous {
+                if !candidates
+                    .iter()
+                    .any(|candidate| candidate["id"] == item["id"])
+                    && let Some(raw) = item.get("candidate")
+                {
+                    raw_candidates.push((raw.clone(), true));
+                }
+            }
+        }
+        // Keep earlier graph relations when upgrading the projection format.
+        // They remain reviewable even if their original evidence is incomplete.
+        if let Some(previous) = existing
+            .filter(|value| !value["relations"].is_array())
+            .and_then(|value| value["graph"]["edges"].as_array())
+        {
+            for edge in previous
+                .iter()
+                .filter(|edge| matches!(edge["type"].as_str(), Some("relationship" | "fact")))
+            {
+                let mut raw = edge.clone();
+                raw["id"] = edge.get("id").cloned().unwrap_or_else(|| {
+                    json!(format!(
+                        "legacy:{}",
+                        hex_digest(&canonical_json_bytes(edge).unwrap_or_default())
+                    ))
+                });
+                raw["subjectId"] = edge["source"].clone();
+                raw["objectId"] = edge["target"].clone();
+                raw["predicate"] = edge
+                    .get("predicate")
+                    .or_else(|| edge.get("label"))
+                    .cloned()
+                    .unwrap_or(json!("关系"));
+                raw["sourceRefs"] = edge.get("sourceRefs").cloned().unwrap_or(json!([]));
+                if !raw_candidates
+                    .iter()
+                    .any(|(item, _)| item["id"] == raw["id"])
+                {
+                    raw_candidates.push((raw, true));
+                }
+            }
+        }
+        let nodes = payload["graph"]["nodes"]
+            .as_array()
+            .context("graph nodes missing")?
+            .clone();
+        let mut ids = std::collections::HashSet::new();
+        let mut relations = Vec::new();
+        for (raw, removed) in raw_candidates {
+            let id = raw["id"]
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+                .context("relation id is required")?;
+            ensure!(ids.insert(id.to_owned()), "duplicate relation id: {id}");
+            let refs = raw["sourceRefs"]
+                .as_array()
+                .context("relation sourceRefs must be an array")?;
+            let mut valid = !removed && !refs.is_empty();
+            let mut evidence = Vec::new();
+            for source_ref in refs {
+                let path = source_ref["path"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .replace('\\', "/");
+                let quote = source_ref
+                    .get("quote")
+                    .or_else(|| source_ref.get("excerpt"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let source = sources.iter().find(|source| {
+                    source.relative_path == path && !path.starts_with(".storydex/knowledge/")
+                });
+                let matched = !quote.trim().is_empty()
+                    && source.is_some_and(|source| source.text.contains(quote));
+                valid &= matched;
+                evidence.push(json!({"path": path, "quote": quote, "sha256": source.map(|source| &source.sha256), "matched": matched}));
+            }
+            let base = hex_digest(&canonical_json_bytes(
+                &json!({"candidate": raw, "evidence": evidence, "removed": removed}),
+            )?);
+            let review = ledger
+                .get(id)
+                .filter(|review| review["baseFingerprint"] == base);
+            let mut status = review
+                .and_then(|review| review["decision"].as_str())
+                .unwrap_or("review_required");
+            let mut relation = raw.clone();
+            ensure!(relation.is_object(), "relation must be an object");
+            if let Some(changes) = review.and_then(|review| review["changes"].as_object()) {
+                for key in ["subjectId", "objectId", "predicate"] {
+                    if let Some(value) = changes
+                        .get(key)
+                        .filter(|value| value.as_str().is_some_and(|s| !s.trim().is_empty()))
+                    {
+                        relation[key] = value.clone();
+                    }
+                }
+            }
+            let endpoints_exist = ["subjectId", "objectId"]
+                .iter()
+                .all(|key| nodes.iter().any(|node| node["id"] == relation[*key]));
+            if status == "confirmed" && (!valid || !endpoints_exist) {
+                status = "review_required";
+            }
+            relation["candidate"] = raw.clone();
+            relation["sourceRefs"] = json!(evidence);
+            relation["baseFingerprint"] = json!(base);
+            relation["fingerprint"] = json!(hex_digest(&canonical_json_bytes(&json!([
+                base,
+                ledger.get(id)
+            ]))?));
+            relation["reviewStatus"] = json!(status);
+            relation["needsReview"] = json!(status == "review_required");
+            relation["knowledgeStatus"] = json!(if valid { "observed" } else { "stale" });
+            relation["evidenceValid"] = json!(valid);
+            relation["reviewReason"] = json!(if removed {
+                "候选已从来源移除，保留旧关系供复核"
+            } else if !valid {
+                "来源或引文已改变，请更新候选"
+            } else if !endpoints_exist {
+                "关系端点不存在，请修正角色 ID"
+            } else {
+                ""
+            });
+            if status != "rejected" && endpoints_exist {
+                let mut edge = relation.clone();
+                edge["source"] = relation["subjectId"].clone();
+                edge["target"] = relation["objectId"].clone();
+                edge["type"] = json!("relationship");
+                edge["label"] = relation["predicate"].clone();
+                edge["evidence"] = json!(
+                    evidence
+                        .iter()
+                        .filter_map(|item| item["quote"].as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+                payload["graph"]["edges"]
+                    .as_array_mut()
+                    .context("graph edges missing")?
+                    .push(edge);
+            }
+            relations.push(relation);
+        }
+        payload["relations"] = json!(relations);
+        payload["graphPolicy"]["relationSource"] = json!(".storydex/knowledge/relations.json");
+        Ok(())
     }
 
     fn source_snapshot(&self, sources: &[ProjectionSource]) -> Value {
@@ -562,6 +811,9 @@ impl StorydexKnowledge {
         let mut previous_chapter_id = None::<String>;
         let mut chapter_order = 0usize;
         for source in sources {
+            if source.relative_path.starts_with(".storydex/knowledge/") {
+                continue;
+            }
             let title = if source.title.trim().is_empty() {
                 Path::new(&source.relative_path)
                     .file_stem()
@@ -707,6 +959,21 @@ impl StorydexKnowledge {
                     .unwrap_or("未命名");
                 let summary = entry.get("summary").and_then(Value::as_str).unwrap_or("");
                 output.push_str(&format!("## {title}\n\n{summary}\n\n"));
+            }
+        }
+        if let Some(relations) = payload["relations"]
+            .as_array()
+            .filter(|items| !items.is_empty())
+        {
+            output.push_str("## 关系记录\n\n");
+            for relation in relations {
+                output.push_str(&format!(
+                    "- {} → {}：{}（{}）\n",
+                    relation["subjectId"].as_str().unwrap_or_default(),
+                    relation["objectId"].as_str().unwrap_or_default(),
+                    relation["predicate"].as_str().unwrap_or_default(),
+                    relation["reviewStatus"].as_str().unwrap_or_default()
+                ));
             }
         }
         output
@@ -3349,6 +3616,136 @@ fn unique_suffix() -> String {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn knowledge_relations_preserve_reviews_rebuilds_and_changed_evidence() {
+        let directory = tempfile::tempdir().expect("test fixture");
+        let root = directory.path();
+        fs::create_dir_all(root.join(".storydex/characters")).expect("test fixture");
+        fs::create_dir_all(root.join(".storydex/knowledge")).expect("test fixture");
+        fs::create_dir_all(root.join("chapters")).expect("test fixture");
+        fs::write(root.join(".storydex/characters/a.md"), "Alice").expect("test fixture");
+        fs::write(root.join(".storydex/characters/b.md"), "Bob").expect("test fixture");
+        fs::write(root.join("chapters/1.md"), "Alice is Bob's sister.").expect("test fixture");
+        let service = StorydexKnowledge::new(root).expect("test fixture");
+        let initial = service.sync(false).expect("test fixture");
+        let nodes = initial["graph"]["nodes"].as_array().expect("test fixture");
+        let node = |label: &str| {
+            nodes
+                .iter()
+                .find(|node| node["label"] == label)
+                .expect("test fixture")["id"]
+                .clone()
+        };
+        let relation = json!({"id": "siblings", "subjectId": node("a"), "objectId": node("b"), "predicate": "sister", "sourceRefs": [{"path": "chapters/1.md", "quote": "Alice is Bob's sister."}]});
+        fs::write(
+            root.join(".storydex/knowledge/relations.json"),
+            serde_json::to_vec(&json!({"relations": [relation]})).expect("test fixture"),
+        )
+        .expect("test fixture");
+        let pending = service.sync(false).expect("test fixture");
+        assert_eq!(pending["relations"][0]["reviewStatus"], "review_required");
+        assert_eq!(pending["relations"][0]["evidenceValid"], true);
+        assert!(
+            service
+                .review_relation("siblings", "old", "confirmed", &json!({}))
+                .is_err()
+        );
+        let confirmed = service
+            .review_relation(
+                "siblings",
+                pending["relations"][0]["fingerprint"]
+                    .as_str()
+                    .expect("test fixture"),
+                "confirmed",
+                &json!({"predicate": "姐姐"}),
+            )
+            .expect("test fixture");
+        assert_eq!(confirmed["relations"][0]["reviewStatus"], "confirmed");
+        assert_eq!(confirmed["graph"]["edges"][0]["label"], "姐姐");
+        assert_eq!(
+            service.sync(false).expect("test fixture")["noChanges"],
+            true
+        );
+        let rebuilt = service.sync(true).expect("test fixture");
+        assert_eq!(rebuilt["relations"][0]["reviewStatus"], "confirmed");
+        fs::write(root.join("chapters/1.md"), "Alice and Bob are strangers.")
+            .expect("test fixture");
+        let changed = service.sync(false).expect("test fixture");
+        assert_eq!(changed["relations"][0]["reviewStatus"], "review_required");
+        assert_eq!(changed["relations"][0]["evidenceValid"], false);
+        assert!(
+            service
+                .review_relation(
+                    "siblings",
+                    changed["relations"][0]["fingerprint"]
+                        .as_str()
+                        .expect("test fixture"),
+                    "confirmed",
+                    &json!({})
+                )
+                .is_err()
+        );
+        let rejected = service
+            .review_relation(
+                "siblings",
+                changed["relations"][0]["fingerprint"]
+                    .as_str()
+                    .expect("test fixture"),
+                "rejected",
+                &json!({"reason": "incorrect"}),
+            )
+            .expect("test fixture");
+        assert_eq!(rejected["relations"][0]["reviewStatus"], "rejected");
+        assert!(
+            rejected["graph"]["edges"]
+                .as_array()
+                .expect("test fixture")
+                .is_empty()
+        );
+        fs::write(
+            root.join(".storydex/knowledge/relations.json"),
+            r#"{"relations":[]}"#,
+        )
+        .expect("test fixture");
+        let removed = service.sync(true).expect("test fixture");
+        assert_eq!(
+            removed["relations"].as_array().expect("test fixture").len(),
+            1
+        );
+        assert_eq!(removed["relations"][0]["knowledgeStatus"], "stale");
+        assert!(
+            fs::read_to_string(root.join(".storydex/knowledge/relation-reviews.json"))
+                .expect("test fixture")
+                .contains("incorrect")
+        );
+    }
+    #[test]
+    fn knowledge_invalid_candidates_mark_old_projection_stale_until_repaired() {
+        let directory = tempfile::tempdir().expect("workspace");
+        fs::create_dir_all(directory.path().join(".storydex/knowledge"))
+            .expect("knowledge directory");
+        let service = StorydexKnowledge::new(directory.path()).expect("service");
+        service.sync(false).expect("initial projection");
+        let graph = directory.path().join(".storydex/wiki/knowledge_graph.json");
+        let previous = fs::read(&graph).expect("previous graph");
+        let input = directory.path().join(".storydex/knowledge/relations.json");
+        fs::write(&input, "{invalid json").expect("invalid candidate");
+        assert!(service.sync(false).is_err());
+        assert_eq!(fs::read(&graph).expect("preserved graph"), previous);
+        let status = ProjectionBundleWriter::new(directory.path())
+            .expect("writer")
+            .read_status()
+            .expect("status")
+            .expect("status exists");
+        assert_eq!(status["status"], "error");
+        assert_eq!(status["projectionFreshness"], "stale");
+        fs::write(&input, r#"{"relations":[]}"#).expect("repair candidate");
+        assert_eq!(
+            service.sync(false).expect("repaired projection")["status"],
+            "ready"
+        );
+    }
     use tempfile::tempdir;
 
     #[test]

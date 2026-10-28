@@ -3,9 +3,11 @@ mod catalog_state;
 mod config;
 mod mcp;
 mod memory;
+mod project_write;
 mod provider;
 mod replay;
 mod storydex_project;
+pub use project_write::ProjectWriteLock;
 mod update;
 
 pub use auto_config::AutoConfigIntent;

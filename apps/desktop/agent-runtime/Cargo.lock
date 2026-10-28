@@ -490,6 +490,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "coomi-engine",
+ "fs2",
  "futures-util",
  "md5",
  "reqwest",

@@ -202,6 +202,8 @@ pub struct CoreTools {
     memory: Option<Arc<MemoryManager>>,
     hooks: Option<Arc<HookRunner>>,
     parent_history: Vec<coomi_engine::ChatMessage>,
+    read_revisions: Mutex<std::collections::HashMap<PathBuf, String>>,
+    file_approval_required: bool,
 }
 
 impl CoreTools {
@@ -220,6 +222,8 @@ impl CoreTools {
             memory: None,
             hooks: None,
             parent_history: Vec::new(),
+            read_revisions: Mutex::new(std::collections::HashMap::new()),
+            file_approval_required: false,
         }
     }
 
@@ -272,11 +276,16 @@ impl CoreTools {
         &self.policy
     }
 
+    pub fn with_file_approval(mut self, required: bool) -> Self {
+        self.file_approval_required = required;
+        self
+    }
+
     async fn dispatch(&self, call: &ToolCall, approval: &dyn ApprovalHandler) -> ToolResult {
         match call.name.as_str() {
             "read_file" => self.read_file(&call.arguments).await,
-            "write_file" => self.write_file(&call.arguments).await,
-            "edit_file" => self.edit_file(&call.arguments).await,
+            "write_file" => self.write_file(call, approval).await,
+            "edit_file" => self.edit_file(call, approval).await,
             "list_dir" => self.list_dir(&call.arguments),
             "grep_files" | "search" => self.search(&call.arguments).await,
             "local_shell" => self.local_shell(call, approval).await,
@@ -519,13 +528,18 @@ impl CoreTools {
         let Some(patch_text) = string_arg(&call.arguments, "patch") else {
             return ToolResult::error("missing string argument: patch");
         };
-        if self.policy.mode() == coomi_security::AccessMode::FullAccess
+        if (self.file_approval_required
+            || self.policy.mode() == coomi_security::AccessMode::FullAccess)
             && !approval
                 .approve(call, "apply_patch will modify files")
                 .await
         {
             return ToolResult::error("patch was not approved");
         }
+        let _write_lock = match coomi_services::ProjectWriteLock::acquire(&self.cwd) {
+            Ok(lock) => lock,
+            Err(error) => return ToolResult::error(error.to_string()),
+        };
         match patch::apply_patch(&self.policy, patch_text) {
             Ok(output) => ToolResult::success(output),
             Err(error) => ToolResult::error(error),
@@ -976,6 +990,10 @@ impl CoreTools {
                 Some(&revision),
             ));
         }
+        self.read_revisions
+            .lock()
+            .expect("read revisions")
+            .insert(path.clone(), revision.clone());
         let content = match String::from_utf8(bytes) {
             Ok(content) => content,
             Err(error) => {
@@ -1087,7 +1105,8 @@ impl CoreTools {
         }
     }
 
-    async fn write_file(&self, arguments: &Value) -> ToolResult {
+    async fn write_file(&self, call: &ToolCall, approval: &dyn ApprovalHandler) -> ToolResult {
+        let arguments = &call.arguments;
         let Some(path) = string_arg(arguments, "path") else {
             return ToolResult::error("missing string argument: path");
         };
@@ -1098,6 +1117,39 @@ impl CoreTools {
             Ok(path) => path,
             Err(error) => return ToolResult::error(error),
         };
+        if self.file_approval_required && !approval.approve(call, "创建或替换项目文件").await
+        {
+            return ToolResult::error("file write was not approved");
+        }
+        let _write_lock = match coomi_services::ProjectWriteLock::acquire(&self.cwd) {
+            Ok(lock) => lock,
+            Err(error) => return ToolResult::error(error.to_string()),
+        };
+        match tokio::fs::read(&path).await {
+            Ok(bytes) => {
+                let revision = source_revision(&bytes);
+                let expected = string_arg(arguments, "expected_revision")
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        self.read_revisions
+                            .lock()
+                            .expect("read revisions")
+                            .get(&path)
+                            .cloned()
+                    });
+                if expected.as_deref() != Some(revision.as_str()) {
+                    return ToolResult::error(read_file_error(
+                        "revision_conflict",
+                        "Read the current file before replacing it; it may have changed since the previous read.",
+                        Some(&revision),
+                    ));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return ToolResult::error(format!("failed to read {}: {error}", path.display()));
+            }
+        }
         if let Some(parent) = path.parent()
             && let Err(error) = tokio::fs::create_dir_all(parent).await
         {
@@ -1107,16 +1159,23 @@ impl CoreTools {
             ));
         }
         match tokio::fs::write(&path, content).await {
-            Ok(()) => ToolResult::success(format!(
-                "wrote {} bytes to {}",
-                content.len(),
-                path.display()
-            )),
+            Ok(()) => {
+                self.read_revisions
+                    .lock()
+                    .expect("read revisions")
+                    .insert(path.clone(), source_revision(content.as_bytes()));
+                ToolResult::success(format!(
+                    "wrote {} bytes to {}",
+                    content.len(),
+                    path.display()
+                ))
+            }
             Err(error) => ToolResult::error(format!("failed to write {}: {error}", path.display())),
         }
     }
 
-    async fn edit_file(&self, arguments: &Value) -> ToolResult {
+    async fn edit_file(&self, call: &ToolCall, approval: &dyn ApprovalHandler) -> ToolResult {
+        let arguments = &call.arguments;
         let Some(path) = string_arg(arguments, "path") else {
             return ToolResult::error("missing string argument: path");
         };
@@ -1133,12 +1192,38 @@ impl CoreTools {
             Ok(path) => path,
             Err(error) => return ToolResult::error(error),
         };
+        if self.file_approval_required && !approval.approve(call, "编辑项目文件").await {
+            return ToolResult::error("file edit was not approved");
+        }
+        let _write_lock = match coomi_services::ProjectWriteLock::acquire(&self.cwd) {
+            Ok(lock) => lock,
+            Err(error) => return ToolResult::error(error.to_string()),
+        };
         let content = match tokio::fs::read_to_string(&path).await {
             Ok(content) => content,
             Err(error) => {
                 return ToolResult::error(format!("failed to read {}: {error}", path.display()));
             }
         };
+        let expected = string_arg(arguments, "expected_revision")
+            .map(str::to_owned)
+            .or_else(|| {
+                self.read_revisions
+                    .lock()
+                    .expect("read revisions")
+                    .get(&path)
+                    .cloned()
+            });
+        if let Some(expected) = expected {
+            let current = source_revision(content.as_bytes());
+            if expected != current {
+                return ToolResult::error(read_file_error(
+                    "revision_conflict",
+                    "File changed after reading; read it again before editing.",
+                    Some(&current),
+                ));
+            }
+        }
         let matches = content.matches(old_string).count();
         if matches == 0 {
             return ToolResult::error(edit_file_not_found_error(&content, old_string));
@@ -1157,8 +1242,14 @@ impl CoreTools {
         } else {
             content.replacen(old_string, new_string, 1)
         };
-        match tokio::fs::write(&path, updated).await {
-            Ok(()) => ToolResult::success(format!("edited {}", path.display())),
+        match tokio::fs::write(&path, &updated).await {
+            Ok(()) => {
+                self.read_revisions
+                    .lock()
+                    .expect("read revisions")
+                    .insert(path.clone(), source_revision(updated.as_bytes()));
+                ToolResult::success(format!("edited {}", path.display()))
+            }
             Err(error) => ToolResult::error(format!("failed to edit {}: {error}", path.display())),
         }
     }
@@ -1304,12 +1395,13 @@ impl ToolRuntime for CoreTools {
             },
             ToolSpec {
                 name: "write_file".into(),
-                description: "Create or replace a UTF-8 text file inside the workspace.".into(),
+                description: "Create a new UTF-8 file or replace an existing file after reading it. Existing files require a current read_file revision; changed files are rejected. Use edit_file for a local change.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "path": {"type": "string"},
-                        "content": {"type": "string"}
+                        "content": {"type": "string"},
+                        "expected_revision": {"type": "string", "description": "Revision from read_file; if omitted the most recent read in this run is used."}
                     },
                     "required": ["path", "content"],
                     "additionalProperties": false
@@ -1324,7 +1416,8 @@ impl ToolRuntime for CoreTools {
                         "path": {"type": "string"},
                         "old_string": {"type": "string"},
                         "new_string": {"type": "string"},
-                        "replace_all": {"type": "boolean"}
+                        "replace_all": {"type": "boolean"},
+                        "expected_revision": {"type": "string", "description": "Revision from read_file; rejects a concurrent change."}
                     },
                     "required": ["path", "old_string", "new_string"],
                     "additionalProperties": false
@@ -1925,6 +2018,78 @@ mod tests {
             .await;
         assert!(result.success);
         assert_eq!(std::fs::read_to_string(file).expect("read result"), "after");
+    }
+
+    #[tokio::test]
+    async fn file_mutations_reject_stale_reads_and_unread_replacements() {
+        let workspace = tempfile::tempdir().expect("test fixture");
+        let path = workspace.path().join("sample.txt");
+        std::fs::write(&path, "before").expect("test fixture");
+        let policy = SecurityPolicy::new(workspace.path(), AccessMode::WorkspaceWrite)
+            .expect("test fixture");
+        let tools = CoreTools::new(workspace.path().to_path_buf(), policy);
+        let call = |name: &str, arguments: Value| ToolCall {
+            id: "test".into(),
+            name: name.into(),
+            arguments,
+        };
+        let unread = tools
+            .call(
+                &call(
+                    "write_file",
+                    json!({"path": "sample.txt", "content": "replacement"}),
+                ),
+                &Deny,
+            )
+            .await;
+        assert!(!unread.success);
+        assert!(
+            tools
+                .call(&call("read_file", json!({"path": "sample.txt"})), &Deny)
+                .await
+                .success
+        );
+        std::fs::write(&path, "user edit").expect("test fixture");
+        for mutation in [
+            call(
+                "write_file",
+                json!({"path": "sample.txt", "content": "replacement"}),
+            ),
+            call(
+                "edit_file",
+                json!({"path": "sample.txt", "old_string": "edit", "new_string": "changed"}),
+            ),
+        ] {
+            let result = tools.call(&mutation, &Deny).await;
+            assert!(!result.success);
+            assert!(result.output.contains("revision_conflict"));
+        }
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("test fixture"),
+            "user edit"
+        );
+        assert!(
+            tools
+                .call(&call("read_file", json!({"path": "sample.txt"})), &Deny)
+                .await
+                .success
+        );
+        assert!(
+            tools
+                .call(
+                    &call(
+                        "write_file",
+                        json!({"path": "sample.txt", "content": "merged"})
+                    ),
+                    &Deny
+                )
+                .await
+                .success
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("test fixture"),
+            "merged"
+        );
     }
 
     #[tokio::test]

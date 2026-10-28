@@ -504,6 +504,37 @@ impl ToolRuntime for StorydexTools {
                 "Storydex turn contract blocks state-changing tools"
             });
         }
+        if self.mutating_custom_names.contains(&call.name) {
+            // Custom mutations must obey the same roots and approval mode as file tools.
+            if call.name == "StorydexWikiSync" {
+                for relative in [
+                    ".storydex/wiki/knowledge_graph.json",
+                    ".storydex/wiki/WIKI.md",
+                    ".storydex/wiki/index.json",
+                    ".storydex/wiki/projection_status.json",
+                    ".storydex/wiki/source_snapshot.json",
+                    ".storydex/wiki/change_set.json",
+                ] {
+                    let path = match self.policy.resolve_path(relative) {
+                        Ok(path) => path,
+                        Err(error) => return ToolResult::error(error.to_string()),
+                    };
+                    if matches!(
+                        self.policy.assess_write(&path),
+                        coomi_security::Decision::Deny(_)
+                    ) {
+                        return ToolResult::error(
+                            "Storydex WIKI projection is outside the allowed write roots",
+                        );
+                    }
+                }
+            }
+            if self.base_permission_mode == "ask_approval"
+                && !approval.approve(call, "更新项目知识图谱").await
+            {
+                return ToolResult::error("Storydex project mutation was not approved");
+            }
+        }
         let request_id = Uuid::new_v4().to_string();
         let receiver = self.controls.register(request_id.clone());
         self.emitter.event(
@@ -948,8 +979,20 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
         cwd.clone(),
         home.clone(),
         provider_config.clone(),
-        access_mode,
-        system_prompt.clone(),
+        // Delegated workers have no UI approval channel. In ask mode they
+        // research read-only and return proposed edits to the parent for approval.
+        if base_permission_mode == "ask_approval" {
+            AccessMode::ReadOnly
+        } else {
+            access_mode
+        },
+        if base_permission_mode == "ask_approval" {
+            format!(
+                "{system_prompt}\nDelegated workers are read-only in ask_approval mode. Return proposed changes to the parent; the parent must obtain approval before applying them."
+            )
+        } else {
+            system_prompt.clone()
+        },
     );
     let security_init_ms = security_started.elapsed().as_secs_f64() * 1000.0;
     let mcp_started = Instant::now();
@@ -960,6 +1003,7 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
     let hooks_init_ms = hooks_started.elapsed().as_secs_f64() * 1000.0;
     let tools_started = Instant::now();
     let core = CoreTools::new(cwd.clone(), policy.clone())
+        .with_file_approval(base_permission_mode == "ask_approval")
         .with_skills_directory(home.join("skills"))
         .with_config_home(home.clone())
         .with_session_state(session.plan.clone(), session.loop_state.clone())
@@ -1824,7 +1868,7 @@ mod tests {
                 .expect("write roots");
         }
         let tools = StorydexTools {
-            core: CoreTools::new(directory.clone(), policy.clone()),
+            core: CoreTools::new(directory.clone(), policy.clone()).with_file_approval(true),
             policy,
             capability,
             writes_allowed: capability.allows_writes(),
@@ -1845,6 +1889,156 @@ mod tests {
     fn remove_policy_test_workspace(directory: &Path) {
         assert!(directory.starts_with(std::env::temp_dir().canonicalize().expect("temp root")));
         std::fs::remove_dir_all(directory).expect("remove isolated workspace");
+    }
+
+    #[tokio::test]
+    async fn approval_handler_honors_manual_decisions_and_automatic_modes() {
+        let call = ToolCall {
+            id: "test".into(),
+            name: "shell".into(),
+            arguments: json!({"command": "echo test"}),
+        };
+        for mode in ["approve_for_me", "full_access"] {
+            let controls = Arc::new(ControlHub::default());
+            let approval = StorydexApproval {
+                base_mode: mode.into(),
+                plan_mode_active: Arc::new(AtomicBool::new(false)),
+                emitter: Emitter::new(),
+                controls: controls.clone(),
+            };
+            assert!(approval.approve(&call, "test").await);
+            assert!(controls.pending.lock().expect("pending").is_empty());
+            approval.plan_mode_active.store(true, Ordering::Release);
+            assert!(!approval.approve(&call, "test").await);
+        }
+        for approved in [false, true] {
+            let controls = Arc::new(ControlHub::default());
+            let approval = StorydexApproval {
+                base_mode: "ask_approval".into(),
+                plan_mode_active: Arc::new(AtomicBool::new(false)),
+                emitter: Emitter::new(),
+                controls: controls.clone(),
+            };
+            let request = approval.approve(&call, "test");
+            let answer = async {
+                let (_, sender) = controls
+                    .pending
+                    .lock()
+                    .expect("pending")
+                    .drain()
+                    .next()
+                    .expect("registered request");
+                sender.send(json!({"approved": approved})).expect("resolve");
+            };
+            let (result, ()) = tokio::join!(request, answer);
+            assert_eq!(result, approved);
+        }
+    }
+
+    #[tokio::test]
+    async fn file_mutations_wait_for_permission_and_recheck_after_approval() {
+        struct FileApproval {
+            root: PathBuf,
+            approved: bool,
+            change_file: bool,
+        }
+        #[async_trait]
+        impl ApprovalHandler for FileApproval {
+            async fn approve(&self, _call: &ToolCall, _reason: &str) -> bool {
+                // Waiting for approval must not occupy the project write lock.
+                let _lock = coomi_services::ProjectWriteLock::acquire(&self.root)
+                    .expect("approval outside lock");
+                if self.change_file {
+                    std::fs::write(self.root.join("existing.md"), "concurrent edit")
+                        .expect("external edit");
+                }
+                self.approved
+            }
+        }
+        let (directory, tools) = policy_test_tools(TurnCapability::WorkspaceWrite, false);
+        std::fs::write(directory.join("existing.md"), "before").expect("existing");
+        let calls = [
+            ToolCall {
+                id: "write".into(),
+                name: "write_file".into(),
+                arguments: json!({"path": "new.md", "content": "new"}),
+            },
+            ToolCall {
+                id: "edit".into(),
+                name: "edit_file".into(),
+                arguments: json!({"path": "existing.md", "old_string": "before", "new_string": "after"}),
+            },
+            ToolCall {
+                id: "patch".into(),
+                name: "apply_patch".into(),
+                arguments: json!({"patch": "*** Begin Patch\n*** Add File: patch.md\n+patch\n*** End Patch"}),
+            },
+        ];
+        let deny = FileApproval {
+            root: directory.clone(),
+            approved: false,
+            change_file: false,
+        };
+        for call in &calls {
+            assert!(
+                tools
+                    .call(call, &deny)
+                    .await
+                    .output
+                    .contains("not approved")
+            );
+        }
+        assert!(!directory.join("new.md").exists());
+        assert!(!directory.join("patch.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(directory.join("existing.md")).expect("disk"),
+            "before"
+        );
+        for call in &calls {
+            assert!(tools.call(call, &ApproveTest).await.success);
+        }
+        let approval = FileApproval {
+            root: directory.clone(),
+            approved: true,
+            change_file: true,
+        };
+        let result = tools.call(&calls[1], &approval).await;
+        assert!(!result.success);
+        assert!(result.output.contains("revision_conflict"));
+        assert_eq!(
+            std::fs::read_to_string(directory.join("existing.md")).expect("disk"),
+            "concurrent edit"
+        );
+        remove_policy_test_workspace(&directory);
+    }
+
+    #[tokio::test]
+    async fn wiki_sync_respects_read_only_plan_and_scoped_policies() {
+        for (capability, plan) in [
+            (TurnCapability::ReadOnly, false),
+            (TurnCapability::WorkspaceWrite, true),
+            (TurnCapability::ScopedWrite, false),
+        ] {
+            let (directory, mut tools) = policy_test_tools(capability, plan);
+            tools.custom_names.insert("StorydexWikiSync".into());
+            tools
+                .mutating_custom_names
+                .insert("StorydexWikiSync".into());
+            tools.custom_specs.push(ToolSpec {
+                name: "StorydexWikiSync".into(),
+                description: "sync".into(),
+                parameters: json!({"type": "object"}),
+            });
+            let call = ToolCall {
+                id: "sync".into(),
+                name: "StorydexWikiSync".into(),
+                arguments: json!({}),
+            };
+            let result = tools.call(&call, &ApproveTest).await;
+            assert!(!result.success);
+            assert!(!directory.join(".storydex/wiki").exists());
+            remove_policy_test_workspace(&directory);
+        }
     }
 
     #[tokio::test]
