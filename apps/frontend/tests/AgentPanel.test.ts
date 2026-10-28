@@ -115,13 +115,13 @@ beforeEach(() => {
 });
 
 describe("AgentPanel", () => {
-  it("defaults reasoning to high and disables undeclared explicit levels", async () => {
+  it("defaults reasoning to auto and disables undeclared explicit levels", async () => {
     const store = useAgentStore();
     const wrapper = shallowMount(AgentPanel);
     const utils = (wrapper.vm as any).__testUtils;
 
-    expect(store.reasoningEffort).toBe("high");
-    expect(wrapper.text()).toContain("推理：高");
+    expect(store.reasoningEffort).toBe("auto");
+    expect(wrapper.text()).toContain("推理：自动");
 
     utils.toggleReasoningMenu();
     await nextTick();
@@ -129,8 +129,8 @@ describe("AgentPanel", () => {
 
     expect(utils.isReasoningOptionDisabled("xhigh")).toBe(true);
     utils.selectReasoningOption("xhigh");
-    expect(store.reasoningEffort).toBe("high");
-    expect(unref(utils.reasoningLabel)).toBe("推理：高");
+    expect(store.reasoningEffort).toBe("auto");
+    expect(unref(utils.reasoningLabel)).toBe("推理：自动");
     wrapper.unmount();
   });
 
@@ -614,6 +614,25 @@ describe("AgentPanel", () => {
     await wrapper.find(".cct-summary").trigger("click");
     expect(wrapper.findAll(".cct-tool")).toHaveLength(11);
     expect(wrapper.findAll(".cct-chunk-head")).toHaveLength(0);
+    wrapper.unmount();
+  });
+
+  it("shows successful writes and failed attempts separately in the collapsed tool summary", () => {
+    const items = [
+      ["write_file", "error"], ["edit_file", "success"], ["edit_file", "success"],
+      ["shell", "success"], ["write_file", "running"]
+    ].map(([toolName, status], index) => ({
+      id: `tool-${index}`, type: "tool", status, title: toolName, toolName,
+      arguments: { path: "chapters/001.md" }, content: "", timestamp: new Date().toISOString(), raw: {}
+    }));
+    const wrapper = mount(CoomiClaudeTurn, { props: { run: makeRun({ status: "completed", items }) } });
+    const summary = wrapper.find(".cct-summary").text();
+    expect(summary).toContain("写入/编辑成功 2 次");
+    expect(summary).toContain("命令执行成功 1 次");
+    expect(summary).toContain("失败 1 次");
+    expect(summary).toContain("未完成 1 次");
+    expect(summary).not.toContain("个文件");
+    expect(wrapper.find(".cct-meta-text").text()).toContain("本轮结束");
     wrapper.unmount();
   });
 

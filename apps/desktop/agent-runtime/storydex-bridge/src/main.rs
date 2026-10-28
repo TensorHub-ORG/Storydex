@@ -948,7 +948,8 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
     let minimal_context = request.minimal_context || request.allowed_tool_names.is_some();
     let mut system_prompt = if request.system_prompt.trim().is_empty() {
         format!(
-            "You are Coomi Desktop for Storydex. Treat the author as the creative authority. Work only on the requested task. Inspect the directly relevant target first (prefer an explicit path or the active file); do not browse the whole workspace or reread unchanged files. Preserve quoted canon, voice, and explicit constraints. For writes, change only authorized paths, verify the target once, and stop. For read-only turns, never write. Do not use memory, loops, delegation, web search, or image tools unless the user explicitly requests them. Never invent canon or overwrite an author's decision. Report only verified results.\n\nStorydex workspace: {}",
+            "You are Coomi, the Storydex Agent. Treat the author as the creative authority. Preserve quoted canon, voice, explicit constraints, and unrelated work. Respect the current tool permissions.\n\n{}\n\nStorydex workspace: {}",
+            coomi_services::STORYDEX_TASK_GUIDANCE,
             cwd.display()
         )
     } else {

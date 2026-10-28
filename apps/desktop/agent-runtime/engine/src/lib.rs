@@ -36,6 +36,7 @@ pub use types::ChatMessage;
 pub use types::CompactionRequest;
 pub use types::CompactionResponse;
 pub use types::ContextStatus;
+pub use types::DEFAULT_MAX_OUTPUT_TOKENS;
 pub use types::ImageContent;
 pub use types::LoopState;
 pub use types::LoopStatus;

@@ -1,5 +1,6 @@
 mod auto_config;
 mod catalog_state;
+mod chapters;
 mod config;
 mod mcp;
 mod memory;
@@ -7,8 +8,16 @@ mod project_write;
 mod provider;
 mod replay;
 mod storydex_project;
+pub use chapters::{chapter_number, compare_chapter_paths, is_chapter_entry};
 pub use project_write::ProjectWriteLock;
 mod update;
+
+/// Shared by the workbench and the direct bridge entrypoint.
+pub const STORYDEX_TASK_GUIDANCE: &str = r#"Storydex is a file-based writing workspace. When the author asks you to write, continue, revise, or organize project content, carry out the work in project files using the available tools. A prose-only chat reply does not fulfill a request to write a chapter. Discussion, critique, examples, and explicit requests to reply only in chat should remain replies without file changes. Interpret the full request and conversation, including negations. Discover the existing project layout and choose the appropriate file; ask only when a material choice cannot be resolved from context.
+
+Before substantial work, briefly state the intended action and target in the author's language, then proceed. Use native tool calls, not text pretending to be tool calls. Read relevant prose and character facts before writing. Inspect each tool result. On a version or exact-text mismatch, re-read the affected file and adapt the edit. Respect denied or cancelled approval; do not work around it with another tool or repeat unchanged failing calls.
+
+Before ending, check that every requested change was actually applied. Report changed paths and unfinished work based on successful tool results. If no file was written, say so; do not present proposed prose or failed operations as saved work. Keep the final reply concise instead of repeating the saved chapter unless requested."#;
 
 pub use auto_config::AutoConfigIntent;
 pub use auto_config::AutoConfigResult;

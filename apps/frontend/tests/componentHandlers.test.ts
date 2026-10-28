@@ -84,7 +84,7 @@ describe("high-density component handler matrices", () => {
       relatedTarget: null, preventDefault: vi.fn(), stopPropagation: vi.fn(),
       dataTransfer: { types: ["Files"], files: [], dropEffect: "copy", effectAllowed: "all" }
     };
-    const directory = { ...hybrid, kind: "directory", relativePath: "chapters/001", name: "001" };
+    const directory = { ...hybrid, kind: "directory", relativePath: "chapters/001", name: "001", isChapter: true };
     expect((utils.gitDecoration as Function)(hybrid)).toMatchObject({ label: "U", tone: "uncommitted" });
     expect((utils.gitDecoration as Function)(directory)).toMatchObject({ label: "1", tone: "uncommitted" });
     expect((utils.diagnosticCounts as Function)({ ...hybrid, relativePath: "chapters/root.md" })).toMatchObject({ info: 1 });
@@ -92,7 +92,7 @@ describe("high-density component handler matrices", () => {
     expect((utils.formatBadgeCount as Function)(120)).toBe("99+");
     expect(await invokeExposedHandlers(utils, hybrid)).toBeGreaterThan(70);
 
-    for (const name of ["toggleDirectory", "iconFor", "isChapterDirectory", "chapterStateTitle", "startCreate", "handleCopy", "handleCut"]) {
+    for (const name of ["toggleDirectory", "iconFor", "isChapterNode", "chapterStateTitle", "startCreate", "handleCopy", "handleCut"]) {
       await Promise.resolve((utils[name] as Function)(directory, hybrid)).catch(() => undefined);
     }
     wrapper.unmount();

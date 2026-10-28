@@ -21,6 +21,7 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const WIKI_ROOT: &str = ".storydex/wiki";
+const WIKI_CATEGORY_SCHEMA_VERSION: &str = "story-wiki-rust-v2";
 const INTERNAL_PATH_PREFIXES: [&str; 2] = [".storydex/.agent/", ".storydex/.cache/"];
 const DEFAULT_BRANCH: &str = "develop";
 const DIFF_MAX_LINES: usize = 2_000;
@@ -439,6 +440,9 @@ impl StorydexKnowledge {
             read_json_if_present(&writer.wiki_root().join("source_snapshot.json"))?;
         let previous_status = writer.read_status()?.unwrap_or_else(|| json!({}));
         let previous_revision = previous_revision(existing.as_ref(), Some(&previous_status));
+        let format_changed = existing
+            .as_ref()
+            .is_some_and(|value| value["categorySchemaVersion"] != WIKI_CATEGORY_SCHEMA_VERSION);
         let diff = source_change_set(
             previous_snapshot.as_ref(),
             &source_snapshot,
@@ -459,6 +463,7 @@ impl StorydexKnowledge {
                 .and_then(Value::as_str)
                 .is_none_or(|status| status == "ready");
         if !force
+            && !format_changed
             && existing_ready
             && existing
                 .as_ref()
@@ -500,7 +505,7 @@ impl StorydexKnowledge {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let next_revision = if previous_revision == 0 || !changed.is_empty() {
+        let next_revision = if previous_revision == 0 || !changed.is_empty() || format_changed {
             previous_revision + 1
         } else {
             previous_revision
@@ -573,7 +578,15 @@ impl StorydexKnowledge {
     fn collect_sources(&self) -> Result<Vec<ProjectionSource>> {
         let mut files = Vec::new();
         collect_source_files(&self.project_root, &self.project_root, &mut files)?;
-        files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+        files.sort_by(|left, right| {
+            if left.relative_path.starts_with("chapters/")
+                && right.relative_path.starts_with("chapters/")
+            {
+                crate::compare_chapter_paths(&left.relative_path, &right.relative_path)
+            } else {
+                left.relative_path.cmp(&right.relative_path)
+            }
+        });
         Ok(files)
     }
 
@@ -703,6 +716,13 @@ impl StorydexKnowledge {
             let endpoints_exist = ["subjectId", "objectId"]
                 .iter()
                 .all(|key| nodes.iter().any(|node| node["id"] == relation[*key]));
+            for (id_key, label_key) in [("subjectId", "subject"), ("objectId", "object")] {
+                relation[label_key] = nodes
+                    .iter()
+                    .find(|node| node["id"] == relation[id_key])
+                    .map(|node| node["label"].clone())
+                    .unwrap_or_else(|| json!("缺失条目"));
+            }
             if status == "confirmed" && (!valid || !endpoints_exist) {
                 status = "review_required";
             }
@@ -722,7 +742,7 @@ impl StorydexKnowledge {
             } else if !valid {
                 "来源或引文已改变，请更新候选"
             } else if !endpoints_exist {
-                "关系端点不存在，请修正角色 ID"
+                "关系端点不存在，请补充独立条目或修正关联"
             } else {
                 ""
             });
@@ -874,7 +894,7 @@ impl StorydexKnowledge {
         Ok(json!({
             "version": 1,
             "schemaVersion": 3,
-            "categorySchemaVersion": "story-wiki-rust-v1",
+            "categorySchemaVersion": WIKI_CATEGORY_SCHEMA_VERSION,
             "projectName": project_name,
             "workspaceRoot": normalized_path(&self.project_root),
             "generatedAt": now_rfc3339(),
@@ -969,8 +989,8 @@ impl StorydexKnowledge {
             for relation in relations {
                 output.push_str(&format!(
                     "- {} → {}：{}（{}）\n",
-                    relation["subjectId"].as_str().unwrap_or_default(),
-                    relation["objectId"].as_str().unwrap_or_default(),
+                    relation["subject"].as_str().unwrap_or("缺失条目"),
+                    relation["object"].as_str().unwrap_or("缺失条目"),
                     relation["predicate"].as_str().unwrap_or_default(),
                     relation["reviewStatus"].as_str().unwrap_or_default()
                 ));
@@ -1052,24 +1072,23 @@ fn collect_source_files(
         } else {
             normalize_source_text(&raw_text)
         };
-        let kind =
-            if relative.starts_with("chapters/") && matches!(extension.as_str(), "md" | "txt") {
-                "chapter"
-            } else if relative.starts_with(".storydex/scripts/") {
-                "planned"
-            } else if is_character_card_path(&relative) {
-                "character"
-            } else if relative.contains("/characters/") || relative.starts_with("characters/") {
-                "memory"
-            } else if relative.contains("/worldbook/") || relative.starts_with("worldbook/") {
-                "world"
-            } else if relative.contains("/presets/") || relative.starts_with("presets/") {
-                "preset"
-            } else if relative.contains("/memory/") || relative.starts_with("memory/") {
-                "memory"
-            } else {
-                "project"
-            };
+        let kind = if relative.starts_with("chapters/") && crate::is_chapter_entry(&name, false) {
+            "chapter"
+        } else if relative.starts_with(".storydex/scripts/") {
+            "planned"
+        } else if is_character_card_path(&relative) {
+            "character"
+        } else if relative.contains("/characters/") || relative.starts_with("characters/") {
+            "memory"
+        } else if relative.contains("/worldbook/") || relative.starts_with("worldbook/") {
+            "world"
+        } else if relative.contains("/presets/") || relative.starts_with("presets/") {
+            "preset"
+        } else if relative.contains("/memory/") || relative.starts_with("memory/") {
+            "memory"
+        } else {
+            "project"
+        };
         let title = path
             .file_stem()
             .and_then(|value| value.to_str())
@@ -1094,7 +1113,23 @@ fn collect_source_files(
 
 fn is_character_card_path(relative_path: &str) -> bool {
     let normalized = relative_path.replace('\\', "/");
-    if normalized.to_ascii_lowercase().ends_with(".relations.md") {
+    let stem = Path::new(&normalized)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    if normalized.to_ascii_lowercase().ends_with(".relations.md")
+        || matches!(
+            stem.to_ascii_lowercase().as_str(),
+            "人物关系"
+                | "角色关系"
+                | "关系表"
+                | "关系总表"
+                | "relations"
+                | "relationships"
+                | "index"
+                | "readme"
+        )
+    {
         return false;
     }
     let parts = normalized
@@ -3645,6 +3680,8 @@ mod tests {
         .expect("test fixture");
         let pending = service.sync(false).expect("test fixture");
         assert_eq!(pending["relations"][0]["reviewStatus"], "review_required");
+        assert_eq!(pending["relations"][0]["subject"], "a");
+        assert_eq!(pending["relations"][0]["object"], "b");
         assert_eq!(pending["relations"][0]["evidenceValid"], true);
         assert!(
             service
@@ -3669,6 +3706,19 @@ mod tests {
         );
         let rebuilt = service.sync(true).expect("test fixture");
         assert_eq!(rebuilt["relations"][0]["reviewStatus"], "confirmed");
+        let mut old_format = rebuilt.clone();
+        old_format["categorySchemaVersion"] = json!("story-wiki-rust-v1");
+        fs::write(
+            root.join(".storydex/wiki/knowledge_graph.json"),
+            serde_json::to_vec(&old_format).expect("test fixture"),
+        )
+        .expect("test fixture");
+        let upgraded = service.sync(false).expect("upgrade projection");
+        assert_eq!(upgraded["relations"][0]["reviewStatus"], "confirmed");
+        assert_eq!(
+            upgraded["relations"][0]["fingerprint"],
+            rebuilt["relations"][0]["fingerprint"]
+        );
         fs::write(root.join("chapters/1.md"), "Alice and Bob are strangers.")
             .expect("test fixture");
         let changed = service.sync(false).expect("test fixture");
@@ -4095,6 +4145,72 @@ mod tests {
             sources["chapters/001.md"]["mtime"]
                 .as_str()
                 .is_some_and(|value| !value.is_empty())
+        );
+    }
+
+    #[test]
+    fn knowledge_reclassifies_overviews_and_rebuilds_old_projection_format() {
+        let root = tempdir().expect("root");
+        fs::create_dir_all(root.path().join(".storydex/characters")).expect("test fixture");
+        fs::create_dir_all(root.path().join("chapters")).expect("test fixture");
+        fs::write(
+            root.path().join(".storydex/characters/沈砚秋.md"),
+            "母亲柳素贞",
+        )
+        .expect("test fixture");
+        fs::write(
+            root.path().join(".storydex/characters/人物关系.md"),
+            "沈砚秋与陆阿四的关系总表",
+        )
+        .expect("test fixture");
+        for name in ["第一章-显影.md", "第三章-二次定影.md", "第二章-渡口.md"] {
+            fs::write(root.path().join("chapters").join(name), "正文").expect("test fixture");
+        }
+        let service = StorydexKnowledge::new(root.path()).expect("test fixture");
+        let initial = service.sync(false).expect("test fixture");
+        let nodes = initial["graph"]["nodes"].as_array().expect("test fixture");
+        assert_eq!(
+            nodes
+                .iter()
+                .filter(|node| node["type"] == "character")
+                .count(),
+            1
+        );
+        assert_eq!(
+            nodes
+                .iter()
+                .find(|node| node["label"] == "人物关系")
+                .expect("test fixture")["type"],
+            "document"
+        );
+        assert!(!nodes.iter().any(|node| node["label"] == "柳素贞"));
+        assert_eq!(
+            nodes
+                .iter()
+                .filter(|node| node["type"] == "chapter")
+                .map(|node| node["label"].as_str().expect("test fixture"))
+                .collect::<Vec<_>>(),
+            ["第一章-显影", "第二章-渡口", "第三章-二次定影"]
+        );
+        let mut old = initial.clone();
+        old["categorySchemaVersion"] = json!("story-wiki-rust-v1");
+        old["graph"]["nodes"]
+            .as_array_mut()
+            .expect("test fixture")
+            .iter_mut()
+            .find(|node| node["label"] == "人物关系")
+            .expect("test fixture")["type"] = json!("character");
+        fs::write(
+            root.path().join(".storydex/wiki/knowledge_graph.json"),
+            serde_json::to_vec(&old).expect("test fixture"),
+        )
+        .expect("test fixture");
+        let rebuilt = service.sync(false).expect("test fixture");
+        assert_eq!(rebuilt["knowledgeRevision"], 2);
+        assert_eq!(rebuilt["graph"]["nodes"], initial["graph"]["nodes"]);
+        assert_eq!(
+            service.sync(false).expect("test fixture")["noChanges"],
+            true
         );
     }
 

@@ -49,6 +49,7 @@ describe("StoryStatePanel deterministic graph and inspector behavior", () => {
     await flushPromises();
     const graphCall = transport.get.mock.calls.find(([url]) => url === "/story/wiki/graph");
     expect(graphCall?.[1].params.includeReview).toBe("true");
+    expect(graphCall?.[1].params.category).toBe("all");
     transport.get.mockImplementation(async (url: string) => {
       if (url === "/story/wiki/graph") throw new Error("图谱查询失败");
       return envelope({});
@@ -269,7 +270,7 @@ describe("StoryStatePanel deterministic graph and inspector behavior", () => {
     const wrapper = mountPanel(); const u = (wrapper.vm as any).__testUtils;
     expect(u.normalizeWikiCategory(undefined)).toBe("characters"); expect(u.normalizeWikiCategory("unknown")).toBe("characters"); expect(u.normalizeWikiCategory("plot")).toBe("plot");
     expect(u.normalizeWikiCategory("relationships")).toBe("characters");
-    expect(u.wikiCategoryTabs.value.map((tab: { id: string }) => tab.id)).toEqual(["characters", "plot", "setting"]);
+    expect(u.wikiCategoryTabs.value.map((tab: { id: string }) => tab.id)).toEqual(["all", "characters", "plot", "setting"]);
     expect(u.preferredWikiCategory()).toBeTruthy(); expect(typeof u.hasWikiRelationshipNetwork()).toBe("boolean");
     u.selectWikiCategory("plot"); expect(u.selectedWikiCategory.value).toBe("plot"); u.selectWikiEntry(""); u.selectWikiEntry("entry");
     u.wikiGraphSearchInput.value = " query "; u.submitWikiGraphSearch(); expect(u.wikiGraphSearchQuery.value).toBe("query");
@@ -365,6 +366,7 @@ describe("StoryStatePanel deterministic graph and inspector behavior", () => {
     ));
     transport.post.mockResolvedValueOnce(envelope(wiki));
     u.wikiData.value = wiki;
+    u.selectedWikiCategory.value = "characters";
     await u.loadWikiGraph({ category: "characters" });
     u.selectWikiNode(u.wikiGraphNodes.value[0]);
 
@@ -376,6 +378,24 @@ describe("StoryStatePanel deterministic graph and inspector behavior", () => {
     expect(transport.get).toHaveBeenCalledWith("/story/wiki/graph", {
       params: expect.objectContaining({ category: "characters" }),
     });
+    wrapper.unmount();
+  });
+
+  it("renders review endpoint names and keeps missing entries readable", async () => {
+    const wrapper = mountPanel({ relationshipOnly: true });
+    await flushPromises();
+    const u = (wrapper.vm as any).__testUtils;
+    u.wikiReviewQueue.value = [
+      { id: "named", subjectId: "source:aaa", subject: "沈砚秋", objectId: "source:bbb", object: "时间线", predicate: "生于1908年", sourceRefs: [] },
+      { id: "missing", subjectId: "source:deleted", objectId: "source:bbb", object: "时间线", predicate: "待修正", sourceRefs: [] },
+    ];
+    u.wikiReviewOpen.value = true;
+    await nextTick();
+    expect(wrapper.text()).toContain("沈砚秋");
+    expect(wrapper.text()).toContain("时间线");
+    expect(wrapper.text()).toContain("缺失条目");
+    expect(wrapper.text()).not.toContain("source:aaa");
+    expect(wrapper.text()).not.toContain("source:deleted");
     wrapper.unmount();
   });
 
@@ -529,7 +549,7 @@ describe("StoryStatePanel deterministic graph and inspector behavior", () => {
     await nextTick();
 
     expect(wrapper.find(".ssp-wiki-edge.edge-review-required").exists()).toBe(true);
-    expect(wrapper.text()).toContain("总节点 62");
+    expect(wrapper.text()).toContain("当前范围节点 62");
     expect(wrapper.text()).toContain("当前返回 60");
     expect(wrapper.text()).toContain("待确认边 1");
     expect(wrapper.text()).toContain("水手传闻雾鲸来自远潮星。");

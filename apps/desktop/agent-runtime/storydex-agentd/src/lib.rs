@@ -2171,6 +2171,123 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn story_chapters_sort_flat_manuscripts_and_share_completion_contract() {
+        let root = tempdir().expect("root");
+        let (state, workspace) = workspace_test_state(root.path());
+        std::fs::create_dir_all(workspace.join("chapters/第十章 归来")).expect("chapter directory");
+        for name in [
+            "README.md",
+            "readme.txt",
+            "目录.md",
+            "章纲.md",
+            "第三章-二次定影.md",
+            "第一章-显影.md",
+            "第二章-渡口.txt",
+            "尾声.md",
+            "第十章 归来/正文.md",
+        ] {
+            std::fs::write(workspace.join("chapters").join(name), "正文保持不变").expect("fixture");
+        }
+        let response = router(state.clone())
+            .oneshot(protected_get_request("/api/v1/story/chapters"))
+            .await
+            .expect("list");
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = response_json(response).await;
+        let chapters = payload["data"]["items"].as_array().expect("chapters");
+        assert_eq!(
+            chapters
+                .iter()
+                .map(|chapter| chapter["displayName"].as_str().expect("test fixture"))
+                .collect::<Vec<_>>(),
+            [
+                "第一章-显影",
+                "第二章-渡口",
+                "第三章-二次定影",
+                "第十章 归来",
+                "尾声"
+            ]
+        );
+        assert_eq!(
+            chapters
+                .iter()
+                .map(|chapter| chapter["chapterNumber"].as_u64().expect("test fixture"))
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 10, 11]
+        );
+        let response = router(state.clone())
+            .oneshot(protected_get_request("/api/v1/workspace/tree"))
+            .await
+            .expect("tree");
+        let tree = response_json(response).await;
+        let chapter_tree = tree["data"]["roots"]
+            .as_array()
+            .expect("test fixture")
+            .iter()
+            .find(|node| node["relativePath"] == "chapters")
+            .expect("test fixture");
+        let indexed = chapter_tree["children"]
+            .as_array()
+            .expect("test fixture")
+            .iter()
+            .filter(|node| node["isChapter"] == true)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            indexed
+                .iter()
+                .map(|node| node["relativePath"].clone())
+                .collect::<Vec<_>>(),
+            chapters
+                .iter()
+                .map(|chapter| chapter["relativePath"].clone())
+                .collect::<Vec<_>>()
+        );
+        for chapter_path in [
+            "chapters/第一章-显影.md",
+            "chapters/第二章-渡口.txt",
+            "chapters/第十章 归来",
+        ] {
+            for completed in [true, false] {
+                let response = router(state.clone()).oneshot(protected_json_request_with_method("PUT",
+                    "/api/v1/workspace/story/chapters/completion",
+                    json!({"workspaceRoot": workspace, "chapterPath": chapter_path, "completed": completed}))).await.expect("completion update");
+                assert_eq!(response.status(), StatusCode::OK);
+                let response = router(state.clone())
+                    .oneshot(protected_get_request("/api/v1/story/chapters"))
+                    .await
+                    .expect("list after update");
+                let payload = response_json(response).await;
+                let chapter = payload["data"]["items"]
+                    .as_array()
+                    .expect("test fixture")
+                    .iter()
+                    .find(|chapter| chapter["relativePath"] == chapter_path)
+                    .expect("test fixture");
+                assert_eq!(chapter["completed"], completed);
+            }
+        }
+        for chapter_path in [
+            "chapters/README.md",
+            "chapters/章纲.md",
+            "chapters/第十章 归来/正文.md",
+        ] {
+            let response = router(state.clone()).oneshot(protected_json_request_with_method("PUT",
+                "/api/v1/workspace/story/chapters/completion",
+                json!({"workspaceRoot": workspace, "chapterPath": chapter_path, "completed": true}))).await.expect("non-chapter update");
+            assert!(response.status().is_client_error());
+            assert_eq!(
+                response_json(response).await["error"]["code"],
+                "chapter_path_invalid"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("chapters/第一章-显影.md"))
+                .expect("test fixture"),
+            "正文保持不变"
+        );
+    }
+
+    #[tokio::test]
     async fn story_and_system_routes_persist_candidate_state() {
         let root = tempdir().expect("root");
         let (state, workspace) = workspace_test_state(root.path());
@@ -2802,6 +2919,79 @@ mod tests {
         assert_eq!(empty["data"]["entries"], json!([]));
         assert_eq!(empty["data"]["graph"]["nodes"], json!([]));
         assert_eq!(empty["data"]["matchedEntryIds"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn rust_wiki_all_view_includes_cross_category_relations_with_named_endpoints() {
+        let root = tempdir().expect("root");
+        let (state, workspace) = workspace_test_state(root.path());
+        for directory in [
+            ".storydex/characters",
+            ".storydex/worldbook",
+            ".storydex/knowledge",
+        ] {
+            std::fs::create_dir_all(workspace.join(directory)).expect("test fixture");
+        }
+        std::fs::write(
+            workspace.join(".storydex/characters/沈砚秋.md"),
+            "母亲柳素贞",
+        )
+        .expect("test fixture");
+        std::fs::write(
+            workspace.join(".storydex/worldbook/时间线.md"),
+            "沈砚秋生于1908年",
+        )
+        .expect("test fixture");
+        let service = coomi_services::StorydexKnowledge::new(&workspace).expect("test fixture");
+        let initial = service.sync(false).expect("test fixture");
+        let node_id = |label| {
+            initial["graph"]["nodes"]
+                .as_array()
+                .expect("test fixture")
+                .iter()
+                .find(|node| node["label"] == label)
+                .expect("test fixture")["id"]
+                .clone()
+        };
+        std::fs::write(workspace.join(".storydex/knowledge/relations.json"), serde_json::to_vec(&json!({"relations": [{
+            "id": "birth", "subjectId": node_id("沈砚秋"), "objectId": node_id("时间线"), "predicate": "生于1908年",
+            "sourceRefs": [{"path": ".storydex/worldbook/时间线.md", "quote": "沈砚秋生于1908年"}]
+        }]})).expect("test fixture")).expect("test fixture");
+        let pending = service.sync(false).expect("test fixture");
+        assert_eq!(pending["relations"][0]["subject"], "沈砚秋");
+        assert_eq!(pending["relations"][0]["object"], "时间线");
+        service
+            .review_relation(
+                "birth",
+                pending["relations"][0]["fingerprint"]
+                    .as_str()
+                    .expect("test fixture"),
+                "confirmed",
+                &json!({}),
+            )
+            .expect("test fixture");
+        for (category, nodes, edges) in [("characters", 1, 0), ("setting", 1, 0), ("all", 2, 1)] {
+            let response = router(state.clone())
+                .oneshot(protected_get_request(&format!(
+                    "/api/v1/story/wiki/graph?category={category}"
+                )))
+                .await
+                .expect("test fixture");
+            assert_eq!(response.status(), StatusCode::OK);
+            let graph = response_json(response).await;
+            assert_eq!(graph["data"]["total"]["nodeCount"], nodes, "{category}");
+            assert_eq!(
+                graph["data"]["total"]["confirmedEdgeCount"], edges,
+                "{category}"
+            );
+            assert_eq!(
+                graph["data"]["graph"]["edges"]
+                    .as_array()
+                    .expect("test fixture")
+                    .len(),
+                edges as usize
+            );
+        }
     }
 
     #[tokio::test]

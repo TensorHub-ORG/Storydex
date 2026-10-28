@@ -203,7 +203,7 @@
                 <span v-if="row.node.kind === 'file' && row.node.extension" class="tree-meta">{{ row.node.extension }}</span>
               </button>
               <div
-                v-if="hasNodeDecorations(row.node) || isChapterDirectory(row.node)"
+                v-if="hasNodeDecorations(row.node) || isChapterNode(row.node)"
                 class="tree-row-trailing"
                 @click.stop
               >
@@ -224,7 +224,7 @@
                   >{{ gitDecoration(row.node)?.label }}</span>
                 </span>
                 <label
-                  v-if="!isRenamingNode(row.node) && isChapterDirectory(row.node)"
+                  v-if="!isRenamingNode(row.node) && isChapterNode(row.node)"
                   class="tree-chapter-state"
                   :class="{ completed: workspaceStore.isChapterCompleted(nodePath(row.node)) }"
                   :title="chapterStateTitle(row.node)"
@@ -548,9 +548,8 @@ function pruneSelection(nodes: WorkspaceTreeNode[]): void {
   }
 }
 
-function isChapterDirectory(node: WorkspaceTreeNode): boolean {
-  const relativePath = nodePath(node);
-  return node.kind === "directory" && /^chapters\/[^/]+$/i.test(relativePath);
+function isChapterNode(node: WorkspaceTreeNode): boolean {
+  return node.isChapter === true;
 }
 
 function diagnosticCount(node: WorkspaceTreeNode): number {
@@ -634,7 +633,7 @@ function treeRowTrailingWidth(node: WorkspaceTreeNode): number {
   const counts = diagnosticCounts(node);
   const diagnosticSlots = diagnosticSeverities.filter((severity) => counts[severity] > 0).length;
   const gitSlots = gitDecoration(node) ? 1 : 0;
-  const chapterSlots = isChapterDirectory(node) ? 1 : 0;
+  const chapterSlots = isChapterNode(node) ? 1 : 0;
   const totalSlots = diagnosticSlots + gitSlots + chapterSlots;
   return totalSlots > 0 ? 14 + totalSlots * 14 + Math.max(0, totalSlots - 1) * 3 : 10;
 }
@@ -692,7 +691,7 @@ async function applyProblemFix(relativePath: string, fixId: string): Promise<voi
 }
 
 function shouldShowRowActions(node: WorkspaceTreeNode): boolean {
-  return showDiagnosticDot(node) || isChapterDirectory(node);
+  return showDiagnosticDot(node) || isChapterNode(node);
 }
 
 function showDiagnosticDot(node: WorkspaceTreeNode): boolean {
@@ -710,7 +709,7 @@ function isStorySegmentNode(node: WorkspaceTreeNode): boolean {
 
 function storyDiagnosticCount(node: WorkspaceTreeNode): number {
   const relativePath = nodePath(node);
-  if (!relativePath || (!isChapterDirectory(node) && !isStorySegmentNode(node))) {
+  if (!relativePath || (!isChapterNode(node) && !isStorySegmentNode(node))) {
     return 0;
   }
   return workspaceStore.diagnosticCountForPath(relativePath);
@@ -733,7 +732,7 @@ function storyDiagnosticHint(node: WorkspaceTreeNode): string {
 }
 
 function shouldShowStoryRowActions(node: WorkspaceTreeNode): boolean {
-  return storyDiagnosticCount(node) > 0 || isChapterDirectory(node);
+  return storyDiagnosticCount(node) > 0 || isChapterNode(node);
 }
 
 function chapterStateTitle(node: WorkspaceTreeNode): string {
@@ -742,7 +741,7 @@ function chapterStateTitle(node: WorkspaceTreeNode): string {
 
 const rowTitle = (node: WorkspaceTreeNode): string => {
   const parts: string[] = [];
-  if (isChapterDirectory(node)) {
+  if (isChapterNode(node)) {
     parts.push(chapterStateTitle(node));
   }
   const hint = diagnosticHint(node);
@@ -1728,7 +1727,7 @@ defineExpose({
   __testUtils: import.meta.env.MODE === "test" ? {
     expandedPaths, contextMenu, clipboardState, pendingCreate, pendingCreateSubmitting, pendingRename, pendingRenameValue,
     dragTargetPath, selectedPaths, selectionAnchor, rows,
-    nodePath, normalizeNodePath, isChapterDirectory, diagnosticCount, directDiagnosticCount, hasDiagnostics,
+    nodePath, normalizeNodePath, isChapterNode, diagnosticCount, directDiagnosticCount, hasDiagnostics,
     diagnosticsForNode, diagnosticCounts, gitFilesForNode, gitDecoration, gitFileDecoration, buildPathIndex, hasNodeDecorations, treeRowTrailingWidth, formatBadgeCount,
     hasDirectDiagnostics, diagnosticSeverity, diagnosticHint, shouldShowRowActions, showDiagnosticDot, chapterCompletionLabel,
     isStorySegmentNode, storyDiagnosticCount, storyDiagnosticHint, shouldShowStoryRowActions, chapterStateTitle,

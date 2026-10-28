@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use coomi_engine::ChatMessage;
 use coomi_engine::CompactionRequest;
 use coomi_engine::CompactionResponse;
+use coomi_engine::DEFAULT_MAX_OUTPUT_TOKENS as PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS;
 use coomi_engine::ModelCapabilities;
 use coomi_engine::ModelProvider;
 use coomi_engine::ModelRequest;
@@ -67,11 +68,6 @@ const PROVIDER_STREAM_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 const PROVIDER_STREAM_ATTEMPTS: usize = 3;
 const PROVIDER_STREAM_RETRY_DELAYS: [Duration; 2] =
     [Duration::from_millis(500), Duration::from_millis(1500)];
-/// Default output-token budget sent when the caller does not specify one.
-/// Gateways use their own (often smaller) default when max_tokens is omitted,
-/// which truncates long tool-argument streams (e.g. a 3000-character chapter
-/// write) mid-JSON. 8192 matches the anthropic path and engine defaults.
-const PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS: u64 = 16_384;
 const PROVIDER_MAX_RETRY_OUTPUT_TOKENS: u64 = 65_536;
 
 fn provider_retry_delay(attempt: usize) -> Duration {
@@ -930,7 +926,7 @@ impl HttpModelProvider {
         let (system, messages) = anthropic_messages(&request.messages)?;
         let mut body = json!({
             "model": request.model,
-            "max_tokens": request.max_output_tokens.unwrap_or(8192),
+            "max_tokens": request.max_output_tokens.unwrap_or(PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS),
             "messages": messages,
             "stream": false
         });
@@ -2501,10 +2497,12 @@ fn parse_provider_sse_line(line: &[u8]) -> Result<ProviderSseLine> {
 }
 
 fn provider_sse_value_completed(value: &Value) -> bool {
-    value.get("type").and_then(Value::as_str) == Some("response.completed")
-        || value
-            .pointer("/choices/0/finish_reason")
-            .is_some_and(|reason| !reason.is_null())
+    matches!(
+        value.get("type").and_then(Value::as_str),
+        Some("response.completed" | "response.incomplete")
+    ) || value
+        .pointer("/choices/0/finish_reason")
+        .is_some_and(|reason| !reason.is_null())
 }
 
 /// Classifies streaming-phase failures that are worth retrying. Only
@@ -2514,11 +2512,17 @@ fn provider_sse_value_completed(value: &Value) -> bool {
 /// The "provider stream failed" prefix requirement keeps observer/parser
 /// errors (which lack it) out of the retry path.
 fn is_retryable_stream_error(error: &anyhow::Error) -> bool {
+    if let Some(event) = error.downcast_ref::<ProviderEventError>()
+        && matches!(event.code.as_str(), "server_error" | "rate_limit_exceeded")
+    {
+        return true;
+    }
     let text = format!("{error:#}").to_ascii_lowercase();
     if !text.contains("provider stream failed") {
         return false;
     }
     text.contains("stream ended before")
+        || text.contains("stream closed before a terminal event")
         || text.contains("no first byte")
         || text.contains("no response head")
         || text.contains("stream stalled")
@@ -2550,7 +2554,6 @@ fn is_retryable_send_error(error: &impl std::fmt::Display) -> bool {
 /// Minimal retry-state surface shared by the chat and responses stream states.
 trait StreamRetryState {
     fn saw_tool_calls(&self) -> bool;
-    fn pushed_any(&self) -> bool;
     fn truncated(&self) -> bool;
     fn emitted_text_characters(&self) -> usize;
 }
@@ -2558,10 +2561,6 @@ trait StreamRetryState {
 impl StreamRetryState for ChatStreamState {
     fn saw_tool_calls(&self) -> bool {
         self.saw_tool_calls
-    }
-
-    fn pushed_any(&self) -> bool {
-        self.pushed_any
     }
 
     fn truncated(&self) -> bool {
@@ -2578,10 +2577,6 @@ impl StreamRetryState for ResponsesStreamState {
         self.saw_tool_calls
     }
 
-    fn pushed_any(&self) -> bool {
-        self.pushed_any
-    }
-
     fn truncated(&self) -> bool {
         self.truncated
     }
@@ -2592,14 +2587,15 @@ impl StreamRetryState for ResponsesStreamState {
 }
 
 /// A stream that ended truncated (finish_reason=length / response incomplete)
-/// after emitting tool-call deltas but no user-visible text is retryable: the
-/// tool was never delivered to the engine, so no side effects were produced.
+/// after emitting tool-call deltas is retryable: the tool was never delivered
+/// to the engine, so no side effects were produced. The observer resets any
+/// lead-in text before displaying the replacement attempt.
 /// Some gateways truncate a long tool-argument stream this way (e.g. the
 /// opencode-go gateway ending deepseek-v4-flash output with finish_reason
 /// = length), leaving an incomplete arguments JSON that would otherwise fail
 /// in finish() with "tool arguments are not valid JSON".
 fn is_truncated_tool_call_stream(state: &impl StreamRetryState) -> bool {
-    state.truncated() && state.saw_tool_calls() && !state.pushed_any()
+    state.truncated() && state.saw_tool_calls()
 }
 
 fn is_empty_truncated_response(state: &impl StreamRetryState) -> bool {
@@ -2727,12 +2723,6 @@ struct ChatStreamState {
     tools: BTreeMap<usize, PartialToolCall>,
     implicit_tools: BTreeMap<usize, usize>,
     usage: TokenUsage,
-    /// True once user-visible text/reasoning deltas have been pushed to the
-    /// observer. A retry must never re-stream already-displayed deltas, so
-    /// streams that produced visible output are not retried. Tool-call deltas
-    /// do not count: a tool that was never delivered to the engine has no
-    /// side effects, so its stream may safely be retried.
-    pushed_any: bool,
     /// True once any tool-call delta has been received. Used to decide whether
     /// a truncated stream (finish_reason=length) may be retried.
     saw_tool_calls: bool,
@@ -2763,7 +2753,6 @@ impl ChatStreamState {
             .and_then(Value::as_str)
             .filter(|value| !value.is_empty());
         if let Some(reasoning) = reasoning {
-            self.pushed_any = true;
             self.reasoning.push_str(reasoning);
             observer.on_reasoning_delta(reasoning);
         }
@@ -2777,7 +2766,6 @@ impl ChatStreamState {
                         .and_then(Value::as_str)
                         .filter(|value| !value.is_empty())
                     {
-                        self.pushed_any = true;
                         self.reasoning.push_str(text);
                         observer.on_reasoning_delta(text);
                     }
@@ -2789,7 +2777,6 @@ impl ChatStreamState {
             .and_then(Value::as_str)
             .filter(|value| !value.is_empty())
         {
-            self.pushed_any = true;
             self.content.push_str(content);
             observer.on_text_delta(content);
         }
@@ -2942,6 +2929,9 @@ impl CompactionStreamState {
             Some("response.completed") => {
                 self.usage = responses_usage(value.pointer("/response/usage"));
             }
+            Some("response.incomplete") => {
+                anyhow::bail!("provider compaction response is incomplete")
+            }
             Some("error" | "response.failed") => {
                 anyhow::bail!(
                     "provider compaction stream failed: {}",
@@ -2981,11 +2971,6 @@ struct ResponsesStreamState {
     response_status: Option<String>,
     finish_reason: Option<String>,
     native_reasoning: bool,
-    /// True once user-visible text/reasoning deltas have been pushed to the
-    /// observer. Streams that produced visible output are never retried (a
-    /// retry would re-display already-streamed deltas). Function-call deltas
-    /// do not count: an undelivered tool call has no side effects.
-    pushed_any: bool,
     /// True once any function-call delta has been received.
     saw_tool_calls: bool,
     /// True when the stream ended with response.status == "incomplete" — the
@@ -3055,7 +3040,6 @@ impl ResponsesStreamState {
                     .and_then(Value::as_str)
                     .filter(|value| !value.is_empty())
                 {
-                    self.pushed_any = true;
                     self.content.push_str(delta);
                     observer.on_text_delta(delta);
                 }
@@ -3067,7 +3051,6 @@ impl ResponsesStreamState {
                     .and_then(Value::as_str)
                     .filter(|value| !value.is_empty())
                 {
-                    self.pushed_any = true;
                     observer.on_reasoning_delta(delta);
                 }
             }
@@ -3118,16 +3101,25 @@ impl ResponsesStreamState {
                     target.arguments.push_str(delta);
                 }
             }
-            Some("response.completed") => {
+            Some("response.completed" | "response.incomplete") => {
                 self.usage = responses_usage(value.pointer("/response/usage"));
                 self.response_model = optional_string(value.pointer("/response/model"))
                     .or_else(|| self.response_model.clone());
-                self.response_status = optional_string(value.pointer("/response/status"));
+                self.response_status =
+                    optional_string(value.pointer("/response/status")).or_else(|| {
+                        Some(
+                            if value["type"] == "response.incomplete" {
+                                "incomplete"
+                            } else {
+                                "completed"
+                            }
+                            .into(),
+                        )
+                    });
                 self.finish_reason =
                     optional_string(value.pointer("/response/incomplete_details/reason"));
-                if value.pointer("/response/status").and_then(Value::as_str) == Some("incomplete") {
-                    self.truncated = true;
-                }
+                self.truncated = self.response_status.as_deref() == Some("incomplete")
+                    && self.finish_reason.as_deref() == Some("max_output_tokens");
                 if let Some(output) = value.pointer("/response/output").and_then(Value::as_array) {
                     self.native_reasoning |= output_has_native_reasoning(output);
                     self.provider_items = output
@@ -3138,13 +3130,7 @@ impl ResponsesStreamState {
                 }
             }
             Some("error" | "response.failed") => {
-                anyhow::bail!(
-                    "provider stream failed: {}",
-                    value
-                        .pointer("/error/message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown error")
-                );
+                return Err(ProviderEventError::from_event(value).into());
             }
             _ => {}
         }
@@ -3152,6 +3138,22 @@ impl ResponsesStreamState {
     }
 
     fn finish(self) -> Result<ModelResponse> {
+        // A terminal incomplete response may contain unfinished tool JSON.
+        // Return its status to the engine without parsing or delivering tools.
+        if self.response_status.as_deref() == Some("incomplete") {
+            return Ok(ModelResponse {
+                content: self.content,
+                usage: self.usage,
+                streamed: true,
+                metadata: ModelResponseMetadata {
+                    response_model: self.response_model,
+                    finish_reason: self.finish_reason,
+                    response_status: self.response_status,
+                    native_reasoning: self.native_reasoning,
+                },
+                ..ModelResponse::default()
+            });
+        }
         let tool_calls = self
             .tools
             .into_values()
@@ -3184,6 +3186,33 @@ impl ResponsesStreamState {
         })
     }
 }
+
+#[derive(Debug)]
+struct ProviderEventError {
+    code: String,
+    message: String,
+}
+
+impl ProviderEventError {
+    fn from_event(value: &Value) -> Self {
+        let error = value
+            .pointer("/response/error")
+            .or_else(|| value.get("error"))
+            .unwrap_or(value);
+        Self {
+            code: error["code"].as_str().unwrap_or_default().into(),
+            message: error["message"].as_str().unwrap_or("unknown error").into(),
+        }
+    }
+}
+
+impl std::fmt::Display for ProviderEventError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "provider stream failed: {}", self.message)
+    }
+}
+
+impl std::error::Error for ProviderEventError {}
 
 fn endpoint(base_url: &str, suffix: &str) -> String {
     let base_url = base_url.trim_end_matches('/');
@@ -5248,6 +5277,205 @@ mod tests {
                 .expect("reset character lock")
                 .push(reset_text_characters);
         }
+    }
+
+    fn responses_sse_fixture(
+        streams: Vec<Vec<Value>>,
+    ) -> (HttpModelProvider, JoinHandle<Vec<Value>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind responses fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let server = std::thread::spawn(move || {
+            streams.into_iter().map(|events| {
+                let (mut socket, _) = listener.accept().expect("accept responses request");
+                socket.set_read_timeout(Some(Duration::from_secs(5))).expect("read timeout");
+                let request = read_http_json(&mut socket);
+                let body: String = events.iter().map(|event| format!("data: {event}\n\n")).collect();
+                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).expect("SSE response");
+                request
+            }).collect()
+        });
+        let mut config = reasoning_provider(ProviderKind::OpenAiResponses, "test-model");
+        config.base_url = format!("http://{address}");
+        (HttpModelProvider::new(config).expect("provider"), server)
+    }
+
+    fn responses_test_request() -> ModelRequest {
+        ModelRequest {
+            model: "test-model".into(),
+            messages: vec![
+                ChatMessage::user("continue writing"),
+                ChatMessage::assistant(
+                    "",
+                    vec![ToolCall {
+                        id: "previous-write".into(),
+                        name: "write_file".into(),
+                        arguments: json!({"path": "saved.md"}),
+                    }],
+                ),
+                ChatMessage::tool("previous-write", "saved successfully"),
+            ],
+            tools: Vec::new(),
+            max_output_tokens: Some(ModelCapabilities::default().max_output_tokens),
+            required_tool: None,
+            reasoning_effort: ReasoningEffort::Auto,
+        }
+    }
+
+    fn completed_responses_tool() -> Vec<Value> {
+        vec![
+            json!({"type": "response.output_item.done", "output_index": 0, "item": {
+                "type": "function_call", "call_id": "replacement", "name": "write_file", "arguments": "{\"path\":\"chapter.md\"}"
+            }}),
+            json!({"type": "response.completed", "response": {"status": "completed", "usage": {"output_tokens": 40}}}),
+        ]
+    }
+
+    #[tokio::test]
+    async fn responses_retries_gateway_disconnect_without_replaying_completed_tools() {
+        let (provider, server) = responses_sse_fixture(vec![
+            vec![
+                json!({"type": "response.output_text.delta", "delta": "开始写作"}),
+                json!({"type": "response.output_item.done", "output_index": 0, "item": {
+                    "type": "function_call", "call_id": "abandoned", "name": "write_file", "arguments": "{\"path\":\"abandoned.md\"}"
+                }}),
+                json!({"type": "error", "error": {"message": "upstream stream closed before a terminal event (last event: response.output_item.done)"}}),
+            ],
+            completed_responses_tool(),
+        ]);
+        let observer = CountingRetryObserver::default();
+        let result = provider
+            .complete_stream(responses_test_request(), &observer)
+            .await
+            .expect("retry succeeds");
+        let requests = server.join().expect("fixture server");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0], requests[1],
+            "retry only the pending model request, retaining prior tool results"
+        );
+        assert!(
+            requests[0]["input"]
+                .as_array()
+                .expect("test fixture")
+                .iter()
+                .any(|item| item["type"] == "function_call_output"
+                    && item["call_id"] == "previous-write")
+        );
+        assert!(
+            requests[0].get("reasoning").is_none(),
+            "auto is provider-managed"
+        );
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].id, "replacement");
+        assert_eq!(result.content, "");
+        assert_eq!(
+            *observer.reset_text_characters.lock().expect("test fixture"),
+            vec![4]
+        );
+    }
+
+    #[tokio::test]
+    async fn responses_incomplete_budget_retries_with_larger_limit_and_resets_lead_in() {
+        let (provider, server) = responses_sse_fixture(vec![
+            vec![
+                json!({"type": "response.output_text.delta", "delta": "开始"}),
+                json!({"type": "response.output_item.added", "output_index": 0, "item": {
+                    "type": "function_call", "call_id": "partial", "name": "write_file", "arguments": "{\"path\":"
+                }}),
+                json!({"type": "response.incomplete", "response": {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}, "usage": {"output_tokens": 16384}}}),
+            ],
+            completed_responses_tool(),
+        ]);
+        let observer = CountingRetryObserver::default();
+        let result = provider
+            .complete_stream(responses_test_request(), &observer)
+            .await
+            .expect("retry succeeds");
+        let requests = server.join().expect("fixture server");
+        assert_eq!(requests[0]["max_output_tokens"], 16384);
+        assert_eq!(requests[1]["max_output_tokens"], 32768);
+        assert_eq!(result.tool_calls[0].id, "replacement");
+        assert_eq!(
+            *observer.reset_text_characters.lock().expect("test fixture"),
+            vec![2]
+        );
+    }
+
+    #[tokio::test]
+    async fn responses_content_filter_is_terminal_and_does_not_deliver_partial_tools() {
+        let (provider, server) = responses_sse_fixture(vec![vec![
+            json!({"type": "response.output_item.added", "output_index": 0, "item": {
+                "type": "function_call", "call_id": "partial", "name": "write_file", "arguments": "{"
+            }}),
+            json!({"type": "response.incomplete", "response": {"status": "incomplete", "incomplete_details": {"reason": "content_filter"}, "usage": {"output_tokens": 12}}}),
+        ]]);
+        let observer = CountingRetryObserver::default();
+        let result = provider
+            .complete_stream(responses_test_request(), &observer)
+            .await
+            .expect("terminal incomplete response");
+        assert_eq!(server.join().expect("server").len(), 1);
+        assert_eq!(*observer.retries.lock().expect("test fixture"), 0);
+        assert!(result.tool_calls.is_empty());
+        assert_eq!(
+            result.metadata.response_status.as_deref(),
+            Some("incomplete")
+        );
+        assert_eq!(
+            result.metadata.finish_reason.as_deref(),
+            Some("content_filter")
+        );
+        assert_eq!(result.usage.output_tokens, 12);
+    }
+
+    #[tokio::test]
+    async fn responses_failed_preserves_nested_error_and_only_retries_transient_failures() {
+        for (code, retryable) in [("server_error", true), ("invalid_api_key", false)] {
+            let mut streams = vec![vec![
+                json!({"type": "response.failed", "response": {"error": {"code": code, "message": "fixture failure"}}}),
+            ]];
+            if retryable {
+                streams.push(completed_responses_tool());
+            }
+            let (provider, server) = responses_sse_fixture(streams);
+            let observer = CountingRetryObserver::default();
+            let result = provider
+                .complete_stream(responses_test_request(), &observer)
+                .await;
+            assert_eq!(result.is_ok(), retryable);
+            if let Err(error) = result {
+                assert!(error.to_string().contains("fixture failure"));
+            }
+            assert_eq!(
+                server.join().expect("server").len(),
+                if retryable { 2 } else { 1 }
+            );
+            assert_eq!(
+                *observer.retries.lock().expect("test fixture"),
+                usize::from(retryable)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_disconnect_retries_are_bounded() {
+        let event =
+            json!({"type": "error", "message": "upstream stream closed before a terminal event"});
+        let (provider, server) = responses_sse_fixture(vec![vec![event]; PROVIDER_STREAM_ATTEMPTS]);
+        let observer = CountingRetryObserver::default();
+        let error = provider
+            .complete_stream(responses_test_request(), &observer)
+            .await
+            .expect_err("bounded failure");
+        assert!(error.to_string().contains("upstream stream closed"));
+        assert_eq!(
+            server.join().expect("server").len(),
+            PROVIDER_STREAM_ATTEMPTS
+        );
+        assert_eq!(
+            *observer.retries.lock().expect("test fixture"),
+            PROVIDER_STREAM_ATTEMPTS - 1
+        );
     }
 
     fn spawn_retry_then_success() -> (String, JoinHandle<()>) {

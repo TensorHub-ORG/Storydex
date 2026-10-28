@@ -105,11 +105,11 @@
             </button>
           </form>
           <div class="ssp-wiki-toolbar-stats">
-            <span>总节点 {{ wikiGraphStats.nodeCount }}</span>
+            <span>当前范围节点 {{ wikiGraphStats.nodeCount }}</span>
             <span>当前返回 {{ wikiGraphStats.returnedNodeCount }}</span>
-            <span>confirmed 边 {{ wikiGraphStats.confirmedEdgeCount }}</span>
+            <span>已确认关系 {{ wikiGraphStats.confirmedEdgeCount }}</span>
             <span>待确认边 {{ wikiGraphStats.reviewRequiredEdgeCount }}</span>
-            <span>无 confirmed 关系节点 {{ wikiGraphStats.isolatedNodeCount }}</span>
+            <span>无已确认关系节点 {{ wikiGraphStats.isolatedNodeCount }}</span>
             <span v-if="wikiGraphStats.notLoadedNodeCount > 0">尚未加载 {{ wikiGraphStats.notLoadedNodeCount }}</span>
             <button
               v-if="wikiGraphHasMore"
@@ -346,9 +346,9 @@
                 <div v-else-if="!wikiReviewQueue.length" class="ssp-wiki-review-empty">暂无待确认关系。</div>
                 <article v-for="candidate in wikiReviewQueue" :key="candidate.id" class="ssp-wiki-review-card">
                   <div class="ssp-wiki-review-card-title">
-                    <strong>{{ candidate.subject || candidate.subjectId || "未知主体" }}</strong>
+                    <strong>{{ candidate.subject || "缺失条目" }}</strong>
                     <span>→</span>
-                    <strong>{{ candidate.object || candidate.objectId || "未知客体" }}</strong>
+                    <strong>{{ candidate.object || "缺失条目" }}</strong>
                   </div>
                   <label class="ssp-wiki-review-field">
                     谓词
@@ -841,7 +841,7 @@ interface WikiSourceRef {
 }
 
 type StoryWikiSyntheticRole = "categoryHub" | "projectHub";
-type StoryWikiCategory = "characters" | "plot" | "setting";
+type StoryWikiCategory = "all" | "characters" | "plot" | "setting";
 
 interface StoryWikiNodePayload {
   id: string;
@@ -1068,7 +1068,7 @@ const wikiReviewError = ref("");
 const wikiReviewOpen = ref(false);
 const wikiReviewActionId = ref("");
 const wikiReviewDrafts = ref<Record<string, WikiReviewDraft>>({});
-const selectedWikiCategory = ref<StoryWikiCategory>("characters");
+const selectedWikiCategory = ref<StoryWikiCategory>("all");
 const selectedWikiEntryId = ref("");
 const selectedWikiNodeId = ref("");
 const selectedWikiEdgeId = ref("");
@@ -1120,6 +1120,7 @@ const RELATION_GRAPH_HEIGHT = 520;
 const RELATION_GRAPH_CENTER_X = RELATION_GRAPH_WIDTH / 2;
 const RELATION_GRAPH_CENTER_Y = RELATION_GRAPH_HEIGHT / 2;
 const WIKI_CATEGORY_TABS: Array<{ id: StoryWikiCategory; label: string; icon: string }> = [
+  { id: "all", label: "全部", icon: "hub" },
   { id: "characters", label: "角色", icon: "groups" },
   { id: "plot", label: "剧情", icon: "timeline" },
   { id: "setting", label: "设定", icon: "auto_stories" },
@@ -1309,13 +1310,13 @@ const wikiCategoryTabs = computed(() => {
   return WIKI_CATEGORY_TABS.map((tab) => ({
     ...tab,
     label: labels[tab.id] || tab.label,
-    count: counts.get(tab.id) ?? 0,
+    count: tab.id === "all" ? wikiEntries.value.filter((entry) => entry.category !== "overview").length : counts.get(tab.id) ?? 0,
   }));
 });
 
 const selectedWikiCategoryEntries = computed(() => {
   const category = selectedWikiCategory.value;
-  return wikiEntries.value.filter((entry) => entry.category === category);
+  return wikiEntries.value.filter((entry) => category === "all" ? entry.category !== "overview" : entry.category === category);
 });
 
 function matchesWikiKnowledgeStatus(status: unknown): boolean {
@@ -1694,10 +1695,13 @@ const wikiInspectorEmptyHint = computed(() => {
     return `正在展示“${wikiGraphSearchQuery.value}”的搜索结果，点击节点或连线查看详情。`;
   }
   if (selectedWikiCategory.value === "characters") {
-    return "只展示角色与有项目证据的角色关系。点击节点聚焦它的邻居，点击连线查看关系详情。";
+    return "展示独立角色卡及角色之间的关系。仅在正文或关系说明中提及的人物需要补充角色卡；跨分类关系可在“全部”中查看。";
+  }
+  if (selectedWikiCategory.value === "all") {
+    return "展示全部故事条目及跨分类关系。点击节点查看来源，点击连线查看关系证据。";
   }
   if (selectedWikiCategory.value === "plot") {
-    return "章节按叙事顺序串联，虚线小节点是该章出场的角色。点击节点查看章节详情。";
+    return "章节按叙事顺序串联。点击节点查看章节来源及关联条目。";
   }
   return "展示世界观、地点、物品、势力与伏笔。点击节点查看它的证据来源与关联章节。";
 });

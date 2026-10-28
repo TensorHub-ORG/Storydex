@@ -73,7 +73,7 @@ const diffTotals = computed(() => ({
 }));
 const tasks = computed<AgentTaskItem[]>(() => activeRun.value?.tasks || []);
 const completedCount = computed(() => tasks.value.filter((task) => task.status === "completed").length);
-const hasDiffTotals = computed(() => diffTotals.value.files > 0);
+const hasDiffTotals = computed(() => diffTotals.value.added > 0 || diffTotals.value.removed > 0);
 const visible = computed(() => {
   if (workspaceStore.launchScreenVisible) {
     return false;

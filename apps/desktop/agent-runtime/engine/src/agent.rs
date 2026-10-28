@@ -28,6 +28,7 @@ pub enum AgentError {
     Compaction(anyhow::Error),
     Checkpoint(anyhow::Error),
     ToolRoundLimit { limit: usize },
+    InvalidResponse(String),
     Hook(String),
 }
 
@@ -38,8 +39,12 @@ impl fmt::Display for AgentError {
             Self::Compaction(error) => write!(formatter, "context compaction failed: {error:#}"),
             Self::Checkpoint(error) => write!(formatter, "session checkpoint failed: {error:#}"),
             Self::ToolRoundLimit { limit } => {
-                write!(formatter, "tool round limit reached ({limit})")
+                write!(
+                    formatter,
+                    "已达到本次工具轮数上限（{limit}），任务尚未确认完成。会话和已执行的操作已保留，可继续处理剩余工作。"
+                )
             }
+            Self::InvalidResponse(message) => write!(formatter, "{message}"),
             Self::Hook(error) => write!(formatter, "hook failed: {error}"),
         }
     }
@@ -328,6 +333,7 @@ impl Agent {
         self.run_checkpoint(session, CheckpointPriority::Immediate)?;
         let capabilities = provider.capabilities();
         let mut compacted_for_provider_error = false;
+        let mut retried_empty_response = false;
 
         for round in 1..=self.max_tool_rounds {
             // Tools may change after a control action such as exit_plan_mode.
@@ -413,10 +419,47 @@ impl Agent {
             observer.on_event(&AgentEvent::ContextUpdated(
                 session.context.status(&capabilities),
             ));
+            if let Some(reason) = incomplete_response_reason(&response.metadata) {
+                let message = format!(
+                    "模型返回不完整响应（{reason}），本次未能完成。已收到的文字保留为不完整片段；本轮响应中的工具未执行，之前已完成的操作保留。"
+                );
+                // Preserve balanced history so resuming cannot execute rejected calls.
+                for call in &response.tool_calls {
+                    session.messages.push(ChatMessage::tool(
+                        call.id.clone(),
+                        "error: not executed because the provider response was incomplete; inspect current state before retrying",
+                    ));
+                }
+                session.messages.push(ChatMessage::internal_user(
+                    "The provider marked the preceding response incomplete. Its text is only a partial fragment and its tool calls were not executed. When continuing, inspect current state and complete only unfinished work; earlier successful tool operations remain applied.",
+                ));
+                session.touch();
+                self.run_checkpoint(session, CheckpointPriority::Immediate)?;
+                self.flush_checkpoints()?;
+                return Err(AgentError::InvalidResponse(message));
+            }
             if response.tool_calls.is_empty() {
                 if self.accept_queued_input(session, observer) {
                     self.run_checkpoint(session, CheckpointPriority::Buffered)?;
                     continue;
+                }
+                if response.content.trim().is_empty() {
+                    // One correction inside the existing tool loop, without inferring intent.
+                    if !retried_empty_response && round < self.max_tool_rounds {
+                        retried_empty_response = true;
+                        session.messages.push(ChatMessage::internal_user(
+                            "The previous response contained no visible answer or tool calls. Continue the existing task: use native tool calls for unfinished actions, or give a substantive final answer if the task is complete. Do not repeat operations that already succeeded.",
+                        ));
+                        self.run_checkpoint(session, CheckpointPriority::Immediate)?;
+                        continue;
+                    }
+                    session.touch();
+                    self.run_checkpoint(session, CheckpointPriority::Immediate)?;
+                    self.flush_checkpoints()?;
+                    return Err(AgentError::InvalidResponse(
+                        "模型未返回正文或工具调用，本次未能完成。会话和此前已执行的操作已保留。"
+                            .into(),
+                    ));
                 }
                 session.touch();
                 self.run_checkpoint(session, CheckpointPriority::Buffered)?;
@@ -461,17 +504,17 @@ impl Agent {
         }
 
         session.touch();
-        let message = format!(
-            "Tool loop stopped after {} rounds to prevent an infinite cycle. The session is preserved; continue with a different approach.",
-            self.max_tool_rounds
-        );
+        let error = AgentError::ToolRoundLimit {
+            limit: self.max_tool_rounds,
+        };
+        let message = error.to_string();
         session
             .messages
             .push(ChatMessage::assistant(message.clone(), Vec::new()));
         self.run_checkpoint(session, CheckpointPriority::Immediate)?;
-        observer.on_event(&AgentEvent::Text(message.clone()));
-        observer.on_event(&AgentEvent::TurnCompleted(session.usage.clone()));
-        Ok(message)
+        self.flush_checkpoints()?;
+        observer.on_event(&AgentEvent::Text(message));
+        Err(error)
     }
 
     async fn compact(
@@ -586,6 +629,29 @@ impl Agent {
             .extend(messages.iter().cloned().map(ChatMessage::user));
         observer.on_event(&AgentEvent::QueuedInputAccepted(messages));
         true
+    }
+}
+
+fn incomplete_response_reason(metadata: &crate::ModelResponseMetadata) -> Option<String> {
+    let reason = metadata
+        .finish_reason
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let status = metadata
+        .response_status
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(
+        reason.as_str(),
+        "length" | "max_tokens" | "max_output_tokens" | "max_tokens_exceeded"
+    ) {
+        Some(reason)
+    } else if matches!(status.as_str(), "incomplete" | "failed" | "cancelled") {
+        Some(status)
+    } else {
+        None
     }
 }
 
@@ -720,6 +786,268 @@ mod tests {
     struct MockProvider {
         calls: Mutex<usize>,
         expect_changed_tools: bool,
+    }
+
+    struct ResponseSequence {
+        responses: Mutex<std::collections::VecDeque<ModelResponse>>,
+        requests: Mutex<Vec<ModelRequest>>,
+    }
+
+    impl ResponseSequence {
+        fn new(responses: Vec<ModelResponse>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into()),
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ModelProvider for ResponseSequence {
+        fn provider_id(&self) -> &str {
+            "mock"
+        }
+        fn model(&self) -> &str {
+            "mock-model"
+        }
+        async fn complete(&self, request: ModelRequest) -> Result<ModelResponse> {
+            self.requests.lock().expect("requests").push(request);
+            Ok(self
+                .responses
+                .lock()
+                .expect("responses")
+                .pop_front()
+                .expect("unexpected extra model call"))
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordedEvents(Mutex<Vec<AgentEvent>>);
+
+    impl AgentObserver for RecordedEvents {
+        fn on_event(&self, event: &AgentEvent) {
+            self.0.lock().expect("events").push(event.clone());
+        }
+    }
+
+    fn echo_response() -> ModelResponse {
+        ModelResponse {
+            tool_calls: vec![ToolCall {
+                id: "action".into(),
+                name: "echo".into(),
+                arguments: json!({"value": "ok"}),
+            }],
+            ..ModelResponse::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn final_text_without_tools_remains_a_valid_single_response() {
+        let mut session = Session::new("mock", "mock-model", PathBuf::from("."));
+        let provider = ResponseSequence::new(vec![ModelResponse {
+            content: "这段对白可以更简洁。".into(),
+            ..ModelResponse::default()
+        }]);
+        let output = Agent::new("test")
+            .run_turn(
+                &mut session,
+                "只讨论，不改文件",
+                &provider,
+                &EchoTool,
+                &Approve,
+                &NoopObserver,
+            )
+            .await
+            .expect("answer");
+        assert_eq!(output, "这段对白可以更简洁。");
+        assert_eq!(provider.requests.lock().expect("requests").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn empty_response_recovers_once_without_repeating_a_successful_tool() {
+        let mut session = Session::new("mock", "mock-model", PathBuf::from("."));
+        let provider = ResponseSequence::new(vec![
+            echo_response(),
+            ModelResponse::default(),
+            ModelResponse {
+                content: "已处理。".into(),
+                ..ModelResponse::default()
+            },
+        ]);
+        let observer = RecordedEvents::default();
+        let output = Agent::new("test")
+            .run_turn(
+                &mut session,
+                "处理任务",
+                &provider,
+                &EchoTool,
+                &Approve,
+                &observer,
+            )
+            .await
+            .expect("recovered");
+        assert_eq!(output, "已处理。");
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 3);
+        assert!(
+            requests[2]
+                .messages
+                .iter()
+                .any(|m| m.role == crate::Role::Tool && m.content == "success: ok")
+        );
+        assert!(
+            requests[2]
+                .messages
+                .last()
+                .expect("reminder")
+                .content
+                .contains("Do not repeat operations")
+        );
+        let events = observer.0.lock().expect("events");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::ToolStarted(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::TurnCompleted(_)))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_empty_responses_fail_without_an_unbounded_retry_or_completion() {
+        let mut session = Session::new("mock", "mock-model", PathBuf::from("."));
+        let provider =
+            ResponseSequence::new(vec![ModelResponse::default(), ModelResponse::default()]);
+        let observer = RecordedEvents::default();
+        let result = Agent::new("test")
+            .run_turn(
+                &mut session,
+                "处理任务",
+                &provider,
+                &EchoTool,
+                &Approve,
+                &observer,
+            )
+            .await;
+        assert!(matches!(result, Err(AgentError::InvalidResponse(_))));
+        assert_eq!(provider.requests.lock().expect("requests").len(), 2);
+        assert!(
+            !observer
+                .0
+                .lock()
+                .expect("events")
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TurnCompleted(_)))
+        );
+    }
+
+    #[tokio::test]
+    async fn incomplete_responses_keep_text_and_usage_but_do_not_execute_tools_or_complete() {
+        for (reason, status, with_tool) in [
+            ("length", "", false),
+            ("MAX_TOKENS", "", true),
+            ("max_output_tokens", "", true),
+            ("max_tokens_exceeded", "", false),
+            ("", "incomplete", true),
+            ("", "failed", false),
+        ] {
+            let mut session = Session::new("mock", "mock-model", PathBuf::from("."));
+            let response = ModelResponse {
+                content: "未完成的片段".into(),
+                tool_calls: if with_tool {
+                    echo_response().tool_calls
+                } else {
+                    vec![]
+                },
+                usage: crate::TokenUsage {
+                    output_tokens: 100,
+                    ..Default::default()
+                },
+                metadata: crate::ModelResponseMetadata {
+                    finish_reason: Some(reason.into()),
+                    response_status: Some(status.into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let provider = ResponseSequence::new(vec![response]);
+            let observer = RecordedEvents::default();
+            let result = Agent::new("test")
+                .run_turn(
+                    &mut session,
+                    "处理任务",
+                    &provider,
+                    &EchoTool,
+                    &Approve,
+                    &observer,
+                )
+                .await;
+            assert!(matches!(result, Err(AgentError::InvalidResponse(_))));
+            assert_eq!(session.usage.output_tokens, 100);
+            assert!(session.messages.iter().any(|m| m.content == "未完成的片段"));
+            assert_eq!(
+                session
+                    .messages
+                    .iter()
+                    .filter(|m| m.role == crate::Role::Tool && m.content.contains("not executed"))
+                    .count(),
+                usize::from(with_tool)
+            );
+            assert!(
+                !observer.0.lock().expect("events").iter().any(|e| matches!(
+                    e,
+                    AgentEvent::TurnCompleted(_) | AgentEvent::ToolStarted(_)
+                ))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn exhausted_tool_rounds_preserve_results_and_report_incomplete() {
+        let mut session = Session::new("mock", "mock-model", PathBuf::from("."));
+        let provider = ResponseSequence::new(vec![echo_response()]);
+        let observer = RecordedEvents::default();
+        let result = Agent::new("test")
+            .with_max_tool_rounds(1)
+            .run_turn(
+                &mut session,
+                "处理任务",
+                &provider,
+                &EchoTool,
+                &Approve,
+                &observer,
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(AgentError::ToolRoundLimit { limit: 1 })
+        ));
+        assert!(
+            session
+                .messages
+                .iter()
+                .any(|m| m.role == crate::Role::Tool && m.content == "success: ok")
+        );
+        let events = observer.0.lock().expect("events");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::ToolFinished { .. }))
+                .count(),
+            1
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TurnCompleted(_)))
+        );
     }
 
     #[async_trait]

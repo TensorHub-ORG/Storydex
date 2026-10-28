@@ -376,21 +376,27 @@ function toolsSummary(entry: Extract<FlowEntry, { kind: "tools" }>): string {
     return running ? `正在${toolVerb(running)}…` : "正在调用工具…";
   }
   const buckets = { cmd: 0, read: 0, edit: 0, search: 0, other: 0 };
+  let failed = 0;
+  let unfinished = 0;
   for (const tool of entry.tools) {
-    buckets[toolKind(tool)] += 1;
+    if (tool.status === "success") buckets[toolKind(tool)] += 1;
+    else if (tool.status === "error") failed += 1;
+    else unfinished += 1;
   }
   const parts: string[] = [];
-  if (buckets.cmd) parts.push(`运行 ${buckets.cmd} 条命令`);
-  if (buckets.read) parts.push(`读取 ${buckets.read} 个文件`);
-  if (buckets.edit) parts.push(`修改 ${buckets.edit} 个文件`);
-  if (buckets.search) parts.push(`搜索 ${buckets.search} 次`);
-  if (buckets.other) parts.push(`调用工具 ${buckets.other} 次`);
+  if (buckets.cmd) parts.push(`命令执行成功 ${buckets.cmd} 次`);
+  if (buckets.read) parts.push(`读取成功 ${buckets.read} 次`);
+  if (buckets.edit) parts.push(`写入/编辑成功 ${buckets.edit} 次`);
+  if (buckets.search) parts.push(`搜索成功 ${buckets.search} 次`);
+  if (buckets.other) parts.push(`工具执行成功 ${buckets.other} 次`);
+  if (failed) parts.push(`失败 ${failed} 次`);
+  if (unfinished) parts.push(`未完成 ${unfinished} 次`);
   return parts.join("，") || `调用工具 ${entry.tools.length} 次`;
 }
 
 function toolKind(tool: CoomiWaterfallItem): "cmd" | "read" | "edit" | "search" | "other" {
   const name = (tool.toolName || "").toLowerCase();
-  if (name.startsWith("run") || name.startsWith("bash") || name.startsWith("exec") || name.startsWith("terminal")) return "cmd";
+  if (name === "shell" || name === "local_shell" || name.startsWith("run") || name.startsWith("bash") || name.startsWith("exec") || name.startsWith("terminal")) return "cmd";
   if (name.startsWith("read") || name.startsWith("list") || name.startsWith("get") || name.startsWith("cat")) return "read";
   if (name.startsWith("write") || name.startsWith("edit") || name.startsWith("create") || name.startsWith("apply")) return "edit";
   if (name.startsWith("search") || name.startsWith("grep") || name.startsWith("find")) return "search";
@@ -505,7 +511,7 @@ const statusText = computed(() => {
   if (props.run.errorMessage) return "错误";
   const labels: Record<string, string> = {
     running: "正在思考…",
-    completed: "已完成",
+    completed: "本轮结束",
     committed: "已提交",
     preview: "待确认",
     discarded: "已丢弃",

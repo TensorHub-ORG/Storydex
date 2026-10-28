@@ -674,21 +674,18 @@ fn chapter_state(workspace: &Path) -> Result<Vec<Value>, Response> {
             .map(|value| value.to_string_lossy().replace('\\', "/"))
             .unwrap_or_default();
         let (_, path) = resolve_existing(workspace, &relative)?;
-        let is_chapter = file_type.is_dir()
-            || path
-                .extension()
-                .and_then(|value| value.to_str())
-                .is_some_and(|value| {
-                    value.eq_ignore_ascii_case("md") || value.eq_ignore_ascii_case("txt")
-                });
-        if !is_chapter {
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        if !coomi_services::is_chapter_entry(&file_name, file_type.is_dir()) {
             continue;
         }
-        let name = path
-            .file_stem()
-            .or_else(|| path.file_name())
-            .and_then(|value| value.to_str())
-            .unwrap_or_default();
+        let name = if file_type.is_dir() {
+            file_name.as_ref()
+        } else {
+            path.file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+        };
         let progress_item = progress_map.and_then(|items| items.get(&relative));
         let completed = progress_item
             .and_then(|item| item.get("completed"))
@@ -704,26 +701,30 @@ fn chapter_state(workspace: &Path) -> Result<Vec<Value>, Response> {
             "relativePath": relative,
             "name": path.file_name().and_then(|value| value.to_str()).unwrap_or_default(),
             "displayName": name,
-            "chapterNumber": extract_chapter_number(name).unwrap_or(paths.len() as i64 + 1),
+            "chapterNumber": coomi_services::chapter_number(name),
             "completed": completed,
             "updatedAt": updated_at,
         }));
     }
     paths.sort_by(|left, right| {
-        left["relativePath"]
-            .as_str()
-            .cmp(&right["relativePath"].as_str())
+        coomi_services::compare_chapter_paths(
+            left["relativePath"].as_str().unwrap_or_default(),
+            right["relativePath"].as_str().unwrap_or_default(),
+        )
     });
+    let mut next_number = paths
+        .iter()
+        .filter_map(|chapter| chapter["chapterNumber"].as_u64())
+        .max()
+        .unwrap_or(0)
+        + 1;
+    for chapter in &mut paths {
+        if chapter["chapterNumber"].is_null() {
+            chapter["chapterNumber"] = json!(next_number);
+            next_number += 1;
+        }
+    }
     Ok(paths)
-}
-
-fn extract_chapter_number(name: &str) -> Option<i64> {
-    let digits = name
-        .chars()
-        .skip_while(|value| !value.is_ascii_digit())
-        .take_while(|value| value.is_ascii_digit())
-        .collect::<String>();
-    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
 }
 
 pub(crate) async fn story_chapters(State(state): State<AppState>) -> Response {
@@ -775,7 +776,7 @@ pub(crate) async fn update_chapter_completion(
             );
         }
     };
-    if !relative.starts_with("chapters/") {
+    if Path::new(&relative).parent() != Some(Path::new("chapters")) {
         return story_error(
             StatusCode::BAD_REQUEST,
             "chapter_path_invalid",
@@ -786,11 +787,16 @@ pub(crate) async fn update_chapter_completion(
         Ok(value) => value,
         Err(response) => return response,
     };
-    if !path.is_dir() {
+    if !coomi_services::is_chapter_entry(
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default(),
+        path.is_dir(),
+    ) {
         return story_error(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "chapter_not_directory",
-            "The chapter path must be a directory.",
+            "chapter_path_invalid",
+            "The chapter path must be a chapter directory or an md/txt manuscript.",
         );
     }
     let completed = input

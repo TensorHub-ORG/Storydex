@@ -59,6 +59,25 @@ describe("ExplorerSidebar creation and selection invariants", () => {
     setActivePinia(createPinia());
   });
 
+  it("offers completion for indexed flat chapters and directories, excluding guide files", async () => {
+    const { wrapper, workspace, utils } = mountExplorer();
+    const completion = vi.spyOn(workspace, "setChapterCompletion").mockResolvedValue(workspace.storySettings);
+    workspace.tree = [{ ...directoryNode, children: [
+      { ...fileNode, name: "第一章.md", relativePath: "chapters/第一章.md", isChapter: true },
+      { ...directoryNode, name: "第二章", relativePath: "chapters/第二章", isChapter: true },
+      { ...fileNode, name: "README.md", relativePath: "chapters/README.md", isChapter: false },
+    ] }];
+    utils.toggleDirectory(directoryNode);
+    await nextTick();
+    const checkboxes = wrapper.findAll(".tree-chapter-state input");
+    expect(checkboxes).toHaveLength(2);
+    await checkboxes[0].setValue(true);
+    expect(completion).toHaveBeenCalledWith("chapters/第一章.md", true);
+    await checkboxes[1].setValue(true);
+    expect(completion).toHaveBeenCalledWith("chapters/第二章", true);
+    wrapper.unmount();
+  });
+
   it("keeps a nested directory editor visible and focused after a create error", async () => {
     const { wrapper, workspace, utils } = mountExplorer();
     vi.spyOn(workspace, "createDirectory").mockImplementation(async () => {

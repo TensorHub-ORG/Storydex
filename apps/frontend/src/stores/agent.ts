@@ -164,7 +164,7 @@ export const useAgentStore = defineStore("agent", {
     runStartedAt: null,
     isCommittingGit: false,
     commitActionLabel: "",
-    reasoningEffort: "high",
+    reasoningEffort: "auto",
     storyFragmentCount: 1,
     taskMode: "chat",
     chapterLengthTier: "medium",

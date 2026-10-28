@@ -5,6 +5,8 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 16_384;
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ModelCapabilities {
     #[serde(default = "default_context_window")]
@@ -81,7 +83,7 @@ const fn default_effective_context_window_percent() -> u8 {
 }
 
 const fn default_max_output_tokens() -> u64 {
-    8_192
+    DEFAULT_MAX_OUTPUT_TOKENS
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -963,12 +963,13 @@ pub(crate) async fn wiki_graph(
             category = "characters".to_owned();
         }
         matched_entry_ids.extend(raw_entries.iter().filter_map(|entry| {
-            (normalize_wiki_category(
-                entry
-                    .get("category")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-            ) == category)
+            (category == "all" && entry["category"] != "overview"
+                || normalize_wiki_category(
+                    entry
+                        .get("category")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                ) == category)
                 .then(|| entry.get("id").and_then(Value::as_str).map(str::to_owned))
                 .flatten()
         }));
@@ -986,9 +987,10 @@ pub(crate) async fn wiki_graph(
                     .and_then(Value::as_str)
                     .unwrap_or_default(),
             );
-            ((node_category == category || entry_category == category) && !wiki_hub_node(node))
-                .then(|| node.get("id").and_then(Value::as_str).map(str::to_owned))
-                .flatten()
+            ((category == "all" || node_category == category || entry_category == category)
+                && !wiki_hub_node(node))
+            .then(|| node.get("id").and_then(Value::as_str).map(str::to_owned))
+            .flatten()
         }));
     }
 

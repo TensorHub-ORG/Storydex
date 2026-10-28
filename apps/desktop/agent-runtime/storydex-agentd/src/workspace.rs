@@ -1064,12 +1064,25 @@ fn tree_node(workspace: &Path, path: &Path, count: &mut usize) -> Result<Option<
         return Ok(None);
     }
     *count += 1;
+    let is_chapter = Path::new(&relative).parent() == Some(Path::new("chapters"))
+        && coomi_services::is_chapter_entry(
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default(),
+            symlink_metadata.is_dir(),
+        );
     if symlink_metadata.is_dir() {
         let mut entries = fs::read_dir(path)
             .map_err(|error| io_error("Reading the workspace tree", error))?
             .filter_map(Result::ok)
             .collect::<Vec<_>>();
         entries.sort_by(|left, right| {
+            if relative == "chapters" {
+                return coomi_services::compare_chapter_paths(
+                    &left.file_name().to_string_lossy(),
+                    &right.file_name().to_string_lossy(),
+                );
+            }
             let left_dir = left.file_type().ok().is_some_and(|value| value.is_dir());
             let right_dir = right.file_type().ok().is_some_and(|value| value.is_dir());
             match (left_dir, right_dir) {
@@ -1093,6 +1106,7 @@ fn tree_node(workspace: &Path, path: &Path, count: &mut usize) -> Result<Option<
             "relativePath": relative,
             "kind": "directory",
             "children": children,
+            "isChapter": is_chapter,
         })));
     }
     Ok(Some(json!({
@@ -1100,6 +1114,7 @@ fn tree_node(workspace: &Path, path: &Path, count: &mut usize) -> Result<Option<
         "relativePath": relative,
         "kind": "file",
         "children": [],
+        "isChapter": is_chapter,
         "extension": path.extension().and_then(|value| value.to_str()).map(|value| format!(".{value}")).unwrap_or_default().to_ascii_lowercase(),
         "size": symlink_metadata.len(),
         "updatedAt": modified_iso(&symlink_metadata),

@@ -77,6 +77,7 @@ export interface WorkspaceTreeNode {
   relativePath: string | null;
   kind: "directory" | "file";
   children: WorkspaceTreeNode[];
+  isChapter?: boolean;
   extension?: string;
   size?: number;
   updatedAt?: string;
