@@ -26,6 +26,7 @@
       </div>
       <StoryStatePanel
         v-else
+        :key="workspaceStore.currentProject?.workspaceRoot"
         class="storydex-relationship-workspace workspace-font-pane"
         :style="centerPaneFontStyle"
         initial-tab="relations"

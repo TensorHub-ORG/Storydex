@@ -2470,10 +2470,10 @@ mod tests {
         std::fs::create_dir(&disabled).expect("create disabled Skill directory");
         std::fs::write(disabled.join("SKILL.md"), "Disabled instructions")
             .expect("write disabled Skill");
-        std::fs::create_dir_all(skills.path().parent().unwrap().join("config"))
-            .expect("create Skill config");
+        let skill_home = skills.path().parent().expect("Skill fixture parent");
+        std::fs::create_dir_all(skill_home.join("config")).expect("create Skill config");
         std::fs::write(
-            skills.path().parent().unwrap().join("config/skills.json"),
+            skill_home.join("config/skills.json"),
             r#"{"skills":{"disabled":{"enabled":false}}}"#,
         )
         .expect("write Skill config");

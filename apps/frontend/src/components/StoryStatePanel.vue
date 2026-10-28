@@ -1463,10 +1463,12 @@ function wikiRelationshipSemanticsLabel(edge: Partial<StoryWikiEdgePayload>): st
   return parts.join(" · ");
 }
 
-function recomputeWikiLayout(): void {
+let wikiLayoutSignature = "";
+function recomputeWikiLayout(force = false): void {
   const rawNodes = wikiVisibleRawGraphNodes.value;
   if (!rawNodes.length) {
     wikiLayoutPositions.value = {};
+    wikiLayoutSignature = "";
     return;
   }
   const degrees = wikiGraphDegrees.value;
@@ -1486,6 +1488,13 @@ function recomputeWikiLayout(): void {
     target: edge.target,
     weight: typeof edge.weight === "number" ? edge.weight : 1,
   }));
+  const signature = JSON.stringify([
+    wikiCanvasSize.value,
+    forceNodes.map(({ id, radius }) => [id, radius]).sort(),
+    forceEdges.map(({ source, target, weight }) => [source, target, weight]).sort(),
+  ]);
+  if (!force && signature === wikiLayoutSignature) return;
+  wikiLayoutSignature = signature;
   wikiLayoutPositions.value = computeForceLayout(forceNodes, forceEdges, {
     width: wikiCanvasSize.value.width,
     height: wikiCanvasSize.value.height,
@@ -2617,7 +2626,7 @@ function fitWikiGraphView(): void {
 
 function resetWikiGraphView(): void {
   wikiNodeOverrides.value = {};
-  recomputeWikiLayout();
+  recomputeWikiLayout(true);
   fitWikiGraphView();
 }
 
@@ -2843,12 +2852,14 @@ watch(
 
 watch(
   () => wikiGraphQueryData.value,
-  () => {
-    wikiNodeOverrides.value = {};
+  (next, previous) => {
+    const survivingIds = new Set((next?.graph?.nodes ?? []).map((node) => node.id));
+    wikiNodeOverrides.value = Object.fromEntries(Object.entries(wikiNodeOverrides.value)
+      .filter(([id]) => survivingIds.has(id)));
     hoveredWikiNodeId.value = "";
     hoveredWikiEdgeId.value = "";
     recomputeWikiLayout();
-    fitWikiGraphView();
+    if (!previous?.graph?.nodes?.some((node) => survivingIds.has(node.id))) fitWikiGraphView();
   }
 );
 

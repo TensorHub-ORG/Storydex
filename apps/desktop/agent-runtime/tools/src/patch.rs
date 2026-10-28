@@ -45,10 +45,30 @@ pub fn apply_patch(policy: &SecurityPolicy, patch: &str) -> Result<String, Strin
     for operation in operations {
         prepared.push(prepare_change(policy, operation)?);
     }
+    let source_change_count = prepared.len();
+    let moves: Vec<_> = prepared
+        .iter()
+        .filter(|change| change.source != change.destination)
+        .map(|change| (change.source.clone(), change.destination.clone()))
+        .collect();
+    if !moves.is_empty() {
+        let metadata = coomi_services::StorydexKnowledge::new(policy.workspace())
+            .and_then(|knowledge| knowledge.source_moves_metadata(&moves))
+            .map_err(|error| format!("failed to prepare source identities: {error}"))?;
+        if let Some((path, content)) = metadata {
+            prepared.push(PreparedChange {
+                previous_source: fs::read(&path).ok(),
+                source: path.clone(),
+                destination: path,
+                previous_destination: None,
+                new_content: Some(content),
+            });
+        }
+    }
     apply_prepared(&prepared)?;
 
     let mut output = Vec::new();
-    for change in prepared {
+    for change in prepared.into_iter().take(source_change_count) {
         let display = change
             .destination
             .strip_prefix(policy.workspace())
@@ -154,6 +174,7 @@ fn apply_prepared(changes: &[PreparedChange]) -> Result<(), String> {
         match result {
             Ok(()) => applied.push(index),
             Err(error) => {
+                restore(change);
                 for applied_index in applied.into_iter().rev() {
                     restore(&changes[applied_index]);
                 }
@@ -360,6 +381,31 @@ fn is_operation_header(line: &str) -> bool {
 mod tests {
     use super::*;
     use coomi_security::AccessMode;
+
+    #[test]
+    fn move_and_rewrite_preserves_knowledge_identity() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        fs::create_dir_all(workspace.path().join("characters")).expect("characters");
+        fs::write(workspace.path().join("characters/a.md"), "before\n").expect("fixture");
+        let knowledge =
+            coomi_services::StorydexKnowledge::new(workspace.path()).expect("knowledge");
+        let initial = knowledge.sync(false).expect("sync");
+        let policy =
+            SecurityPolicy::new(workspace.path(), AccessMode::WorkspaceWrite).expect("policy");
+        let _lock = coomi_services::ProjectWriteLock::acquire(workspace.path()).expect("lock");
+        apply_patch(&policy, "*** Begin Patch\n*** Update File: characters/a.md\n*** Move to: characters/alice.md\n@@\n-before\n+after\n*** End Patch").expect("patch");
+        drop(_lock);
+        let updated = knowledge.sync(false).expect("sync move");
+        assert_eq!(
+            initial["graph"]["nodes"][1]["id"],
+            updated["graph"]["nodes"][1]["id"]
+        );
+        assert_eq!(updated["graph"]["nodes"][1]["label"], "alice");
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("characters/alice.md")).expect("read"),
+            "after\n"
+        );
+    }
 
     #[test]
     fn applies_add_update_delete_as_one_validated_patch() {

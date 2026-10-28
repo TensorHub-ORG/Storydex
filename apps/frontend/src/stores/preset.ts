@@ -21,6 +21,8 @@ import type {
 } from "@/api/presets";
 import { describeTransportError } from "@/api/client";
 import { useWorkspaceStore } from "@/stores/workspace";
+import { createWorkspaceFile } from "@/api/workspace";
+import { writingGuidanceTemplates } from "@/constants/writingGuidance";
 
 function emptyDocument(): PresetDocumentPayload {
   return {
@@ -105,6 +107,30 @@ export const usePresetStore = defineStore("preset", {
     runtimeOverrides: { enabledModuleIds: [], disabledModuleIds: [], temporaryRules: [] }
   }),
   actions: {
+    async createNaturalWritingPreset(): Promise<string | null> {
+      this.errorMessage = "";
+      this.saving = true;
+      try {
+        const { data } = await listPresets();
+        const existing = [...data.active, ...data.library].find((item) => item.path.endsWith("/自然写作.md"));
+        if (existing) return existing.path;
+        const path = ".storydex/presets/library/自然写作.md";
+        const document = emptyDocument();
+        document.meta.name = "自然写作";
+        document.meta.description = "可分别开关和编辑的表达、叙事与因果建议。作者要求和本书文风优先。";
+        document.guidanceModules = writingGuidanceTemplates.map((module) => ({ ...module }));
+        await createWorkspaceFile({ relativePath: path, content: "# 自然写作\n\n可在预设参数中调整三组写作建议，启用为主预设后生效。\n\n## Modules\n" });
+        await savePresetDocument(path, document);
+        await this.refreshList();
+        await useWorkspaceStore().refreshTree();
+        return path;
+      } catch (error) {
+        this.errorMessage = describeTransportError(error, "自然写作预设创建失败。");
+        return null;
+      } finally {
+        this.saving = false;
+      }
+    },
     async refreshList() {
       this.loading = true;
       this.errorMessage = "";

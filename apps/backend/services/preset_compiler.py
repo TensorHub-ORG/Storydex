@@ -250,7 +250,11 @@ def _coerce_overrides(overrides: Optional[PresetRuntimeOverrides | Dict[str, Any
 
 
 def _modules_from_document(doc: PresetDocument) -> List[PresetModule]:
-    raw_modules = getattr(doc, "modules", None)
+    modules = _parse_modules(getattr(doc, "modules", None)) or _virtual_modules_from_v1(doc)
+    return modules + _parse_modules(doc.guidance_modules)
+
+
+def _parse_modules(raw_modules: Any) -> List[PresetModule]:
     if isinstance(raw_modules, list) and raw_modules:
         modules: List[PresetModule] = []
         for index, raw in enumerate(raw_modules):
@@ -263,9 +267,8 @@ def _modules_from_document(doc: PresetDocument) -> List[PresetModule]:
             if not module.id:
                 module.id = f"module_{index + 1}"
             modules.append(module)
-        if modules:
-            return modules
-    return _virtual_modules_from_v1(doc)
+        return modules
+    return []
 
 
 def _document_source_format(doc: PresetDocument) -> str:

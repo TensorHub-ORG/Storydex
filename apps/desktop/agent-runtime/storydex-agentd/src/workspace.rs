@@ -1575,17 +1575,14 @@ pub(crate) async fn move_path(
     Json(request): Json<TransferRequest>,
 ) -> Response {
     let started = Instant::now();
-    let (_workspace, _from_relative, source, to_relative, target) =
+    let (workspace, from_relative, _source, to_relative, target) =
         match transfer_paths(&state, &request) {
             Ok(value) => value,
             Err(response) => return response,
         };
-    if let Some(parent) = target.parent()
-        && let Err(error) = fs::create_dir_all(parent)
+    if let Err(error) = coomi_services::StorydexKnowledge::new(&workspace)
+        .and_then(|knowledge| knowledge.move_source(&from_relative, &to_relative))
     {
-        return io_error("Creating the move target directory", error);
-    }
-    if let Err(error) = fs::rename(&source, &target) {
         return io_error("Moving the workspace path", error);
     }
     match path_info(&to_relative, &target) {

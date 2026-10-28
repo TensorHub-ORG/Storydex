@@ -161,6 +161,7 @@ fn default_document() -> Value {
             "enforceAtGeneration": true,
         },
         "characterVoices": {},
+        "guidanceModules": [],
     })
 }
 
@@ -194,6 +195,7 @@ fn canonicalize_known_aliases(document: &mut Value) {
     };
     move_alias(root, "lengthContract", &["length_contract"]);
     move_alias(root, "characterVoices", &["character_voices"]);
+    move_alias(root, "guidanceModules", &["guidance_modules"]);
     if let Some(meta) = root.get_mut("meta").and_then(Value::as_object_mut) {
         move_alias(meta, "compatibleProviders", &["compatible_providers"]);
         move_alias(meta, "updatedAt", &["updated_at"]);
@@ -291,6 +293,7 @@ fn disk_document(mut document: Value) -> Value {
     };
     rename_key(root, "lengthContract", "length_contract");
     rename_key(root, "characterVoices", "character_voices");
+    rename_key(root, "guidanceModules", "guidance_modules");
     if let Some(meta) = root.get_mut("meta").and_then(Value::as_object_mut) {
         rename_key(meta, "compatibleProviders", "compatible_providers");
         rename_key(meta, "updatedAt", "updated_at");
@@ -494,11 +497,13 @@ fn validate_document(document: &mut Value, strict: bool) -> Result<(), String> {
     require_bool(thinking, "visibleInOutput")?;
     thinking.insert("visibleInOutput".to_owned(), Value::Bool(false));
 
-    if let Some(modules) = root.get("modules")
-        && !modules.is_array()
-        && strict
-    {
-        return Err("preset modules must be an array".to_owned());
+    for key in ["modules", "guidanceModules"] {
+        if let Some(modules) = root.get(key)
+            && !modules.is_array()
+            && strict
+        {
+            return Err(format!("preset {key} must be an array"));
+        }
     }
     Ok(())
 }
@@ -1217,11 +1222,17 @@ fn virtual_modules(document: &Value) -> Vec<PresetModule> {
 
 fn modules_from_document(document: &Value) -> Vec<PresetModule> {
     let explicit = explicit_modules(document);
-    if explicit.is_empty() {
+    let mut modules = if explicit.is_empty() {
         virtual_modules(document)
     } else {
         explicit
-    }
+    };
+    // Optional writing advice augments both structured and imported presets.
+    // Keeping it separate avoids suppressing the structured style/length modules.
+    modules.extend(explicit_modules(
+        &json!({"modules": document["guidanceModules"]}),
+    ));
+    modules
 }
 
 fn document_source_format(document: &Value) -> String {
@@ -3687,6 +3698,28 @@ pub(crate) async fn dispatch(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn optional_guidance_augments_imported_presets_and_respects_runtime_disable() {
+        let (document, _) = normalize_document(
+            json!({
+                "meta": {"sourceFormat": "sillytavern"},
+                "modules": [{"id": "author", "content": "AUTHOR VOICE"}],
+                "guidanceModules": [{"id": "writing_expression", "content": "NATURAL PROSE"}]
+            }),
+            true,
+        )
+        .expect("document");
+        let compiled = compile_document(&document, &json!({}));
+        let text = compiled["compiledText"].as_str().expect("text");
+        assert!(text.contains("AUTHOR VOICE"));
+        assert!(text.contains("NATURAL PROSE"));
+        let disabled = compile_document(
+            &document,
+            &json!({"presetOverrides": {"disabledModuleIds": ["writing_expression"]}}),
+        );
+        assert_eq!(disabled["compiledText"], "AUTHOR VOICE");
+    }
+
     use super::*;
     use tempfile::tempdir;
 
@@ -3761,6 +3794,10 @@ mod tests {
         fs::write(&markdown, "# Focus\n").expect("markdown");
         let mut document = default_document();
         document["style"]["freeTextSlotPre"] = json!("ACTIVE PRESET RULE");
+        document["guidanceModules"] = json!([
+            {"id": "writing_expression", "content": "NATURAL PROSE", "enabledByDefault": true},
+            {"id": "writing_scene_focus", "content": "DISABLED ADVICE", "enabledByDefault": false}
+        ]);
         fs::write(
             sidecar_path(&markdown),
             serde_json::to_vec_pretty(&document).expect("sidecar bytes"),
@@ -3779,6 +3816,21 @@ mod tests {
             .expect("compile active preset")
             .expect("active preset");
         assert!(compiled.contains("ACTIVE PRESET RULE"));
+        assert!(compiled.contains("NATURAL PROSE"));
+        assert!(!compiled.contains("DISABLED ADVICE"));
+
+        document["guidanceModules"][0]["enabledByDefault"] = json!(false);
+        fs::write(
+            sidecar_path(&markdown),
+            serde_json::to_vec(&disk_document(document)).expect("disk preset"),
+        )
+        .expect("disable advice");
+        assert!(
+            !compile_active_for_agent(workspace.path())
+                .expect("compile")
+                .expect("active")
+                .contains("NATURAL PROSE")
+        );
 
         fs::write(sidecar_path(&markdown), "{").expect("corrupt sidecar");
         let error = compile_active_for_agent(workspace.path()).expect_err("corrupt sidecar");

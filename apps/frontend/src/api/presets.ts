@@ -138,6 +138,7 @@ export interface AuthorReferencePayload {
 export interface PresetDocumentPayload {
   version: number;
   modules?: PresetModulePayload[];
+  guidanceModules?: PresetModulePayload[];
   moduleProfiles?: Array<Record<string, unknown>>;
   runtimeDefaults?: Record<string, unknown>;
   riskPolicy?: Record<string, unknown>;

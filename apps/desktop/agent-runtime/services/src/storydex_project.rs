@@ -20,8 +20,16 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[path = "knowledge_identity.rs"]
+mod knowledge_identity;
+#[cfg(test)]
+#[path = "knowledge_stability_tests.rs"]
+mod knowledge_stability_tests;
+use knowledge_identity::SourceIdentities;
+
 const WIKI_ROOT: &str = ".storydex/wiki";
-const WIKI_CATEGORY_SCHEMA_VERSION: &str = "story-wiki-rust-v2";
+const WIKI_CATEGORY_SCHEMA_VERSION: &str = "story-wiki-rust-v3";
+const SOURCE_IDENTITIES_PATH: &str = ".storydex/knowledge/source-identities.json";
 const INTERNAL_PATH_PREFIXES: [&str; 2] = [".storydex/.agent/", ".storydex/.cache/"];
 const DEFAULT_BRANCH: &str = "develop";
 const DIFF_MAX_LINES: usize = 2_000;
@@ -210,6 +218,14 @@ impl ProjectionBundleWriter {
     }
 
     pub fn write(&self, bundle: &ProjectionBundle) -> Result<ProjectionWriteResult> {
+        self.write_with_sources(bundle, Vec::new())
+    }
+
+    fn write_with_sources(
+        &self,
+        bundle: &ProjectionBundle,
+        extra: Vec<(PathBuf, Vec<u8>)>,
+    ) -> Result<ProjectionWriteResult> {
         // Keep the same observable order as Python's projection writer:
         // graph, markdown, index, status, then the optional source snapshot.
         let mut targets = vec![
@@ -239,6 +255,7 @@ impl ProjectionBundleWriter {
                 pretty_json_bytes(change_set)?,
             ));
         }
+        targets.extend(extra);
         self.write_targets(targets)
     }
 
@@ -294,7 +311,13 @@ impl ProjectionBundleWriter {
                     .with_context(|| format!("failed to replace {}", target.display()))?;
                 changed_paths.push(relative_to_project(&root, target));
             }
-            sync_directory(&self.wiki_root())?;
+            for directory in targets
+                .iter()
+                .filter_map(|(path, _)| path.parent())
+                .collect::<BTreeSet<_>>()
+            {
+                sync_directory(directory)?;
+            }
             Ok(())
         })();
 
@@ -341,6 +364,69 @@ impl StorydexKnowledge {
 
     pub fn project_root(&self) -> &Path {
         &self.project_root
+    }
+
+    fn read_identities(&self, snapshot: Option<&Value>) -> Result<SourceIdentities> {
+        match read_json_if_present(&self.project_root.join(SOURCE_IDENTITIES_PATH))? {
+            Some(value) => {
+                serde_json::from_value(value).context("invalid source identity registry")
+            }
+            None => Ok(SourceIdentities::from_snapshot(snapshot)),
+        }
+    }
+
+    /// Prepare identity metadata for an Agent patch. The caller commits it in
+    /// the same transaction as the source edits while holding ProjectWriteLock.
+    pub fn source_moves_metadata(
+        &self,
+        moves: &[(PathBuf, PathBuf)],
+    ) -> Result<Option<(PathBuf, Vec<u8>)>> {
+        let writer = ProjectionBundleWriter::new(&self.project_root)?;
+        let snapshot = read_json_if_present(&writer.wiki_root().join("source_snapshot.json"))?;
+        let mut identities = self.read_identities(snapshot.as_ref())?;
+        if identities.sources.is_empty() {
+            return Ok(None);
+        }
+        for (from, to) in moves {
+            if let (Ok(from), Ok(to)) = (
+                from.strip_prefix(&self.project_root),
+                to.strip_prefix(&self.project_root),
+            ) {
+                identities.move_paths(&normalized_path(from), &normalized_path(to));
+            }
+        }
+        Ok(Some((
+            self.project_root.join(SOURCE_IDENTITIES_PATH),
+            pretty_json_bytes(&serde_json::to_value(identities)?)?,
+        )))
+    }
+
+    /// File-tree moves carry identity even when several files have identical text.
+    /// Source move and registry update share the project write lock.
+    pub fn move_source(&self, from: &str, to: &str) -> Result<()> {
+        let _lock = crate::ProjectWriteLock::acquire(&self.project_root)?;
+        let writer = ProjectionBundleWriter::new(&self.project_root)?;
+        let snapshot = read_json_if_present(&writer.wiki_root().join("source_snapshot.json"))?;
+        let mut identities = self.read_identities(snapshot.as_ref())?;
+        identities.move_paths(from, to);
+        let source = self.project_root.join(from);
+        let target = self.project_root.join(to);
+        ensure_inside(&self.project_root, &source)?;
+        ensure_inside(&self.project_root, &target)?;
+        ensure!(!target.exists(), "move target already exists");
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::rename(&source, &target)?;
+        if let Err(error) = writer.write_targets(vec![(
+            self.project_root.join(SOURCE_IDENTITIES_PATH),
+            pretty_json_bytes(&serde_json::to_value(&identities)?)?,
+        )]) {
+            fs::rename(&target, &source)
+                .context("failed to restore source after identity write failure")?;
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Relation candidates are source data; human decisions are a separate ledger.
@@ -433,11 +519,13 @@ impl StorydexKnowledge {
 
     fn build_projection(&self, force: bool) -> Result<Value> {
         let writer = ProjectionBundleWriter::new(&self.project_root)?;
-        let sources = self.collect_sources()?;
-        let source_snapshot = self.source_snapshot(&sources);
+        let mut sources = self.collect_sources()?;
         let existing = read_json_if_present(&writer.wiki_root().join("knowledge_graph.json"))?;
         let previous_snapshot =
             read_json_if_present(&writer.wiki_root().join("source_snapshot.json"))?;
+        let mut identities = self.read_identities(previous_snapshot.as_ref())?;
+        identities.reconcile(&sources);
+        let source_snapshot = self.source_snapshot(&sources, &identities);
         let previous_status = writer.read_status()?.unwrap_or_else(|| json!({}));
         let previous_revision = previous_revision(existing.as_ref(), Some(&previous_status));
         let format_changed = existing
@@ -464,6 +552,7 @@ impl StorydexKnowledge {
                 .is_none_or(|status| status == "ready");
         if !force
             && !format_changed
+            && self.project_root.join(SOURCE_IDENTITIES_PATH).is_file()
             && existing_ready
             && existing
                 .as_ref()
@@ -499,6 +588,28 @@ impl StorydexKnowledge {
             return Ok(result);
         }
 
+        let mut payload = self.build_payload(&sources, &identities)?;
+        let mut source_writes =
+            self.project_relations(&sources, &mut identities, existing.as_ref(), &mut payload)?;
+        // A migrated review is part of this transaction's final source snapshot.
+        for (path, bytes) in &source_writes {
+            if let Some(source) = sources
+                .iter_mut()
+                .find(|source| self.project_root.join(&source.relative_path) == *path)
+            {
+                source.text =
+                    serde_json::to_string_pretty(&serde_json::from_slice::<Value>(bytes)?)?;
+                source.sha256 = hex_digest(source.text.as_bytes());
+                source.size = bytes.len() as u64;
+                source.mtime = now_rfc3339();
+            }
+        }
+        let source_snapshot = self.source_snapshot(&sources, &identities);
+        let diff = source_change_set(
+            previous_snapshot.as_ref(),
+            &source_snapshot,
+            previous_revision,
+        )?;
         let source_checksum = source_set_checksum(&sources)?;
         let changed = diff
             .get("changedSourcePaths")
@@ -510,8 +621,10 @@ impl StorydexKnowledge {
         } else {
             previous_revision
         };
-        let mut payload = self.build_payload(&sources, next_revision, &source_checksum)?;
-        self.project_relations(&sources, existing.as_ref(), &mut payload)?;
+        source_writes.push((
+            self.project_root.join(SOURCE_IDENTITIES_PATH),
+            pretty_json_bytes(&serde_json::to_value(&identities)?)?,
+        ));
         let graph = graph_checksum(&payload)?;
         if let Some(object) = payload.as_object_mut() {
             object.insert("graphChecksum".to_owned(), Value::String(graph.clone()));
@@ -560,17 +673,20 @@ impl StorydexKnowledge {
             "diagnostics": [],
             "updatedAt": now_rfc3339(),
         });
-        let index = self.build_index(&sources, &payload, &status, &diff);
+        let index = self.build_index(&sources, &identities, &payload, &status, &diff);
         let markdown = self.render_markdown(&payload);
         writer
-            .write(&ProjectionBundle {
-                payload: payload.clone(),
-                markdown,
-                index,
-                status,
-                source_snapshot: Some(source_snapshot),
-                change_set: Some(diff),
-            })
+            .write_with_sources(
+                &ProjectionBundle {
+                    payload: payload.clone(),
+                    markdown,
+                    index,
+                    status,
+                    source_snapshot: Some(source_snapshot),
+                    change_set: Some(diff),
+                },
+                source_writes,
+            )
             .context("Rust WIKI projection write failed; last-good projection preserved")?;
         Ok(payload)
     }
@@ -593,18 +709,20 @@ impl StorydexKnowledge {
     fn project_relations(
         &self,
         sources: &[ProjectionSource],
+        identities: &mut SourceIdentities,
         existing: Option<&Value>,
         payload: &mut Value,
-    ) -> Result<()> {
+    ) -> Result<Vec<(PathBuf, Vec<u8>)>> {
         let input =
             read_json_if_present(&self.project_root.join(".storydex/knowledge/relations.json"))?
                 .unwrap_or_else(|| json!({"relations": []}));
-        let ledger = read_json_if_present(
+        let mut ledger = read_json_if_present(
             &self
                 .project_root
                 .join(".storydex/knowledge/relation-reviews.json"),
         )?
         .unwrap_or_else(|| json!({}));
+        let mut migrated_reviews = false;
         let candidates = input["relations"]
             .as_array()
             .context("relations.json requires a relations array")?;
@@ -669,13 +787,17 @@ impl StorydexKnowledge {
                 .filter(|value| !value.trim().is_empty())
                 .context("relation id is required")?;
             ensure!(ids.insert(id.to_owned()), "duplicate relation id: {id}");
+            let previous = existing
+                .and_then(|p| p["relations"].as_array())
+                .and_then(|items| items.iter().find(|item| item["id"] == id));
             let refs = raw["sourceRefs"]
                 .as_array()
                 .context("relation sourceRefs must be an array")?;
             let mut valid = !removed && !refs.is_empty();
             let mut evidence = Vec::new();
-            for source_ref in refs {
-                let path = source_ref["path"]
+            let source_ids = identities.bind_references(id, refs);
+            for (index, source_ref) in refs.iter().enumerate() {
+                let original_path = source_ref["path"]
                     .as_str()
                     .unwrap_or_default()
                     .replace('\\', "/");
@@ -684,20 +806,45 @@ impl StorydexKnowledge {
                     .or_else(|| source_ref.get("excerpt"))
                     .and_then(Value::as_str)
                     .unwrap_or_default();
+                let source_id = source_ids[index].as_deref();
+                let path = source_id
+                    .and_then(|id| identities.current_path(id))
+                    .unwrap_or(&original_path);
                 let source = sources.iter().find(|source| {
-                    source.relative_path == path && !path.starts_with(".storydex/knowledge/")
+                    source.relative_path == path
+                        && !path.starts_with(".storydex/knowledge/")
+                        && source_id.is_some_and(|id| identities.id_at(path) == Some(id))
                 });
                 let matched = !quote.trim().is_empty()
                     && source.is_some_and(|source| source.text.contains(quote));
                 valid &= matched;
-                evidence.push(json!({"path": path, "quote": quote, "sha256": source.map(|source| &source.sha256), "matched": matched}));
+                evidence.push(json!({"sourceId": source_id, "path": path, "quote": quote, "sha256": source.map(|source| &source.sha256), "matched": matched}));
             }
-            let base = hex_digest(&canonical_json_bytes(
-                &json!({"candidate": raw, "evidence": evidence, "removed": removed}),
-            )?);
-            let review = ledger
-                .get(id)
-                .filter(|review| review["baseFingerprint"] == base);
+            let base = relation_review_base(&raw, &evidence, removed, identities)?;
+            let review_matches = ledger.get(id).is_some_and(|review| {
+                review["baseFingerprint"] == base
+                    || previous.is_some_and(|previous| {
+                        review["baseFingerprint"] == previous["baseFingerprint"]
+                            && relation_review_base(
+                                &previous["candidate"],
+                                &objects(previous.get("sourceRefs")),
+                                previous["candidateRemoved"] == true
+                                    || previous["reviewReason"].as_str().is_some_and(|reason| {
+                                        reason.starts_with("候选已从来源移除")
+                                    }),
+                                identities,
+                            )
+                            .ok()
+                            .as_deref()
+                                == Some(&base)
+                    })
+            });
+            if review_matches && ledger[id]["baseFingerprint"] != base {
+                ledger[id]["legacyBaseFingerprint"] = ledger[id]["baseFingerprint"].clone();
+                ledger[id]["baseFingerprint"] = json!(base);
+                migrated_reviews = true;
+            }
+            let review = ledger.get(id).filter(|_| review_matches);
             let mut status = review
                 .and_then(|review| review["decision"].as_str())
                 .unwrap_or("review_required");
@@ -727,6 +874,7 @@ impl StorydexKnowledge {
                 status = "review_required";
             }
             relation["candidate"] = raw.clone();
+            relation["candidateRemoved"] = json!(removed);
             relation["sourceRefs"] = json!(evidence);
             relation["baseFingerprint"] = json!(base);
             relation["fingerprint"] = json!(hex_digest(&canonical_json_bytes(&json!([
@@ -768,16 +916,32 @@ impl StorydexKnowledge {
         }
         payload["relations"] = json!(relations);
         payload["graphPolicy"]["relationSource"] = json!(".storydex/knowledge/relations.json");
-        Ok(())
+        Ok(if migrated_reviews {
+            vec![(
+                self.project_root
+                    .join(".storydex/knowledge/relation-reviews.json"),
+                pretty_json_bytes(&ledger)?,
+            )]
+        } else {
+            Vec::new()
+        })
     }
 
-    fn source_snapshot(&self, sources: &[ProjectionSource]) -> Value {
+    fn source_snapshot(
+        &self,
+        sources: &[ProjectionSource],
+        identities: &SourceIdentities,
+    ) -> Value {
         json!({
             "version": 1,
             "updatedAt": now_rfc3339(),
             "sources": sources.iter().map(|source| (
                 source.relative_path.clone(),
-                serde_json::to_value(source).unwrap_or_else(|_| json!({}))
+                {
+                    let mut value = serde_json::to_value(source).unwrap_or_else(|_| json!({}));
+                    value["sourceId"] = json!(identities.id_at(&source.relative_path));
+                    value
+                }
             )).collect::<Map<_, _>>(),
         })
     }
@@ -785,8 +949,7 @@ impl StorydexKnowledge {
     fn build_payload(
         &self,
         sources: &[ProjectionSource],
-        revision: u64,
-        checksum: &str,
+        identities: &SourceIdentities,
     ) -> Result<Value> {
         let project_name = self
             .project_root
@@ -843,10 +1006,10 @@ impl StorydexKnowledge {
             } else {
                 source.title.clone()
             };
-            let id = format!(
-                "source:{}",
-                hex_digest(source.relative_path.as_bytes())[..16].to_owned()
-            );
+            let id = identities
+                .id_at(&source.relative_path)
+                .context("source identity missing")?
+                .to_owned();
             let kind = source.kind.as_str();
             let node_type = match kind {
                 "chapter" => "chapter",
@@ -907,10 +1070,6 @@ impl StorydexKnowledge {
             "graphPolicy": {"mode": "evidence_grounded_local_v1", "agentGraphAccepted": false, "coOccurrenceIsRelationship": false},
             "status": "ready",
             "projectionFreshness": "fresh",
-            "knowledgeRevision": revision,
-            "builtFromRevision": revision,
-            "lastSuccessfulRevision": revision,
-            "sourceSetChecksum": checksum,
             "entries": entries,
             "graph": {"nodes": nodes, "edges": edges},
             "sourceStats": {"scannedFiles": sources.len(), "chapterFiles": chapter_count, "characters": character_count},
@@ -921,16 +1080,17 @@ impl StorydexKnowledge {
     fn build_index(
         &self,
         sources: &[ProjectionSource],
+        identities: &SourceIdentities,
         payload: &Value,
         status: &Value,
         change_set: &Value,
     ) -> Value {
         let mut source_index = Map::new();
         for source in sources {
-            let related_id = format!(
-                "source:{}",
-                hex_digest(source.relative_path.as_bytes())[..16].to_owned()
-            );
+            let related_ids: Vec<_> = identities
+                .id_at(&source.relative_path)
+                .into_iter()
+                .collect();
             source_index.insert(
                 source.relative_path.clone(),
                 json!({
@@ -939,8 +1099,8 @@ impl StorydexKnowledge {
                     "size": source.size,
                     "mtime": source.mtime,
                     "lastAnalyzedAt": now_rfc3339(),
-                    "relatedEntryIds": [related_id],
-                    "relatedNodeIds": [related_id],
+                    "relatedEntryIds": related_ids,
+                    "relatedNodeIds": related_ids,
                 }),
             );
         }
@@ -1000,6 +1160,25 @@ impl StorydexKnowledge {
     }
 }
 
+fn relation_review_base(
+    raw: &Value,
+    evidence: &[Value],
+    removed: bool,
+    identities: &SourceIdentities,
+) -> Result<String> {
+    let mut candidate = raw.clone();
+    let refs: Vec<_> = evidence.iter().map(|reference| {
+        let source_id = reference["sourceId"].as_str().or_else(||
+            reference["path"].as_str().and_then(|path| identities.resolve_path(path)));
+        json!({"sourceId": source_id, "quote": reference["quote"], "matched": reference["matched"],
+            "unresolvedPath": if source_id.is_none() { reference["path"].clone() } else { Value::Null }})
+    }).collect();
+    candidate["sourceRefs"] = json!(refs);
+    Ok(hex_digest(&canonical_json_bytes(
+        &json!({"candidate": candidate, "removed": removed}),
+    )?))
+}
+
 fn collect_source_files(
     root: &Path,
     directory: &Path,
@@ -1029,7 +1208,8 @@ fn collect_source_files(
             .unwrap_or(&path)
             .to_string_lossy()
             .replace('\\', "/");
-        if relative.starts_with(".storydex/wiki/")
+        if relative == SOURCE_IDENTITIES_PATH
+            || relative.starts_with(".storydex/wiki/")
             || relative.starts_with(".storydex/.agent/")
             || relative.starts_with(".storydex/.cache/")
             || relative.starts_with(".storydex/config/")

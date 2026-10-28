@@ -245,6 +245,7 @@ class PresetDocument(BaseModel):
     memory: MemorySection = Field(default_factory=MemorySection)
     terms: TermsSection = Field(default_factory=TermsSection)
     character_voices: Dict[str, CharacterVoice] = Field(default_factory=dict)
+    guidance_modules: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 # -- 加载器 ----------------------------------------------------------------

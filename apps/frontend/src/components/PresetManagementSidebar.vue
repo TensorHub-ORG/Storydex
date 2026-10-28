@@ -48,6 +48,11 @@
             <span class="preset-summary-value">.storydex/presets</span>
           </div>
           <div class="preset-workbench-entry-row">
+            <button class="preset-workbench-entry" type="button" :disabled="presetStore.saving"
+              @click="openNaturalWritingPreset">
+              <span class="material-symbols-rounded">edit_note</span>
+              <span>自然写作</span>
+            </button>
             <button
               class="preset-workbench-entry"
               type="button"
@@ -61,6 +66,7 @@
             </button>
           </div>
           <p v-if="importSummary" class="preset-import-summary">{{ importSummary }}</p>
+          <p v-if="presetStore.errorMessage" class="preset-import-summary" role="alert">{{ presetStore.errorMessage }}</p>
         </section>
 
         <section class="preset-section">
@@ -303,6 +309,11 @@ onBeforeUnmount(() => {
 
 async function handleActivate(relativePath: string): Promise<void> {
   await presetStore.activate(relativePath);
+}
+
+async function openNaturalWritingPreset(): Promise<void> {
+  const path = await presetStore.createNaturalWritingPreset();
+  if (path) await openEditor(path);
 }
 
 async function handleDeactivate(relativePath: string): Promise<void> {

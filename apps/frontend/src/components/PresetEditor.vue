@@ -34,6 +34,7 @@
     <p v-if="presetStore.compileError" class="preset-editor-error">{{ presetStore.compileError }}</p>
 
     <div v-if="activeMode === 'structured'" class="preset-editor-mode-panel">
+    <WritingGuidanceEditor :document="document" @change="presetStore.markDirty" />
     <details class="preset-editor-section" open>
       <summary>采样参数（default）</summary>
       <div class="preset-editor-grid">
@@ -533,6 +534,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { usePresetStore } from "@/stores/preset";
+import WritingGuidanceEditor from "@/components/WritingGuidanceEditor.vue";
 import type { PresetModulePayload, PresetRisk, SamplingParams } from "@/api/presets";
 
 interface AuthorReferenceEditorValue {
@@ -544,7 +546,7 @@ interface AuthorReferenceEditorValue {
 
 const presetStore = usePresetStore();
 const document = computed(() => presetStore.document);
-const relativePath = computed(() => presetStore.activeMainPreset || presetStore.currentName);
+const relativePath = computed(() => presetStore.currentName);
 const activeMode = ref<"structured" | "workbench" | "preview" | "risk">("structured");
 const editorModes = [
   { id: "structured", label: "结构化编辑" },

@@ -32,6 +32,34 @@ afterEach(() => {
 });
 
 describe("StoryStatePanel deterministic graph and inspector behavior", () => {
+  it("preserves layout, dragging, zoom and selection when stable nodes receive new labels or evidence", async () => {
+    const wrapper = mountPanel(); const u = (wrapper.vm as any).__testUtils;
+    await flushPromises();
+    const graph = {
+      nodes: [{ id: "a", label: "Alice", type: "character" }, { id: "b", label: "Bob", type: "character" }],
+      edges: [{ id: "trust", source: "a", target: "b", type: "relationship", label: "信任" }],
+    };
+    u.wikiGraphQueryData.value = { graph, entries: [] };
+    await nextTick();
+    const positions = JSON.parse(JSON.stringify(u.wikiLayoutPositions.value));
+    u.wikiNodeOverrides.value = { a: { x: 200, y: 150 } };
+    u.wikiGraphZoom.value = 1.8;
+    u.wikiGraphPan.value = { x: -40, y: 30 };
+    u.selectedWikiNodeId.value = "a";
+    u.wikiGraphQueryData.value = { graph: {
+      nodes: [{ ...graph.nodes[0], label: "Alice 新名字" }, graph.nodes[1]],
+      edges: [{ ...graph.edges[0], evidence: "更新摘要", reviewStatus: "confirmed" }],
+    }, entries: [] };
+    await nextTick();
+    expect(u.wikiLayoutPositions.value).toEqual(positions);
+    expect(u.wikiNodeOverrides.value).toEqual({ a: { x: 200, y: 150 } });
+    expect(u.wikiGraphZoom.value).toBe(1.8);
+    expect(u.wikiGraphPan.value).toEqual({ x: -40, y: 30 });
+    expect(u.selectedWikiNodeId.value).toBe("a");
+    u.resetWikiGraphView();
+    expect(u.wikiNodeOverrides.value).toEqual({});
+    wrapper.unmount();
+  });
   it("shows a graph HTTP 500 as a server error without claiming the service is stopped", async () => {
     const wrapper = mountPanel({ relationshipOnly: true });
     await flushPromises();

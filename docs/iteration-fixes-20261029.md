@@ -1,6 +1,6 @@
 # 普通聊天、章节索引与图谱修复（2026-10-29）
 
-已在原有未提交改动上完成本轮代码修改和本地聚焦验证，未提交、未推送。此前实测报告保留为修复前证据；本轮没有运行 Playwright/E2E、调用真实写作模型或重启现有服务。
+已完成代码修改和本地聚焦验证，并以 `af8d487071f6549c3712624b506d1aeb536ae9c3` 推送到 `dev/windows`，通过 [Development CI](https://github.com/TensorHub-ORG/Storydex/actions/runs/40736763517) 后以同 SHA 进入 `main`。[main CI](https://github.com/TensorHub-ORG/Storydex/actions/runs/40738431118) 成功复用 Windows 检查。此前实测报告保留为修复前证据；本轮没有运行 Playwright/E2E、调用真实写作模型或重启现有服务。
 
 ## 本轮改动
 
