@@ -10,7 +10,7 @@ const path = require("node:path");
 
 const repoRoot = path.resolve(__dirname, "..");
 const backendApiRoot = path.join(repoRoot, "apps", "backend", "api");
-const frontendApiRoot = path.join(repoRoot, "apps", "frontend", "src", "api");
+const frontendApiRoot = path.join(repoRoot, "apps", "frontend", "src");
 const rustRouterPath = path.join(
   repoRoot,
   "apps",
@@ -266,7 +266,7 @@ function readPythonRoutes() {
 
 function readFrontendConsumers() {
   const consumers = [];
-  for (const fileName of fs.readdirSync(frontendApiRoot).filter((name) => name.endsWith(".ts")).sort()) {
+  for (const fileName of fs.readdirSync(frontendApiRoot, { recursive: true }).filter((name) => /\.(ts|vue)$/.test(name)).sort()) {
     const filePath = path.join(frontendApiRoot, fileName);
     const source = fs.readFileSync(filePath, "utf8");
     for (const match of source.matchAll(FRONTEND_CALL_RE)) {
@@ -278,7 +278,7 @@ function readFrontendConsumers() {
       consumers.push({
         method: match[1].toUpperCase(),
         path: routePath,
-        consumer: path.posix.join("apps/frontend/src/api", fileName),
+        consumer: path.posix.join("apps/frontend/src", fileName.replaceAll("\\", "/")),
         line: lineNumberAt(source, match.index),
         evidence: call.arguments[0]
       });
@@ -387,7 +387,7 @@ function buildInventory() {
       rustRoute,
       frontendConsumers: consumers,
       exclusionEvidence: status === "excluded"
-        ? "No Vue API consumer exists under apps/frontend/src/api and the target candidate has no registered Rust route."
+        ? "No Vue API consumer exists under apps/frontend/src and the target candidate has no registered Rust route."
         : null
     };
   }).sort((left, right) => `${left.normalizedPath}\0${left.method}`.localeCompare(`${right.normalizedPath}\0${right.method}`, "en"));

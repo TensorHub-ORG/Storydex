@@ -151,6 +151,8 @@ jobs:
           git diff --check
       - name: CI policy regressions
         run: node --test scripts/tests/check-coverage.test.cjs scripts/tests/resolve-ci-scope.test.cjs scripts/tests/resolve-ci-evidence.test.cjs scripts/tests/ci-preflight.test.cjs
+      - name: Rust interface inventory regressions
+        run: node --test scripts/tests/rust-backend-interface-inventory.test.cjs
       - name: Feedback receiver regressions
         if: ${{ inputs.full || (!inputs.windows_release && needs.changes.outputs.feedback == 'true') }}
         run: python3 -m unittest discover -s deploy/storydex-feedback/tests -v

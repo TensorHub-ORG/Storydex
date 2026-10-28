@@ -1,40 +1,42 @@
 # Rust 后端公开接口覆盖清单
 
-更新日期：2026-08-29
+更新日期：2026-10-27
 
-这是面向贡献者和维护者的可再生契约清单，不是普通用户文档。完整 JSON 只在本地 `output/` 生成，不提交到仓库。
+这是可再生的静态接口清单，用来发现前端调用与 Rust 路由的差异。路由存在不代表请求参数、权限、持久化和界面行为已经通过验证。
 
-本清单由 `scripts/generate_rust_backend_interface_inventory.cjs` 对比以下三类公开边界：
+## 扫描范围
 
-- `apps/frontend/src/api` 中 Vue 工作台真实消费的 API；
-- `storydex-agentd` 当前注册的 Axum 路由；
-- 当前仍存在的 Python/FastAPI 路由，用于迁移差分和识别无消费者的历史接口；它们不代表 Stable 运行时入口。
+`scripts/generate_rust_backend_interface_inventory.cjs` 对比以下边界：
 
-脚本会识别跨行泛型调用、模板字符串动态路径和章节模板的显式备用路径，并为归一化契约记录 `implemented`、`pending` 或带依据的 `excluded`。它不会启动服务、读取真实用户项目或把旧 Python 路由自动视为必须迁移的产品接口。
+- `apps/frontend/src` 下所有 `.ts` 和 `.vue` 文件，包括组件内直接调用；
+- `storydex-agentd` 注册的 Axum 路由；
+- Python/FastAPI 历史路由，仅用于迁移对照。
 
-## 当前结论
+脚本识别跨行泛型调用、模板字符串动态路径和章节模板的显式备用路径。每个归一化契约记录 `implemented`、`pending` 或有依据的 `excluded`。它不启动服务、不读取用户项目，也不校验任意动态构造的 URL 或参数类型。
 
-2026-08-29 当前生成结果：
+## 当前结果
 
-- Python 历史路由（仅作对照）：99；
-- Vue 实际消费契约：96（其中 23 个是 Rust-only Agent 接口）；
-- Vue 消费契约已由 Rust 覆盖：96；
-- 待迁移：0；
-- Rust 公开路由：104；
-- 已实现契约：104；
-- 无消费者且不再迁移的历史契约：22；
-- Rust-only 路由（没有对应 Python 历史路由）：27。
+2026-10-27 本地生成结果：
 
-`excluded` 不表示 Rust 后端缺失当前产品功能，而表示该 Python 历史路由在 `apps/frontend/src/api` 中没有消费者，且 Rust Stable 未注册对应路由。`frontendConsumersWithoutPythonRoute` 只用于标记 Rust-only 前端契约，不是缺口指标。Windows 正式运行时已经是 `Tauri 2 + storydex-agentd + Rust Coomi`；Python 路由只保留在兼容/测试边界的对照扫描中，Electron 和 Python 不进入默认开发、构建或发布路径。
+| 指标 | 数量 |
+| --- | ---: |
+| Python 历史路由 | 99 |
+| Vue 消费契约 | 107 |
+| 已有 Rust 路由的 Vue 消费契约 | 104 |
+| 缺少 Rust 路由的 Vue 消费契约 | 3 |
+| Rust 公开路由 / 已实现契约 | 108 |
+| 排除的历史契约 | 15 |
+| 无 Python 对照的 Vue 消费契约 | 23 |
+| 无 Python 对照的 Rust 路由 | 27 |
 
-当前所有权分组如下：
+原文的“96/96、待迁移 0”只扫描 `src/api`，遗漏了组件内调用，不能作为产品功能完整的证据。
 
-| 公开边界 | 已实现 | 待迁移 | 排除的历史接口 |
+| 公开边界 | 已实现 | 缺失 | 排除的历史接口 |
 | --- | ---: | ---: | ---: |
 | 文件/工作区 | 22 | 0 | 0 |
 | Git | 14 | 0 | 0 |
-| WIKI / Story Knowledge | 5 | 0 | 9 |
-| Story 状态 | 4 | 0 | 14 |
+| WIKI / Story Knowledge | 8 | 0 | 0 |
+| Story 状态 | 5 | 3 | 10 |
 | System | 10 | 0 | 1 |
 | Agent | 16 | 0 | 0 |
 | Coomi 控制面 | 8 | 0 | 0 |
@@ -42,18 +44,23 @@
 | Help | 4 | 0 | 1 |
 | Presets | 12 | 0 | 0 |
 
-## 生成与检查
+已知缺口均来自 `StoryStatePanel.vue` 的旧功能：
 
-完整 JSON 是可再生运行产物，写入已被忽略的 `output/`，不应作为长期文档提交：
+- `POST /story/character-conflicts/resolve`：角色状态冲突裁定；
+- `POST /story/rollback`：故事回档；
+- `POST /story/rollback/undo`：撤销故事回档。
+
+这三个缺口仍保留为 `pending`，没有改成排除或实现占位成功响应。它们与本次补齐的 WIKI 关系确认/拒绝接口不同。
+
+`excluded` 表示在扫描范围内没有找到 Vue 消费者、Rust 也未注册的 Python 历史契约。`frontendConsumersWithoutPythonRoute` 表示 Rust 独有契约，不是缺口指标。Windows 默认运行链路为 `Tauri 2 + storydex-agentd + Rust Coomi`。
+
+## 生成与门禁
 
 ```powershell
 node scripts/generate_rust_backend_interface_inventory.cjs --output output/rust-backend-interface-inventory.json
-```
-
-契约门禁：
-
-```powershell
 node --test scripts/tests/rust-backend-interface-inventory.test.cjs
 ```
 
-门禁要求所有 Vue 消费契约均存在 Rust 路由，且 `contractsPending` 为 0；不要求每个前端契约都存在 Python 对照路由。新增或删除前端 API 时应先更新真实 Rust 路由，再重新生成清单；不得通过放宽解析或静默排除来掩盖缺口。
+JSON 为被忽略的本地产物，不提交。测试检查扫描范围、新增关系审核路由和上述三个已知缺口的精确集合；出现新缺口或修复旧缺口时都要求更新相应断言。门禁通过表示结果符合这份已知基线，不能称为“所有接口已覆盖”。
+
+参数和行为需要单独验证。本次组件测试核对 `includeReview=true/false`、错误展示；Rust 路由测试核对图谱查询、关系审核指纹冲突和落盘结果。完整证据范围见 [可靠性与 Agent 实施记录](reliability-and-agent-implementation.md)。

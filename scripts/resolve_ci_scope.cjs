@@ -176,6 +176,7 @@ function classifyChangedPaths(inputPaths, options = {}) {
         filePath === "scripts/run_rust_dependency_audit.ps1"
         || filePath === "scripts/verify_coomi_runtime.py"
         || filePath === "scripts/generate_rust_backend_interface_inventory.cjs"
+        || filePath === "scripts/tests/rust-backend-interface-inventory.test.cjs"
       ) {
         scope.coomi = true;
         scope.pc_runtime = true;

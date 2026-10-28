@@ -75,6 +75,23 @@ test("desktop and documentation changes stay scoped", () => {
   assert.equal(docs.feedback, false);
 });
 
+test("Rust interface inventory and its regression tests select PC runtime checks", () => {
+  for (const file of [
+    "scripts/generate_rust_backend_interface_inventory.cjs",
+    "scripts/tests/rust-backend-interface-inventory.test.cjs",
+  ]) {
+    const result = classifyChangedPaths([file]);
+    assert.equal(result.pc_runtime, true);
+    assert.equal(result.coomi, true);
+    assert.equal(result.backend, false);
+    assert.equal(result.frontend, false);
+    assert.equal(result.desktop, false);
+    assert.equal(result.tauri, false);
+    assert.equal(result.android, false);
+    assert.deepEqual(result.unknownPaths, []);
+  }
+});
+
 test("feedback and release helper changes run only their owning checks", () => {
   const feedback = classifyChangedPaths(["deploy/storydex-feedback/server.py"]);
   assert.equal(feedback.feedback, true);
