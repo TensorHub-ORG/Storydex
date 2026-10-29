@@ -1,6 +1,6 @@
 <template>
   <article class="cct-turn" :class="[`is-${run.status}`]">
-    <!-- 用户消息：左侧淡色圆角块；右侧 hover 浮现回滚操作 -->
+    <!-- 用户消息：右对齐的淡色气泡；左侧 hover 浮现回滚操作 -->
     <div v-if="run.prompt" class="cct-user">
       <span class="cct-user-text">{{ run.prompt }}</span>
       <span v-if="promptTimeText" class="cct-time">{{ promptTimeText }}</span>
@@ -30,15 +30,6 @@
 
     <!-- 模型回复区：完全扁平，无卡片无边框 -->
     <div class="cct-assistant">
-      <details v-if="contextSources.length" class="cct-context-sources">
-        <summary>本轮参考 · {{ contextSources.length }} 份</summary>
-        <ul>
-          <li v-for="source in contextSources" :key="source.path">
-            <span>{{ source.path }}</span>
-            <small>{{ source.status }}{{ source.chars ? ` · ${source.chars} 字符` : '' }}</small>
-          </li>
-        </ul>
-      </details>
       <template v-for="entry in entries" :key="entry.id">
         <!-- 中途插话（steer）：与首条用户消息同款 -->
         <div v-if="entry.kind === 'user'" class="cct-user cct-user-inline">
@@ -232,24 +223,6 @@ function toggle(id: string, fallback: boolean): void {
 
 const isRunning = computed(() => props.run.status === "running");
 
-const contextSources = computed(() => {
-  const assembly = [...props.run.events].reverse()
-    .map((event) => event.data?.contextAssembly)
-    .find((value) => value && typeof value === "object" && Array.isArray((value as Record<string, unknown>).promptBlocks)) as Record<string, unknown> | undefined;
-  const blocks = (assembly?.promptBlocks || []) as Record<string, unknown>[];
-  const notes = Array.isArray(assembly?.notes) ? assembly.notes.map(String) : [];
-  const sources = blocks.flatMap((block) => (Array.isArray(block.sourcePaths) ? block.sourcePaths : []).map((path) => ({
-    path: block.kind === "runtime_presets" ? "小说写作指导与当前预设" : String(path),
-    status: block.omitted || block.included === false ? "未加入" : block.truncated ? "部分加入" : notes.includes(`unsaved_draft:${path}`) ? "已加入编辑器草稿" : "已加入",
-    chars: Number(block.chars || 0),
-  })));
-  for (const note of notes) {
-    if (note.startsWith("source_too_large:")) sources.push({ path: note.slice("source_too_large:".length), status: "文件过大，未加入", chars: 0 });
-    if (note.startsWith("knowledge_unavailable:")) sources.push({ path: "已确认关系", status: "图谱未能刷新，未加入", chars: 0 });
-  }
-  return sources;
-});
-
 const entries = computed<FlowEntry[]>(() => {
   const list: FlowEntry[] = [];
   let toolBucket: CoomiWaterfallItem[] = [];
@@ -270,6 +243,9 @@ const entries = computed<FlowEntry[]>(() => {
 
   for (const item of props.run.items) {
     if (item.type === "usage" || item.type === "compression" || item.type === "system") continue;
+    // Keep chapter context/accounting diagnostics in the trace, not above the
+    // established tool waterfall (including when reopening older sessions).
+    if (item.type === "phase" && ["context_assembly", "story_continuity"].includes(String(item.raw?.phase || ""))) continue;
     // 首条用户消息由 run.prompt 渲染，避免重复
     if (item.type === "user" && item.id === `${props.run.traceId}-user`) continue;
     if (item.type === "tool") {
@@ -579,16 +555,17 @@ function compactText(value: unknown, limit = 1200): string {
   gap: 18px;
 }
 
-/* 用户消息：左侧一个很淡的圆角块，时间靠右对齐 */
+/* 用户消息：右对齐的嵌入层气泡；时间与 hover 操作排在气泡左侧 */
 .cct-user {
   display: flex;
+  flex-direction: row-reverse;
   align-items: center;
   justify-content: flex-start;
   gap: 6px;
 }
 
 .cct-user .cct-time {
-  margin-left: auto;
+  margin-left: 0;
 }
 
 .cct-user-inline {
@@ -596,11 +573,11 @@ function compactText(value: unknown, limit = 1200): string {
 }
 
 .cct-user-text {
-  max-width: 90%;
-  padding: 8px 12px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  background: var(--surface-2);
+  max-width: 85%;
+  padding: 9px 14px;
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: var(--color-user-bubble);
   color: var(--text-main);
   font-size: 14px;
   line-height: 1.6;
@@ -663,16 +640,6 @@ function compactText(value: unknown, limit = 1200): string {
 }
 
 /* 助手区：完全扁平 */
-.cct-context-sources {
-  color: var(--text-secondary);
-  font-size: 12px;
-  margin-bottom: 12px;
-}
-.cct-context-sources summary { cursor: pointer; }
-.cct-context-sources ul { padding-left: 18px; }
-.cct-context-sources li { margin: 5px 0; overflow-wrap: anywhere; }
-.cct-context-sources small { margin-left: 8px; opacity: .75; }
-
 .cct-assistant {
   display: flex;
   flex-direction: column;

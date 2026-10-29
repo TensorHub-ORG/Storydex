@@ -1757,13 +1757,18 @@ defineExpose({
   letter-spacing: 0;
 }
 
+/* 选中（键盘/点击焦点）用淡底；当前打开的文件抬到卡片层 */
 .tree-row.is-selected {
-  background: color-mix(in srgb, var(--accent-soft) 72%, transparent);
+  background: var(--bg-active);
   color: var(--text-main);
+  box-shadow: none;
 }
 
+.tree-row.active,
 .tree-row.is-selected.active {
-  background: color-mix(in srgb, var(--accent) 24%, var(--accent-soft));
+  background: var(--nav-selected-bg);
+  color: var(--text-main);
+  box-shadow: var(--nav-selected-shadow);
 }
 
 .explorer-header,

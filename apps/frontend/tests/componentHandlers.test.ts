@@ -266,6 +266,22 @@ describe("high-density component handler matrices", () => {
     wrapper.unmount();
   });
 
+  it("closes the preset editor with Escape or its close control", async () => {
+    const wrapper = mount(PresetManagementSidebar, { global: { stubs: { teleport: true, PresetEditor: true, PresetImportPreview: true } } });
+    const utils = (wrapper.vm as any).__testUtils;
+    utils.editorOpen.value = true;
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".preset-editor-modal").exists()).toBe(true);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".preset-editor-modal").exists()).toBe(false);
+    utils.editorOpen.value = true;
+    await wrapper.vm.$nextTick();
+    await wrapper.find(".preset-editor-close").trigger("click");
+    expect(wrapper.find(".preset-editor-modal").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
   it("executes preset, source-control and trace side-panel handlers", async () => {
     const hybrid = {
       relativePath: ".storydex/presets/active/demo.json", name: "demo.json", extension: ".json", kind: "file",

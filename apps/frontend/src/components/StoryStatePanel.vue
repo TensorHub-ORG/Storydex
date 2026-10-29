@@ -3118,14 +3118,57 @@ defineExpose({
   background: var(--bg-editor);
 }
 .story-state-panel.is-relationship-only .ssp-header {
-  min-height: 48px;
+  min-height: 52px;
+  padding: 10px 16px 6px 18px;
+}
+.story-state-panel.is-relationship-only .ssp-title {
+  gap: 10px;
+  color: var(--text-main);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.story-state-panel.is-relationship-only .ssp-title-icon {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 17px;
+}
+.story-state-panel.is-relationship-only .ssp-header-actions {
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border-ghost);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+}
+.story-state-panel.is-relationship-only .ssp-refresh {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+}
+.story-state-panel.is-relationship-only .ssp-refresh:hover:not(:disabled) {
+  background: var(--surface-1);
+  color: var(--text-main);
+  box-shadow: var(--shadow-resting);
+}
+.story-state-panel.is-relationship-only .ssp-rebuild {
+  color: var(--accent-strong);
+}
+.story-state-panel.is-relationship-only .ssp-refresh:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 .story-state-panel.is-expanded .ssp-body {
   max-height: none;
   padding: 10px 20px 14px;
 }
 .story-state-panel.is-relationship-only.is-expanded .ssp-body {
-  padding: 8px 14px 12px;
+  padding: 8px 16px 16px;
   overflow: hidden;
 }
 .story-state-panel.is-expanded .ssp-relation-graph {
@@ -3235,7 +3278,13 @@ defineExpose({
   color: var(--text-muted);
   line-height: 1.6;
 }
+/* ================= 知识图谱工作区 =================
+   结构：工具条（分类 + 搜索）→ 统计行 → 主区（图谱画布 | 详情栏）
+   图谱画布是卡片内的嵌入层（略深底色 + 点阵），节点是带白描边的圆点，
+   图例、缩放控件是悬浮在画布上的小胶囊；详情栏是同色卡片，内容分段。 */
 .ssp-wiki-workspace {
+  --wiki-graph-bg: color-mix(in srgb, var(--surface-2) 70%, var(--surface-1));
+  container: ssp-wiki-workspace / inline-size;
   height: 100%;
   min-height: 0;
   display: flex;
@@ -3247,30 +3296,32 @@ defineExpose({
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 12px;
+  gap: 10px 12px;
 }
 .ssp-wiki-category-tabs {
   display: inline-flex;
   align-items: center;
   gap: 2px;
+  height: 36px;
   padding: 3px;
+  box-sizing: border-box;
   border: 1px solid var(--border-ghost);
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--bg-card) 72%, transparent);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
 }
 .ssp-wiki-category-tab {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  min-height: 30px;
+  height: 28px;
   padding: 0 12px;
   border: 0;
   border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-muted);
   font: inherit;
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 12.5px;
+  font-weight: 500;
   cursor: pointer;
   transition: background 140ms ease, color 140ms ease, box-shadow 140ms ease;
 }
@@ -3278,42 +3329,57 @@ defineExpose({
   font-size: 16px;
 }
 .ssp-wiki-category-tab small {
+  min-width: 18px;
+  padding: 1px 5px;
+  box-sizing: border-box;
+  border-radius: var(--radius-full);
+  background: var(--bg-hover);
   color: var(--text-faint);
-  font-size: 10px;
+  font-size: 10.5px;
   font-weight: 600;
+  line-height: 1.4;
+  text-align: center;
 }
 .ssp-wiki-category-tab:hover {
   background: var(--bg-hover);
   color: var(--text-main);
 }
 .ssp-wiki-category-tab.active {
-  background: var(--bg-card);
-  color: var(--accent-strong);
-  box-shadow: var(--shadow-resting);
+  background: var(--surface-1);
+  color: var(--text-main);
+  font-weight: 600;
+  box-shadow: var(--shadow-resting), 0 0 0 1px var(--border-ghost);
 }
-.ssp-wiki-category-tab.active small {
+.ssp-wiki-category-tab.active .material-symbols-rounded {
   color: var(--accent);
 }
+.ssp-wiki-category-tab.active small {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
 .ssp-wiki-search-form {
-  flex: 1 1 220px;
-  max-width: 400px;
-  min-height: 32px;
+  flex: 1 1 240px;
+  max-width: 420px;
+  height: 36px;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
-  gap: 7px;
-  border: 1px solid var(--border-ghost);
-  border-radius: var(--radius-md);
-  padding: 0 6px 0 10px;
-  background: color-mix(in srgb, var(--bg-card) 72%, transparent);
-  transition: border-color 140ms ease;
+  gap: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: 0 6px 0 11px;
+  background: var(--surface-1);
+  box-shadow: var(--shadow-resting);
+  transition: border-color 140ms ease, box-shadow 140ms ease;
 }
 .ssp-wiki-search-form:focus-within {
-  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 .ssp-wiki-search-form > .material-symbols-rounded {
   flex: 0 0 auto;
   color: var(--text-faint);
-  font-size: 16px;
+  font-size: 17px;
 }
 .ssp-wiki-search-input {
   flex: 1 1 auto;
@@ -3323,19 +3389,19 @@ defineExpose({
   background: transparent;
   color: var(--text-main);
   font: inherit;
-  font-size: 12px;
+  font-size: 13px;
 }
 .ssp-wiki-search-input::placeholder {
   color: var(--text-faint);
 }
 .ssp-wiki-search-clear {
   flex: 0 0 auto;
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   display: grid;
   place-items: center;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-faint);
   cursor: pointer;
@@ -3345,45 +3411,73 @@ defineExpose({
   color: var(--text-main);
 }
 .ssp-wiki-search-clear .material-symbols-rounded {
-  font-size: 14px;
+  font-size: 15px;
 }
+/* 统计行：独占一行，数字做成浅色小标签；操作按钮靠右 */
 .ssp-wiki-toolbar-stats {
-  margin-left: auto;
+  flex: 1 0 100%;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+.ssp-wiki-toolbar-stats > span {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
-  color: var(--text-faint);
-  font-size: 11px;
-  white-space: nowrap;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--radius-full);
+  background: var(--surface-2);
+  font-variant-numeric: tabular-nums;
 }
 .ssp-wiki-load-more,
 .ssp-wiki-review-alert,
 .ssp-wiki-review-refresh {
-  border: 1px solid var(--border-ghost);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elevated);
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-resting);
   color: var(--text-soft);
-  padding: 3px 7px;
-  font-size: 11px;
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 500;
   cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
 }
 .ssp-wiki-load-more:hover,
 .ssp-wiki-review-alert:hover,
 .ssp-wiki-review-refresh:hover {
-  color: var(--accent-strong);
-  border-color: var(--accent-strong);
+  border-color: var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text-main);
+}
+.ssp-wiki-load-more {
+  margin-left: auto;
 }
 .ssp-wiki-load-more:disabled {
   opacity: 0.5;
   cursor: wait;
 }
 .ssp-wiki-review-alert {
-  color: var(--warning);
-  border-color: color-mix(in srgb, var(--warning) 42%, transparent);
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+  font-weight: 600;
 }
-.ssp-wiki-review-alert {
-  color: var(--warning);
-  font-weight: 700;
+.ssp-wiki-toolbar-stats > span + .ssp-wiki-review-alert {
+  margin-left: auto;
+}
+.ssp-wiki-review-alert:hover {
+  border-color: var(--warning-fg);
+  background: var(--warning-bg);
+  color: var(--warning-fg);
 }
 .ssp-wiki-evidence-note {
   display: block;
@@ -3393,51 +3487,64 @@ defineExpose({
   font-style: italic;
 }
 .ssp-wiki-source-chip {
-  padding: 1px 6px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border-ghost);
+  padding: 1px 8px;
+  border-radius: var(--radius-full);
+  background: var(--surface-2);
   color: var(--text-muted);
-  font-size: 10px;
-  background: color-mix(in srgb, var(--bg-card) 60%, transparent);
+  font-size: 10.5px;
 }
 .ssp-wiki-agent-status {
   flex: 0 0 auto;
   border: 1px solid var(--border-ghost);
   border-radius: var(--radius-md);
-  padding: 6px 10px;
+  padding: 7px 12px;
   color: var(--text-soft);
-  background: color-mix(in srgb, var(--bg-card) 76%, transparent);
-  font-size: 11px;
-  line-height: 1.45;
+  background: var(--surface-2);
+  font-size: 12px;
+  line-height: 1.5;
 }
 .ssp-wiki-agent-status.success {
-  color: var(--success);
+  border-color: var(--success-border);
+  background: var(--success-bg);
+  color: var(--success-fg);
 }
 .ssp-wiki-agent-status.warning {
-  color: var(--warning);
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
+  color: var(--warning-fg);
 }
 .ssp-wiki-agent-status.error {
-  color: var(--danger);
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
 }
 .ssp-wiki-main {
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 360px);
   gap: 12px;
 }
+/* 窄宽度：详情栏移到图谱下方 */
+@container ssp-wiki-workspace (max-width: 760px) {
+  .ssp-wiki-main {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(280px, 1fr) minmax(0, 40%);
+  }
+}
+
+/* ---------- 图谱画布 ---------- */
 .ssp-wiki-graph-panel {
   position: relative;
   min-width: 0;
   min-height: 0;
   border: 1px solid var(--border-ghost);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   overflow: hidden;
-  background:
-    radial-gradient(color-mix(in srgb, var(--text-faint) 18%, transparent) 1px, transparent 1.4px),
-    linear-gradient(180deg, color-mix(in srgb, var(--bg-card) 46%, var(--bg-editor)), var(--bg-editor));
-  background-size: 23px 23px, 100% 100%;
+  background-color: var(--wiki-graph-bg);
+  background-image: radial-gradient(color-mix(in srgb, var(--text-faint) 26%, transparent) 1px, transparent 1.3px);
+  background-size: 22px 22px;
 }
 .ssp-wiki-graph {
   position: absolute;
@@ -3451,55 +3558,68 @@ defineExpose({
 .ssp-wiki-graph:active {
   cursor: grabbing;
 }
+/* 边：普通关联是细灰线；真实关系用强调色；待确认用黄色虚线 */
 .ssp-wiki-edge {
   fill: none;
-  stroke: color-mix(in srgb, var(--text-muted) 32%, transparent);
-  stroke-width: 1;
+  stroke: color-mix(in srgb, var(--text-muted) 34%, transparent);
+  stroke-width: 1.2;
   stroke-linecap: round;
   cursor: pointer;
-  transition: opacity 160ms ease;
+  transition: opacity 160ms ease, stroke 140ms ease, stroke-width 140ms ease;
 }
 .ssp-wiki-edge.edge-real-relation {
-  stroke: color-mix(in srgb, var(--accent) 62%, transparent);
-  stroke-width: 1.7;
-}
-.ssp-wiki-edge.edge-review-required {
-  stroke: var(--warning);
-  stroke-dasharray: 6 5;
+  stroke: color-mix(in srgb, var(--accent) 55%, var(--wiki-graph-bg));
   stroke-width: 1.8;
 }
+.ssp-wiki-edge.edge-review-required {
+  stroke: var(--warning-fg);
+  stroke-dasharray: 6 5;
+  stroke-width: 1.6;
+  opacity: 0.85;
+}
 .ssp-wiki-edge.edge-co-occurrence {
-  stroke-dasharray: 3 5;
+  stroke-dasharray: 2 5;
 }
 .ssp-wiki-edge:hover {
   stroke: var(--accent);
+  stroke-width: 2.2;
 }
 .ssp-wiki-edge.active {
   stroke: var(--accent-strong);
-  stroke-width: 2.2;
+  stroke-width: 2.6;
+  opacity: 1;
 }
 .ssp-wiki-edge.dimmed {
   opacity: 0.08;
   pointer-events: none;
 }
+/* 边标签：带细边框的小胶囊 */
 .ssp-wiki-edge-label {
   cursor: pointer;
   transition: opacity 160ms ease;
 }
 .ssp-wiki-edge-label rect {
-  fill: color-mix(in srgb, var(--bg-editor) 90%, transparent);
+  fill: var(--surface-1);
+  stroke: var(--border-subtle);
+  stroke-width: 1;
 }
 .ssp-wiki-edge-label text {
-  fill: var(--text-muted);
-  font-size: 10px;
+  fill: var(--text-soft);
+  font-size: 10.5px;
   font-weight: 600;
+  pointer-events: none;
+}
+.ssp-wiki-edge-label:hover rect {
+  stroke: color-mix(in srgb, var(--accent) 50%, var(--border-subtle));
 }
 .ssp-wiki-edge-label.active rect {
-  fill: color-mix(in srgb, var(--accent) 14%, var(--bg-editor));
+  fill: var(--accent);
+  stroke: var(--accent);
 }
 .ssp-wiki-edge-label.active text {
-  fill: var(--accent-strong);
+  fill: var(--accent-contrast);
 }
+/* 节点：分类色圆点 + 卡片色描边，外圈是同色淡光晕 */
 .ssp-wiki-node {
   cursor: default;
   transition: opacity 160ms ease;
@@ -3524,80 +3644,108 @@ defineExpose({
 }
 .ssp-wiki-node-dot {
   fill: var(--wiki-node-color, var(--text-muted));
-  stroke: color-mix(in srgb, var(--bg-editor) 85%, transparent);
-  stroke-width: 2.5; /* 优化：从 1.5 增加到 2.5 */
-  transition: fill 140ms ease, filter 140ms ease; /* 优化：添加 filter 过渡 */
+  stroke: var(--surface-1);
+  stroke-width: 2.5;
+  transition: fill 140ms ease, stroke 140ms ease, stroke-width 140ms ease;
 }
 .ssp-wiki-node.active .ssp-wiki-node-dot {
-  filter: brightness(1.15) drop-shadow(0 2px 6px var(--wiki-node-color)); /* 优化：添加激活态发光效果 */
+  stroke: var(--surface-1);
+  stroke-width: 3;
 }
 .ssp-wiki-node.needs-review .ssp-wiki-node-dot {
-  stroke: color-mix(in srgb, var(--warning-fg) 82%, var(--wiki-node-color, var(--text-muted)));
+  stroke: var(--warning-fg);
   stroke-width: 2;
   stroke-dasharray: 4 3;
 }
 .ssp-wiki-node-halo {
-  fill: transparent;
+  fill: color-mix(in srgb, var(--wiki-node-color, var(--text-muted)) 12%, transparent);
   stroke: transparent;
-  stroke-width: 1.4;
+  stroke-width: 1.5;
   transition: stroke 140ms ease, fill 140ms ease;
 }
+.ssp-wiki-node:hover .ssp-wiki-node-halo {
+  fill: color-mix(in srgb, var(--wiki-node-color, var(--accent)) 22%, transparent);
+  stroke: color-mix(in srgb, var(--wiki-node-color, var(--accent)) 45%, transparent);
+}
+.ssp-wiki-node.active .ssp-wiki-node-halo {
+  fill: color-mix(in srgb, var(--wiki-node-color, var(--accent)) 24%, transparent);
+  stroke: var(--wiki-node-color, var(--accent));
+  stroke-width: 2;
+}
+/* 节点名：用画布底色描边，压在连线上也清楚 */
 .ssp-wiki-node text {
   fill: var(--text-soft);
-  font-size: 13px; /* 优化：从 11px 增加到 13px */
-  font-weight: 600;
+  font-size: 12.5px;
+  font-weight: 500;
   paint-order: stroke;
-  stroke: color-mix(in srgb, var(--bg-editor) 90%, transparent);
-  stroke-width: 3px;
+  stroke: var(--wiki-graph-bg);
+  stroke-width: 4px;
   stroke-linejoin: round;
   pointer-events: none;
   transition: fill 140ms ease;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.15); /* 优化：增加文本阴影 */
-}
-.ssp-wiki-node:hover .ssp-wiki-node-halo,
-.ssp-wiki-node.active .ssp-wiki-node-halo {
-  stroke: color-mix(in srgb, var(--wiki-node-color, var(--accent)) 80%, transparent);
-  fill: color-mix(in srgb, var(--wiki-node-color, var(--accent)) 20%, transparent); /* 优化：从 14% 提升到 20% */
 }
 .ssp-wiki-node:hover text,
 .ssp-wiki-node.active text {
   fill: var(--text-main);
+  font-weight: 600;
 }
 .ssp-wiki-node.dimmed {
-  opacity: 0.13;
+  opacity: 0.14;
 }
 .ssp-wiki-node.is-neighbor {
-  opacity: 0.6;
+  opacity: 0.7;
 }
 .ssp-wiki-node.is-neighbor.dimmed {
   opacity: 0.1;
 }
 .ssp-wiki-node.is-neighbor text {
-  font-size: 10px;
+  font-size: 10.5px;
   font-weight: 500;
   fill: var(--text-muted);
 }
 .ssp-wiki-node.is-synthetic .ssp-wiki-node-dot {
-  fill: color-mix(in srgb, var(--wiki-node-color, var(--text-muted)) 32%, var(--bg-editor));
+  fill: color-mix(in srgb, var(--wiki-node-color, var(--text-muted)) 28%, var(--surface-1));
   stroke: var(--wiki-node-color, var(--text-muted));
+  stroke-width: 1.5;
   stroke-dasharray: 3 3;
 }
+
+/* ---------- 画布上的悬浮控件 ---------- */
 .ssp-wiki-graph-note {
   position: absolute;
   left: 50%;
-  bottom: 48px;
+  top: 12px;
   transform: translateX(-50%);
   max-width: min(520px, calc(100% - 32px));
-  padding: 6px 12px;
-  border: 1px solid var(--border-ghost);
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--bg-card) 88%, transparent);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px 5px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-raised);
   color: var(--text-muted);
   font-size: 12px;
   line-height: 1.4;
-  text-align: center;
-  backdrop-filter: blur(8px);
+  white-space: nowrap;
   pointer-events: none;
+}
+.ssp-wiki-graph-note button {
+  pointer-events: auto;
+  height: 22px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.ssp-wiki-graph-note button:hover {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
 }
 .ssp-wiki-graph-legend {
   position: absolute;
@@ -3605,24 +3753,26 @@ defineExpose({
   bottom: 12px;
   display: inline-flex;
   align-items: center;
-  gap: 12px;
-  padding: 5px 11px;
-  border: 1px solid var(--border-ghost);
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--bg-card) 82%, transparent);
-  backdrop-filter: blur(8px);
-  color: var(--text-muted);
-  font-size: 11px;
+  gap: 14px;
+  height: 32px;
+  box-sizing: border-box;
+  padding: 0 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-raised);
+  color: var(--text-soft);
+  font-size: 11.5px;
   pointer-events: none;
 }
 .ssp-wiki-legend-item {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
 }
 .ssp-wiki-legend-item i {
-  width: 8px;
-  height: 8px;
+  width: 9px;
+  height: 9px;
   border-radius: var(--radius-full);
   background: var(--text-muted);
 }
@@ -3648,12 +3798,13 @@ defineExpose({
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  padding: 3px;
-  border: 1px solid var(--border-ghost);
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--bg-card) 88%, transparent);
-  backdrop-filter: blur(8px);
-  box-shadow: var(--shadow-sm);
+  height: 32px;
+  box-sizing: border-box;
+  padding: 0 3px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-raised);
 }
 .ssp-hud-btn {
   width: 26px;
@@ -3661,7 +3812,7 @@ defineExpose({
   display: grid;
   place-items: center;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-full);
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -3671,13 +3822,14 @@ defineExpose({
   color: var(--text-main);
 }
 .ssp-hud-btn .material-symbols-rounded {
-  font-size: 16px;
+  font-size: 17px;
 }
 .ssp-hud-zoom {
-  min-width: 40px;
+  min-width: 42px;
   text-align: center;
-  color: var(--text-faint);
-  font-size: 11px;
+  color: var(--text-soft);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
 }
 .ssp-wiki-graph-empty {
   position: absolute;
@@ -3685,13 +3837,22 @@ defineExpose({
   display: grid;
   place-content: center;
   justify-items: center;
-  gap: 6px;
-  padding: 20px;
+  gap: 8px;
+  padding: 24px;
   color: var(--text-muted);
   text-align: center;
 }
 .ssp-wiki-graph-empty .material-symbols-rounded {
-  font-size: 34px;
+  width: 56px;
+  height: 56px;
+  display: grid;
+  place-items: center;
+  margin-bottom: 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-resting);
+  font-size: 28px;
   color: var(--text-faint);
 }
 .ssp-wiki-graph-empty .is-spinning {
@@ -3699,37 +3860,41 @@ defineExpose({
 }
 .ssp-wiki-graph-empty p {
   margin: 0;
-  font-size: 13px;
+  color: var(--text-soft);
+  font-size: 14px;
   font-weight: 600;
 }
 .ssp-wiki-graph-empty small {
-  color: var(--text-faint);
-  font-size: 11px;
+  max-width: 340px;
+  color: var(--text-muted);
+  font-size: 12px;
   line-height: 1.6;
 }
+
+/* ---------- 右侧详情栏 ---------- */
 .ssp-wiki-inspector {
   min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
   border: 1px solid var(--border-ghost);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   overflow: hidden;
-  background: color-mix(in srgb, var(--bg-card) 76%, transparent);
+  background: var(--surface-1);
 }
 .ssp-wiki-inspector-head {
   flex: 0 0 auto;
-  padding: 12px 14px 10px;
+  padding: 14px 16px 12px;
   border-bottom: 1px solid var(--border-ghost);
 }
 .ssp-wiki-project {
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 10px;
   color: var(--text-main);
-  font-size: 13px;
-  font-weight: 700;
+  font-size: 14px;
+  font-weight: 600;
 }
 .ssp-wiki-project strong {
   overflow: hidden;
@@ -3738,23 +3903,29 @@ defineExpose({
 }
 .ssp-wiki-project .material-symbols-rounded {
   flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
   color: var(--accent-strong);
   font-size: 17px;
 }
 .ssp-wiki-run-meta {
-  margin-top: 4px;
+  margin: 6px 0 0 38px;
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 10px;
+  gap: 2px 12px;
   color: var(--text-faint);
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.4;
 }
 .ssp-wiki-project-summary {
-  margin: 8px 0 0;
+  margin: 10px 0 0;
   color: var(--text-soft);
-  font-size: 11px;
-  line-height: 1.55;
+  font-size: 12px;
+  line-height: 1.6;
   display: -webkit-box;
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
@@ -3766,29 +3937,38 @@ defineExpose({
   overflow-y: auto;
 }
 .ssp-wiki-inspector-detail {
-  padding: 13px 14px 15px;
+  padding: 16px 16px 18px;
   border-bottom: 1px solid var(--border-ghost);
 }
 .ssp-wiki-inspector-detail h3 {
-  margin: 4px 0 8px;
+  margin: 8px 0 10px;
   color: var(--text-main);
-  font-size: 15px;
+  font-size: 16px;
+  font-weight: 600;
   line-height: 1.4;
+  letter-spacing: -0.01em;
 }
 .ssp-wiki-inspector-detail p {
   margin: 0;
   color: var(--text-soft);
-  font-size: 12px;
-  line-height: 1.65;
+  font-size: 12.5px;
+  line-height: 1.7;
 }
 .ssp-wiki-inspector-detail ul {
-  margin: 10px 0 0;
+  margin: 12px 0 0;
   padding-left: 18px;
 }
 .ssp-wiki-inspector-detail li {
   color: var(--text-soft);
-  font-size: 12px;
+  font-size: 12.5px;
   line-height: 1.7;
+}
+.ssp-wiki-inspector-detail li::marker {
+  color: var(--text-faint);
+}
+.ssp-wiki-inspector-detail.is-empty {
+  padding: 22px 16px;
+  text-align: center;
 }
 .ssp-wiki-inspector-detail.is-empty p {
   color: var(--text-muted);
@@ -3797,46 +3977,63 @@ defineExpose({
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 7px;
-  margin: 2px 0 8px;
+  gap: 6px;
+  margin: 2px 0 12px;
   color: var(--text-main);
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 600;
+}
+.ssp-wiki-relation-endpoints > span:not(.material-symbols-rounded) {
+  padding: 3px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  background: var(--surface-2);
 }
 .ssp-wiki-relation-endpoints .material-symbols-rounded {
   color: var(--text-faint);
-  font-size: 15px;
+  font-size: 16px;
 }
 .ssp-wiki-relation-level {
   display: grid;
-  gap: 4px;
-  margin: 0 0 8px;
+  gap: 5px;
+  margin: 0 0 12px;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 11.5px;
 }
 .ssp-wiki-audit-grid {
   display: grid;
-  grid-template-columns: minmax(84px, auto) minmax(0, 1fr);
-  gap: 4px 8px;
-  margin-top: 10px;
+  grid-template-columns: minmax(64px, auto) minmax(0, 1fr);
+  gap: 4px 10px;
+  margin-top: 12px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
   color: var(--text-muted);
-  font-size: 10px;
-  line-height: 1.45;
+  font-size: 11.5px;
+  line-height: 1.5;
 }
 .ssp-wiki-audit-grid strong {
   min-width: 0;
   overflow-wrap: anywhere;
-  color: var(--text-soft);
+  color: var(--text-main);
   font-weight: 600;
 }
 .ssp-wiki-audit-grid.compact {
-  margin-top: 7px;
+  margin-top: 4px;
+}
+.ssp-wiki-inspector-detail > small,
+.ssp-wiki-review-card > small {
+  display: block;
+  margin-top: 8px;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.55;
 }
 .ssp-wiki-source-ref-list,
 .ssp-wiki-source-ref {
   display: grid;
-  gap: 4px;
-  margin-top: 8px;
+  gap: 5px;
+  margin-top: 10px;
 }
 .ssp-wiki-source-link {
   justify-self: start;
@@ -3844,28 +4041,36 @@ defineExpose({
   background: transparent;
   padding: 0;
   color: var(--accent-strong);
-  font-size: 10px;
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 500;
   text-align: left;
   cursor: pointer;
   overflow-wrap: anywhere;
 }
+.ssp-wiki-source-link:hover {
+  text-decoration: underline;
+}
 .ssp-wiki-source-ref blockquote {
   margin: 0;
-  padding: 6px 8px;
-  border-left: 2px solid var(--border-subtle);
+  padding: 8px 10px;
+  border-left: 3px solid color-mix(in srgb, var(--accent) 45%, var(--border-subtle));
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  background: var(--surface-2);
   color: var(--text-soft);
-  font-size: 11px;
-  line-height: 1.55;
+  font-size: 12px;
+  line-height: 1.6;
   white-space: pre-wrap;
 }
 .ssp-wiki-review-inline-actions {
   display: flex;
-  gap: 6px;
-  margin-top: 9px;
+  gap: 8px;
+  margin-top: 14px;
 }
 .ssp-wiki-review-queue {
-  padding: 10px 8px 12px;
+  padding: 14px 12px 14px;
   border-bottom: 1px solid var(--border-ghost);
+  background: color-mix(in srgb, var(--warning-bg) 35%, var(--surface-1));
 }
 .ssp-wiki-review-heading {
   display: flex;
@@ -3873,108 +4078,147 @@ defineExpose({
   justify-content: space-between;
 }
 .ssp-wiki-review-refresh {
-  float: right;
-  padding: 1px 5px;
+  height: 22px;
+  margin-left: auto;
+  padding: 0 8px;
+  font-size: 11px;
 }
 .ssp-wiki-review-card {
   display: grid;
-  gap: 6px;
-  margin-top: 8px;
-  padding: 9px;
-  border: 1px solid var(--border-ghost);
-  border-radius: var(--radius-md);
-  background: var(--bg-elevated);
+  gap: 8px;
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-resting);
 }
 .ssp-wiki-review-card-title {
   display: flex;
   align-items: center;
   gap: 6px;
   color: var(--text-main);
+  font-size: 13px;
   overflow-wrap: anywhere;
+}
+.ssp-wiki-review-card-title > span {
+  color: var(--text-faint);
+}
+.ssp-wiki-review-card p {
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.6;
 }
 .ssp-wiki-review-field {
   display: grid;
-  gap: 3px;
+  gap: 4px;
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 11px;
+  font-weight: 500;
 }
 .ssp-wiki-review-field input,
 .ssp-wiki-review-field select,
 .ssp-wiki-review-field textarea {
   width: 100%;
+  min-height: 30px;
   box-sizing: border-box;
-  border: 1px solid var(--border-ghost);
-  border-radius: var(--radius-sm);
-  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
   color: var(--text-main);
-  padding: 4px 6px;
+  padding: 5px 8px;
   font: inherit;
+  font-size: 12px;
+}
+.ssp-wiki-review-field input:focus,
+.ssp-wiki-review-field select:focus,
+.ssp-wiki-review-field textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 .ssp-wiki-review-field textarea {
   resize: vertical;
 }
 .ssp-wiki-review-empty,
 .ssp-wiki-review-error {
-  padding: 8px 4px;
+  padding: 10px 4px;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.5;
 }
 .ssp-wiki-review-error {
-  color: var(--danger);
+  color: var(--danger-fg);
 }
 .ssp-wiki-sidecar-note {
   color: var(--text-faint);
-  font-size: 10px;
+  font-size: 11px;
 }
+/* 详情类型标签：小胶囊 */
 .ssp-wiki-entry-kicker {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: var(--radius-full);
+  background: var(--accent-soft);
   color: var(--accent-strong);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 600;
 }
 .ssp-wiki-entry-meta {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin: -2px 0 8px;
+  margin: 0 0 10px;
   color: var(--text-muted);
   font-size: 11px;
   line-height: 1.4;
 }
 .ssp-wiki-review-chip {
-  border: 1px solid color-mix(in srgb, var(--warning) 42%, transparent);
-  border-radius: var(--radius-sm);
-  padding: 1px 6px;
-  color: var(--warning);
-  background: color-mix(in srgb, var(--warning) 10%, transparent);
-  font-size: 10px;
-  font-weight: 700;
+  border: 1px solid var(--warning-border);
+  border-radius: var(--radius-full);
+  padding: 1px 8px;
+  color: var(--warning-fg);
+  background: var(--warning-bg);
+  font-size: 10.5px;
+  font-weight: 600;
   line-height: 1.5;
 }
+/* 分段标题：「相关条目 · 12」「关系待确认 · 3」 */
 .ssp-wiki-inspector-heading {
-  margin: 0 0 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
   padding: 0 6px;
   color: var(--text-muted);
-  font-size: 11px;
-  font-weight: 700;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
 }
 .ssp-wiki-entry-list {
-  padding: 10px 8px 12px;
+  padding: 14px 10px 14px;
 }
 .ssp-wiki-entry-button {
   width: 100%;
   display: grid;
   gap: 3px;
+  margin-bottom: 2px;
   border: 1px solid transparent;
   border-radius: var(--radius-md);
   background: transparent;
-  padding: 7px 8px;
+  padding: 9px 10px;
   color: var(--text-main);
+  font: inherit;
   text-align: left;
   cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease;
 }
 .ssp-wiki-entry-button strong {
-  font-size: 12px;
+  font-size: 13px;
+  font-weight: 600;
 }
 .ssp-wiki-entry-button span {
   overflow: hidden;
@@ -3982,33 +4226,39 @@ defineExpose({
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   color: var(--text-muted);
-  font-size: 11px;
-  line-height: 1.45;
+  font-size: 12px;
+  line-height: 1.5;
 }
 .ssp-wiki-entry-button small {
   justify-self: start;
+  margin-top: 2px;
 }
-.ssp-wiki-entry-button:hover,
-.ssp-wiki-entry-button.active {
-  border-color: var(--border-subtle);
+.ssp-wiki-entry-button:hover {
   background: var(--bg-hover);
+}
+.ssp-wiki-entry-button.active {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border-subtle));
+  background: var(--bg-selected);
+}
+.ssp-wiki-entry-button.active strong {
+  color: var(--accent-strong);
 }
 .ssp-wiki-sources {
   display: flex;
   flex-wrap: wrap;
-  gap: 5px;
-  margin-top: 12px;
+  gap: 6px;
+  margin-top: 14px;
 }
 .ssp-wiki-sources span {
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  border: 1px solid var(--border-ghost);
-  border-radius: var(--radius-sm);
-  padding: 2px 6px;
+  border-radius: var(--radius-full);
+  padding: 2px 9px;
+  background: var(--surface-2);
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 11px;
 }
 .ssp-list {
   list-style: none;
@@ -4278,7 +4528,7 @@ defineExpose({
   pointer-events: all;
 }
 .ssp-relation-edge-label rect {
-  fill: var(--bg-sidebar);
+  fill: var(--bg-card);
   stroke: var(--border-ghost);
   stroke-width: 1;
 }

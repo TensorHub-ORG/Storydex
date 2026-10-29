@@ -427,6 +427,7 @@ export interface StoryProjectSettings {
   chapterLengthTier: ChapterLengthTier;
   chapterWordCountTarget: number;
   preciseWordCountEnabled: boolean;
+  continuityTrackingEnabled: boolean;
   storyFragmentWordCount: number;
   storyFragmentWordCountMin: number;
   storyFragmentWordCountMax: number;
@@ -462,6 +463,7 @@ export interface StoryProjectSettingsResponse {
   chapterWordCountTarget?: number | string;
   chapter_word_count_target?: number | string;
   preciseWordCountEnabled?: boolean | string;
+  continuityTrackingEnabled?: boolean | string;
   precise_word_count_enabled?: boolean | string;
   storyFragmentWordCount?: number | string;
   story_fragment_word_count?: number | string;
@@ -514,6 +516,7 @@ export interface StoryProjectSettingsUpdateRequest {
   chapterWordCountTarget?: number;
   chapter_word_count_target?: number;
   preciseWordCountEnabled?: boolean;
+  continuityTrackingEnabled?: boolean;
   precise_word_count_enabled?: boolean;
   storyFragmentWordCount?: number;
   story_fragment_word_count?: number;

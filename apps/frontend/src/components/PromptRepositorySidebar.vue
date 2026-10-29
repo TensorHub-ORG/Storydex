@@ -383,8 +383,7 @@ function showFeedback(message: string): void {
   display: flex;
   flex-direction: column;
   color: var(--text-primary);
-  background: var(--bg-sidebar);
-  border-right: 1px solid var(--border-subtle);
+  background: var(--canvas);
 }
 
 .prompt-repository-header {
@@ -395,8 +394,9 @@ function showFeedback(message: string): void {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  border-bottom: 1px solid var(--border-subtle);
-  background: var(--surface-2);
+  padding: 8px 10px 8px 12px;
+  border-bottom: 0;
+  background: transparent;
 }
 
 .prompt-repository-title {
@@ -404,8 +404,7 @@ function showFeedback(message: string): void {
   color: var(--text-muted);
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .prompt-icon-button {

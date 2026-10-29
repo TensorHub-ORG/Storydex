@@ -267,7 +267,7 @@ function chatsquashDisplayFields(meta: Record<string, unknown>): Record<string, 
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  background: var(--bg-sidebar);
+  background: var(--surface-1);
   color: var(--text-main);
   font-size: 13px;
 }

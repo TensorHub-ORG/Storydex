@@ -145,17 +145,27 @@
         ></button>
       </div>
       <div class="coomi-composer-status">
-        <span class="coomi-status-pill" :title="modelLabel">模型：{{ modelLabel }}</span>
+        <button
+          class="coomi-status-pill coomi-model-chip"
+          type="button"
+          :title="`模型：${modelLabel}（点击打开模型设置）`"
+          @click="openConfigPanel"
+        >
+          <span class="material-symbols-rounded coomi-chip-icon" aria-hidden="true">smart_toy</span>
+          <span class="coomi-chip-label"><span class="sr-only">模型：</span>{{ modelLabel }}</span>
+        </button>
         <div class="coomi-status-control">
           <button
             class="coomi-status-pill coomi-status-button"
             :class="permissionToneClass(activePermissionTone)"
             type="button"
-            title="Shift+Tab"
+            :title="`审批模式：${permissionControlLabel}（Shift+Tab）`"
             :aria-expanded="permissionMenuOpen"
             @click="togglePermissionMenu"
           >
-            {{ permissionControlLabel }}
+            <span class="material-symbols-rounded coomi-chip-icon" aria-hidden="true">{{ permissionToneIcon(activePermissionTone) }}</span>
+            <span class="coomi-chip-label">{{ permissionControlLabel }}</span>
+            <span class="material-symbols-rounded coomi-chip-caret" aria-hidden="true">expand_more</span>
           </button>
           <div v-if="permissionMenuOpen" class="coomi-status-popover coomi-permission-popover">
             <button
@@ -173,12 +183,15 @@
         </div>
         <div class="coomi-status-control">
           <button
-            class="coomi-status-pill coomi-status-button"
+            class="coomi-status-pill coomi-status-button coomi-reasoning-chip"
             type="button"
+            :title="reasoningLabel"
             :aria-expanded="reasoningMenuOpen"
             @click="toggleReasoningMenu"
           >
-            {{ reasoningLabel }}
+            <span class="material-symbols-rounded coomi-chip-icon" aria-hidden="true">psychology</span>
+            <span class="coomi-chip-label"><span class="sr-only">推理：</span>{{ selectedReasoningOption?.shortLabel || selectedReasoningMode }}</span>
+            <span class="material-symbols-rounded coomi-chip-caret" aria-hidden="true">expand_more</span>
           </button>
           <div v-if="reasoningMenuOpen" class="coomi-status-popover coomi-reasoning-popover">
             <button
@@ -202,11 +215,9 @@
             :aria-expanded="storyOptionsOpen"
             @click="toggleStoryOptions"
           >
-            <span class="material-symbols-rounded">tune</span>
-            <span>{{ agentStore.taskMode === 'generate_chapter' ? '生成新章节' : storyOptionsLabel }}</span>
-            <span class="material-symbols-rounded coomi-story-caret">
-              {{ storyOptionsOpen ? "expand_more" : "chevron_right" }}
-            </span>
+            <span class="material-symbols-rounded coomi-chip-icon" aria-hidden="true">tune</span>
+            <span class="coomi-chip-label">{{ agentStore.taskMode === 'generate_chapter' ? '生成新章节' : storyOptionsLabel }}</span>
+            <span class="material-symbols-rounded coomi-chip-caret" aria-hidden="true">expand_more</span>
           </button>
           <div v-if="storyOptionsOpen" class="coomi-status-popover coomi-story-popover">
             <label class="coomi-story-field">
@@ -261,6 +272,14 @@
                 ? '开启：按目标字数上下浮动 10% 验收，未达标时最多自动修订一次，会增加时间和用量；仍未达标则保留候选稿，不写入章节。'
                 : '关闭：目标字数仅作写作提示，按实际篇幅保存，不因字数偏差自动修订或拒绝保存。' }}
               AI 不保证达到目标。字数按非空白字符计算（含标点），片段共用整章目标；空正文或检测到截断时不写入，有内容时保留候选稿并说明原因。
+            </small>
+            <label class="coomi-story-field coomi-story-continuity-field">
+              <span>整理人物与线索</span>
+              <input type="checkbox" :checked="agentStore.continuityTrackingEnabled"
+                @change="persistStoryGenerationOptions({ continuityTrackingEnabled: ($event.target as HTMLInputElement).checked })" />
+            </label>
+            <small class="coomi-story-template-hint">
+              开启后，章节保存成功会额外调用一次模型整理续写记录，增加时间和用量；整理失败会提示，已保存正文保留。关闭后仍可参考已有记录。
             </small>
             <label class="coomi-story-field">
               <span>目标字数</span>
@@ -1250,6 +1269,7 @@ watch(
     workspaceStore.storySettings.storyFragmentCount,
     workspaceStore.storySettings.chapterLengthTier,
     workspaceStore.storySettings.preciseWordCountEnabled,
+    workspaceStore.storySettings.continuityTrackingEnabled,
     workspaceStore.storySettings.chapterWordCountTarget,
     workspaceStore.storySettings.storyChapterTemplateId
   ],
@@ -1268,10 +1288,20 @@ watch(storyOptionsOpen, () => {
   }
 });
 
+watch(promptDockActive, (active) => {
+  if (active) {
+    storyOptionsOpen.value = false;
+    reasoningMenuOpen.value = false;
+    permissionMenuOpen.value = false;
+    commandMenuOpen.value = false;
+  }
+});
+
 async function handleSubmitOrStop(): Promise<void> {
   if (agentStore.editingTraceId || agentStore.isReexecuting) {
     return;
   }
+  storyOptionsOpen.value = false;
   await agentStore.runPrompt();
   await nextTick();
   resizeComposer();
@@ -1385,6 +1415,7 @@ function toggleReasoningMenu(): void {
 }
 
 function toggleStoryOptions(): void {
+  if (promptDockActive.value) return;
   storyOptionsOpen.value = !storyOptionsOpen.value;
   permissionMenuOpen.value = false;
   reasoningMenuOpen.value = false;
@@ -1447,6 +1478,7 @@ function syncStoryGenerationOptionsFromProjectSettings(): void {
     chapterLengthTier: workspaceStore.storySettings.chapterLengthTier,
     chapterWordCountTarget: workspaceStore.storySettings.chapterWordCountTarget,
     preciseWordCountEnabled: workspaceStore.storySettings.preciseWordCountEnabled,
+    continuityTrackingEnabled: workspaceStore.storySettings.continuityTrackingEnabled,
     chapterTemplateId: workspaceStore.storySettings.storyChapterTemplateId || "default_chapter_directory"
   });
 }
@@ -1456,6 +1488,7 @@ async function persistStoryGenerationOptions(options: {
   chapterLengthTier?: ChapterLengthTier;
   chapterWordCountTarget?: number;
   preciseWordCountEnabled?: boolean;
+  continuityTrackingEnabled?: boolean;
   chapterTemplateId?: string;
 }): Promise<void> {
   storyOptionsEditing.value = true;
@@ -1472,6 +1505,7 @@ async function persistStoryGenerationOptions(options: {
       chapterLengthTier: agentStore.chapterLengthTier,
       chapterWordCountTarget: agentStore.chapterWordCountTarget,
       preciseWordCountEnabled: agentStore.preciseWordCountEnabled,
+      continuityTrackingEnabled: agentStore.continuityTrackingEnabled,
       storyChapterTemplateId: agentStore.storyChapterTemplateId
     });
   } catch (error: unknown) {
@@ -1482,6 +1516,7 @@ async function persistStoryGenerationOptions(options: {
         chapterLengthTier: workspaceStore.storySettings.chapterLengthTier,
         chapterWordCountTarget: workspaceStore.storySettings.chapterWordCountTarget,
         preciseWordCountEnabled: workspaceStore.storySettings.preciseWordCountEnabled,
+        continuityTrackingEnabled: workspaceStore.storySettings.continuityTrackingEnabled,
         chapterTemplateId: workspaceStore.storySettings.storyChapterTemplateId
       });
     }
@@ -1501,6 +1536,17 @@ function isPermissionOptionActive(value: PermissionChoice): boolean {
 
 function permissionToneClass(value: PermissionTone): string {
   return `permission-${value.replace(/_/g, "-")}`;
+}
+
+const PERMISSION_TONE_ICONS: Record<PermissionTone, string> = {
+  plan_mode: "lock",
+  ask_approval: "front_hand",
+  approve_for_me: "verified_user",
+  full_access: "gpp_maybe",
+};
+
+function permissionToneIcon(value: PermissionTone): string {
+  return PERMISSION_TONE_ICONS[value] ?? "shield";
 }
 
 async function selectPermissionOption(value: PermissionChoice): Promise<void> {
@@ -2449,7 +2495,6 @@ defineExpose({
   overflow: hidden;
   background: var(--bg-agent);
   color: var(--text-main);
-  border-left: 1px solid var(--border-subtle);
 }
 
 .coomi-header,
@@ -2458,14 +2503,14 @@ defineExpose({
 }
 
 .coomi-header {
-  min-height: 44px;
+  min-height: 46px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 8px 12px;
-  background: var(--bg-header);
-  border-bottom: 1px solid var(--border-subtle);
+  padding: 8px 10px 8px 16px;
+  background: transparent;
+  border-bottom: 1px solid var(--border-ghost);
 }
 
 .coomi-title {
@@ -2473,14 +2518,15 @@ defineExpose({
   display: flex;
   align-items: baseline;
   gap: 8px;
-  font-size: 13px;
-  font-weight: 700;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .coomi-header-actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 2px;
 }
 
 .coomi-icon-btn,
@@ -2494,12 +2540,12 @@ defineExpose({
 }
 
 .coomi-icon-btn {
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   color: var(--text-muted);
 }
 
@@ -2512,10 +2558,11 @@ defineExpose({
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 8px;
-  border-radius: var(--radius-sm);
+  margin-left: 6px;
+  padding: 3px 10px;
+  border-radius: var(--radius-full);
   color: var(--text-muted);
-  background: color-mix(in srgb, var(--text-main) 6%, transparent);
+  background: var(--surface-3);
   font-size: 11px;
 }
 
@@ -2536,7 +2583,7 @@ defineExpose({
   max-height: 100%;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 16px 18px 22px;
+  padding: 20px 20px 24px;
 }
 
 .coomi-stream-shell {
@@ -3219,8 +3266,8 @@ defineExpose({
   flex-direction: column;
   gap: 6px;
   padding: 0 12px 12px;
-  background: var(--bg-header);
-  border-top: 1px solid var(--border-subtle);
+  background: transparent;
+  border-top: 0;
 }
 
 .coomi-feedback {
@@ -3267,7 +3314,7 @@ defineExpose({
   position: absolute;
   inset: 3px;
   border-radius: inherit;
-  background: var(--bg-header);
+  background: var(--bg-input);
 }
 
 .coomi-context-ring.safe {
@@ -3302,67 +3349,122 @@ defineExpose({
   font-size: 14px;
 }
 
+/* 输入框上方的选项条：每个选项都是带图标的圆角胶囊按钮 */
 .coomi-composer-status {
   position: relative;
   container: coomi-composer-status / inline-size;
   display: flex;
   align-items: center;
-  gap: 7px;
-  min-height: 30px;
-  padding: 5px 8px 0;
+  gap: 8px;
+  min-height: 38px;
+  padding: 6px 4px 2px;
   overflow: visible;
 }
 
 .coomi-composer-status > .coomi-status-pill,
 .coomi-composer-status > .coomi-status-control {
-  min-height: 24px;
   display: inline-flex;
   align-items: center;
 }
 
 .coomi-status-pill {
+  flex: 0 0 auto;
   min-width: 0;
-  max-width: 145px;
+  max-width: 168px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px 0 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-resting);
+  color: var(--text-soft);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease, box-shadow 140ms ease;
+}
+
+.coomi-status-pill:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text-main);
+}
+
+.coomi-status-pill[aria-expanded="true"] {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-subtle));
+  background: var(--bg-selected);
+  color: var(--text-main);
+}
+
+
+/* 模型名可能很长：允许它先收缩，其余选项保持完整 */
+.coomi-model-chip {
+  flex: 0 1 auto;
+  min-width: 64px;
+}
+
+.coomi-chip-icon {
+  flex: 0 0 auto;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--text-muted);
+}
+
+.coomi-chip-label {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--text-muted);
-  font-size: 11px;
 }
 
-.coomi-status-button {
+.coomi-chip-caret {
   flex: 0 0 auto;
-  min-height: 24px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--text-soft);
-  font-family: inherit;
+  margin-left: -1px;
+  font-size: 16px;
   line-height: 1;
-  cursor: pointer;
+  color: var(--text-faint);
+  transition: transform 140ms ease;
 }
 
-.coomi-status-button.permission-plan-mode,
+.coomi-status-pill[aria-expanded="true"] .coomi-chip-caret {
+  transform: rotate(180deg);
+}
+
+.coomi-status-pill:hover .coomi-chip-icon,
+.coomi-status-pill[aria-expanded="true"] .coomi-chip-icon {
+  color: var(--text-soft);
+}
+
+/* 审批模式用图标颜色区分风险，文字保持正文色 */
+.coomi-status-button.permission-plan-mode .coomi-chip-icon,
 .coomi-choice-card.permission-plan-mode span {
   color: var(--info-fg);
 }
 
-.coomi-status-button.permission-ask-approval {
-  color: var(--text-main);
-}
-
+.coomi-status-button.permission-ask-approval .coomi-chip-icon,
 .coomi-choice-card.permission-ask-approval span {
   color: var(--accent-strong);
 }
 
-.coomi-status-button.permission-approve-for-me,
+.coomi-status-button.permission-approve-for-me .coomi-chip-icon,
 .coomi-choice-card.permission-approve-for-me span {
   color: var(--success-fg);
 }
 
-.coomi-status-button.permission-full-access,
+.coomi-status-button.permission-full-access .coomi-chip-icon,
 .coomi-choice-card.permission-full-access span {
   color: var(--warning-fg);
+}
+
+.coomi-status-button.permission-full-access {
+  border-color: var(--warning-border);
+  background: color-mix(in srgb, var(--warning-bg) 60%, var(--surface-1));
 }
 
 .coomi-status-control {
@@ -3396,30 +3498,7 @@ defineExpose({
 }
 
 .coomi-story-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  max-width: 118px;
-  height: 24px;
-  vertical-align: middle;
-}
-
-.coomi-story-toggle .material-symbols-rounded {
-  flex: 0 0 auto;
-  font-size: 15px;
-  line-height: 1;
-  align-self: center;
-}
-
-.coomi-story-toggle span:nth-child(2) {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.coomi-story-caret {
-  color: var(--text-muted);
+  max-width: 168px;
 }
 
 .coomi-story-popover {
@@ -3516,6 +3595,21 @@ defineExpose({
 
 .coomi-story-template-hint.error {
   color: var(--danger);
+}
+
+/* Agent 区较窄时：模型与故事参数只保留图标，名称见悬停提示 */
+@container coomi-composer-status (max-width: 470px) {
+  .coomi-model-chip,
+  .coomi-story-toggle {
+    min-width: 0;
+    padding: 0 7px;
+  }
+
+  .coomi-model-chip .coomi-chip-label,
+  .coomi-story-toggle .coomi-chip-label,
+  .coomi-story-toggle .coomi-chip-caret {
+    display: none;
+  }
 }
 
 @container coomi-composer-status (max-width: 250px) {
@@ -4169,14 +4263,22 @@ defineExpose({
   display: flex;
   align-items: flex-end;
   gap: 10px;
-  padding: 8px 10px 8px 12px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-md);
+  padding: 8px 8px 8px 14px;
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-xl);
   background: var(--bg-input);
+  box-shadow: var(--shadow-raised);
   overflow: visible;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
 }
 
-.coomi-story-precision-field input[type="checkbox"] {
+.coomi-input-shell:focus-within {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-raised), 0 0 0 3px var(--accent-soft);
+}
+
+.coomi-story-precision-field input[type="checkbox"],
+.coomi-story-continuity-field input[type="checkbox"] {
   justify-self: start;
   width: 16px;
   height: 16px;
@@ -4294,9 +4396,9 @@ defineExpose({
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  color: var(--text-main);
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  color: var(--accent-contrast);
   transition:
     transform 0.18s ease,
     color 0.18s ease,
@@ -4313,7 +4415,7 @@ defineExpose({
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-full);
   background: transparent;
   color: var(--text-muted);
 }
@@ -4342,8 +4444,7 @@ defineExpose({
 }
 
 .coomi-send:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--accent) 24%, transparent);
-  transform: translateY(-1px);
+  background: var(--accent-strong);
 }
 
 .coomi-send:active:not(:disabled) {
@@ -4358,9 +4459,7 @@ defineExpose({
   transition: transform 0.18s ease;
 }
 
-.coomi-send:hover:not(:disabled) .material-symbols-rounded {
-  transform: translateY(-1px);
-}
+
 
 .coomi-send.stop {
   color: var(--danger);
@@ -4394,7 +4493,9 @@ defineExpose({
 }
 
 .coomi-send:disabled {
-  opacity: 0.45;
+  background: var(--surface-3);
+  color: var(--text-faint);
+  opacity: 1;
   cursor: default;
 }
 

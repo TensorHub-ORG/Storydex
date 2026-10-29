@@ -81,6 +81,24 @@ describe("auth store", () => {
 });
 
 describe("git store", () => {
+  it("backs off unavailable repository polling but keeps manual refresh and project reset immediate", async () => {
+    const store = useGitStore(); store.reset();
+    workspaceApi.fetchWorkspaceGitSummary.mockResolvedValue(result({ ...gitSummary, initialized: false }));
+    await store.refreshSummary({ silent: true });
+    for (let i = 0; i < 10; i++) {
+      vi.advanceTimersByTime(4000);
+      await store.refreshSummary({ silent: true });
+    }
+    expect(workspaceApi.fetchWorkspaceGitSummary).toHaveBeenCalledTimes(1);
+    await store.refreshSummary({ silent: true, force: true });
+    expect(workspaceApi.fetchWorkspaceGitSummary).toHaveBeenCalledTimes(2);
+    vi.advanceTimersByTime(60000);
+    await store.refreshSummary({ silent: true });
+    expect(workspaceApi.fetchWorkspaceGitSummary).toHaveBeenCalledTimes(3);
+    store.reset();
+    await store.refreshSummary({ silent: true });
+    expect(workspaceApi.fetchWorkspaceGitSummary).toHaveBeenCalledTimes(4);
+  });
   it("covers all success, guard, message and failure paths", async () => {
     const store = useGitStore(); expect(store.changedCount).toBe(0); expect(store.recentCommits).toEqual([]);
     await store.refreshSummary(); expect(store.changedCount).toBe(1); expect(store.recentCommits).toHaveLength(1);

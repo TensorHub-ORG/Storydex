@@ -138,8 +138,8 @@ async function handleSave(): Promise<void> {
   z-index: 40;
   display: flex;
   justify-content: flex-end;
-  background: color-mix(in srgb, var(--bg-app) 68%, transparent);
-  backdrop-filter: blur(8px);
+  background: var(--overlay-scrim);
+  backdrop-filter: blur(2px);
 }
 
 .story-settings-shell {
@@ -147,8 +147,9 @@ async function handleSave(): Promise<void> {
   height: 100%;
   display: flex;
   flex-direction: column;
-  background: var(--bg-panel);
-  border-left: 1px solid var(--border-ghost);
+  background: var(--surface-1);
+  border-left: 1px solid var(--card-border);
+  box-shadow: var(--shadow-overlay);
 }
 
 .story-settings-header {

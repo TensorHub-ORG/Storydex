@@ -1,54 +1,59 @@
 /* ============================================================
    Storydex 设计令牌（单层，唯一定义处）
-   风格纪律：GitHub 式灰阶分层表面 + 实色边框 + 克制密度。
-   - 表面三档：surface-1 画布 / surface-2 内嵌 / surface-3 更深内嵌
-   - 边框一律实色 hex：半透明边框叠在同色表面上等于没有边框
-   - 悬停只改背景与边框，不位移、不发光
-   - 每个主题保留自己的主体色（accent），骨架与纪律统一
+   风格纪律：画布 + 浮起卡片的两层结构（参考 Claude / Codex Desktop）。
+   - canvas：窗口底色。顶栏、活动栏、侧栏、状态栏直接坐在画布上，不画分割线
+   - card（surface-1）：编辑区与 Agent 区是浮起的圆角卡片，靠底色差 + 细边 + 轻投影区分
+   - surface-2 / surface-3：卡片内部的嵌入层（输入框、代码块、选中底）
+   - surface-overlay：菜单、弹窗等最高层
+   - 选中态 = 把元素「抬」到卡片层（card 底 + 轻投影），而不是加色条
+   - 每个主题只换调色板，骨架统一
    ============================================================ */
 
 :root {
-  --header-height: 34px;
-  --footer-height: 24px;
+  --header-height: 40px;
+  --footer-height: 26px;
 
-  /* 尺度 */
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 8px;
+  /* 框架尺度 */
+  --shell-gap: 8px;
+  --shell-edge: 8px;
+
+  /* 圆角：徽章/小控件 / 按钮输入 / 卡片浮层 / 框架卡片 */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 14px;
   --radius-full: 999px;
 
-  --font-ui: "IBM Plex Sans", "PingFang SC", "Microsoft YaHei UI", "Segoe UI", sans-serif;
+  --font-ui: "Inter", "IBM Plex Sans", "PingFang SC", "Microsoft YaHei UI", "Segoe UI", sans-serif;
   --font-prose: "Source Han Serif SC", "Noto Serif SC", "Songti SC", serif;
   --font-mono: "Cascadia Mono", "IBM Plex Mono", "Consolas", monospace;
   --font-editor: var(--font-mono);
   --ui-pane-font-scale: 1;
 
-  /* ---- 表面（default 主题：暖橙主张，浅灰阶分层） ---- */
+  /* ---- 现代浅色（default）：暖灰画布 + 白卡片，暖橙强调 ---- */
+  --canvas: #efede8;
   --surface-1: #ffffff;
-  --surface-2: #f4f6fa;
-  --surface-3: #eaeef4;
+  --surface-2: #f6f5f2;
+  --surface-3: #eceae5;
   --surface-overlay: #ffffff;
 
-  /* ---- 边框（实色） ---- */
-  --border-strong: #c2cad6;
-  --border-subtle: #d5dae2;
-  --border-ghost: #e6eaf1;
+  --border-strong: #c9c5bc;
+  --border-subtle: #dedbd4;
+  --border-ghost: #ebe9e4;
+  --card-border: #dcd9d1;
 
-  /* ---- 文本 ---- */
-  --text-main: #162030;
-  --text-soft: #3f4e62;
-  --text-muted: #66748a;
-  --text-faint: #94a1b3;
+  --text-main: #1f1d1a;
+  --text-soft: #46423c;
+  --text-muted: #6c675e;
+  --text-faint: #a39e95;
   --text-inverse: #ffffff;
 
-  /* ---- 强调色 ---- */
-  --accent: #d06d3b;
-  --accent-rgb: 208, 109, 59;
-  --accent-strong: #b6562d;
-  --accent-soft: rgba(var(--accent-rgb), 0.14);
+  --accent: #c96a3a;
+  --accent-rgb: 201, 106, 58;
+  --accent-strong: #ad5429;
+  --accent-soft: rgba(var(--accent-rgb), 0.12);
   --accent-contrast: #ffffff;
 
-  /* ---- 状态三元组 ---- */
   --success-fg: #1f8a53;
   --success-bg: #e6f5ec;
   --success-border: #b3ddc5;
@@ -62,31 +67,36 @@
   --info-bg: #e8f0fd;
   --info-border: #bcd3f6;
 
-  /* ---- 交互态背景 ---- */
-  --bg-hover: rgba(22, 32, 48, 0.06);
-  --bg-active: rgba(22, 32, 48, 0.1);
-  --bg-selected: rgba(var(--accent-rgb), 0.12);
+  --bg-hover: rgba(31, 29, 26, 0.055);
+  --bg-active: rgba(31, 29, 26, 0.09);
+  --bg-selected: rgba(var(--accent-rgb), 0.1);
 
-  /* ---- 阴影 ---- */
-  --shadow-resting: 0 1px 0 var(--border-subtle);
-  --shadow-overlay: 0 8px 24px rgba(22, 32, 48, 0.14);
-  --shadow-modal: 0 16px 48px rgba(22, 32, 48, 0.2);
+  /* 画布上的选中项：抬到卡片层 */
+  --nav-selected-bg: #ffffff;
+  --nav-selected-shadow: 0 0 0 1px rgba(31, 29, 26, 0.07), 0 1px 2px rgba(31, 29, 26, 0.08);
 
-  /* ---- 活动栏 / 状态栏 ---- */
-  --activity-bg: #171a21;
-  --activity-border: #262b34;
-  --activity-icon: rgba(234, 239, 246, 0.68);
-  --activity-icon-active: #ffffff;
-  --activity-item-hover: rgba(255, 255, 255, 0.08);
-  --activity-item-active: transparent;
+  /* ---- 阴影：卡片 / 浮层 / 弹窗三档 ---- */
+  --shadow-resting: 0 1px 2px rgba(31, 29, 26, 0.06);
+  --shadow-card: 0 1px 2px rgba(31, 29, 26, 0.05), 0 2px 8px rgba(31, 29, 26, 0.04);
+  --shadow-raised: 0 1px 2px rgba(31, 29, 26, 0.06), 0 4px 14px rgba(31, 29, 26, 0.07);
+  --shadow-overlay: 0 4px 12px rgba(31, 29, 26, 0.08), 0 12px 32px rgba(31, 29, 26, 0.12);
+  --shadow-modal: 0 8px 24px rgba(31, 29, 26, 0.12), 0 24px 64px rgba(31, 29, 26, 0.18);
 
-  --statusbar-bg: #182233;
-  --statusbar-text: #dfe7f5;
-  --statusbar-divider: rgba(255, 255, 255, 0.24);
+  /* ---- 活动栏 / 状态栏：与画布同色，靠选中胶囊表达状态 ---- */
+  --activity-bg: var(--canvas);
+  --activity-border: transparent;
+  --activity-icon: var(--text-muted);
+  --activity-icon-active: var(--text-main);
+  --activity-item-hover: var(--bg-hover);
+  --activity-item-active: var(--nav-selected-bg);
+
+  --statusbar-bg: var(--canvas);
+  --statusbar-text: var(--text-muted);
+  --statusbar-divider: var(--border-subtle);
 
   /* ---- 编辑器查找高亮 ---- */
   --find-highlight-bg: #fdf0b8;
-  --find-highlight-fg: #162030;
+  --find-highlight-fg: #1f1d1a;
   --find-highlight-active-bg: #f5c451;
   --find-highlight-active-fg: #2b1c05;
 
@@ -97,34 +107,35 @@
   --wiki-cat-4: #8b74c4;
 
   /* ---- 遮罩 ---- */
-  --overlay-scrim: rgba(22, 32, 48, 0.42);
+  --overlay-scrim: rgba(24, 22, 19, 0.36);
 
-  --welcome-wordmark-fill: linear-gradient(135deg, #22324b 0%, #5a6f8c 100%);
+  --welcome-wordmark-fill: linear-gradient(135deg, #2a2621 0%, #7a7166 100%);
 
-  /* 装饰层：GitHub 纪律下不使用背景光晕 */
   --glow-a: transparent;
   --glow-b: transparent;
   --page-overlay-start: transparent;
   --page-overlay-end: transparent;
 
-  /* ============================================================
-     语义别名（供既有 31k 行代码沿用旧变量名，勿删）
-     ============================================================ */
   /* --bg-header / --bg-app 由 useTheme.ts 通过 getPropertyValue 读取以同步桌面标题栏，
-     必须是字面颜色值，不能是 var() 别名 */
-  --bg-app: #f4f6fa;
-  --bg-header: #f4f6fa;
-  --bg-sidebar: var(--surface-2);
-  --bg-agent: var(--surface-2);
+     必须是字面颜色值，不能是 var() 别名；与 --canvas 保持一致 */
+  --bg-app: #efede8;
+  --bg-header: #efede8;
+
+  /* ============================================================
+     语义别名（供既有代码沿用旧变量名，勿删）
+     ============================================================ */
+  --card: var(--surface-1);
+  --bg-sidebar: var(--canvas);
+  --bg-panel: var(--canvas);
+  --bg-agent: var(--surface-1);
   --bg-editor: var(--surface-1);
+  --bg-main: var(--surface-1);
   --bg-card: var(--surface-1);
   --bg-card-muted: var(--surface-2);
-  --bg-elevated: var(--surface-1);
+  --bg-elevated: var(--surface-overlay);
   --bg-input: var(--surface-1);
-  --bg-code: var(--surface-3);
-  --bg-panel: var(--surface-2);
-  --bg-main: var(--surface-1);
-  --panel-bg: var(--surface-2);
+  --bg-code: var(--surface-2);
+  --panel-bg: var(--canvas);
   --input-bg: var(--surface-1);
   --surface: var(--surface-1);
   --color-surface: var(--surface-1);
@@ -155,9 +166,9 @@
   --color-error: var(--danger-fg);
   --color-info: var(--info-fg);
 
-  --color-user-bubble: var(--surface-2);
-  --color-assistant-bubble: var(--surface-1);
-  --color-code-bg: var(--surface-3);
+  --color-user-bubble: var(--surface-3);
+  --color-assistant-bubble: transparent;
+  --color-code-bg: var(--surface-2);
   --color-code-fg: var(--text-main);
 
   --shadow-sm: var(--shadow-resting);
@@ -166,29 +177,32 @@
 }
 
 /* ============================================================
-   纯白工作台：GitHub Light 灰阶，蓝色强调
+   纯白工作台：中性灰画布 + 纯白卡片，蓝色强调
+   画布与卡片拉开明度差，卡片带实色细边与投影，块与块之间结构清楚
    ============================================================ */
 [data-theme="white"] {
+  --canvas: #ebedf0;
   --surface-1: #ffffff;
-  --surface-2: #f6f8fa;
-  --surface-3: #eff2f5;
+  --surface-2: #f5f6f8;
+  --surface-3: #eceef1;
   --surface-overlay: #ffffff;
-  --bg-app: #f6f8fa;
-  --bg-header: #f6f8fa;
+  --bg-app: #ebedf0;
+  --bg-header: #ebedf0;
 
-  --border-strong: #b9c1cb;
-  --border-subtle: #d1d9e0;
-  --border-ghost: #e4e8ec;
+  --border-strong: #b9bfc8;
+  --border-subtle: #d6dae0;
+  --border-ghost: #e7e9ed;
+  --card-border: #d3d7de;
 
-  --text-main: #1f2328;
-  --text-soft: #414952;
-  --text-muted: #636c76;
-  --text-faint: #8c959f;
+  --text-main: #17191c;
+  --text-soft: #3d424a;
+  --text-muted: #646b75;
+  --text-faint: #979ea8;
   --text-inverse: #ffffff;
 
-  --accent: #005fb8;
-  --accent-rgb: 0, 95, 184;
-  --accent-strong: #0a4f96;
+  --accent: #0b63c4;
+  --accent-rgb: 11, 99, 196;
+  --accent-strong: #0a519f;
   --accent-soft: rgba(var(--accent-rgb), 0.1);
   --accent-contrast: #ffffff;
 
@@ -205,27 +219,21 @@
   --info-bg: #ddf4ff;
   --info-border: #b6e3ff;
 
-  --bg-hover: rgba(31, 35, 40, 0.06);
-  --bg-active: rgba(31, 35, 40, 0.1);
-  --bg-selected: rgba(var(--accent-rgb), 0.1);
+  --bg-hover: rgba(23, 25, 28, 0.055);
+  --bg-active: rgba(23, 25, 28, 0.09);
+  --bg-selected: rgba(var(--accent-rgb), 0.09);
 
-  --shadow-resting: 0 1px 0 var(--border-subtle);
-  --shadow-overlay: 0 8px 24px rgba(31, 35, 40, 0.12);
-  --shadow-modal: 0 16px 48px rgba(31, 35, 40, 0.18);
+  --nav-selected-bg: #ffffff;
+  --nav-selected-shadow: 0 0 0 1px rgba(23, 25, 28, 0.08), 0 1px 2px rgba(23, 25, 28, 0.1);
 
-  --activity-bg: #eff2f5;
-  --activity-border: #d1d9e0;
-  --activity-icon: #636c76;
-  --activity-icon-active: #1f2328;
-  --activity-item-hover: rgba(31, 35, 40, 0.06);
-  --activity-item-active: transparent;
-
-  --statusbar-bg: #eff2f5;
-  --statusbar-text: #636c76;
-  --statusbar-divider: #d1d9e0;
+  --shadow-resting: 0 1px 2px rgba(23, 25, 28, 0.07);
+  --shadow-card: 0 1px 2px rgba(23, 25, 28, 0.06), 0 3px 10px rgba(23, 25, 28, 0.05);
+  --shadow-raised: 0 1px 2px rgba(23, 25, 28, 0.07), 0 4px 14px rgba(23, 25, 28, 0.08);
+  --shadow-overlay: 0 4px 12px rgba(23, 25, 28, 0.08), 0 12px 32px rgba(23, 25, 28, 0.12);
+  --shadow-modal: 0 8px 24px rgba(23, 25, 28, 0.12), 0 24px 64px rgba(23, 25, 28, 0.18);
 
   --find-highlight-bg: #fff8c5;
-  --find-highlight-fg: #1f2328;
+  --find-highlight-fg: #17191c;
   --find-highlight-active-bg: #f5c451;
   --find-highlight-active-fg: #2b1c05;
 
@@ -234,35 +242,38 @@
   --wiki-cat-3: #1a7f37;
   --wiki-cat-4: #8250df;
 
-  --overlay-scrim: rgba(31, 35, 40, 0.4);
+  --overlay-scrim: rgba(17, 19, 22, 0.36);
 
-  --welcome-wordmark-fill: linear-gradient(135deg, #1f2328 0%, #636c76 100%);
+  --welcome-wordmark-fill: linear-gradient(135deg, #17191c 0%, #646b75 100%);
 }
 
 /* ============================================================
-   雪：冷蓝主张
+   雪纸蓝白：冷蓝灰画布 + 白卡片
    ============================================================ */
 [data-theme="snow"] {
+  --canvas: #e9eef6;
   --surface-1: #ffffff;
-  --surface-2: #f2f7ff;
-  --surface-3: #e6effc;
+  --surface-2: #f4f7fc;
+  --surface-3: #e9eff8;
   --surface-overlay: #ffffff;
-  --bg-app: #f2f7ff;
-  --bg-header: #f2f7ff;
+  --bg-app: #e9eef6;
+  --bg-header: #e9eef6;
 
-  --border-strong: #b7c9e4;
-  --border-subtle: #ccdcf2;
-  --border-ghost: #e0e9f7;
+  --border-strong: #b5c4da;
+  --border-subtle: #d2dcea;
+  --border-ghost: #e3e9f3;
+  --card-border: #cfd9e8;
 
-  --text-main: #16315e;
-  --text-soft: #42638f;
-  --text-muted: #6f8bb2;
-  --text-faint: #9fb5d8;
+  --text-main: #14284a;
+  --text-soft: #3b557c;
+  --text-muted: #566d90;
+  --text-faint: #9aabc6;
+  --text-inverse: #ffffff;
 
-  --accent: #4e79ef;
-  --accent-rgb: 78, 121, 239;
-  --accent-strong: #325ddd;
-  --accent-soft: rgba(var(--accent-rgb), 0.14);
+  --accent: #3f6fe6;
+  --accent-rgb: 63, 111, 230;
+  --accent-strong: #2f58c8;
+  --accent-soft: rgba(var(--accent-rgb), 0.11);
   --accent-contrast: #ffffff;
 
   --success-fg: #1c7f57;
@@ -278,27 +289,21 @@
   --info-bg: #e6f0ff;
   --info-border: #bcd5f9;
 
-  --bg-hover: rgba(22, 49, 94, 0.06);
-  --bg-active: rgba(22, 49, 94, 0.1);
-  --bg-selected: rgba(var(--accent-rgb), 0.14);
+  --bg-hover: rgba(20, 40, 74, 0.055);
+  --bg-active: rgba(20, 40, 74, 0.09);
+  --bg-selected: rgba(var(--accent-rgb), 0.1);
 
-  --shadow-resting: 0 1px 0 var(--border-subtle);
-  --shadow-overlay: 0 8px 24px rgba(22, 49, 94, 0.14);
-  --shadow-modal: 0 16px 48px rgba(22, 49, 94, 0.2);
+  --nav-selected-bg: #ffffff;
+  --nav-selected-shadow: 0 0 0 1px rgba(20, 40, 74, 0.08), 0 1px 2px rgba(20, 40, 74, 0.1);
 
-  --activity-bg: #e6effc;
-  --activity-border: #ccdcf2;
-  --activity-icon: #6281bb;
-  --activity-icon-active: #2a56c8;
-  --activity-item-hover: rgba(78, 121, 239, 0.1);
-  --activity-item-active: transparent;
-
-  --statusbar-bg: #3567dd;
-  --statusbar-text: #f8fbff;
-  --statusbar-divider: rgba(255, 255, 255, 0.3);
+  --shadow-resting: 0 1px 2px rgba(20, 40, 74, 0.07);
+  --shadow-card: 0 1px 2px rgba(20, 40, 74, 0.06), 0 3px 10px rgba(20, 40, 74, 0.05);
+  --shadow-raised: 0 1px 2px rgba(20, 40, 74, 0.07), 0 4px 14px rgba(20, 40, 74, 0.08);
+  --shadow-overlay: 0 4px 12px rgba(20, 40, 74, 0.08), 0 12px 32px rgba(20, 40, 74, 0.13);
+  --shadow-modal: 0 8px 24px rgba(20, 40, 74, 0.12), 0 24px 64px rgba(20, 40, 74, 0.2);
 
   --find-highlight-bg: #fdf0b8;
-  --find-highlight-fg: #16315e;
+  --find-highlight-fg: #14284a;
   --find-highlight-active-bg: #f3c04a;
   --find-highlight-active-fg: #2b1c05;
 
@@ -307,35 +312,38 @@
   --wiki-cat-3: #2c8f6a;
   --wiki-cat-4: #7a63bd;
 
-  --overlay-scrim: rgba(16, 34, 66, 0.42);
+  --overlay-scrim: rgba(16, 34, 66, 0.36);
 
   --welcome-wordmark-fill: linear-gradient(135deg, #2954c7 0%, #7aa3ff 100%);
 }
 
 /* ============================================================
-   纸书：暖棕主张
+   沉浸书卷：暖纸画布 + 米白卡片
    ============================================================ */
 [data-theme="book"] {
-  --surface-1: #fffaf3;
-  --surface-2: #f6ede1;
-  --surface-3: #eee2d2;
-  --surface-overlay: #fffaf3;
-  --bg-app: #f6ede1;
-  --bg-header: #f6ede1;
+  --canvas: #eee4d5;
+  --surface-1: #fffbf5;
+  --surface-2: #f8f1e6;
+  --surface-3: #f0e6d7;
+  --surface-overlay: #fffbf5;
+  --bg-app: #eee4d5;
+  --bg-header: #eee4d5;
 
   --border-strong: #cbb69b;
-  --border-subtle: #ddcdb8;
-  --border-ghost: #ebe0d0;
+  --border-subtle: #e0d2bf;
+  --border-ghost: #ede3d5;
+  --card-border: #dccdb7;
 
-  --text-main: #3f2f26;
+  --text-main: #3a2b21;
   --text-soft: #5b4738;
-  --text-muted: #816f62;
-  --text-faint: #ac9d92;
+  --text-muted: #765f4d;
+  --text-faint: #ae9d8c;
+  --text-inverse: #fff8f0;
 
-  --accent: #b56033;
-  --accent-rgb: 181, 96, 51;
-  --accent-strong: #984520;
-  --accent-soft: rgba(var(--accent-rgb), 0.14);
+  --accent: #b05c30;
+  --accent-rgb: 176, 92, 48;
+  --accent-strong: #93461f;
+  --accent-soft: rgba(var(--accent-rgb), 0.12);
   --accent-contrast: #fff8f0;
 
   --success-fg: #2f7a4f;
@@ -351,27 +359,21 @@
   --info-bg: #e7eef7;
   --info-border: #bdd0e6;
 
-  --bg-hover: rgba(63, 47, 38, 0.06);
-  --bg-active: rgba(63, 47, 38, 0.1);
-  --bg-selected: rgba(var(--accent-rgb), 0.14);
+  --bg-hover: rgba(58, 43, 33, 0.06);
+  --bg-active: rgba(58, 43, 33, 0.1);
+  --bg-selected: rgba(var(--accent-rgb), 0.11);
 
-  --shadow-resting: 0 1px 0 var(--border-subtle);
-  --shadow-overlay: 0 8px 24px rgba(63, 47, 38, 0.16);
-  --shadow-modal: 0 16px 48px rgba(63, 47, 38, 0.22);
+  --nav-selected-bg: #fffbf5;
+  --nav-selected-shadow: 0 0 0 1px rgba(58, 43, 33, 0.08), 0 1px 2px rgba(58, 43, 33, 0.1);
 
-  --activity-bg: #302721;
-  --activity-border: #423630;
-  --activity-icon: rgba(248, 237, 223, 0.72);
-  --activity-icon-active: #fff5eb;
-  --activity-item-hover: rgba(255, 255, 255, 0.08);
-  --activity-item-active: transparent;
-
-  --statusbar-bg: #4f3c2f;
-  --statusbar-text: #fff7ee;
-  --statusbar-divider: rgba(255, 255, 255, 0.26);
+  --shadow-resting: 0 1px 2px rgba(58, 43, 33, 0.07);
+  --shadow-card: 0 1px 2px rgba(58, 43, 33, 0.06), 0 3px 10px rgba(58, 43, 33, 0.05);
+  --shadow-raised: 0 1px 2px rgba(58, 43, 33, 0.07), 0 4px 14px rgba(58, 43, 33, 0.08);
+  --shadow-overlay: 0 4px 12px rgba(58, 43, 33, 0.09), 0 12px 32px rgba(58, 43, 33, 0.14);
+  --shadow-modal: 0 8px 24px rgba(58, 43, 33, 0.13), 0 24px 64px rgba(58, 43, 33, 0.2);
 
   --find-highlight-bg: #f6dfa4;
-  --find-highlight-fg: #3f2f26;
+  --find-highlight-fg: #3a2b21;
   --find-highlight-active-bg: #dda437;
   --find-highlight-active-fg: #2e1d08;
 
@@ -380,37 +382,39 @@
   --wiki-cat-3: #48815d;
   --wiki-cat-4: #7d6396;
 
-  --overlay-scrim: rgba(45, 33, 25, 0.44);
+  --overlay-scrim: rgba(45, 33, 25, 0.38);
 
   --welcome-wordmark-fill: linear-gradient(135deg, #734325 0%, #c8874d 100%);
 }
 
 /* ============================================================
-   暗色：暖橙主张
+   纯净暗色：近黑画布 + 略亮的卡片（暗色下越靠前越亮）
    ============================================================ */
 [data-theme="dark"] {
-  --surface-1: #1a1f27;
-  --surface-2: #14181f;
-  --surface-3: #0f1319;
-  --surface-overlay: #1e242d;
-  --bg-app: #14181f;
-  --bg-header: #14181f;
+  --canvas: #131416;
+  --surface-1: #1c1d20;
+  --surface-2: #232428;
+  --surface-3: #2a2c30;
+  --surface-overlay: #26282c;
+  --bg-app: #131416;
+  --bg-header: #131416;
 
-  --border-strong: #3b434f;
-  --border-subtle: #2c333d;
-  --border-ghost: #232932;
+  --border-strong: #42454b;
+  --border-subtle: #303237;
+  --border-ghost: #26282c;
+  --card-border: #2c2e33;
 
-  --text-main: #e6edf3;
-  --text-soft: #c3ccd8;
-  --text-muted: #8b96a5;
-  --text-faint: #6a7482;
-  --text-inverse: #14181f;
+  --text-main: #ececee;
+  --text-soft: #c5c6ca;
+  --text-muted: #8e9097;
+  --text-faint: #686a71;
+  --text-inverse: #131416;
 
-  --accent: #e2886e;
-  --accent-rgb: 226, 136, 110;
-  --accent-strong: #cf7156;
-  --accent-soft: rgba(var(--accent-rgb), 0.18);
-  --accent-contrast: #21120c;
+  --accent: #e08a6c;
+  --accent-rgb: 224, 138, 108;
+  --accent-strong: #ee9d81;
+  --accent-soft: rgba(var(--accent-rgb), 0.16);
+  --accent-contrast: #1f120c;
 
   --success-fg: #56d364;
   --success-bg: #16301f;
@@ -425,24 +429,18 @@
   --info-bg: #10243e;
   --info-border: #1f4470;
 
-  --bg-hover: rgba(255, 255, 255, 0.07);
-  --bg-active: rgba(255, 255, 255, 0.11);
-  --bg-selected: rgba(var(--accent-rgb), 0.18);
+  --bg-hover: rgba(255, 255, 255, 0.06);
+  --bg-active: rgba(255, 255, 255, 0.1);
+  --bg-selected: rgba(var(--accent-rgb), 0.16);
 
-  --shadow-resting: 0 1px 0 var(--border-subtle);
-  --shadow-overlay: 0 8px 24px rgba(0, 0, 0, 0.48);
-  --shadow-modal: 0 16px 48px rgba(0, 0, 0, 0.58);
+  --nav-selected-bg: #232428;
+  --nav-selected-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 1px 2px rgba(0, 0, 0, 0.4);
 
-  --activity-bg: #0f1319;
-  --activity-border: #2c333d;
-  --activity-icon: rgba(230, 237, 243, 0.66);
-  --activity-icon-active: #ffffff;
-  --activity-item-hover: rgba(255, 255, 255, 0.08);
-  --activity-item-active: transparent;
-
-  --statusbar-bg: #0f1319;
-  --statusbar-text: #c3ccd8;
-  --statusbar-divider: rgba(255, 255, 255, 0.16);
+  --shadow-resting: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-card: 0 0 0 1px rgba(0, 0, 0, 0.2), 0 2px 10px rgba(0, 0, 0, 0.28);
+  --shadow-raised: 0 1px 2px rgba(0, 0, 0, 0.35), 0 4px 16px rgba(0, 0, 0, 0.32);
+  --shadow-overlay: 0 4px 12px rgba(0, 0, 0, 0.4), 0 12px 32px rgba(0, 0, 0, 0.45);
+  --shadow-modal: 0 8px 24px rgba(0, 0, 0, 0.45), 0 24px 64px rgba(0, 0, 0, 0.55);
 
   --find-highlight-bg: #4a3a12;
   --find-highlight-fg: #f5e8c8;
@@ -454,9 +452,9 @@
   --wiki-cat-3: #56d364;
   --wiki-cat-4: #b18aff;
 
-  --overlay-scrim: rgba(4, 7, 11, 0.6);
+  --overlay-scrim: rgba(0, 0, 0, 0.55);
 
-  --welcome-wordmark-fill: linear-gradient(135deg, #f3f7ff 0%, #9ab3d2 100%);
+  --welcome-wordmark-fill: linear-gradient(135deg, #f3f3f5 0%, #9a9ca3 100%);
 }
 
 * {
@@ -5242,4 +5240,671 @@ body.is-resizing-panels .workspace-splitter::before {
   .welcome-columns {
     gap: 44px;
   }
+}
+
+/* ============================================================
+   框架层（最后生效）：画布 + 浮起卡片
+   - 顶栏 / 活动栏 / 侧栏 / 状态栏坐在画布上，彼此不画分割线
+   - 编辑区与 Agent 区是两张独立的圆角卡片，用 --shell-gap 间距分开
+   - 画布上的选中项抬到卡片层（--nav-selected-*），卡片内的选中项用嵌入层
+   ============================================================ */
+
+body,
+.app-shell {
+  background: var(--canvas);
+}
+
+.workspace {
+  background: var(--canvas);
+  padding-bottom: 0;
+}
+
+/* ---------- 顶栏：画布色、无下边线 ---------- */
+.top-header {
+  height: var(--header-height);
+  padding: 0 10px 0 8px;
+  border-bottom: 0;
+  background: var(--canvas);
+}
+
+.menu-bar-item,
+.file-menu-trigger {
+  height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.menu-bar-item:hover,
+.file-menu-trigger:hover,
+.file-menu-trigger[aria-expanded="true"] {
+  background: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.topbar-brand-name {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.command-bar {
+  height: 30px;
+  padding: 0 10px 0 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: var(--bg-hover);
+  box-shadow: none;
+  transition: background 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.command-bar:hover {
+  background: var(--bg-active);
+}
+
+.command-bar.active,
+.command-bar:focus-within {
+  border-color: var(--card-border);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-raised);
+}
+
+.command-bar-input {
+  font-size: 12px;
+}
+
+.command-bar-hint {
+  padding: 1px 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.header-utility-btn,
+.header-agent-toggle {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-md);
+}
+
+/* ---------- 活动栏：画布色图标轨，选中项为浮起方块 ---------- */
+.activity-bar {
+  padding: 4px 0 10px;
+  gap: 6px;
+  border-right: 0;
+  background: var(--canvas);
+}
+
+.activity-group {
+  gap: 4px;
+}
+
+.activity-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  transition: background 140ms ease, color 140ms ease, box-shadow 140ms ease;
+}
+
+.activity-icon::before {
+  display: none;
+}
+
+.activity-icon:hover {
+  background: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.activity-icon.active {
+  background: var(--nav-selected-bg);
+  color: var(--text-main);
+  box-shadow: var(--nav-selected-shadow);
+}
+
+.activity-icon.active .material-symbols-rounded {
+  color: var(--accent);
+}
+
+.activity-icon .material-symbols-rounded {
+  font-size: 20px;
+}
+
+/* ---------- 分隔条：静止时不可见，只在悬停 / 拖动时出现 ---------- */
+.workspace-splitter::before,
+.workspace-splitter-agent::before {
+  width: 2px;
+  background: transparent;
+  border-radius: var(--radius-full);
+}
+
+.workspace-splitter:hover::before,
+body.is-resizing-panels .workspace-splitter::before {
+  width: 2px;
+  background: color-mix(in srgb, var(--accent) 70%, transparent);
+}
+
+/* ---------- 侧栏：坐在画布上，无边框 ---------- */
+.explorer-panel,
+.source-control-panel,
+.scm-panel,
+.preset-panel,
+.prompt-repository-panel,
+.search-panel {
+  border-right: 0;
+  background: var(--canvas);
+}
+
+.explorer-header,
+.scm-header,
+.preset-header,
+.prompt-repository-header,
+.search-panel-header {
+  padding: 8px 10px 8px 12px;
+  border-bottom: 0;
+  background: transparent;
+}
+
+.explorer-title,
+.scm-title,
+.preset-title,
+.prompt-repository-title {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: none;
+}
+
+.explorer-project {
+  margin-top: 2px;
+  color: var(--text-main);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.explorer-subtitle {
+  padding: 0 12px 10px;
+  color: var(--text-muted);
+}
+
+.tree-view {
+  padding: 2px 6px 12px;
+}
+
+.tree-row {
+  min-height: 28px;
+  border-radius: var(--radius-md);
+  color: var(--text-soft);
+  font-size: 13px;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.tree-row:hover {
+  background: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.tree-row.is-selected {
+  background: var(--bg-active);
+  color: var(--text-main);
+}
+
+.tree-row.active {
+  background: var(--nav-selected-bg);
+  color: var(--text-main);
+  box-shadow: var(--nav-selected-shadow);
+}
+
+.tree-row.active::before {
+  display: none;
+}
+
+.tree-row.active .tree-icon {
+  color: var(--accent);
+}
+
+.tree-icon {
+  font-size: 17px;
+  color: var(--text-muted);
+}
+
+.tree-empty {
+  margin: 8px 6px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: transparent;
+}
+
+/* ---------- 主卡片：编辑区与 Agent 区 ---------- */
+.editor-workbench,
+.storydex-relationship-workspace,
+.storydex-relationship-empty,
+.coomi-dock {
+  min-width: 0;
+  min-height: 0;
+  margin: 0 0 var(--shell-gap);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-xl);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+
+/* 最右侧的卡片与窗口右缘留出同样的间距 */
+.workspace > .editor-workbench:last-child,
+.workspace > .storydex-relationship-workspace:last-child,
+.workspace > .storydex-relationship-empty:last-child,
+.workspace > .coomi-dock:last-child {
+  margin-right: var(--shell-edge);
+}
+
+/* 无侧栏时编辑卡片与活动栏之间也留出间距 */
+.workspace > .activity-bar + .editor-workbench,
+.workspace > .activity-bar + .storydex-relationship-workspace,
+.workspace > .activity-bar + .storydex-relationship-empty {
+  margin-left: 2px;
+}
+
+/* ---------- 编辑区：轻量标签页 + 居中的正文栏 ---------- */
+.editor-tabs {
+  min-height: 42px;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 8px 0;
+  border-bottom: 1px solid var(--border-ghost);
+  background: transparent;
+}
+
+.editor-tab {
+  height: 30px;
+  margin-bottom: 6px;
+  padding: 0 8px 0 12px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  box-shadow: none;
+}
+
+.editor-tab:hover:not(.is-launch) {
+  background: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.editor-tab.active {
+  background: var(--surface-3);
+  color: var(--text-main);
+  font-weight: 500;
+  box-shadow: none;
+}
+
+.editor-tab.is-launch {
+  padding-right: 12px;
+}
+
+.editor-pane {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.editor-pane-head {
+  padding: 14px 20px 12px;
+  border-bottom: 0;
+  background: transparent;
+}
+
+.editor-pane-title {
+  color: var(--text-main);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.editor-pane-subtitle {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.editor-mode-switch {
+  padding: 2px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--surface-3);
+}
+
+.editor-mode-btn {
+  width: 30px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+}
+
+.editor-mode-btn:hover {
+  color: var(--text-main);
+}
+
+.editor-mode-btn.active {
+  background: var(--surface-1);
+  color: var(--text-main);
+  box-shadow: var(--shadow-resting);
+}
+
+/* 正文居中成阅读栏，宽屏不会拉成一整行 */
+.doc-editor,
+.doc-preview,
+.doc-markdown {
+  padding: 18px max(28px, calc((100% - 760px) / 2)) 48px;
+  background: transparent;
+}
+
+.doc-editor:focus {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.editor-empty {
+  color: var(--text-muted);
+}
+
+/* ---------- 状态栏：画布上的一行淡色文字 ---------- */
+.status-bar {
+  min-height: var(--footer-height);
+  padding: 0 14px 0 10px;
+  border-top: 0;
+  background: var(--canvas);
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.status-left span + span::before,
+.status-right span + span::before {
+  background: var(--border-strong);
+}
+
+/* 编辑区标题行：元信息单行省略，操作按钮不换行 */
+.editor-pane-head {
+  align-items: center;
+}
+
+.editor-pane-heading {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.editor-pane-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editor-pane-subtitle {
+  margin-top: 3px;
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.editor-pane-subtitle > span {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.editor-pane-subtitle > span + span::before {
+  content: "·";
+  margin: 0 6px;
+  color: var(--text-faint);
+}
+
+.editor-pane-actions {
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  gap: 4px;
+}
+
+.editor-pane-actions > .editor-mode-btn {
+  background: transparent;
+}
+
+.editor-pane-actions > .editor-mode-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.editor-pane-actions > .editor-mode-switch {
+  margin-left: 4px;
+}
+
+/* ---------- 欢迎页：分组卡片，主次清楚 ---------- */
+.welcome-shell {
+  background: transparent;
+  overflow: auto;
+}
+
+.welcome-inner {
+  width: min(1040px, 100%);
+  padding: 40px 48px 32px;
+}
+
+.welcome-columns {
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 48px;
+}
+
+.welcome-heading {
+  margin: 0 0 32px;
+  padding-top: 0;
+}
+
+.welcome-heading-mark {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+
+.welcome-subtitle {
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 15px;
+}
+
+.welcome-section + .welcome-section,
+.welcome-section-recent {
+  margin-top: 28px;
+}
+
+.welcome-section-title {
+  margin: 0 0 4px;
+  color: var(--text-main);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.welcome-section-note {
+  margin: 0 0 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* 启动命令：两张并排的可点卡片 */
+.welcome-command-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.welcome-command {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--surface-1);
+  color: var(--text-main);
+  box-shadow: var(--shadow-resting);
+  transition: border-color 140ms ease, box-shadow 140ms ease, background 140ms ease;
+}
+
+.welcome-command > .material-symbols-rounded {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 18px;
+}
+
+.welcome-command:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text-main);
+  box-shadow: var(--shadow-raised);
+}
+
+.welcome-command:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.welcome-command-label {
+  color: var(--text-main);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.welcome-command-desc {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* 最近项目：一个分组容器里的行列表 */
+.welcome-recent-list {
+  gap: 0;
+  padding: 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+}
+
+.welcome-recent-row {
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  color: var(--text-main);
+  transition: background 120ms ease;
+}
+
+.welcome-recent-row:hover:not(:disabled) {
+  background: var(--surface-1);
+  color: var(--text-main);
+  box-shadow: var(--shadow-resting);
+}
+
+.welcome-recent-name {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.welcome-recent-path {
+  margin-top: 2px;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.welcome-empty {
+  margin-top: 0;
+  padding: 14px 16px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: transparent;
+}
+
+/* 演练：嵌入层上的独立小卡片 */
+.welcome-practice-column {
+  padding-top: 0;
+}
+
+.welcome-practice-list {
+  gap: 8px;
+}
+
+.welcome-practice-item,
+.welcome-practice-item + .welcome-practice-item {
+  padding: 12px 14px;
+  border: 1px solid var(--border-ghost);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+}
+
+.welcome-practice-item::before {
+  display: none;
+}
+
+.welcome-practice-badge {
+  align-self: flex-start;
+  padding: 1px 8px;
+  border-radius: var(--radius-full);
+  background: var(--surface-3);
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.welcome-practice-title {
+  margin-top: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.welcome-practice-copy {
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.welcome-practice-meta {
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+@media (max-width: 1100px) {
+  .welcome-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .welcome-command-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* 启动态侧栏：打开 / 新建两个入口抬到卡片层 */
+.explorer-launch-actions .sidebar-action,
+.explorer-launch-actions button {
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-resting);
+}
+
+.explorer-launch-actions .sidebar-action:hover:not(:disabled),
+.explorer-launch-actions button:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-raised);
 }

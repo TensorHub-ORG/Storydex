@@ -691,9 +691,8 @@ defineExpose({
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  /* --bg-panel is not a defined theme token; fall back to the sidebar surface so
-     the panel never renders on a transparent background. */
-  background: var(--surface-2);
+  /* 侧栏坐在画布上 */
+  background: var(--canvas);
   color: var(--text-main);
 }
 
@@ -705,9 +704,9 @@ defineExpose({
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 6px 12px;
-  border-bottom: 1px solid var(--border-subtle);
-  background: var(--surface-2);
+  padding: 8px 10px 8px 12px;
+  border-bottom: 0;
+  background: transparent;
 }
 
 .scm-header-copy {
@@ -720,8 +719,7 @@ defineExpose({
   color: var(--text-muted);
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .scm-project {

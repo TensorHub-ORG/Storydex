@@ -868,7 +868,7 @@ function onRawJsonChange(text: string): void {
 .preset-editor {
   display: flex;
   flex-direction: column;
-  background: var(--bg-sidebar);
+  background: var(--surface-1);
   color: var(--text-main);
   height: 100%;
   min-height: 0;

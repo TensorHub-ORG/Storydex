@@ -705,6 +705,7 @@ export const useWorkspaceStore = defineStore("workspace", {
               ?? this.storySettings.chapterLengthTier,
           chapterWordCountTarget: patch.chapterWordCountTarget ?? patch.chapter_word_count_target ?? this.storySettings.chapterWordCountTarget,
           preciseWordCountEnabled: patch.preciseWordCountEnabled ?? patch.precise_word_count_enabled ?? this.storySettings.preciseWordCountEnabled,
+          continuityTrackingEnabled: patch.continuityTrackingEnabled ?? this.storySettings.continuityTrackingEnabled,
           storyChapterTemplateId:
             patch.storyChapterTemplateId ?? this.storySettings.storyChapterTemplateId,
           autoUpdateVariables: patch.autoUpdateVariables ?? this.storySettings.autoUpdateVariables,
@@ -2223,6 +2224,7 @@ function defaultStoryProjectSettings(settingsPath = ".storydex/config/project-se
       chapterLengthTier: "medium",
       chapterWordCountTarget: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
       preciseWordCountEnabled: false,
+      continuityTrackingEnabled: true,
       storyFragmentWordCount: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
       storyFragmentWordCountMin: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
       storyFragmentWordCountMax: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
@@ -2289,6 +2291,7 @@ function normalizeStorySettingsPayload(
     chapter_length_tier: chapterLengthTier,
     chapterWordCountTarget,
     preciseWordCountEnabled,
+    continuityTrackingEnabled: normalizeBooleanFlag(payload.continuityTrackingEnabled, true),
     storyChapterTemplateId,
     story_chapter_template_id: storyChapterTemplateId,
     autoUpdateVariables,
@@ -2379,6 +2382,7 @@ function normalizeStorySettingsResponse(
           ?? currentSettings?.preciseWordCountEnabled,
         false
       ),
+      continuityTrackingEnabled: normalizeBooleanFlag(payload.continuityTrackingEnabled ?? fallbackSettings?.continuityTrackingEnabled ?? currentSettings?.continuityTrackingEnabled, true),
       storyFragmentWordCount: responseWordCountRange.max,
       storyFragmentWordCountMin: responseWordCountRange.min,
       storyFragmentWordCountMax: responseWordCountRange.max,
@@ -2504,6 +2508,7 @@ function normalizeStorySettingsFromProjectFile(
         chapterWordCountTarget
       ),
       chapterWordCountTarget,
+      continuityTrackingEnabled: normalizeBooleanFlag(storySettings.continuityTrackingEnabled, true),
       preciseWordCountEnabled: normalizeBooleanFlag(
         storySettings.preciseWordCountEnabled ?? storySettings.precise_word_count_enabled,
         false

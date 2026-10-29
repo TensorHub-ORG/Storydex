@@ -174,6 +174,9 @@ export const useGitStore = defineStore("git", {
      */
     async refreshSummary(options?: { silent?: boolean; force?: boolean }): Promise<void> {
       const silent = options?.silent ?? false;
+      if (silent && !options?.force && this.summary?.initialized === false && Date.now() - this.lastSyncedAt < 60_000) {
+        return;
+      }
       if (!options?.force && inFlightSummary) {
         await inFlightSummary;
         return;
@@ -347,6 +350,7 @@ export const useGitStore = defineStore("git", {
      * 的刷新、以及写操作后的自动刷新都会被吞掉，树停在旧状态且没有任何错误。
      */
     async refreshTimeline(options?: { force?: boolean }): Promise<void> {
+      if (!options?.force && this.summary?.initialized === false) return;
       if (!options?.force && inFlightTimeline) {
         await inFlightTimeline;
         return;

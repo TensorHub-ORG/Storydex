@@ -926,8 +926,9 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 
 .system-settings-font-option {
   min-width: 0;
-  padding: 10px;
+  padding: 10px 12px;
   border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
   background: var(--bg-editor);
   color: var(--text-main);
   text-align: left;
@@ -938,7 +939,8 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 
 .system-settings-font-option.active {
   border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent-soft) 45%, var(--bg-editor));
+  background: var(--bg-selected);
+  box-shadow: 0 0 0 1px var(--accent);
 }
 
 .system-settings-font-option small { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -950,17 +952,17 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
   align-items: center;
   justify-content: center;
   padding: 14px;
-  background: color-mix(in srgb, var(--bg-app) 82%, transparent);
-  backdrop-filter: blur(8px);
+  background: var(--overlay-scrim);
+  backdrop-filter: blur(2px);
 }
 
 .system-settings-window {
   width: min(1120px, calc(100vw - 28px));
   height: min(780px, calc(100vh - 28px));
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-subtle);
-  background: var(--bg-card);
-  box-shadow: var(--shadow-md);
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--card-border);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-modal);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -969,13 +971,13 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 /* ---- 标题栏（与预设导入预览同款面板头） ---- */
 .system-settings-titlebar {
   flex: 0 0 auto;
-  height: 38px;
+  height: 44px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 8px 0 14px;
-  border-bottom: 1px solid var(--border-subtle);
-  background: var(--bg-card-muted);
+  padding: 0 10px 0 16px;
+  border-bottom: 1px solid var(--border-ghost);
+  background: var(--canvas);
 }
 
 .system-settings-titlebar-main {
@@ -992,19 +994,18 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 
 .system-settings-titlebar-text {
   font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  color: var(--text-soft);
+  font-weight: 600;
+  color: var(--text-main);
 }
 
 .system-settings-titlebar-close {
-  width: 26px;
-  height: 26px;
+  width: 30px;
+  height: 30px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -1031,9 +1032,9 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  padding: 10px 0 8px;
-  border-right: 1px solid var(--border-subtle);
-  background: var(--bg-card-muted);
+  padding: 12px 0 10px;
+  border-right: 1px solid var(--border-ghost);
+  background: var(--canvas);
 }
 
 .system-settings-card-actions {
@@ -1187,24 +1188,26 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 }
 
 .system-settings-nav-label {
-  padding: 12px 14px 6px;
+  padding: 14px 18px 6px;
   font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
+  font-weight: 600;
+  letter-spacing: 0.04em;
   color: var(--text-faint);
 }
 
 .system-settings-nav {
   display: flex;
   flex-direction: column;
+  gap: 2px;
+  padding: 0 8px;
   overflow-y: auto;
 }
 
 .system-settings-nav-item {
-  min-height: 30px;
-  padding: 0 14px;
+  min-height: 32px;
+  padding: 0 10px;
   border: 0;
-  border-radius: 0;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-soft);
   display: inline-flex;
@@ -1226,13 +1229,14 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 }
 
 .system-settings-nav-item.active {
-  background: var(--bg-selected);
-  box-shadow: inset 2px 0 0 var(--accent);
+  background: var(--nav-selected-bg);
+  box-shadow: var(--nav-selected-shadow);
   color: var(--text-main);
+  font-weight: 500;
 }
 
 .system-settings-nav-item.active .material-symbols-rounded {
-  color: var(--accent-strong);
+  color: var(--accent);
 }
 
 .system-settings-search-meta {
@@ -1252,17 +1256,17 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 12px 18px 16px;
+  padding: 20px 28px 28px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 16px;
   overscroll-behavior: contain;
 }
 
 .system-settings-empty {
   min-height: 220px;
-  border: 1px dashed var(--border-subtle);
-  border-radius: var(--radius-sm);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-lg);
   display: grid;
   place-items: center;
   color: var(--text-muted);
@@ -1283,8 +1287,8 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 
 .system-settings-card-header {
   min-height: 32px;
-  padding: 0 0 8px;
-  border-bottom: 1px solid var(--border-ghost);
+  padding: 0 0 4px;
+  border-bottom: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1308,8 +1312,9 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 
 .system-settings-card-title {
   color: var(--text-main);
-  font-size: 15px;
+  font-size: 17px;
   font-weight: 600;
+  letter-spacing: -0.01em;
   margin: 0;
 }
 
@@ -1326,24 +1331,28 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
   gap: 14px;
 }
 
+/* 设置分组：一块圆角卡片承载一组设置 */
 .system-settings-block {
-  padding: 0 0 10px;
+  padding: 14px 16px 16px;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  border-bottom: 1px solid color-mix(in srgb, var(--border-ghost) 78%, transparent);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-resting);
 }
 
 .system-settings-block:last-child {
-  padding-bottom: 0;
-  border-bottom: 0;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .system-settings-block-title {
-  color: var(--text-faint);
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
+  color: var(--text-main);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0;
 }
 
 .theme-grid {
@@ -1354,9 +1363,9 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 
 .theme-option {
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: var(--bg-card);
-  padding: 7px 9px;
+  padding: 8px 10px;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -1369,9 +1378,9 @@ function sectionMatches(section: SettingsSection, query: string): boolean {
 }
 
 .theme-option.active {
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-subtle));
+  border-color: var(--accent);
   background: var(--bg-selected);
-  box-shadow: inset 2px 0 0 var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
 }
 
 .theme-option-preview {

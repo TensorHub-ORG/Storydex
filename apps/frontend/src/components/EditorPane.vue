@@ -942,8 +942,8 @@ defineExpose({
 
 .editor-pane-subtitle {
   display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
+  gap: 0;
+  flex-wrap: nowrap;
 }
 
 .editor-surface-wrap { display: flex; flex-direction: column; }
@@ -963,8 +963,8 @@ defineExpose({
 .editor-pane-actions {
   display: flex;
   align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
+  gap: 4px;
+  flex-wrap: nowrap;
   justify-content: flex-end;
 }
 

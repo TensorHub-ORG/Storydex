@@ -101,6 +101,7 @@ interface AgentState {
   chapterLengthTier: ChapterLengthTier;
   chapterWordCountTarget: number;
   preciseWordCountEnabled: boolean;
+  continuityTrackingEnabled: boolean;
   storyFragmentWordCount: number;
   storyFragmentWordCountMin: number;
   storyFragmentWordCountMax: number;
@@ -170,6 +171,7 @@ export const useAgentStore = defineStore("agent", {
     chapterLengthTier: "medium",
     chapterWordCountTarget: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
     preciseWordCountEnabled: false,
+    continuityTrackingEnabled: true,
     storyFragmentWordCount: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
     storyFragmentWordCountMin: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
     storyFragmentWordCountMax: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
@@ -559,6 +561,7 @@ export const useAgentStore = defineStore("agent", {
       chapterLengthTier?: ChapterLengthTier;
       chapterWordCountTarget?: number;
       preciseWordCountEnabled?: boolean;
+      continuityTrackingEnabled?: boolean;
       fragmentWordCount?: number;
       fragmentWordCountMin?: number;
       fragmentWordCountMax?: number;
@@ -586,6 +589,9 @@ export const useAgentStore = defineStore("agent", {
         this.storyFragmentCount = isSingleFileTemplate ? 1 : normalizePositiveInteger(options.fragmentCount, 1);
       } else if (isSingleFileTemplate) {
         this.storyFragmentCount = 1;
+      }
+      if (options.continuityTrackingEnabled !== undefined) {
+        this.continuityTrackingEnabled = Boolean(options.continuityTrackingEnabled);
       }
       if (options.preciseWordCountEnabled !== undefined) {
         this.preciseWordCountEnabled = Boolean(options.preciseWordCountEnabled);
@@ -911,6 +917,7 @@ export const useAgentStore = defineStore("agent", {
               chapterLengthTier: this.chapterLengthTier,
               chapterWordCountTarget: this.chapterWordCountTarget,
               preciseWordCountEnabled: this.preciseWordCountEnabled,
+              continuityTrackingEnabled: this.continuityTrackingEnabled,
               chapterTemplateId: this.storyChapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID
             },
             sourceFollowupMessageId: next.messageId,
@@ -1021,6 +1028,7 @@ export const useAgentStore = defineStore("agent", {
           chapterLengthTier: this.chapterLengthTier,
           chapterWordCountTarget: this.chapterWordCountTarget,
           preciseWordCountEnabled: this.preciseWordCountEnabled,
+          continuityTrackingEnabled: this.continuityTrackingEnabled,
           chapterTemplateId: this.storyChapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID
         },
         replaceLatestTraceId: expectedTraceId
@@ -1082,6 +1090,7 @@ export const useAgentStore = defineStore("agent", {
           chapterLengthTier: this.chapterLengthTier,
           chapterWordCountTarget: this.chapterWordCountTarget,
           preciseWordCountEnabled: this.preciseWordCountEnabled,
+          continuityTrackingEnabled: this.continuityTrackingEnabled,
           chapterTemplateId: this.storyChapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID
         }
       };
@@ -1236,6 +1245,7 @@ export const useAgentStore = defineStore("agent", {
           chapterLengthTier: this.chapterLengthTier,
           chapterWordCountTarget: this.chapterWordCountTarget,
           preciseWordCountEnabled: this.preciseWordCountEnabled,
+          continuityTrackingEnabled: this.continuityTrackingEnabled,
           chapterTemplateId: this.storyChapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID
         }
       };
@@ -1984,6 +1994,20 @@ function streamPacketToWaterfallItem(
       raw
     });
   }
+  if (eventName === "WorkspaceOperation") {
+    // Host file operations reuse the existing tool UI without claiming that
+    // they were model-issued tool calls. The raw trace retains their origin.
+    const operation = String(raw.operation || "");
+    const operationId = String(raw.operationId || "");
+    if (!operationId || !["read_file", "write_file"].includes(operation)) return null;
+    return createWaterfallItem({
+      id: `${traceId}-workspace-${operationId}`,
+      type: "tool", status: raw.status === "error" ? "error" : raw.status === "running" ? "running" : "success",
+      title: operation, toolName: operation, toolCallId: `workspace-${operationId}`,
+      arguments: toRecord(raw.arguments) || {},
+      content: String(raw.result || ""), resultPreview: String(raw.result || ""), raw
+    });
+  }
   if (eventName === "TurnContract") {
     const status = statusForPacket(eventName, packet);
     return createWaterfallItem({
@@ -2575,9 +2599,10 @@ function summarizeStoryCallAccountingPacket(packet: AgentStreamPacket): string {
   const secondDraftCalls = firstNumber(record, ["secondDraftCalls"]) ?? 0;
   const providerAttempts = firstNumber(record, ["providerAttempts"]) ?? logicalStoryCalls;
   const transportRetries = firstNumber(record, ["transportRetries"]) ?? 0;
+  const continuityCalls = firstNumber(toRecord(record.nonProseCalls) || {}, ["continuity"]) ?? 0;
   return [
     `正文逻辑调用：${logicalStoryCalls} 次（首稿 ${initialGenerationCalls}，长度修订 ${lengthRevisionCalls}，第二稿 ${secondDraftCalls}）`,
-    `正文 Provider 尝试：${providerAttempts} 次`,
+    ...(continuityCalls ? [`人物与线索整理：${continuityCalls} 次`, `模型调用总计：${providerAttempts} 次`] : [`正文 Provider 尝试：${providerAttempts} 次`]),
     `传输重试：${transportRetries} 次`
   ].join(" · ");
 }

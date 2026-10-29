@@ -617,7 +617,7 @@ describe("AgentPanel", () => {
     wrapper.unmount();
   });
 
-  it("shows the actual chapter references including drafts, truncation and omissions", () => {
+  it("does not show reference cards or invent tool calls when reopening older chapter runs", () => {
     const wrapper = mount(CoomiClaudeTurn, { props: { run: makeRun({ status: "completed", events: [{
       event: "TurnPhase", data: { contextAssembly: {
         promptBlocks: [
@@ -628,13 +628,41 @@ describe("AgentPanel", () => {
         ], notes: ["unsaved_draft:章纲.md", "source_too_large:世界史.md"],
       } },
     }] }) } });
-    const references = wrapper.find(".cct-context-sources");
-    expect(references.text()).toContain("本轮参考 · 5 份");
-    expect(references.text()).toContain("临水镇.md");
-    expect(references.text()).toContain("部分加入");
-    expect(references.text()).toContain("已加入编辑器草稿");
-    expect(references.text()).toContain("文件过大，未加入");
-    expect(references.text()).not.toContain("runtime_presets");
+    expect(wrapper.find(".cct-context-sources").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("本轮参考");
+    expect(wrapper.find(".cct-tool-list").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it.each(["running", "completed"])("uses the original tool fold and hides chapter diagnostics while %s", async (status) => {
+    const now = new Date().toISOString();
+    const tool = (id: string, toolName: string, path: string) => ({
+      id, type: "tool", status: "success", title: toolName, toolName,
+      arguments: { path }, resultPreview: "操作已完成", content: "", timestamp: now,
+      raw: { _type: "WorkspaceOperation", origin: "runtime" }
+    });
+    const phase = (name: string, text: string) => ({
+      id: name, type: "phase", status: "success", title: text, content: text, timestamp: now, raw: { phase: name }
+    });
+    const wrapper = mount(CoomiClaudeTurn, { props: { run: makeRun({ status, items: [
+      phase("context_assembly", "章节上下文已准备 · 已加入 7 份参考"),
+      tool("read", "read_file", "文风.md"),
+      phase("story_continuity", "人物与线索记录 · 整理用量：输出 6000 tokens"),
+      tool("write", "write_file", "chapters/001.md"),
+    ] }) } });
+    expect(wrapper.find(".cct-context-sources").exists()).toBe(false);
+    expect(wrapper.find(".cct-phase-text").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("整理用量");
+    expect(wrapper.findAll(".cct-summary")).toHaveLength(1);
+    if (status === "completed") {
+      expect(wrapper.find(".cct-tool-list").exists()).toBe(false);
+      await wrapper.find(".cct-summary").trigger("click");
+    }
+    expect(wrapper.findAll(".cct-tool")).toHaveLength(2);
+    expect(wrapper.findAll(".cct-tool-name").map((row) => row.text())).toEqual(["read_file", "write_file"]);
+    await wrapper.find(".cct-tool-head").trigger("click");
+    expect(wrapper.find(".cct-tool-expand").text()).toContain("文风.md");
+    expect(wrapper.find(".cct-tool-result").text()).toBe("操作已完成");
     wrapper.unmount();
   });
 
@@ -688,6 +716,21 @@ describe("AgentPanel", () => {
     expect(meta.text()).toContain("本轮总计 6.1K tokens");
     expect(meta.attributes("title")).toContain("输入上下文：5.9K tokens");
     expect(meta.attributes("title")).toContain("模型输出：249 tokens");
+    wrapper.unmount();
+  });
+
+  it("closes chapter options when approval arrives and keeps confirmation accessible", async () => {
+    const store = useAgentStore();
+    const wrapper = shallowMount(AgentPanel);
+    await wrapper.find(".coomi-story-toggle").trigger("click");
+    expect(wrapper.find(".coomi-story-popover").exists()).toBe(true);
+    store.pendingApprovals = [{ approvalId: "permission-ui", kind: "permission", question: "允许写入？", allowText: false,
+      options: [{ value: "allow", label: "允许" }] }];
+    await nextTick();
+    expect(wrapper.find(".coomi-story-popover").exists()).toBe(false);
+    await wrapper.find(".coomi-story-toggle").trigger("click");
+    expect(wrapper.find(".coomi-story-popover").exists()).toBe(false);
+    expect(wrapper.find(".coomi-approval-action.primary").exists()).toBe(true);
     wrapper.unmount();
   });
 
@@ -1127,6 +1170,19 @@ describe("AgentPanel", () => {
     await wrapper.find('.coomi-story-toggle').trigger('click');
     expect((wrapper.find('.coomi-story-precision-field input').element as HTMLInputElement).checked).toBe(false);
     expect(wrapper.text()).toContain('不因字数偏差自动修订或拒绝保存');
+    wrapper.unmount();
+  });
+
+  it("explains the continuity call and persists opt-out independently of length checks", async () => {
+    const wrapper = shallowMount(AgentPanel);
+    await wrapper.find('.coomi-story-toggle').trigger('click');
+    expect(wrapper.text()).toContain('额外调用一次模型');
+    await wrapper.find('.coomi-story-continuity-field input').setValue(false);
+    await flushPromises();
+    expect(workspace.updateStorySettings.mock.calls.at(-1)?.[0]).toMatchObject({
+      continuityTrackingEnabled: false, preciseWordCountEnabled: false
+    });
+    expect(useAgentStore().continuityTrackingEnabled).toBe(false);
     wrapper.unmount();
   });
 

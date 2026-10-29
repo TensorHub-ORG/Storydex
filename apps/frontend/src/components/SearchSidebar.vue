@@ -89,20 +89,21 @@ function flattenFiles(nodes: WorkspaceTreeNode[], result: WorkspaceTreeNode[] = 
 </script>
 
 <style scoped>
-.search-panel { height: 100%; min-height: 0; display: flex; flex-direction: column; background: var(--bg-panel); color: var(--text-main); }
-.search-head { height: 42px; display: flex; align-items: center; padding: 0 14px; border-bottom: 1px solid var(--border-ghost); font-size: 12px; text-transform: uppercase; }
-.search-form { padding: 10px; border-bottom: 1px solid var(--border-ghost); }
-.search-input-row { height: 32px; display: flex; align-items: center; border: 1px solid var(--border-subtle); background: var(--bg-editor); }
-.search-input-row:focus-within { border-color: var(--accent); }
+.search-panel { height: 100%; min-height: 0; display: flex; flex-direction: column; background: var(--canvas); color: var(--text-main); }
+.search-head { height: 40px; display: flex; align-items: center; padding: 0 12px; color: var(--text-muted); font-size: 11px; font-weight: 600; letter-spacing: 0.04em; }
+.search-form { padding: 0 8px 10px; }
+.search-input-row { height: 34px; display: flex; align-items: center; border: 1px solid var(--card-border); border-radius: var(--radius-md); background: var(--surface-1); box-shadow: var(--shadow-resting); }
+.search-input-row:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .search-input-row .material-symbols-rounded { padding-left: 7px; font-size: 17px; color: var(--text-muted); }
 .search-input-row input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: inherit; padding: 0 7px; }
-.search-input-row button { width: 28px; height: 28px; border: 0; background: transparent; cursor: pointer; }
+.search-input-row button { width: 28px; height: 28px; margin-right: 3px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); cursor: pointer; }
+.search-input-row button:hover { background: var(--bg-hover); color: var(--text-main); }
 .search-input-row button .material-symbols-rounded { padding: 0; }
-.search-options { display: flex; align-items: center; gap: 14px; padding-top: 9px; color: var(--text-muted); font-size: 11px; }
+.search-options { display: flex; align-items: center; gap: 14px; padding: 9px 4px 0; color: var(--text-muted); font-size: 11px; }
 .search-option { display: inline-flex; align-items: center; gap: 6px; min-height: 18px; cursor: pointer; }
 .search-option input { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); }
-.search-results { overflow: auto; flex: 1; }
-.search-results > button { width: 100%; border: 0; border-bottom: 1px solid var(--border-ghost); background: transparent; color: inherit; padding: 8px 12px; text-align: left; cursor: pointer; display: grid; gap: 3px; }
+.search-results { overflow: auto; flex: 1; padding: 0 6px 10px; }
+.search-results > button { width: 100%; border: 0; border-radius: var(--radius-md); background: transparent; color: inherit; padding: 8px 10px; text-align: left; cursor: pointer; display: grid; gap: 3px; }
 .search-results > button:hover { background: var(--bg-hover); }
 .search-file { display: flex; align-items: center; gap: 5px; font-size: 13px; font-weight: 600; }
 .search-file .material-symbols-rounded { font-size: 15px; }

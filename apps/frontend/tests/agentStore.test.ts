@@ -80,6 +80,57 @@ function envelopeMailbox(messages: unknown[] = []) {
 }
 
 describe("agent store streaming", () => {
+  it("keeps runtime file operations in the same tool waterfall across streaming and history", async () => {
+    const packets = [
+      { _type: "WorkspaceOperation", operationId: "context-read-0", operation: "read_file", origin: "runtime",
+        status: "success", arguments: { path: "文风.md", source: "disk" }, result: "已读取 120 字符" },
+      { _type: "ToolStart", tool_call_id: "model-read", tool_name: "read_file", arguments: { path: "大纲.md" } },
+      { _type: "ToolDone", tool_call_id: "model-read", tool_name: "read_file", result_preview: "大纲内容", success: true },
+      { _type: "WorkspaceOperation", operationId: "chapter-write-0", operation: "write_file", origin: "runtime",
+        status: "success", arguments: { path: "chapters/001.md" }, result: "章节已保存" },
+      { _type: "AgentCompleted" }
+    ];
+    api.streamAgentPrompt.mockImplementation(async (_request, onPacket) => {
+      for (const packet of packets) onPacket(packet);
+    });
+    const store = useAgentStore();
+    store.promptInput = "接着写";
+    await store.runPrompt();
+    const live = store.executionHistory[0];
+    const tools = live.items.filter((item) => item.type === "tool");
+    expect(tools).toHaveLength(3);
+    expect(tools.map((item) => item.toolName)).toEqual(["read_file", "read_file", "write_file"]);
+    expect(tools.map((item) => item.status)).toEqual(["success", "success", "success"]);
+    expect(tools[0]).toMatchObject({ arguments: { path: "文风.md", source: "disk" }, resultPreview: "已读取 120 字符", raw: { origin: "runtime" } });
+    expect(tools[1].raw?.origin).toBeUndefined();
+    api.fetchAgentHistory.mockResolvedValue({ data: { items: [{
+      traceId: live.traceId, sessionId: live.sessionId, prompt: live.prompt, status: "completed", events: live.events
+    }] } });
+    await store.loadHistory();
+    const restored = store.executionHistory[0].items.filter((item) => item.type === "tool");
+    expect(restored.map(({ toolName, status, arguments: args, resultPreview, raw }) => ({ toolName, status, args, resultPreview, origin: raw?.origin })))
+      .toEqual(tools.map(({ toolName, status, arguments: args, resultPreview, raw }) => ({ toolName, status, args, resultPreview, origin: raw?.origin })));
+  });
+
+  it("keeps continuity opt-out in the generation request and renders its separate accounting", async () => {
+    api.streamAgentPrompt.mockImplementation(async (request: { storyGeneration: { continuityTrackingEnabled: boolean } }, onPacket: (packet: unknown) => void) => {
+      const continuity = request.storyGeneration.continuityTrackingEnabled ? 1 : 0;
+      onPacket({ _type: "StoryCallAccounting", logicalStoryCalls: 1, initialGenerationCalls: 1,
+        providerAttempts: 1 + continuity, nonProseCalls: { continuity } });
+      onPacket({ _type: "AgentCompleted" });
+    });
+    const store = useAgentStore();
+    store.setStoryGenerationOptions({ continuityTrackingEnabled: false });
+    store.promptInput = "继续下一章";
+    await store.runPrompt();
+    expect(api.streamAgentPrompt.mock.calls[0][0].storyGeneration.continuityTrackingEnabled).toBe(false);
+    expect(store.executionHistory[0].items.some((item) => item.content.includes("人物与线索整理"))).toBe(false);
+    store.setStoryGenerationOptions({ continuityTrackingEnabled: true });
+    store.promptInput = "再继续下一章";
+    await store.runPrompt();
+    expect(api.streamAgentPrompt.mock.calls[1][0].storyGeneration.continuityTrackingEnabled).toBe(true);
+    expect(store.executionHistory[0].items.some((item) => item.content.includes("人物与线索整理：1 次"))).toBe(true);
+  });
   it("dismisses the current error and removes failed runs without touching successful history", () => {
     const store = useAgentStore();
     store.lastError = "provider failed";
@@ -174,6 +225,7 @@ describe("agent store streaming", () => {
       chapterLengthTier: "medium",
       chapterWordCountTarget: 3000,
       preciseWordCountEnabled: false,
+      continuityTrackingEnabled: true,
       chapterTemplateId: "default_chapter_directory"
     });
     expect(request.storyGeneration).not.toHaveProperty("fragmentWordCount");
@@ -585,6 +637,7 @@ describe("agent store sessions and Git decision UX", () => {
       chapterLengthTier: "long",
       chapterWordCountTarget: 3000,
       preciseWordCountEnabled: false,
+      continuityTrackingEnabled: true,
       chapterTemplateId: "default_chapter_directory"
     });
     expect(store.executionHistory).toHaveLength(1);

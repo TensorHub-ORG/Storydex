@@ -338,6 +338,15 @@ function closePresetContextMenu(): void {
 
 function handlePresetContextKeydown(event: KeyboardEvent): void {
   if (event.key === "Escape") {
+    if (contextMenu.value.visible) {
+      closePresetContextMenu();
+      return;
+    }
+    if (editorOpen.value || previewOpen.value) {
+      event.preventDefault();
+      if (editorOpen.value) closeEditor();
+      else cancelImport();
+    }
     closePresetContextMenu();
   }
 }
@@ -647,9 +656,8 @@ defineExpose({
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: var(--bg-sidebar);
+  background: var(--canvas);
   color: var(--text-main);
-  border-right: 1px solid var(--border-subtle);
 }
 
 .preset-header {
@@ -658,9 +666,9 @@ defineExpose({
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 6px 12px;
-  border-bottom: 1px solid var(--border-subtle);
-  background: var(--surface-2);
+  padding: 8px 10px 8px 12px;
+  border-bottom: 0;
+  background: transparent;
 }
 
 .preset-header-copy {
@@ -683,8 +691,7 @@ defineExpose({
   color: var(--text-muted);
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .preset-subtitle {
@@ -1032,9 +1039,10 @@ defineExpose({
 .preset-editor-modal {
   width: min(720px, 95vw);
   height: min(90vh, 800px);
-  background: var(--bg-sidebar);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-modal);
   position: relative;
   overflow: hidden;
   display: flex;
@@ -1052,7 +1060,7 @@ defineExpose({
   position: absolute;
   top: 8px;
   right: 8px;
-  z-index: 1;
+  z-index: 4;
   background: transparent;
   border: 0;
   color: var(--text-muted);
