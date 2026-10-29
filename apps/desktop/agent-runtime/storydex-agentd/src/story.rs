@@ -74,6 +74,7 @@ pub(crate) struct StorySettingsInput {
     chapter_length_tier: Option<String>,
     chapter_word_count_target: Option<i64>,
     precise_word_count_enabled: Option<bool>,
+    continuity_tracking_enabled: Option<bool>,
     story_fragment_word_count: Option<i64>,
     story_fragment_word_count_min: Option<i64>,
     story_fragment_word_count_max: Option<i64>,
@@ -161,6 +162,7 @@ fn default_settings() -> Value {
         "chapterLengthTier": "medium",
         "chapterWordCountTarget": 3000,
         "preciseWordCountEnabled": false,
+        "continuityTrackingEnabled": true,
         "storyFragmentWordCount": 3000,
         "storyFragmentWordCountMin": 3000,
         "storyFragmentWordCountMax": 3000,
@@ -430,6 +432,15 @@ pub(crate) async fn update_story_settings(
                     .get("preciseWordCountEnabled")
                     .and_then(Value::as_bool)
                     .unwrap_or(false)
+            })),
+        );
+        object.insert(
+            "continuityTrackingEnabled".to_owned(),
+            json!(input.continuity_tracking_enabled.unwrap_or_else(|| {
+                baseline
+                    .get("continuityTrackingEnabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true)
             })),
         );
         if let Some(value) = input.story_chapter_template_id {

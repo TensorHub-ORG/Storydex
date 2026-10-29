@@ -47,6 +47,16 @@ def test_all_guidance_can_be_disabled():
         assert module["content"] not in text
 
 
+def test_continuity_setting_round_trips_without_reenabling_explicit_false(tmp_path):
+    service = StoryProjectService()
+    service.ensure_project_structure(tmp_path)
+    assert service.read_project_settings(tmp_path)["continuityTrackingEnabled"] is True
+    service.write_project_settings(tmp_path, {"continuityTrackingEnabled": False})
+    assert service.read_project_settings(tmp_path)["continuityTrackingEnabled"] is False
+    service.write_project_settings(tmp_path, {"autoUpdateWiki": True})
+    assert service.read_project_settings(tmp_path)["continuityTrackingEnabled"] is False
+
+
 def test_runtime_preserves_the_complete_guidance_after_preset_compilation(tmp_path):
     service = StoryProjectService()
     service.ensure_project_structure(tmp_path)

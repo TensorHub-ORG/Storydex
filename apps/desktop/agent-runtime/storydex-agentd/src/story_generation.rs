@@ -63,6 +63,15 @@ fn completion_is_truncated(completion: &Value, budget: u64) -> bool {
                 .is_some_and(|used| used >= budget))
 }
 
+fn provider_failure_message(error: &anyhow::Error) -> String {
+    let raw = format!("{error:#}");
+    if raw.to_ascii_lowercase().contains("http 524") {
+        "供应商返回 HTTP 524，未取得完整响应，通常是上游等待超时。可稍后重试；本次没有自动追加调用。".into()
+    } else {
+        raw
+    }
+}
+
 fn annotate_completion(validation: &mut Value, completion: &Value, budget: u64) {
     let truncated = completion_is_truncated(completion, budget);
     validation["outputTruncated"] = json!(truncated);
@@ -257,9 +266,23 @@ where
     }
     emit(sender, trace_events, "TurnPhase", json!({
         "phase": "context_assembly", "label": "章节上下文已准备", "status": "success",
-        "detail": format!("已加入 {} 份项目参考；缺失或省略的来源记录在上下文详情中。", context.trace()["budget"]["blockCount"]),
+        "detail": format!("已加入 {} 份项目参考；缺失或省略的来源记录在上下文详情中。", context.included_source_count()),
         "contextAssembly": context.trace(),
     }), trace_id, session_id).await?;
+
+    for (index, read) in context.file_reads.iter().enumerate() {
+        let mut operation = read.clone();
+        operation["operationId"] = json!(format!("context-read-{index}"));
+        emit(
+            sender,
+            trace_events,
+            "WorkspaceOperation",
+            operation,
+            trace_id,
+            session_id,
+        )
+        .await?;
+    }
 
     emit(
         sender,
@@ -335,7 +358,8 @@ where
                 json!({
                     "error_type": "story_generation_provider_error",
                     "code": "story_generation_provider_error",
-                    "message": format!("Story generation Provider completion failed: {error:#}"),
+                    "message": format!("{} 本次未创建章节文件。", provider_failure_message(&error)),
+                    "providerError": format!("{error:#}"),
                     "providerMode": provider_mode(state),
                 }),
                 trace_id,
@@ -727,6 +751,21 @@ where
                 .replace('\\', "/")
         })
         .collect::<Vec<_>>();
+    for (index, path) in relative_targets.iter().enumerate() {
+        emit(
+            sender,
+            trace_events,
+            "WorkspaceOperation",
+            json!({
+                "operationId": format!("chapter-write-{index}"),
+                "operation": "write_file", "origin": "runtime", "status": "success",
+                "arguments": { "path": path }, "result": "章节已保存",
+            }),
+            trace_id,
+            session_id,
+        )
+        .await?;
+    }
     if let Some(object) = validation.as_object_mut() {
         object.insert("writeToolApplied".into(), Value::Bool(true));
         object.insert("writtenPaths".into(), json!(relative_targets.clone()));
@@ -736,6 +775,127 @@ where
         );
     }
     let actual_word_count = visible_character_count(&content);
+    let mut continuity_note = String::new();
+    if options.continuity_tracking_enabled {
+        let prepared =
+            crate::story_continuity::draft(workspace, &relative_targets).and_then(|draft| {
+                let target = crate::story_continuity::destination(workspace, &draft.0)?;
+                ensure_story_targets_are_authorized(payload, workspace, &[target])?;
+                let chapter = crate::story_continuity::extraction_input(workspace, &draft.1)?;
+                Ok((draft.0, draft.1, chapter))
+            });
+        let started = Instant::now();
+        let mut attempted = false;
+        let mut usage = Value::Null;
+        let mut reasoning_plan = Value::Null;
+        let mut response_metadata = Value::Null;
+        let mut record_paths = Vec::new();
+        let result = match prepared {
+            Ok((path, record, chapter)) if !cancellation.is_cancelled() => {
+                emit(sender, trace_events, "TurnPhase", json!({
+                    "phase": "story_continuity", "label": "正文已保存，正在整理人物与线索",
+                    "status": "running", "detail": "额外调用一次模型整理续写记录；失败不会撤销已保存正文。"
+                }), trace_id, session_id).await?;
+                let mut request = provider_request.clone();
+                let prior = crate::story_continuity::read(workspace, &payload.prompt)
+                    .map(|view| view.text)
+                    .unwrap_or_default();
+                request["messages"] = json!([
+                    {"role": "system", "content": crate::story_continuity::COMPACT_EXTRACTION_GUIDANCE},
+                    {"role": "user", "content": format!("已有观察仅用于理解和沿用名称，不得抄成新增事实：\n{prior}\n\n只整理以下已保存正文：\n{chapter}")}
+                ]);
+                request["maxOutputTokens"] = json!(8_192);
+                request["reasoningEffort"] = json!("low");
+                attempted = true;
+                match complete(request).await {
+                    Ok(completion) => {
+                        usage = completion.get("usage").cloned().unwrap_or(Value::Null);
+                        reasoning_plan = completion
+                            .get("reasoningRequestPlan")
+                            .cloned()
+                            .unwrap_or(Value::Null);
+                        response_metadata =
+                            completion.get("metadata").cloned().unwrap_or(Value::Null);
+                        if completion_is_truncated(&completion, 8_192)
+                            || cancellation.is_cancelled()
+                        {
+                            Err(anyhow::anyhow!("整理已取消或输出未完成"))
+                        } else {
+                            let result = crate::story_continuity::save_completion(
+                                workspace,
+                                &path,
+                                record,
+                                completion["content"].as_str().unwrap_or_default(),
+                            );
+                            if let Ok(report) = &result {
+                                emit(sender, trace_events, "WorkspaceOperation", json!({
+                                    "operationId": "continuity-write",
+                                    "operation": "write_file", "origin": "runtime", "status": "success",
+                                    "arguments": { "path": path },
+                                    "result": format!("已保存 {} 条记录，{} 条未通过校验。", report.accepted, report.rejected),
+                                }), trace_id, session_id).await?;
+                                record_paths.push(path);
+                            }
+                            result
+                        }
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Ok(_) => Err(anyhow::anyhow!("整理已取消")),
+            Err(error) => Err(error),
+        };
+        let (status, mut detail) = match result {
+            Ok(report) => {
+                if report.rejected > 0 {
+                    continuity_note = format!(
+                        "\n正文已保存；续写记录已保存 {} 条，另 {} 条未通过校验，未采用。",
+                        report.accepted, report.rejected
+                    );
+                    ("warning", continuity_note.trim().to_owned())
+                } else {
+                    (
+                        "success",
+                        format!(
+                            "已保存 {} 条人物与线索观察，供后续章节参考。",
+                            report.accepted
+                        ),
+                    )
+                }
+            }
+            Err(error) => {
+                continuity_note = format!(
+                    "\n正文已保存；续写记录未更新：{}",
+                    provider_failure_message(&error)
+                );
+                ("warning", continuity_note.trim().to_owned())
+            }
+        };
+        if let Some(output_tokens) = usage.get("output_tokens").and_then(Value::as_u64) {
+            let input_tokens = usage
+                .get("input_tokens")
+                .and_then(Value::as_u64)
+                .map(|count| count.to_string())
+                .unwrap_or_else(|| "未报告".into());
+            detail.push_str(&format!(
+                " 整理用量：输入 {input_tokens}，输出 {output_tokens} tokens。"
+            ));
+        }
+        emit(
+            sender,
+            trace_events,
+            "TurnPhase",
+            json!({
+                "phase": "story_continuity", "label": "人物与线索记录", "status": status,
+                "detail": detail, "providerAttempts": u64::from(attempted), "usage": usage,
+                "maxOutputTokens": 8192, "reasoningRequestPlan": reasoning_plan, "responseMetadata": response_metadata,
+                "elapsedMs": started.elapsed().as_millis(), "writtenPaths": record_paths,
+            }),
+            trace_id,
+            session_id,
+        )
+        .await?;
+    }
     let tier_hit = (calibration.preferred_minimum..=calibration.preferred_maximum)
         .contains(&actual_word_count);
     if chapter_target.is_none() && provider_attempts == 1 {
@@ -781,7 +941,7 @@ where
         trace_events,
         "TextChunk",
         json!({
-            "content": completion_reply(&relative_targets[0], actual_word_count, options),
+            "content": format!("{}{continuity_note}", completion_reply(&relative_targets[0], actual_word_count, options)),
             "path": relative_targets[0].clone(),
             "writtenPaths": relative_targets.clone(),
             "providerMode": provider_mode,
@@ -816,7 +976,10 @@ where
     .await?;
     Ok(StoryGenerationOutcome {
         terminal_event: "AgentCompleted".to_owned(),
-        reply: completion_reply(&relative_targets[0], actual_word_count, options),
+        reply: format!(
+            "{}{continuity_note}",
+            completion_reply(&relative_targets[0], actual_word_count, options)
+        ),
     })
 }
 
@@ -1000,6 +1163,11 @@ async fn emit_story_accounting(
     precise_word_count_enabled: bool,
     provider_attempts: u64,
 ) -> Result<()> {
+    let continuity_calls: u64 = trace_events
+        .iter()
+        .filter(|(name, value)| name == "TurnPhase" && value["phase"] == "story_continuity")
+        .filter_map(|(_, value)| value["providerAttempts"].as_u64())
+        .sum();
     emit(
         sender,
         trace_events,
@@ -1011,12 +1179,12 @@ async fn emit_story_accounting(
             "preciseWordCountEnabled": precise_word_count_enabled,
             "asymmetricLengthEnabled": false,
             "logicalStoryCalls": provider_attempts,
-            "providerAttempts": provider_attempts,
+            "providerAttempts": provider_attempts + continuity_calls,
             "transportRetries": 0,
             "initialGenerationCalls": 1,
             "lengthRevisionCalls": provider_attempts.saturating_sub(1),
             "secondDraftCalls": 0,
-            "nonProseCalls": {},
+            "nonProseCalls": if continuity_calls == 0 { json!({}) } else { json!({"continuity": continuity_calls}) },
             "contractViolations": [],
             "providerMode": provider_mode,
         }),
@@ -1486,7 +1654,9 @@ where
         published.push(target.clone());
     }
     for (temporary, _) in &staged {
-        if let Err(error) = fs::remove_file(temporary) {
+        if let Err(error) = fs::remove_file(temporary)
+            && error.kind() != io::ErrorKind::NotFound
+        {
             tracing::warn!(error = %error, path = %temporary.display(), "unable to remove committed story staging file");
         }
     }
@@ -1514,6 +1684,139 @@ fn cleanup_story_staging(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn continuity_update_follows_saved_prose_and_reports_failures_without_losing_it() {
+        for scenario in [
+            "success",
+            "partial",
+            "invalid",
+            "edited",
+            "cancelled",
+            "provider_error",
+            "truncated",
+            "disabled",
+            "scope",
+        ] {
+            let directory = tempdir().expect("workspace");
+            let workspace = directory.path().canonicalize().expect("root");
+            fs::create_dir_all(workspace.join("chapters")).expect("chapters");
+            let state = AppState::with_paths(
+                "token",
+                directory.path().join("home"),
+                directory.path().join("bridge"),
+                Some(workspace.clone()),
+                None,
+            )
+            .expect("state");
+            let (mut payload, mut options) = story_request("short");
+            if scenario != "scope" {
+                payload.allowed_write_roots = vec![".".into()];
+            }
+            options.continuity_tracking_enabled = scenario != "disabled";
+            let cancellation = crate::execution::ExecutionCancellation::default();
+            let (sender, _receiver) = mpsc::channel(128);
+            let mut events = Vec::new();
+            let mut calls = 0;
+            let source = "chapters/第1章 未命名/001.md";
+            let prose = "小雨收起铜牌，答应明天归还。";
+            let outcome = run_create_new_with_completion(&state, &payload, &options, &workspace, "trace", "session", &provider_identity(), &cancellation, &sender, &mut events, |request| {
+                calls += 1;
+                if calls == 2 && scenario == "provider_error" {
+                    return std::future::ready(Err(anyhow::anyhow!("provider unavailable")));
+                }
+                let content = if calls == 1 { prose.to_owned() } else {
+                    assert_eq!(fs::read_to_string(workspace.join(source)).expect("saved prose").trim(), prose);
+                    assert_eq!(request["reasoningEffort"], "low");
+                    assert_eq!(request["maxOutputTokens"], 8192);
+                    assert!(request["messages"][1]["content"].as_str().expect("chapter").contains("[S1]"));
+                    assert!(request["messages"][0]["content"].as_str().expect("instructions").contains("未来章纲"));
+                    if scenario == "edited" { fs::write(workspace.join(source), "作者修改了正文。").expect("edit"); }
+                    if scenario == "cancelled" { cancellation.cancel("user_cancelled"); }
+                    if scenario == "invalid" { "not json".into() } else {
+                        let mut entries = vec![json!({"kind": "commitment", "key": "归还铜牌", "summary": "小雨答应明天归还铜牌，尚未兑现。", "status": "active", "characters": ["小雨"], "evidenceId": "S1"})];
+                        if scenario == "partial" { entries.push(json!({"kind": "thread", "key": "错误观察", "evidenceId": "S999"})); }
+                        json!({"entries": entries}).to_string()
+                    }
+                };
+                std::future::ready(Ok(json!({"content": content, "providerMode": "replay", "usage": {"input_tokens": 80, "output_tokens": 30},
+                    "metadata": {"finishReason": if calls == 2 && scenario == "truncated" { "max_output_tokens" } else { "stop" }}})))
+            }).await.expect("run");
+            assert_eq!(outcome.terminal_event, "AgentCompleted", "{scenario}");
+            assert!(workspace.join(source).is_file());
+            let writes = events
+                .iter()
+                .filter(|(name, value)| {
+                    name == "WorkspaceOperation" && value["operation"] == "write_file"
+                })
+                .map(|(_, value)| value)
+                .collect::<Vec<_>>();
+            let saved_record = matches!(scenario, "success" | "partial");
+            assert_eq!(writes.len(), if saved_record { 2 } else { 1 }, "{scenario}");
+            assert_eq!(writes[0]["arguments"]["path"], source);
+            for write in &writes {
+                assert_eq!(write["origin"], "runtime");
+                assert_eq!(write["status"], "success");
+                assert!(
+                    workspace
+                        .join(write["arguments"]["path"].as_str().expect("path"))
+                        .is_file()
+                );
+            }
+            assert_eq!(
+                calls,
+                if matches!(scenario, "disabled" | "scope") {
+                    1
+                } else {
+                    2
+                },
+                "{scenario}"
+            );
+            let view = crate::story_continuity::read(&workspace, "小雨").expect("view");
+            assert_eq!(
+                view.text.contains("归还铜牌"),
+                matches!(scenario, "success" | "partial"),
+                "{scenario}"
+            );
+            if scenario == "partial" {
+                assert!(outcome.reply.contains("已保存 1 条，另 1 条未通过校验"));
+            } else if !matches!(scenario, "success" | "disabled") {
+                assert!(
+                    outcome.reply.contains("正文已保存；续写记录未更新"),
+                    "{scenario}"
+                );
+            }
+            let accounting = &events
+                .iter()
+                .rev()
+                .find(|(name, _)| name == "StoryCallAccounting")
+                .expect("accounting")
+                .1;
+            assert_eq!(accounting["providerAttempts"], calls);
+            assert_eq!(accounting["lengthRevisionCalls"], 0);
+            if scenario == "success" {
+                let phase = &events
+                    .iter()
+                    .rev()
+                    .find(|(_, value)| value["phase"] == "story_continuity")
+                    .expect("phase")
+                    .1;
+                assert_eq!(phase["usage"]["output_tokens"], 30);
+                assert!(
+                    phase["detail"]
+                        .as_str()
+                        .expect("detail")
+                        .contains("输入 80，输出 30 tokens")
+                );
+                assert!(
+                    phase["writtenPaths"][0]
+                        .as_str()
+                        .expect("record path")
+                        .starts_with(".storydex/memory/continuity/")
+                );
+            }
+        }
+    }
     use tempfile::tempdir;
 
     fn cold_start_calibration() -> ShortCalibrationSummary {
@@ -1539,6 +1842,7 @@ mod tests {
             chapter_length_tier: tier.to_owned(),
             chapter_word_count_target: None,
             precise_word_count_enabled: false,
+            continuity_tracking_enabled: false,
             chapter_template_id: "default_chapter_directory".to_owned(),
         };
         (payload, options)
@@ -1802,6 +2106,27 @@ mod tests {
         assert_eq!(calls, 2);
         assert_eq!(outcome.terminal_event, "AgentCompleted");
         assert!(workspace.join("chapters/第2章 未命名/001.md").is_file());
+        let reads = events
+            .iter()
+            .filter(|(name, value)| {
+                name == "WorkspaceOperation" && value["operation"] == "read_file"
+            })
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reads.len(),
+            2,
+            "one real chapter and one character file, no virtual preset file"
+        );
+        assert!(
+            reads
+                .iter()
+                .all(|read| read["origin"] == "runtime" && read["status"] == "success")
+        );
+        assert!(
+            !events.iter().any(|(name, _)| name == "ToolStart"),
+            "host operations are not model-issued tool calls"
+        );
         let context = &events
             .iter()
             .find(|(name, data)| name == "TurnPhase" && data["phase"] == "context_assembly")
@@ -1877,6 +2202,15 @@ mod tests {
             assert_eq!(validation["writeToolApplied"], should_write);
             let path = workspace.join("chapters/第1章 未命名/001.md");
             assert_eq!(path.exists(), should_write);
+            assert_eq!(
+                events.iter().any(|(name, value)| {
+                    name == "WorkspaceOperation"
+                        && value["operation"] == "write_file"
+                        && value["status"] == "success"
+                }),
+                should_write,
+                "only successful saves may appear as successful writes"
+            );
             if should_write {
                 assert_eq!(outcome.terminal_event, "AgentCompleted");
                 assert_eq!(validation["status"], "success");
@@ -2459,6 +2793,63 @@ mod tests {
         assert!(!workspace.join("chapters/第1章 未命名/001.md").exists());
         assert!(!workspace.join("chapters/第1章 未命名/002.md").exists());
         assert!(!workspace.join("chapters/第1章 未命名/003.md").exists());
+        assert!(!events.iter().any(
+            |(name, value)| name == "WorkspaceOperation" && value["operation"] == "write_file"
+        ));
+    }
+
+    #[tokio::test]
+    async fn gateway_timeout_explains_retry_without_creating_a_chapter_or_extra_call() {
+        let directory = tempdir().expect("temp");
+        let workspace = directory.path().canonicalize().expect("root");
+        fs::create_dir(workspace.join("chapters")).expect("chapters");
+        let state = AppState::with_paths(
+            "token",
+            workspace.join("home"),
+            workspace.join("bridge"),
+            Some(workspace.clone()),
+            None,
+        )
+        .expect("state");
+        let (payload, options) = story_request("short");
+        let cancellation = crate::execution::ExecutionCancellation::default();
+        let (sender, _receiver) = mpsc::channel(32);
+        let mut events = Vec::new();
+        let mut calls = 0;
+        let outcome = run_create_new_with_completion(
+            &state,
+            &payload,
+            &options,
+            &workspace,
+            "trace",
+            "session",
+            &provider_identity(),
+            &cancellation,
+            &sender,
+            &mut events,
+            |_| {
+                calls += 1;
+                std::future::ready(Err(anyhow::anyhow!("provider returned HTTP 524")))
+            },
+        )
+        .await
+        .expect("outcome");
+        assert_eq!(calls, 1);
+        assert_eq!(outcome.terminal_event, "AgentError");
+        let error = &events.last().expect("terminal").1;
+        assert!(
+            error["message"]
+                .as_str()
+                .expect("message")
+                .contains("可稍后重试")
+        );
+        assert_eq!(error["providerError"], "provider returned HTTP 524");
+        assert_eq!(
+            fs::read_dir(workspace.join("chapters"))
+                .expect("dir")
+                .count(),
+            0
+        );
     }
 
     #[tokio::test]

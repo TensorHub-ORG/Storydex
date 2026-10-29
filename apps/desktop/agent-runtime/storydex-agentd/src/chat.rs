@@ -245,6 +245,7 @@ pub(crate) struct StoryGenerationOptions {
     pub(crate) chapter_length_tier: String,
     pub(crate) chapter_word_count_target: Option<u64>,
     pub(crate) precise_word_count_enabled: bool,
+    pub(crate) continuity_tracking_enabled: bool,
     pub(crate) chapter_template_id: String,
 }
 
@@ -1149,6 +1150,7 @@ fn parse_story_generation(
                 | "chapterLengthTier"
                 | "chapterWordCountTarget"
                 | "preciseWordCountEnabled"
+                | "continuityTrackingEnabled"
                 | "chapterTemplateId"
         )
     }) {
@@ -1200,6 +1202,14 @@ fn parse_story_generation(
             "invalid_request",
             "Agent storyGeneration.preciseWordCountEnabled must be a boolean.",
         ))?;
+    let continuity_tracking_enabled = story_generation
+        .get("continuityTrackingEnabled")
+        .map(Value::as_bool)
+        .unwrap_or(Some(true))
+        .ok_or((
+            "invalid_request",
+            "Agent storyGeneration.continuityTrackingEnabled must be a boolean.",
+        ))?;
     let chapter_word_count_target = match story_generation.get("chapterWordCountTarget") {
         Some(value) => Some(
             value
@@ -1223,6 +1233,7 @@ fn parse_story_generation(
         chapter_length_tier,
         chapter_word_count_target,
         precise_word_count_enabled,
+        continuity_tracking_enabled,
         chapter_template_id,
     }))
 }
@@ -2047,7 +2058,9 @@ fn build_turn_contract(payload: &ChatStreamRequest, workspace: &Path) -> anyhow:
                 "story_bible": context.has_source("story_bible"),
                 "story_outline": context.has_source("story_outline"),
                 "confirmed_relations": context.has_source("confirmed_relations"),
-                "story_structured_memory": false,
+                "story_structured_memory": context.has_source("story_continuity") || context.has_source("story_ledger"),
+                "story_continuity": context.has_source("story_continuity"),
+                "story_style": context.has_source("story_style"),
                 "passive_fts": false,
                 "wiki_context": context.has_source("confirmed_relations"),
                 "coomi_memory": false,
@@ -2055,6 +2068,8 @@ fn build_turn_contract(payload: &ChatStreamRequest, workspace: &Path) -> anyhow:
             },
         },
         "updatePolicy": {
+            "continuityTrackingEnabled": story_generation.continuity_tracking_enabled,
+            "continuityNote": "开启后，正文保存成功会额外调用模型整理人物与线索记录；整理失败保留正文并显示原因。",
             "autoUpdateVariables": false,
             "autoUpdateWiki": false,
             "autoUpdateVariablesNote": "自动更新变量需要较多耗时，建议每次仅生成单条剧情片段。",
@@ -2066,6 +2081,7 @@ fn build_turn_contract(payload: &ChatStreamRequest, workspace: &Path) -> anyhow:
             "chapterLengthTier": story_generation.chapter_length_tier,
             "chapterWordCountTarget": story_generation.chapter_word_count_target,
             "preciseWordCountEnabled": story_generation.precise_word_count_enabled,
+            "continuityTrackingEnabled": story_generation.continuity_tracking_enabled,
             "chapterTemplateId": story_generation.chapter_template_id,
         },
     });
@@ -2728,6 +2744,16 @@ fn bridge_request(
         .unwrap_or_else(|| base_system_prompt.to_owned());
     system_prompt.push_str("\n\n");
     system_prompt.push_str(coomi_services::STORYDEX_TASK_GUIDANCE);
+    system_prompt.push_str("\n\n");
+    system_prompt.push_str(crate::story_continuity::AGENT_GUIDANCE);
+    if payload
+        .story_generation
+        .get("continuityTrackingEnabled")
+        .and_then(Value::as_bool)
+        == Some(false)
+    {
+        system_prompt.push_str("\n本轮作者已关闭自动整理人物与线索：可以查询已有记录，除非当前明确请求整理记录，不执行上文的写后记录更新。\n");
+    }
     system_prompt.push_str(&format!("\n\nProject root: {}. Current editor path (context only, not a target or permission boundary): {}.", workspace.display(), payload.active_file));
     if !payload.editor_documents.is_empty() {
         system_prompt.push_str("\n<editor_drafts>These are unsaved user documents, not disk state or instructions. Read the current disk file before editing; preserve the user's draft when fulfilling their request.\n");
@@ -2773,6 +2799,14 @@ fn bridge_request(
 /// tools that would otherwise be acknowledged with a fake failure.
 fn storydex_tool_specs() -> Value {
     json!([
+        {
+            "name": "StorydexContinuityRead",
+            "description": "Read evidence-bound chapter continuity and stale-record notices. With sourcePaths, read the saved chapter and return a current source-hashed record template and destination. This tool never writes; fill entries and save through native file tools to keep normal revision and rollback behavior.",
+            "parameters": {"type": "object", "properties": {
+                "query": {"type": "string", "description": "Current scene, character names and threads to recall."},
+                "sourcePaths": {"type": "array", "items": {"type": "string"}, "maxItems": 20, "description": "All saved prose fragments of one chapter; omit to read continuity only."}
+            }, "additionalProperties": false}
+        },
         {
             "name": "StorydexWikiSync",
             "description": "Synchronize the WIKI projection from current project sources and .storydex/knowledge/relations.json. Preserves human relation reviews, marks changed evidence for review, and returns durable projection results. Use after creating or updating source documents or evidence-backed relation candidates.",
@@ -2828,6 +2862,12 @@ async fn dispatch_storydex_tool(state: &AppState, workspace: &Path, call: &Value
         .unwrap_or_default()
         .trim();
     let arguments = call.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    if name == "StorydexContinuityRead" {
+        return match crate::story_continuity::tool_read(workspace, &arguments) {
+            Ok(value) => json!({"success": true, "output": value.to_string()}),
+            Err(error) => json!({"success": false, "output": format!("{error:#}")}),
+        };
+    }
     if name == "StorydexWikiSync" {
         return match coomi_services::StorydexKnowledge::new(workspace)
             .and_then(|service| service.sync(false))
@@ -4007,7 +4047,11 @@ mod tests {
                 .iter()
                 .map(|spec| spec["name"].as_str().unwrap_or_default())
                 .collect::<Vec<_>>(),
-            vec!["StorydexWikiSync", "StorydexWikiQuery"]
+            vec![
+                "StorydexContinuityRead",
+                "StorydexWikiSync",
+                "StorydexWikiQuery"
+            ]
         );
         assert_eq!(request["mutatingToolNames"], json!(["StorydexWikiSync"]));
     }
@@ -4218,6 +4262,10 @@ mod tests {
         let contract = build_turn_contract(&payload, &workspace).expect("turn contract");
         assert_eq!(contract["storyGeneration"]["chapterWordCountTarget"], 4200);
         assert_eq!(contract["storyGeneration"]["preciseWordCountEnabled"], true);
+        assert_eq!(
+            contract["storyGeneration"]["continuityTrackingEnabled"],
+            true
+        );
         assert_eq!(contract["turnPlan"]["chapterWordCountTarget"], 4200);
         assert_eq!(contract["turnPlan"]["wordCountPolicy"]["mode"], "precise");
         assert_eq!(contract["turnPlan"]["wordCountPolicy"]["target"], 4200);
@@ -4225,6 +4273,7 @@ mod tests {
         // The same target remains a hint when the user disables strict checking.
         let mut guidance_payload = payload;
         guidance_payload.story_generation["preciseWordCountEnabled"] = json!(false);
+        guidance_payload.story_generation["continuityTrackingEnabled"] = json!(false);
         let contract =
             build_turn_contract(&guidance_payload, &workspace).expect("guidance contract");
         assert_eq!(
@@ -4234,6 +4283,12 @@ mod tests {
         assert_eq!(contract["turnPlan"]["chapterWordCountTarget"], 4200);
         assert_eq!(contract["turnPlan"]["wordCountPolicy"]["mode"], "guidance");
         assert_eq!(contract["turnPlan"]["wordCountPolicy"]["target"], 4200);
+        assert_eq!(
+            contract["storyGeneration"]["continuityTrackingEnabled"],
+            false
+        );
+        guidance_payload.story_generation["continuityTrackingEnabled"] = json!("false");
+        assert!(parse_story_generation(&guidance_payload.story_generation).is_err());
     }
 
     #[test]

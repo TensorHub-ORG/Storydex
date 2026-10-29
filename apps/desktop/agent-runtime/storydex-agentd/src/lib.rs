@@ -57,6 +57,7 @@ mod project;
 mod replacement;
 mod story;
 mod story_context;
+mod story_continuity;
 mod story_generation;
 mod system;
 mod workspace;
@@ -2325,6 +2326,7 @@ mod tests {
                     "storyFragmentWordCountMin": 3000,
                     "storyFragmentWordCountMax": 4800,
                     "preciseWordCountEnabled": true,
+                    "continuityTrackingEnabled": false,
                     "autoUpdateVariables": true,
                     "autoUpdateWiki": true,
                     "agentCommitPromptEnabled": false,
@@ -2346,6 +2348,7 @@ mod tests {
         assert_eq!(body["data"]["storyFragmentWordCountMin"], 6000);
         assert_eq!(body["data"]["storyFragmentWordCountMax"], 6000);
         assert_eq!(body["data"]["preciseWordCountEnabled"], true);
+        assert_eq!(body["data"]["continuityTrackingEnabled"], false);
 
         let response = router(state.clone())
             .oneshot(protected_json_request_with_method(
@@ -2380,6 +2383,7 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(body["data"]["chapterWordCountTarget"], 6000);
         assert_eq!(body["data"]["preciseWordCountEnabled"], false);
+        assert_eq!(body["data"]["continuityTrackingEnabled"], false);
 
         let response = router(state.clone())
             .oneshot(protected_get_request("/api/v1/story/chapters"))

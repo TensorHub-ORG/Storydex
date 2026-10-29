@@ -1732,7 +1732,12 @@ impl StorydexGit {
             ));
         };
         if !same_path(&root, &top) {
-            bail!("refusing Git operation: project root is nested in a parent repository")
+            // A status query is allowed to describe this project as unavailable;
+            // mutations still reject access to the parent repository.
+            return Ok(uninitialized_summary(
+                true,
+                "本项目位于另一个 Git 仓库内，未启用独立版本管理；不会读取或修改父仓库。",
+            ));
         }
         let status = run_git(
             &root,
@@ -1881,8 +1886,19 @@ impl StorydexGit {
 
     pub fn branches(&self, project_root: impl AsRef<Path>) -> Result<GitBranches> {
         let root = canonical_existing_dir(project_root.as_ref())?;
-        self.initialize(&root)?;
-        self.branch_result(&root)
+        let summary = self.summary(&root)?;
+        if !summary.initialized {
+            return Ok(GitBranches {
+                summary: Some(summary),
+                ..GitBranches::default()
+            });
+        }
+        let (current, branches) = self.read_branches(&root)?;
+        Ok(GitBranches {
+            current,
+            branches,
+            summary: Some(summary),
+        })
     }
 
     fn branch_result(&self, root: &Path) -> Result<GitBranches> {
@@ -1967,10 +1983,12 @@ impl StorydexGit {
                 "Local repository is not initialized yet.",
             ));
         };
-        ensure!(
-            same_path(&root, &top),
-            "refusing Git operation: project root is nested in a parent repository"
-        );
+        if !same_path(&root, &top) {
+            return Ok(uninitialized_timeline(
+                true,
+                "本项目位于另一个 Git 仓库内，未启用独立版本管理；不会读取或修改父仓库。",
+            ));
+        }
 
         let branch_heads = self.read_branch_heads(&root)?;
         let current_branch = self.current_branch(&root)?;
@@ -4452,12 +4470,45 @@ mod tests {
         fs::create_dir(&child).expect("child");
         let git = StorydexGit;
         git.initialize(parent.path()).expect("parent init");
+        let child_summary = git.summary(&child).expect("nested status is readable");
+        assert!(!child_summary.initialized);
+        assert!(child_summary.changed_files.is_empty());
+        assert!(child_summary.recent_commits.is_empty());
+        assert!(child_summary.message.contains("父仓库"));
+        let child_branches = git.branches(&child).expect("nested branches are readable");
+        assert!(child_branches.current.is_empty());
+        assert!(child_branches.branches.is_empty());
+        let branch_summary = child_branches.summary.expect("nested summary");
+        assert!(!branch_summary.initialized);
+        assert!(branch_summary.changed_files.is_empty());
+        assert!(branch_summary.recent_commits.is_empty());
+        assert_eq!(branch_summary.message, child_summary.message);
+        let child_timeline = git.timeline(&child).expect("nested timeline is readable");
+        assert!(!child_timeline.initialized);
+        assert!(child_timeline.branches.is_empty());
+        assert!(child_timeline.nodes.is_empty());
+        assert!(child_timeline.message.contains("父仓库"));
+        assert!(!child.join(".git").exists());
         let error = git
             .initialize(&child)
             .expect_err("nested repository must fail");
         assert!(error.to_string().contains("nested"));
 
         let standalone = tempdir().expect("standalone");
+        let branches = git
+            .branches(standalone.path())
+            .expect("uninitialized branches");
+        assert!(branches.branches.is_empty());
+        assert!(!branches.summary.expect("summary").initialized);
+        assert!(
+            !git.timeline(standalone.path())
+                .expect("timeline")
+                .initialized
+        );
+        assert!(
+            !standalone.path().join(".git").exists(),
+            "reads must not initialize Git"
+        );
         let summary = git.initialize(standalone.path()).expect("init");
         assert!(summary.initialized);
         fs::write(standalone.path().join("chapter.md"), "正文\n").expect("write chapter");
