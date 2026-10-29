@@ -33,14 +33,6 @@
   </a>
 </p>
 
-## Star 趋势
-
-<p align="center">
-  <a href="https://www.star-history.com/#TensorHub-ORG/Storydex&Date">
-    <img src="https://api.star-history.com/svg?repos=TensorHub-ORG/Storydex&type=Date" alt="Storydex Star History" width="700" />
-  </a>
-</p>
-
 ## 简介
 
 Storydex 服务于需要持续维护世界观、人物关系、伏笔与章节连续性的小说作者。它把章节、角色、世界书、WIKI、创作记忆与版本历史组织在本地项目中，由 Coomi Agent 围绕这些资料协助续写、整理、审阅和设定维护。
