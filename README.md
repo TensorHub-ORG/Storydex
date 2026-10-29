@@ -96,6 +96,7 @@ npm --prefix apps/desktop run dev
 - [项目架构说明](docs/项目架构说明.md)：源码目录、运行链路和数据边界。
 - [Agent 双平台 Rust 架构](docs/agent-runtime-architecture.md)：Windows 与 Android runtime 的职责边界。
 - [Rust 接口覆盖清单](docs/rust-backend-interface-inventory.md)：前端真实 API 消费契约与 Rust 路由核对方式。
+- [文风与续写记录](docs/writing-continuity.md)：文风资料、跨章人物与线索记录，以及来源校验和失败处理。
 - [项目决策与评测结论](docs/项目决策与评测结论.md)：当前有效的架构决策和可复现实验结论。
 - [封装与发布要求](docs/发行说明/Storydex-封装与发布要求.md)：版本、签名、发行资产、更新源和回滚门禁。
 - [仓库自动化规则](AGENTS.md)：本地 hook、CI、提交和安全边界。
@@ -186,3 +187,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_pre_push_ci.ps1
 本项目采用 Apache License 2.0 与 Commons Clause 组合许可。个人学习、研究和教学等非商业用途可按许可证使用；商业使用、SaaS 托管、付费服务、二次分发或对外提供衍生版本前，请先取得书面授权。商业授权联系：`septemc@foxmail.com`。详见 [LICENSE](LICENSE) 和 [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md)。
 
 Copyright 2026 Septemc and Flowby.
+
+## Star 趋势
+
+<a href="https://star-history.com/#TensorHub-ORG/Storydex&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=TensorHub-ORG/Storydex&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=TensorHub-ORG/Storydex&type=Date" />
+    <img alt="Storydex 的 GitHub Star 增长趋势" src="https://api.star-history.com/svg?repos=TensorHub-ORG/Storydex&type=Date" />
+  </picture>
+</a>
