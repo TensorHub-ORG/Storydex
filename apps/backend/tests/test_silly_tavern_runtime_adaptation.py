@@ -40,7 +40,10 @@ def test_prompt_order_prefers_dummy_character_100001_over_longer_order():
     doc_dump = result.document.model_dump(mode="python", by_alias=True)
 
     assert [item["identifier"] for item in doc_dump["sillyTavern"]["selectedPromptOrder"]] == ["c", "a"]
-    assert compile_preset(result.document).compiled_text == "C"
+    compiled = compile_preset(result.document)
+    assert compiled.compiled_text.startswith("C\n\n")
+    assert [section.source_module_id for section in compiled.sections
+            if section.source_module_id.startswith("st_")] == ["st_c"]
 
 
 def test_prompts_missing_from_prompt_order_import_disabled_and_sorted_last():
@@ -63,11 +66,13 @@ def test_prompts_missing_from_prompt_order_import_disabled_and_sorted_last():
     assert by_identifier["main"]["enabledByDefault"] is True
     assert by_identifier["orphan"]["enabledByDefault"] is False
     assert by_identifier["orphan"]["sourceOrder"] > by_identifier["main"]["sourceOrder"]
-    assert compile_preset(result.document).compiled_text == "Main prompt"
+    compiled = compile_preset(result.document)
+    assert compiled.compiled_text.startswith("Main prompt\n\n")
+    assert "Orphan prompt" not in compiled.compiled_text
 
     # 用户手动开启后可参与编译（排在有序模块之后）。
     enabled = compile_preset(result.document, overrides={"enabledModuleIds": ["st_orphan"]})
-    assert enabled.compiled_text == "Main prompt\n\nOrphan prompt"
+    assert enabled.compiled_text.startswith("Main prompt\n\nOrphan prompt\n\n")
 
 
 def test_gemini_style_model_role_normalizes_to_assistant():
@@ -122,7 +127,8 @@ def test_absolute_injections_are_not_duplicated_into_compiled_text():
 
     compiled = compile_preset(_import_payload(payload).document)
 
-    assert compiled.compiled_text == "Relative prompt"
+    assert compiled.compiled_text.startswith("Relative prompt\n\n")
+    assert "Absolute prompt" not in compiled.compiled_text
     assert [injection.text for injection in compiled.injections] == ["Absolute prompt"]
     # 绝对注入模块不应被误报为未注入。
     assert not [risk for risk in compiled.risks if risk.code == "not_injected"]
