@@ -22,7 +22,9 @@ pub(crate) struct StoryContext {
 
 impl StoryContext {
     pub(crate) fn has_source(&self, kind: &str) -> bool {
-        self.blocks.iter().any(|block| block["kind"] == kind)
+        self.blocks
+            .iter()
+            .any(|block| block["kind"] == kind && block["included"] == true)
     }
 
     pub(crate) fn trace(&self) -> Value {
@@ -189,7 +191,7 @@ pub(crate) fn prepare(workspace: &Path, payload: &ChatStreamRequest) -> Result<S
     }
     for (directory, kind) in [
         (".storydex/memory", "story_bible"),
-        (".storydex/scripts", "story_outline"),
+        (".storydex/scripts", "story_scripts"),
         (".storydex/worldbook", "worldbook"),
     ] {
         canon.extend(
@@ -538,6 +540,21 @@ mod tests {
             serde_json::from_value(json!({"prompt": "继续", "activeFile": "../outside.md"}))
                 .expect("context test fixture");
         assert!(prepare(&root, &payload).is_err());
+    }
+
+    #[test]
+    fn omitted_sources_are_not_reported_as_loaded() {
+        let mut context = StoryContext::default();
+        context.add(
+            "runtime_presets",
+            "preset",
+            &"文".repeat(MAX_CONTEXT_CHARS),
+            MAX_CONTEXT_CHARS,
+            false,
+        );
+        context.add("confirmed_relations", "graph", "已确认关系", 100, false);
+        assert!(!context.has_source("confirmed_relations"));
+        assert_eq!(context.trace()["promptBlocks"][1]["omitted"], true);
     }
 
     #[test]
