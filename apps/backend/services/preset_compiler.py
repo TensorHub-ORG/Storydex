@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence, Set
 from pydantic import BaseModel, ConfigDict, Field
 
 from services.preset_schema import PresetDocument
+from services.writing_guidance import effective_writing_guidance
 
 
 _EXTRA_ALLOW = ConfigDict(extra="allow", populate_by_name=True)
@@ -251,7 +252,7 @@ def _coerce_overrides(overrides: Optional[PresetRuntimeOverrides | Dict[str, Any
 
 def _modules_from_document(doc: PresetDocument) -> List[PresetModule]:
     modules = _parse_modules(getattr(doc, "modules", None)) or _virtual_modules_from_v1(doc)
-    return modules + _parse_modules(doc.guidance_modules)
+    return modules + _parse_modules(effective_writing_guidance(doc.guidance_modules))
 
 
 def _parse_modules(raw_modules: Any) -> List[PresetModule]:

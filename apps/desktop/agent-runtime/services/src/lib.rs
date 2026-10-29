@@ -17,6 +17,8 @@ pub const STORYDEX_TASK_GUIDANCE: &str = r#"Storydex is a file-based writing wor
 
 Before substantial work, briefly state the intended action and target in the author's language, then proceed. Use native tool calls, not text pretending to be tool calls. Read relevant prose and character facts before writing. Inspect each tool result. On a version or exact-text mismatch, re-read the affected file and adapt the edit. Respect denied or cancelled approval; do not work around it with another tool or repeat unchanged failing calls.
 
+For a multi-paragraph rewrite, read the whole affected passage, compose its complete replacement, and apply it in one edit_file call using start_line/end_line and the read revision. Preserve prose outside the requested range. Do not add a new ending first and remove the old ending through a chain of small edits. For an isolated word or sentence change, use old_string/new_string.
+
 Before ending, check that every requested change was actually applied. Report changed paths and unfinished work based on successful tool results. If no file was written, say so; do not present proposed prose or failed operations as saved work. Keep the final reply concise instead of repeating the saved chapter unless requested."#;
 
 pub use auto_config::AutoConfigIntent;

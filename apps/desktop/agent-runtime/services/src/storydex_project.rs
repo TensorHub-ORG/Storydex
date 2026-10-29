@@ -28,7 +28,7 @@ mod knowledge_stability_tests;
 use knowledge_identity::SourceIdentities;
 
 const WIKI_ROOT: &str = ".storydex/wiki";
-const WIKI_CATEGORY_SCHEMA_VERSION: &str = "story-wiki-rust-v3";
+const WIKI_CATEGORY_SCHEMA_VERSION: &str = "story-wiki-rust-v4";
 const SOURCE_IDENTITIES_PATH: &str = ".storydex/knowledge/source-identities.json";
 const INTERNAL_PATH_PREFIXES: [&str; 2] = [".storydex/.agent/", ".storydex/.cache/"];
 const DEFAULT_BRANCH: &str = "develop";
@@ -1209,6 +1209,10 @@ fn collect_source_files(
             .to_string_lossy()
             .replace('\\', "/");
         if relative == SOURCE_IDENTITIES_PATH
+            || matches!(
+                relative.as_str(),
+                ".storydex/project.json" | ".storydex/memory/chapter-progress.json"
+            )
             || relative.starts_with(".storydex/wiki/")
             || relative.starts_with(".storydex/.agent/")
             || relative.starts_with(".storydex/.cache/")
@@ -1269,11 +1273,21 @@ fn collect_source_files(
         } else {
             "project"
         };
-        let title = path
+        let mut title = path
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or("未命名")
             .to_owned();
+        if kind == "chapter"
+            && let Some(parent) = path
+                .parent()
+                .filter(|parent| *parent != root.join("chapters"))
+        {
+            title = format!(
+                "{} / {title}",
+                parent.file_name().unwrap_or_default().to_string_lossy()
+            );
+        }
         output.push(ProjectionSource {
             relative_path: relative,
             sha256: hex_digest(text.as_bytes()),
@@ -4391,6 +4405,40 @@ mod tests {
         assert_eq!(
             service.sync(false).expect("test fixture")["noChanges"],
             true
+        );
+    }
+
+    #[test]
+    fn knowledge_labels_chapter_fragments_and_excludes_bookkeeping() {
+        let root = tempdir().expect("root");
+        for (path, text) in [
+            ("chapters/第1章 未命名/001.md", "第一章正文"),
+            ("chapters/第2章 渡口/001.md", "第二章正文"),
+            (".storydex/project.json", "{\"title\":\"测试\"}"),
+            (
+                ".storydex/memory/chapter-progress.json",
+                "{\"chapters\":{}}",
+            ),
+        ] {
+            let file = root.path().join(path);
+            fs::create_dir_all(file.parent().expect("parent")).expect("directories");
+            fs::write(file, text).expect("fixture");
+        }
+        let graph = StorydexKnowledge::new(root.path())
+            .expect("service")
+            .sync(false)
+            .expect("sync");
+        let nodes = graph["graph"]["nodes"].as_array().expect("nodes");
+        assert!(
+            nodes
+                .iter()
+                .any(|node| node["label"] == "第1章 未命名 / 001")
+        );
+        assert!(nodes.iter().any(|node| node["label"] == "第2章 渡口 / 001"));
+        assert!(
+            !nodes
+                .iter()
+                .any(|node| node["label"] == "project" || node["label"] == "chapter-progress")
         );
     }
 

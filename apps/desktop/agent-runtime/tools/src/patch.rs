@@ -36,7 +36,16 @@ struct PreparedChange {
     new_content: Option<Vec<u8>>,
 }
 
+#[cfg(test)]
 pub fn apply_patch(policy: &SecurityPolicy, patch: &str) -> Result<String, String> {
+    apply_patch_recorded(policy, patch, |_, _, _| {})
+}
+
+pub(crate) fn apply_patch_recorded(
+    policy: &SecurityPolicy,
+    patch: &str,
+    mut record: impl FnMut(&std::path::Path, Option<Vec<u8>>, Option<Vec<u8>>),
+) -> Result<String, String> {
     let operations = parse_patch(patch)?;
     if operations.is_empty() {
         return Err("patch contains no file operations".into());
@@ -66,6 +75,22 @@ pub fn apply_patch(policy: &SecurityPolicy, patch: &str) -> Result<String, Strin
         }
     }
     apply_prepared(&prepared)?;
+    for change in &prepared {
+        if change.source != change.destination {
+            record(&change.source, change.previous_source.clone(), None);
+            record(
+                &change.destination,
+                change.previous_destination.clone(),
+                change.new_content.clone(),
+            );
+        } else {
+            record(
+                &change.source,
+                change.previous_source.clone(),
+                change.new_content.clone(),
+            );
+        }
+    }
 
     let mut output = Vec::new();
     for change in prepared.into_iter().take(source_change_count) {

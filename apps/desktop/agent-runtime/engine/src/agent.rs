@@ -41,7 +41,7 @@ impl fmt::Display for AgentError {
             Self::ToolRoundLimit { limit } => {
                 write!(
                     formatter,
-                    "已达到本次工具轮数上限（{limit}），任务尚未确认完成。会话和已执行的操作已保留，可继续处理剩余工作。"
+                    "已达到本次工具轮数上限（{limit}），任务尚未确认完成。会话已保留，请查看文件恢复结果后继续处理。"
                 )
             }
             Self::InvalidResponse(message) => write!(formatter, "{message}"),
@@ -457,7 +457,7 @@ impl Agent {
                     self.run_checkpoint(session, CheckpointPriority::Immediate)?;
                     self.flush_checkpoints()?;
                     return Err(AgentError::InvalidResponse(
-                        "模型未返回正文或工具调用，本次未能完成。会话和此前已执行的操作已保留。"
+                        "模型未返回正文或工具调用，本次未能完成。会话已保留，请查看文件恢复结果后继续处理。"
                             .into(),
                     ));
                 }

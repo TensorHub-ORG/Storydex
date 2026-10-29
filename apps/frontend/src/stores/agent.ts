@@ -1239,7 +1239,6 @@ export const useAgentStore = defineStore("agent", {
           chapterTemplateId: this.storyChapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID
         }
       };
-      this.taskMode = "chat";
       await this.executePromptRequest(request);
     },
 

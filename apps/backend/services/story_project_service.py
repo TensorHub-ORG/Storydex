@@ -8357,14 +8357,12 @@ class StoryProjectService:
                         source_path=path.relative_to(root).as_posix(),
                         compile_errors=compile_errors,
                     )
-                    if compiled:
-                        entries.append((path.relative_to(root).as_posix(), compiled))
-                        continue
-                    summary = summarize_preset_sidecar(doc, max_chars=max_chars_per_file)
-                    if summary:
-                        preview = preview + "\n\n---\n\n[Structured Preset Sidecar]\n" + summary
-            if not preview:
-                continue
+                    # An empty compiled preset can mean all advice was explicitly
+                    # disabled. Do not replace that choice with default guidance.
+                    entries.append((path.relative_to(root).as_posix(), compiled))
+                    continue
+            from services.writing_guidance import default_writing_guidance_text
+            preview = preview + "\n\n" + default_writing_guidance_text()
             entries.append((path.relative_to(root).as_posix(), preview))
         return entries
 
@@ -8402,8 +8400,12 @@ class StoryProjectService:
                 compile_errors.append(message)
             return ""
         effective_max = max_chars
+        # Keep the default advice complete; the old preview budget can cut off
+        # the continuity module mid-instruction.
+        if any(section.source_module_id.startswith("writing_") for section in result.sections):
+            effective_max = max(effective_max, len(compiled))
         if st_max_chars is not None and self._is_silly_tavern_document(doc):
-            effective_max = max(max_chars, int(st_max_chars))
+            effective_max = max(effective_max, int(st_max_chars))
         return self._truncate_text(compiled, max_chars=effective_max)
 
     @staticmethod
@@ -8493,7 +8495,8 @@ class StoryProjectService:
             compile_errors=compile_errors,
         )
         if not entries:
-            return ""
+            from services.writing_guidance import default_writing_guidance_text
+            return default_writing_guidance_text()
 
         feature_flags = FeatureFlags(
             Path(workspace_root).resolve(),

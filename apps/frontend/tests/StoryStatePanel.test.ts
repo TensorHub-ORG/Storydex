@@ -581,7 +581,10 @@ describe("StoryStatePanel deterministic graph and inspector behavior", () => {
     expect(wrapper.text()).toContain("当前返回 60");
     expect(wrapper.text()).toContain("待确认边 1");
     expect(wrapper.text()).toContain("水手传闻雾鲸来自远潮星。");
-    expect(wrapper.text()).toContain("test-provider / test-model");
+    expect(wrapper.text()).not.toContain("provider/model");
+    expect(wrapper.text()).toContain("引文匹配只说明原文存在");
+    expect(wrapper.findAll(".ssp-wiki-review-field select")[0].text()).toContain("雾鲸");
+    expect(wrapper.text()).not.toContain("entity:whale");
     expect(wrapper.text()).toContain("该关系将写入 JSON 角色卡 sidecar。");
     expect(wrapper.find(".ssp-wiki-source-link").exists()).toBe(true);
     wrapper.unmount();

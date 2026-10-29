@@ -49,9 +49,9 @@
           </div>
           <div class="preset-workbench-entry-row">
             <button class="preset-workbench-entry" type="button" :disabled="presetStore.saving"
-              @click="openNaturalWritingPreset">
+              @click="openWritingGuidance">
               <span class="material-symbols-rounded">edit_note</span>
-              <span>自然写作</span>
+              <span>小说写作指导</span>
             </button>
             <button
               class="preset-workbench-entry"
@@ -311,8 +311,8 @@ async function handleActivate(relativePath: string): Promise<void> {
   await presetStore.activate(relativePath);
 }
 
-async function openNaturalWritingPreset(): Promise<void> {
-  const path = await presetStore.createNaturalWritingPreset();
+async function openWritingGuidance(): Promise<void> {
+  const path = await presetStore.configureWritingGuidance();
   if (path) await openEditor(path);
 }
 

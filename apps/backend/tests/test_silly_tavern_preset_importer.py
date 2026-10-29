@@ -189,7 +189,7 @@ def test_compile_silly_tavern_runtime_text_omits_storydex_section_headers():
 
     compiled = compile_preset(result.document)
 
-    assert compiled.compiled_text == "First ST prompt.\n\nSecond ST prompt."
+    assert compiled.compiled_text.startswith("First ST prompt.\n\nSecond ST prompt.\n\n")
     assert "[boundary/" not in compiled.compiled_text
     assert "[advanced/" not in compiled.compiled_text
 
@@ -218,7 +218,7 @@ def test_import_accepts_direct_prompt_order_array_from_silly_tavern_exports():
         ("b", False, 1),
         ("a", True, 2),
     ]
-    assert compiled.compiled_text == "C enabled first\n\nA enabled"
+    assert compiled.compiled_text.startswith("C enabled first\n\nA enabled\n\n")
 
 
 def test_import_preserves_silly_tavern_prompt_execution_metadata():
@@ -281,8 +281,10 @@ def test_compile_silly_tavern_respects_injection_trigger_generation_type():
     normal_text = compile_preset(result.document, runtime_context={"generationType": "normal"}).compiled_text
     continue_text = compile_preset(result.document, runtime_context={"generationType": "continue"}).compiled_text
 
-    assert normal_text == "Normal prompt"
-    assert continue_text == "Continue prompt"
+    assert normal_text.startswith("Normal prompt\n\n")
+    assert "Continue prompt" not in normal_text
+    assert continue_text.startswith("Continue prompt\n\n")
+    assert "Normal prompt" not in continue_text
 
 
 def test_compile_silly_tavern_exposes_absolute_injections_grouped_by_depth_order_and_role():

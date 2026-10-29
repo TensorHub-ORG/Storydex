@@ -617,6 +617,27 @@ describe("AgentPanel", () => {
     wrapper.unmount();
   });
 
+  it("shows the actual chapter references including drafts, truncation and omissions", () => {
+    const wrapper = mount(CoomiClaudeTurn, { props: { run: makeRun({ status: "completed", events: [{
+      event: "TurnPhase", data: { contextAssembly: {
+        promptBlocks: [
+          { kind: "runtime_presets", sourcePaths: [".storydex/presets/active.json"], included: true, chars: 1200 },
+          { kind: "worldbook", sourcePaths: [".storydex/worldbook/临水镇.md"], included: true, chars: 150 },
+          { kind: "recent_segments", sourcePaths: ["chapters/第2章/001.md"], included: true, truncated: true, chars: 4000 },
+          { kind: "active_document", sourcePaths: ["章纲.md"], included: true, chars: 500 },
+        ], notes: ["unsaved_draft:章纲.md", "source_too_large:世界史.md"],
+      } },
+    }] }) } });
+    const references = wrapper.find(".cct-context-sources");
+    expect(references.text()).toContain("本轮参考 · 5 份");
+    expect(references.text()).toContain("临水镇.md");
+    expect(references.text()).toContain("部分加入");
+    expect(references.text()).toContain("已加入编辑器草稿");
+    expect(references.text()).toContain("文件过大，未加入");
+    expect(references.text()).not.toContain("runtime_presets");
+    wrapper.unmount();
+  });
+
   it("shows successful writes and failed attempts separately in the collapsed tool summary", () => {
     const items = [
       ["write_file", "error"], ["edit_file", "success"], ["edit_file", "success"],

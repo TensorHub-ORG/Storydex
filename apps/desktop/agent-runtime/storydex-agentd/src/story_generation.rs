@@ -33,15 +33,15 @@ const STORY_COUNTING_RULE: &str = "count every non-whitespace Unicode character 
 // native reasoning both consume output tokens. Keep room for each separately.
 fn story_output_token_budget(maximum_characters: usize, effort: &str) -> u64 {
     let reasoning = match effort {
-        "low" => 4_096,
-        "medium" => 8_192,
-        "xhigh" | "max" => 24_576,
-        _ => 16_384,
+        "low" => 8_192,
+        "medium" => 16_384,
+        "xhigh" | "max" => 49_152,
+        _ => 32_768,
     };
-    (maximum_characters as u64 * 2 + reasoning).clamp(8_192, 65_536)
+    (maximum_characters as u64 * 2 + reasoning).clamp(16_384, 65_536)
 }
 
-const CHAPTER_PROSE_GUIDANCE: &str = "沿已有情节充分展开关键冲突，写清人物的行动、对话反应、决定及其后果；按情节重要程度安排篇幅，避免匆忙收束。保持既有事实和本章结尾落点，避免重复描写或无关支线凑字。只输出完整正文，不输出字数统计或写作计划。";
+const CHAPTER_PROSE_GUIDANCE: &str = "按本章目标篇幅与情节重要程度安排详略，写清关键行动、人物反应、决定及其后果，普通过渡可以概述。保持既有事实和本章结尾落点，避免匆忙收束、重复描写或无关支线凑字。只输出完整正文，不输出字数统计或写作计划。";
 
 fn completion_is_truncated(completion: &Value, budget: u64) -> bool {
     let reason = completion
@@ -401,8 +401,10 @@ where
     let mut revision_applied = false;
     let mut revision_completion = Value::Null;
     let mut revision_completions = Vec::new();
-    // Length correction is opt-in and never chases a target in a retry loop.
-    let revision_limit = usize::from(enforce_length);
+    // A failed completion is recoverable independently of the author's length
+    // preference. Share a single retry with optional length correction.
+    let recovering_output = initial_truncated || content.trim().is_empty();
+    let revision_limit = usize::from(enforce_length || recovering_output);
     for attempt in 1..=revision_limit {
         if cancellation.is_cancelled() {
             return emit_cancelled_outcome(
@@ -427,8 +429,8 @@ where
             break;
         }
         emit(sender, trace_events, "TurnPhase", json!({
-            "phase": "length_revision", "label": "正在修订章节篇幅",
-            "detail": format!("当前 {current_count} 字{}，要求 {hard_minimum}～{runtime_safety_maximum} 字；第 {attempt}/{revision_limit} 次修订。", if current_truncated { "，输出未完成" } else { "" }),
+            "phase": "length_revision", "label": if recovering_output { "正在恢复未完成的正文" } else { "正在修订章节篇幅" },
+            "detail": if recovering_output { "上次未返回完整正文，将增加输出预算重新生成一次；这会额外调用模型，目标字数保持不变。".to_owned() } else { format!("当前 {current_count} 字，要求 {hard_minimum}～{runtime_safety_maximum} 字；第 {attempt}/{revision_limit} 次修订。") },
             "status": "running"
         }), trace_id, session_id).await?;
         let target = ((calibration.preferred_minimum + calibration.preferred_maximum) / 2)
@@ -444,13 +446,17 @@ where
             .as_array_mut()
             .expect("completion messages");
         messages.truncate(2);
-        messages.extend([
+        // A truncated prefix is not a finished draft to extend. Regenerate from
+        // the original sources so two alternative endings cannot be spliced.
+        if !recovering_output {
+            messages.extend([
             json!({"role": "assistant", "content": content}),
             json!({"role": "user", "content": format!(
                 "请修订上面的完整章节：当前 {current_count} 字，目标约 {target} 字，接受范围为 {hard_minimum}–{runtime_safety_maximum} 字（正文非空白字符，含标点）。{}保持既有事实和结尾落点，返回完整正文，不要只返回补充段落或说明。",
                 if current_count > runtime_safety_maximum { "删除重复描写与冗余过渡，保留关键行动和人物反应。" } else { "充分展开已有冲突中的行动、对话反应和决定的后果，避免重复或无关支线凑字。" },
             )}),
-        ]);
+            ]);
+        }
         provider_attempts += 1;
         let revision = complete(provider_request.clone()).await;
         if cancellation.is_cancelled() {
@@ -550,6 +556,7 @@ where
     validation["revisionCompletion"] = revision_completion;
     validation["revisionCompletions"] = json!(revision_completions);
     validation["lengthRevisionLimit"] = json!(revision_limit);
+    validation["outputRecovery"] = json!(recovering_output && provider_attempts > 1);
     validation["callAccounting"] = json!({"lengthRevisionCalls": provider_attempts - 1});
     let precision_achieved = validation.get("tierHit").and_then(Value::as_bool);
     if let Some(object) = validation.as_object_mut() {
@@ -1819,8 +1826,6 @@ mod tests {
             (Some(3000), 9500, "stop", true, true),
             (None, 1679, "stop", true, true),
             (None, 9500, "stop", true, true),
-            (Some(6000), 6000, "length", true, false),
-            (Some(6000), 0, "stop", true, false),
             (Some(6000), 6000, "stop", false, false),
         ] {
             let directory = tempdir().expect("workspace");
@@ -2081,8 +2086,8 @@ mod tests {
 
     #[test]
     fn completion_limits_do_not_mistake_character_counts_for_tokens() {
-        assert_eq!(story_output_token_budget(3300, "high"), 22_984);
-        assert_eq!(story_output_token_budget(6600, "high"), 29_584);
+        assert_eq!(story_output_token_budget(3300, "high"), 39_368);
+        assert_eq!(story_output_token_budget(6600, "high"), 45_968);
         assert!(completion_is_truncated(
             &json!({"metadata": {"finishReason": "length"}}),
             100
@@ -2161,7 +2166,7 @@ mod tests {
                         assert!(prompt.contains("约 6000 字"));
                         assert!(prompt.contains("5400—6600"));
                         assert!(!prompt.contains("每段约"));
-                    } else {
+                    } else if counts[0] > 0 {
                         assert_eq!(request["messages"].as_array().expect("messages").len(), 4);
                         assert_eq!(request["messages"][2]["content"], prose(index - 1));
                         let prompt = request["messages"][3]["content"].as_str().expect("revision prompt");
@@ -2279,7 +2284,7 @@ mod tests {
                         ("初".repeat(initial_count), initial_reason)
                     } else {
                         if initial_reason == "length" {
-                            assert_eq!(budget, initial_budget * 2);
+                            assert_eq!(budget, (initial_budget * 2).min(65_536));
                         }
                         ("修".repeat(revised_count), revised_reason)
                     };
@@ -2334,6 +2339,63 @@ mod tests {
                     assert_eq!(validation["outputTruncated"], false);
                 }
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn guidance_recovers_reasoning_exhaustion_without_changing_the_word_target() {
+        for (initial_count, succeeds) in [(0, true), (19, true), (19, false)] {
+            let directory = tempdir().expect("workspace");
+            let workspace = directory.path().canonicalize().expect("root");
+            let state = AppState::with_paths(
+                "token",
+                directory.path().join("home"),
+                directory.path().join("bridge"),
+                Some(workspace.clone()),
+                None,
+            )
+            .expect("state");
+            let (mut payload, mut options) = story_request("short");
+            payload.reasoning_effort = "low".into();
+            options.chapter_word_count_target = Some(1600);
+            options.precise_word_count_enabled = false;
+            options.fragment_count = 1;
+            let (sender, _receiver) = mpsc::channel(64);
+            let mut events = Vec::new();
+            let mut calls = 0;
+            let mut first_budget = 0;
+            let outcome = run_create_new_with_completion(&state, &payload, &options, &workspace, "trace", "session", &provider_identity(),
+                &crate::execution::ExecutionCancellation::default(), &sender, &mut events, |request| {
+                    calls += 1;
+                    assert!(calls <= 2);
+                    assert!(request["messages"][0]["content"].as_str().expect("prompt").contains("约 1600 字"));
+                    assert_eq!(request["messages"].as_array().expect("messages").len(), 2);
+                    let budget = request["maxOutputTokens"].as_u64().expect("budget");
+                    if calls == 1 { first_budget = budget; } else { assert!(budget > first_budget); }
+                    let complete = calls == 2 && succeeds;
+                    std::future::ready(Ok(json!({"content": "文".repeat(if complete { 1500 } else { initial_count }),
+                        "metadata": {"finishReason": if complete { "stop" } else { "max_output_tokens" }},
+                        "usage": {"output_tokens": if complete { 12000 } else { budget }}})))
+                }).await.expect("generation");
+            assert_eq!(calls, 2);
+            assert_eq!(
+                outcome.terminal_event,
+                if succeeds {
+                    "AgentCompleted"
+                } else {
+                    "AgentError"
+                }
+            );
+            assert_eq!(
+                workspace.join("chapters/第1章 未命名/001.md").is_file(),
+                succeeds
+            );
+            let validation = &events
+                .iter()
+                .find(|(name, _)| name == "StoryGenerationValidation")
+                .expect("validation")
+                .1;
+            assert_eq!(validation["outputRecovery"], true);
         }
     }
 

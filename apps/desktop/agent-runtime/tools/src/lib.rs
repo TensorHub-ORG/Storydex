@@ -1,4 +1,5 @@
 mod agents;
+mod edit_journal;
 mod patch;
 mod processes;
 
@@ -113,6 +114,37 @@ fn line_limited_end(content: &str, start: usize, limit: usize) -> usize {
     content.len()
 }
 
+fn replace_line_range(
+    content: &str,
+    arguments: &Value,
+    replacement: &str,
+) -> Result<String, String> {
+    if arguments.get("old_string").is_some()
+        || arguments.get("replace_all") == Some(&Value::Bool(true))
+    {
+        return Err("Use either old_string or start_line/end_line, not both.".into());
+    }
+    let start = usize_arg(arguments, "start_line").ok_or("missing start_line")?;
+    let end = usize_arg(arguments, "end_line").ok_or("missing end_line")?;
+    if start == 0 || end < start || end > total_text_lines(content) {
+        return Err("Line range is outside the file; use the line numbers from read_file.".into());
+    }
+    let from = byte_offset_for_line(content, start).ok_or("invalid start_line")?;
+    let to = byte_offset_for_line(content, end + 1).unwrap_or(content.len());
+    let mut updated = content[..from].to_owned();
+    let newline = if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    updated.push_str(&replacement.replace("\r\n", "\n").replace('\n', newline));
+    if !replacement.is_empty() && !replacement.ends_with('\n') && content[..to].ends_with('\n') {
+        updated.push_str(newline);
+    }
+    updated.push_str(&content[to..]);
+    Ok(updated)
+}
+
 fn render_numbered_content(content: &str, start: usize, end: usize) -> String {
     if start >= end {
         return String::new();
@@ -203,6 +235,7 @@ pub struct CoreTools {
     hooks: Option<Arc<HookRunner>>,
     parent_history: Vec<coomi_engine::ChatMessage>,
     read_revisions: Mutex<std::collections::HashMap<PathBuf, String>>,
+    edit_journal: Option<Mutex<edit_journal::EditJournal>>,
     file_approval_required: bool,
 }
 
@@ -223,6 +256,7 @@ impl CoreTools {
             hooks: None,
             parent_history: Vec::new(),
             read_revisions: Mutex::new(std::collections::HashMap::new()),
+            edit_journal: None,
             file_approval_required: false,
         }
     }
@@ -279,6 +313,27 @@ impl CoreTools {
     pub fn with_file_approval(mut self, required: bool) -> Self {
         self.file_approval_required = required;
         self
+    }
+
+    pub fn with_edit_recovery(mut self) -> Self {
+        self.edit_journal = Some(Mutex::new(edit_journal::EditJournal::default()));
+        self
+    }
+
+    pub fn recover_failed_edits(&self) -> anyhow::Result<Option<Value>> {
+        match &self.edit_journal {
+            Some(journal) => journal.lock().expect("edit journal").recover(&self.cwd),
+            None => Ok(None),
+        }
+    }
+
+    fn record_edit(&self, path: &std::path::Path, before: Option<Vec<u8>>, after: Option<Vec<u8>>) {
+        if let Some(journal) = &self.edit_journal {
+            journal
+                .lock()
+                .expect("edit journal")
+                .record(path, before, after);
+        }
     }
 
     async fn dispatch(&self, call: &ToolCall, approval: &dyn ApprovalHandler) -> ToolResult {
@@ -540,7 +595,9 @@ impl CoreTools {
             Ok(lock) => lock,
             Err(error) => return ToolResult::error(error.to_string()),
         };
-        match patch::apply_patch(&self.policy, patch_text) {
+        match patch::apply_patch_recorded(&self.policy, patch_text, |path, before, after| {
+            self.record_edit(path, before, after)
+        }) {
             Ok(output) => ToolResult::success(output),
             Err(error) => ToolResult::error(error),
         }
@@ -1125,7 +1182,7 @@ impl CoreTools {
             Ok(lock) => lock,
             Err(error) => return ToolResult::error(error.to_string()),
         };
-        match tokio::fs::read(&path).await {
+        let previous = match std::fs::read(&path) {
             Ok(bytes) => {
                 let revision = source_revision(&bytes);
                 let expected = string_arg(arguments, "expected_revision")
@@ -1144,12 +1201,13 @@ impl CoreTools {
                         Some(&revision),
                     ));
                 }
+                Some(bytes)
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => {
                 return ToolResult::error(format!("failed to read {}: {error}", path.display()));
             }
-        }
+        };
         if let Some(parent) = path.parent()
             && let Err(error) = tokio::fs::create_dir_all(parent).await
         {
@@ -1158,8 +1216,9 @@ impl CoreTools {
                 parent.display()
             ));
         }
-        match tokio::fs::write(&path, content).await {
+        match std::fs::write(&path, content) {
             Ok(()) => {
+                self.record_edit(&path, previous, Some(content.as_bytes().to_vec()));
                 self.read_revisions
                     .lock()
                     .expect("read revisions")
@@ -1179,15 +1238,9 @@ impl CoreTools {
         let Some(path) = string_arg(arguments, "path") else {
             return ToolResult::error("missing string argument: path");
         };
-        let Some(old_string) = string_arg(arguments, "old_string") else {
-            return ToolResult::error("missing string argument: old_string");
-        };
         let Some(new_string) = string_arg(arguments, "new_string") else {
             return ToolResult::error("missing string argument: new_string");
         };
-        if old_string.is_empty() {
-            return ToolResult::error("old_string must not be empty");
-        }
         let path = match self.checked_path(path, true) {
             Ok(path) => path,
             Err(error) => return ToolResult::error(error),
@@ -1199,7 +1252,7 @@ impl CoreTools {
             Ok(lock) => lock,
             Err(error) => return ToolResult::error(error.to_string()),
         };
-        let content = match tokio::fs::read_to_string(&path).await {
+        let content = match std::fs::read_to_string(&path) {
             Ok(content) => content,
             Err(error) => {
                 return ToolResult::error(format!("failed to read {}: {error}", path.display()));
@@ -1214,6 +1267,13 @@ impl CoreTools {
                     .get(&path)
                     .cloned()
             });
+        let range_edit =
+            arguments.get("start_line").is_some() || arguments.get("end_line").is_some();
+        if range_edit && string_arg(arguments, "expected_revision").is_none() {
+            return ToolResult::error(
+                "Read the file before replacing a line range; expected_revision is required.",
+            );
+        }
         if let Some(expected) = expected {
             let current = source_revision(content.as_bytes());
             if expected != current {
@@ -1224,26 +1284,44 @@ impl CoreTools {
                 ));
             }
         }
-        let matches = content.matches(old_string).count();
-        if matches == 0 {
-            return ToolResult::error(edit_file_not_found_error(&content, old_string));
-        }
-        let replace_all = arguments
-            .get("replace_all")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        if matches > 1 && !replace_all {
-            return ToolResult::error(format!(
-                "old_string matched {matches} locations; set replace_all=true or provide more context"
-            ));
-        }
-        let updated = if replace_all {
-            content.replace(old_string, new_string)
+        let updated = if range_edit {
+            match replace_line_range(&content, arguments, new_string) {
+                Ok(updated) => updated,
+                Err(error) => return ToolResult::error(error),
+            }
         } else {
-            content.replacen(old_string, new_string, 1)
+            let Some(old_string) = string_arg(arguments, "old_string").filter(|s| !s.is_empty())
+            else {
+                return ToolResult::error(
+                    "Provide non-empty old_string or start_line/end_line for a complete passage replacement.",
+                );
+            };
+            let matches = content.matches(old_string).count();
+            if matches == 0 {
+                return ToolResult::error(edit_file_not_found_error(&content, old_string));
+            }
+            let replace_all = arguments
+                .get("replace_all")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if matches > 1 && !replace_all {
+                return ToolResult::error(format!(
+                    "old_string matched {matches} locations; set replace_all=true or provide more context"
+                ));
+            }
+            if replace_all {
+                content.replace(old_string, new_string)
+            } else {
+                content.replacen(old_string, new_string, 1)
+            }
         };
-        match tokio::fs::write(&path, &updated).await {
+        match std::fs::write(&path, &updated) {
             Ok(()) => {
+                self.record_edit(
+                    &path,
+                    Some(content.into_bytes()),
+                    Some(updated.as_bytes().to_vec()),
+                );
                 self.read_revisions
                     .lock()
                     .expect("read revisions")
@@ -1409,17 +1487,19 @@ impl ToolRuntime for CoreTools {
             },
             ToolSpec {
                 name: "edit_file".into(),
-                description: "Replace an exact text fragment in a workspace file.".into(),
+                description: "Replace text atomically. For a multi-paragraph rewrite use start_line/end_line (inclusive, from read_file) and the complete replacement in new_string, with expected_revision. This preserves all bytes outside the range and avoids copying a long old_string. For a small edit use exact old_string. Do not insert a new solution and remove the old one in separate calls.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "path": {"type": "string"},
                         "old_string": {"type": "string"},
+                        "start_line": {"type": "integer", "minimum": 1},
+                        "end_line": {"type": "integer", "minimum": 1},
                         "new_string": {"type": "string"},
                         "replace_all": {"type": "boolean"},
                         "expected_revision": {"type": "string", "description": "Revision from read_file; rejects a concurrent change."}
                     },
-                    "required": ["path", "old_string", "new_string"],
+                    "required": ["path", "new_string"],
                     "additionalProperties": false
                 }),
             },
@@ -1992,6 +2072,105 @@ mod tests {
         };
 
         assert_eq!(validate_user_input_request(&request), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn passage_edits_preserve_surroundings_and_recover_failed_turns() {
+        let workspace = tempfile::tempdir().expect("fixture");
+        let root = workspace.path().canonicalize().expect("root");
+        let file = root.join("chapter.md");
+        let original = "前半章\r\n\r\n旧方案第一段\r\n\r\n旧方案第二段\r\n\r\n结尾铜哨\r\n";
+        std::fs::write(&file, original).expect("fixture");
+        let policy = SecurityPolicy::new(&root, AccessMode::WorkspaceWrite).expect("policy");
+        let tools = CoreTools::new(root.clone(), policy).with_edit_recovery();
+        let mut range_call = ToolCall {
+            id: "range".into(),
+            name: "edit_file".into(),
+            arguments: json!({"path": "chapter.md", "start_line": 3, "end_line": 5, "new_string": "新方案第一段\n\n新方案第二段"}),
+        };
+        assert!(
+            !tools.call(&range_call, &Approve).await.success,
+            "unread range rejected"
+        );
+        assert!(
+            tools
+                .call(
+                    &ToolCall {
+                        id: "read".into(),
+                        name: "read_file".into(),
+                        arguments: json!({"path": "chapter.md"})
+                    },
+                    &Approve
+                )
+                .await
+                .success
+        );
+        range_call.arguments["expected_revision"] = json!(source_revision(original.as_bytes()));
+        assert!(tools.call(&range_call, &Approve).await.success);
+        assert!(
+            !tools.call(&range_call, &Approve).await.success,
+            "old line numbers cannot edit a newer revision"
+        );
+        let draft = std::fs::read_to_string(&file).expect("draft");
+        assert_eq!(
+            draft,
+            "前半章\r\n\r\n新方案第一段\r\n\r\n新方案第二段\r\n\r\n结尾铜哨\r\n"
+        );
+        let recovery = tools
+            .recover_failed_edits()
+            .expect("recover")
+            .expect("changed");
+        assert_eq!(recovery["restored"], true);
+        assert_eq!(std::fs::read_to_string(&file).expect("original"), original);
+        let archive = root.join(recovery["archive"].as_str().expect("archive"));
+        assert_eq!(
+            std::fs::read_to_string(archive.join("0.draft")).expect("saved draft"),
+            draft
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_edit_recovery_preserves_concurrent_author_changes() {
+        let workspace = tempfile::tempdir().expect("fixture");
+        let root = workspace.path().canonicalize().expect("root");
+        let file = root.join("chapter.md");
+        std::fs::write(&file, "原稿").expect("fixture");
+        let policy = SecurityPolicy::new(&root, AccessMode::WorkspaceWrite).expect("policy");
+        let tools = CoreTools::new(root.clone(), policy).with_edit_recovery();
+        assert!(tools.call(&ToolCall { id: "edit".into(), name: "edit_file".into(), arguments: json!({"path": "chapter.md", "old_string": "原稿", "new_string": "模型改稿"}) }, &Approve).await.success);
+        std::fs::write(&file, "作者的新稿").expect("external edit");
+        let recovery = tools
+            .recover_failed_edits()
+            .expect("recover")
+            .expect("changed");
+        assert_eq!(recovery["restored"], false);
+        assert_eq!(recovery["conflict"], true);
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("author draft"),
+            "作者的新稿"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_patch_recovery_restores_renames_and_new_files() {
+        let workspace = tempfile::tempdir().expect("fixture");
+        let root = workspace.path().canonicalize().expect("root");
+        std::fs::write(root.join("old.md"), "原稿\n").expect("fixture");
+        let policy = SecurityPolicy::new(&root, AccessMode::WorkspaceWrite).expect("policy");
+        let tools = CoreTools::new(root.clone(), policy).with_edit_recovery();
+        let result = tools.call(&ToolCall { id: "patch".into(), name: "apply_patch".into(), arguments: json!({"patch": "*** Begin Patch\n*** Update File: old.md\n*** Move to: new.md\n@@\n-原稿\n+改稿\n*** Add File: extra.md\n+新文件\n*** End Patch"}) }, &Approve).await;
+        assert!(result.success, "{}", result.output);
+        let recovery = tools
+            .recover_failed_edits()
+            .expect("recover")
+            .expect("changed");
+        assert_eq!(recovery["restored"], true);
+        assert_eq!(
+            std::fs::read_to_string(root.join("old.md")).expect("original"),
+            "原稿\n"
+        );
+        assert!(!root.join("new.md").exists());
+        assert!(!root.join("extra.md").exists());
     }
 
     #[tokio::test]

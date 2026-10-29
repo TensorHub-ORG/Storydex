@@ -277,16 +277,9 @@
                 </p>
                 <p v-else>{{ selectedWikiRelationEdge.evidence || "该关系来自知识图谱，可在下方相关条目查看更多上下文。" }}</p>
                 <div class="ssp-wiki-audit-grid">
-                  <span>reviewStatus</span><strong>{{ selectedWikiRelationEdge.reviewStatus }}</strong>
-                  <span>knowledgeStatus</span><strong>{{ selectedWikiRelationEdge.knowledgeStatus }}</strong>
-                  <span>confidence</span><strong>{{ selectedWikiRelationEdge.confidence ?? "-" }}</strong>
-                  <span>provider/model</span>
-                  <strong>
-                    {{ String(selectedWikiRelationEdge.provenance?.providerId || "-") }} /
-                    {{ String(selectedWikiRelationEdge.provenance?.model || "-") }}
-                  </strong>
-                  <span>trace</span><strong>{{ selectedWikiRelationEdge.traceId || "-" }}</strong>
+                  <span>审核</span><strong>{{ wikiReviewStatusLabel(selectedWikiRelationEdge.reviewStatus) }}</strong>
                 </div>
+                <small>引文匹配只说明原文存在；关系含义、称谓与推断仍需结合上下文核对。</small>
                 <div v-if="selectedWikiRelationEdge.sourceRefs.length" class="ssp-wiki-source-ref-list">
                   <div v-for="(sourceRef, sourceIndex) in selectedWikiRelationEdge.sourceRefs" :key="`${sourceRef.path}-${sourceIndex}`" class="ssp-wiki-source-ref">
                     <button type="button" class="ssp-wiki-source-link" @click="openWikiSource(sourceRef.path)">
@@ -346,29 +339,30 @@
                 <div v-else-if="!wikiReviewQueue.length" class="ssp-wiki-review-empty">暂无待确认关系。</div>
                 <article v-for="candidate in wikiReviewQueue" :key="candidate.id" class="ssp-wiki-review-card">
                   <div class="ssp-wiki-review-card-title">
-                    <strong>{{ candidate.subject || "缺失条目" }}</strong>
+                    <strong>{{ wikiEndpointLabel(candidate.subjectId, candidate.subject) }}</strong>
                     <span>→</span>
-                    <strong>{{ candidate.object || "缺失条目" }}</strong>
+                    <strong>{{ wikiEndpointLabel(candidate.objectId, candidate.object) }}</strong>
                   </div>
                   <label class="ssp-wiki-review-field">
                     谓词
                     <input v-model="wikiReviewDraft(candidate).predicate" type="text" />
                   </label>
                   <label class="ssp-wiki-review-field">
-                    主体 ID
-                    <input v-model="wikiReviewDraft(candidate).subjectId" type="text" />
+                    主体
+                    <select v-model="wikiReviewDraft(candidate).subjectId">
+                      <option v-for="node in wikiEndpointOptions(candidate)" :key="node.id" :value="node.id">{{ node.label }}</option>
+                    </select>
                   </label>
                   <label class="ssp-wiki-review-field">
-                    客体 ID
-                    <input v-model="wikiReviewDraft(candidate).objectId" type="text" />
+                    客体
+                    <select v-model="wikiReviewDraft(candidate).objectId">
+                      <option v-for="node in wikiEndpointOptions(candidate)" :key="node.id" :value="node.id">{{ node.label }}</option>
+                    </select>
                   </label>
                   <p v-if="candidate.reviewReason">{{ candidate.reviewReason }}</p>
-                  <small>确认结果保存到项目关系审核记录，图谱重建时保留。</small>
+                  <small>引文匹配只说明原文存在。请核对关系双方、称谓和推断是否成立；确认结果在图谱重建后保留。</small>
                   <div class="ssp-wiki-audit-grid compact">
-                    <span>状态</span><strong>{{ candidate.reviewStatus || "review_required" }} / {{ candidate.knowledgeStatus || "observed" }}</strong>
-                    <span>confidence</span><strong>{{ candidate.confidence ?? "-" }}</strong>
-                    <span>provider/model</span><strong>{{ String(candidate.provenance?.providerId || "-") }} / {{ String(candidate.provenance?.model || "-") }}</strong>
-                    <span>trace</span><strong>{{ candidate.traceId || "-" }}</strong>
+                    <span>审核</span><strong>{{ wikiReviewStatusLabel(candidate.reviewStatus) }}</strong>
                   </div>
                   <div v-for="(sourceRef, sourceIndex) in (candidate.sourceRefs || [])" :key="`${candidate.id}-source-${sourceIndex}`" class="ssp-wiki-source-ref">
                     <button type="button" class="ssp-wiki-source-link" @click="openWikiSource(sourceRef.path)">
@@ -379,11 +373,11 @@
                   <label class="ssp-wiki-review-field">
                     驳回原因
                     <select v-model="wikiReviewDraft(candidate).rejectReason">
-                      <option value="incorrect">incorrect</option>
-                      <option value="ambiguous">ambiguous</option>
-                      <option value="duplicate">duplicate</option>
-                      <option value="not_canon">not_canon</option>
-                      <option value="other">other</option>
+                      <option value="incorrect">关系错误</option>
+                      <option value="ambiguous">证据有歧义</option>
+                      <option value="duplicate">重复关系</option>
+                      <option value="not_canon">未采纳的设定</option>
+                      <option value="other">其他原因</option>
                     </select>
                   </label>
                   <label class="ssp-wiki-review-field">
@@ -1421,10 +1415,29 @@ function wikiNodeLabel(value: string): string {
 
 function resolveWikiDisplayLabel(value: unknown): string {
   const label = normalizeRelationshipGraphText(value);
-  if (!label || /^(?:entity|character|char|event|mention|rel|unresolved):/i.test(label)) {
+  if (!label || /^(?:source|entity|character|char|event|mention|rel|unresolved):/i.test(label)) {
     return "未解析实体";
   }
   return label;
+}
+
+function wikiReviewStatusLabel(status?: string): string {
+  return ({ confirmed: "已确认", rejected: "已驳回", review_required: "待确认" } as Record<string, string>)[status || "review_required"] || "待确认";
+}
+
+function wikiEndpointLabel(id?: string, label?: string): string {
+  const node = wikiGraphQueryData.value?.graph?.nodes?.find((node) => node.id === id);
+  return resolveWikiDisplayLabel(node?.label || label || "缺失条目");
+}
+
+function wikiEndpointOptions(candidate: WikiReviewCandidate): { id: string; label: string }[] {
+  const options = new Map((wikiGraphQueryData.value?.graph?.nodes || [])
+    .filter((node) => node.type !== "project" && !node.synthetic)
+    .map((node) => [node.id, { id: node.id, label: resolveWikiDisplayLabel(node.label || "缺失条目") }]));
+  for (const [id, label] of [[candidate.subjectId, candidate.subject], [candidate.objectId, candidate.object]]) {
+    if (id && !options.has(id)) options.set(id, { id, label: wikiEndpointLabel(id, label) });
+  }
+  return [...options.values()];
 }
 
 const WIKI_RELATION_TYPE_LABELS: Record<string, string> = {

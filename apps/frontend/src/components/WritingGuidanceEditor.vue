@@ -1,7 +1,7 @@
 <template>
   <details class="writing-guidance" open>
-    <summary>自然写作指导</summary>
-    <p>分别开启需要的建议，展开可修改提示词。本次要求与本书文风优先，保存后随主预设生效。</p>
+    <summary>小说写作指导</summary>
+    <p>默认开启，帮助安排情节、对话与连续性。可分别关闭或修改提示词；本次要求与本书文风优先，保存后生效。</p>
     <details v-for="module in modules" :key="module.id" class="writing-guidance-module">
       <summary>
         <label @click.stop>

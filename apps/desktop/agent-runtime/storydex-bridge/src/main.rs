@@ -1004,6 +1004,7 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
     let hooks_init_ms = hooks_started.elapsed().as_secs_f64() * 1000.0;
     let tools_started = Instant::now();
     let core = CoreTools::new(cwd.clone(), policy.clone())
+        .with_edit_recovery()
         .with_file_approval(base_permission_mode == "ask_approval")
         .with_skills_directory(home.join("skills"))
         .with_config_home(home.clone())
@@ -1128,6 +1129,36 @@ async fn run_agent(request: BridgeRequest, emitter: Emitter) -> Result<()> {
             }
         }
     };
+    if !matches!(&run_outcome, Ok(false)) {
+        match tools.core.recover_failed_edits() {
+            Ok(Some(recovery)) => {
+                let message = format!(
+                    "{} 原稿和失败稿保存在 {}。后续继续前请重新读取文件。",
+                    if recovery["restored"] == true {
+                        "本轮未完成，文件工具的改动已恢复到本轮开始前。"
+                    } else {
+                        "检测到其他编辑，未自动恢复；请对照存档处理未完成改稿。"
+                    },
+                    recovery["archive"].as_str().unwrap_or_default()
+                );
+                session
+                    .messages
+                    .push(ChatMessage::internal_user(message.clone()));
+                emitter.event(
+                    "edit_recovery",
+                    json!({"message": message, "recovery": recovery}),
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let message = format!("未完成改稿的自动恢复失败：{error:#}。请检查文件后再继续。");
+                session
+                    .messages
+                    .push(ChatMessage::internal_user(message.clone()));
+                emitter.event("edit_recovery", json!({"message": message, "error": true}));
+            }
+        }
+    }
     let cancelled = save_session_after_run(&checkpoint_buffer, &mut session, run_outcome)?;
     if !cancelled && let Some(replay) = replay_provider.as_ref() {
         replay.assert_complete()?;

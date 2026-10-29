@@ -20,7 +20,7 @@ def test_plain_text_preset_imports_as_generic_and_compiles_verbatim():
     assert doc_dump["meta"]["sourceFormat"] == "generic"
     assert result.module_count == 1
     compiled = compile_preset(result.document)
-    assert compiled.compiled_text == text
+    assert compiled.compiled_text.startswith(text + "\n\n")
     # 通用格式与 ST 一样不加 Storydex 段头。
     assert "[advanced/" not in compiled.compiled_text
 
@@ -41,7 +41,7 @@ def test_json_array_of_strings_imports_each_item_as_module():
 
     assert doc_dump["meta"]["sourceFormat"] == "generic"
     assert result.module_count == 2
-    assert compile_preset(result.document).compiled_text == "第一条规则内容\n\n第二条规则内容"
+    assert compile_preset(result.document).compiled_text.startswith("第一条规则内容\n\n第二条规则内容\n\n")
 
 
 def test_json_array_of_prompt_objects_keeps_order_and_enabled_flags():
@@ -55,7 +55,7 @@ def test_json_array_of_prompt_objects_keeps_order_and_enabled_flags():
 
     assert [m["title"] for m in modules] == ["开头", "关闭项", "结尾"]
     assert [m["enabledByDefault"] for m in modules] == [True, False, True]
-    assert compile_preset(result.document).compiled_text == "开头规则\n\n结尾规则"
+    assert compile_preset(result.document).compiled_text.startswith("开头规则\n\n结尾规则\n\n")
 
 
 def test_generic_dict_json_falls_back_to_string_fields():

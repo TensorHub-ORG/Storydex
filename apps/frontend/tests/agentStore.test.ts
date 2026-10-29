@@ -124,7 +124,7 @@ describe("agent store streaming", () => {
     expect(store.executionHistory[0].reply).toContain("退出计划模式");
   });
 
-  it("sends drafts as context and applies explicit chapter mode to one turn", async () => {
+  it("sends drafts as context and keeps chapter mode until the author switches it", async () => {
     api.streamAgentPrompt.mockImplementation(async (_request, onPacket) => {
       onPacket({ _type: "AgentCompleted", status: "success" });
     });
@@ -141,11 +141,15 @@ describe("agent store streaming", () => {
       taskMode: "generate_chapter",
       editorDocuments: [{ relativePath: "draft.md", content: "unsaved", baseRevision: "v1", dirty: true }],
     });
-    expect(store.taskMode).toBe("chat");
+    expect(store.taskMode).toBe("generate_chapter");
     expect(workspace.refreshOpenDocuments).toHaveBeenCalled();
+    store.promptInput = "继续下一章";
+    await store.runPrompt();
+    expect(api.streamAgentPrompt.mock.calls[1][0].taskMode).toBe("generate_chapter");
+    store.taskMode = "chat";
     store.promptInput = "只修改标点，不生成章节";
     await store.runPrompt();
-    expect(api.streamAgentPrompt.mock.calls[1][0].taskMode).toBe("chat");
+    expect(api.streamAgentPrompt.mock.calls[2][0].taskMode).toBe("chat");
   });
 
   it("publishes immediate phases, updates heartbeats in place, and appends text chunks", async () => {

@@ -107,25 +107,33 @@ export const usePresetStore = defineStore("preset", {
     runtimeOverrides: { enabledModuleIds: [], disabledModuleIds: [], temporaryRules: [] }
   }),
   actions: {
-    async createNaturalWritingPreset(): Promise<string | null> {
+    async configureWritingGuidance(): Promise<string | null> {
       this.errorMessage = "";
       this.saving = true;
       try {
         const { data } = await listPresets();
-        const existing = [...data.active, ...data.library].find((item) => item.path.endsWith("/自然写作.md"));
-        if (existing) return existing.path;
-        const path = ".storydex/presets/library/自然写作.md";
-        const document = emptyDocument();
-        document.meta.name = "自然写作";
-        document.meta.description = "可分别开关和编辑的表达、叙事与因果建议。作者要求和本书文风优先。";
-        document.guidanceModules = writingGuidanceTemplates.map((module) => ({ ...module }));
-        await createWorkspaceFile({ relativePath: path, content: "# 自然写作\n\n可在预设参数中调整三组写作建议，启用为主预设后生效。\n\n## Modules\n" });
-        await savePresetDocument(path, document);
+        if (data.activeMainPreset) return data.activeMainPreset;
+        const existing = [...data.active, ...data.library].find((item) =>
+          item.path.endsWith("/小说写作指导.md") || item.path.endsWith("/自然写作.md"));
+        const path = existing?.path || ".storydex/presets/library/小说写作指导.md";
+        if (!existing) {
+          const document = emptyDocument();
+          document.meta.name = "小说写作指导";
+          document.meta.description = "默认开启，可分别调整语言、情节节奏与连续性。作者要求和本书文风优先。";
+          document.guidanceModules = writingGuidanceTemplates.map((module) => ({ ...module }));
+          // Configuring writing advice must not introduce a chapter length contract.
+          document.lengthContract.bodyMinChars = 0;
+          document.lengthContract.bodyTargetChars = 0;
+          document.lengthContract.bodyMaxChars = 0;
+          await createWorkspaceFile({ relativePath: path, content: "# 小说写作指导\n\n在预设参数中关闭或调整三组建议，保存后用于后续写作。\n\n## Modules\n" });
+          await savePresetDocument(path, document);
+        }
+        const { data: pointer } = await activatePreset(path);
         await this.refreshList();
         await useWorkspaceStore().refreshTree();
-        return path;
+        return String(pointer.activeMainPreset);
       } catch (error) {
-        this.errorMessage = describeTransportError(error, "自然写作预设创建失败。");
+        this.errorMessage = describeTransportError(error, "写作指导加载失败。");
         return null;
       } finally {
         this.saving = false;

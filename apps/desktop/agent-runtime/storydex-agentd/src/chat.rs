@@ -2277,7 +2277,20 @@ async fn run_bridge(context: BridgeRunContext<'_>) -> anyhow::Result<()> {
         tokio::select! {
             _ = cancellation.cancelled() => {
                 send_bridge_control(&mut stdin, "cancel", Some(&cancellation.reason())).await;
-                let _ = tokio::time::timeout(BRIDGE_SHUTDOWN_TIMEOUT, child.wait()).await;
+                // Drain recovery output while the bridge shuts down. Waiting
+                // only on the process would lose its file restoration notice.
+                let _ = tokio::time::timeout(BRIDGE_SHUTDOWN_TIMEOUT, async {
+                    while let Ok(Some(raw)) = lines.next_line().await {
+                        if let Ok(packet) = serde_json::from_str::<Value>(&raw)
+                            && packet["type"] == "edit_recovery"
+                            && let Some((name, data)) = translate_bridge_event(&packet, trace_id, session_id)
+                        {
+                            trace_events.push((name.clone(), data.clone()));
+                            send_event_value(sender, &name, data).await;
+                        }
+                    }
+                    child.wait().await
+                }).await;
                 if !child_terminal {
                     *terminal_event = "AgentCancelled".to_owned();
                     trace_events.push((
@@ -3097,6 +3110,10 @@ fn translate_bridge_event(
         "provider_retry" => ("ConnectionRetry", data),
         "protocol_warning" => ("AgentWarning", data),
         "cancelled" => ("AgentCancelled", data),
+        "edit_recovery" => (
+            "AgentWarning",
+            json!({"message": data["message"], "recovery": data["recovery"], "warning_type": "edit_recovery"}),
+        ),
         "completed" => ("AgentCompleted", data),
         "error" => (
             "AgentError",

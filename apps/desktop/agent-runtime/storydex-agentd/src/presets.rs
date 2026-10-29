@@ -1230,9 +1230,43 @@ fn modules_from_document(document: &Value) -> Vec<PresetModule> {
     // Optional writing advice augments both structured and imported presets.
     // Keeping it separate avoids suppressing the structured style/length modules.
     modules.extend(explicit_modules(
-        &json!({"modules": document["guidanceModules"]}),
+        &json!({"modules": effective_writing_guidance(document)}),
     ));
     modules
+}
+
+fn writing_guidance_templates() -> Vec<Value> {
+    serde_json::from_str(include_str!(
+        "../../../../backend/services/writing_guidance.json"
+    ))
+    .expect("bundled writing guidance is valid JSON")
+}
+
+fn effective_writing_guidance(document: &Value) -> Vec<Value> {
+    let overrides = document["guidanceModules"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let mut modules = writing_guidance_templates();
+    for module in &mut modules {
+        if let Some(value) = overrides.iter().find(|value| value["id"] == module["id"]) {
+            deep_merge(module, value.clone());
+        }
+    }
+    for value in overrides {
+        if !modules.iter().any(|module| module["id"] == value["id"]) {
+            modules.push(value);
+        }
+    }
+    modules
+}
+
+fn default_writing_guidance_text() -> String {
+    writing_guidance_templates()
+        .iter()
+        .filter_map(|module| module["content"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn document_source_format(document: &Value) -> String {
@@ -1497,7 +1531,7 @@ pub(crate) fn compile_active_for_agent(
         .join("presets")
         .join("active.json");
     if !pointer.exists() {
-        return Ok(None);
+        return Ok(Some(default_writing_guidance_text()));
     }
     let pointer_metadata = fs::symlink_metadata(&pointer).map_err(|error| {
         ActivePresetError::new(
@@ -1530,7 +1564,7 @@ pub(crate) fn compile_active_for_agent(
         )
     })?;
     let Some(relative) = pointer_object.get("activeMainPreset") else {
-        return Ok(None);
+        return Ok(Some(default_writing_guidance_text()));
     };
     let relative = relative.as_str().ok_or_else(|| {
         ActivePresetError::new(
@@ -1540,7 +1574,7 @@ pub(crate) fn compile_active_for_agent(
     })?;
     let relative = relative.trim().replace('\\', "/");
     if relative.is_empty() {
-        return Ok(None);
+        return Ok(Some(default_writing_guidance_text()));
     }
     let relative_path = Path::new(&relative);
     if relative_path.is_absolute()
@@ -3717,11 +3751,75 @@ mod tests {
             &document,
             &json!({"presetOverrides": {"disabledModuleIds": ["writing_expression"]}}),
         );
-        assert_eq!(disabled["compiledText"], "AUTHOR VOICE");
+        assert!(
+            disabled["compiledText"]
+                .as_str()
+                .expect("text")
+                .contains("AUTHOR VOICE")
+        );
+        assert!(
+            !disabled["compiledText"]
+                .as_str()
+                .expect("text")
+                .contains("NATURAL PROSE")
+        );
     }
 
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn writing_guidance_is_default_without_selecting_a_preset() {
+        let workspace = tempdir().expect("workspace");
+        let text = compile_active_for_agent(workspace.path())
+            .expect("compile")
+            .expect("default guidance");
+        for module in writing_guidance_templates() {
+            assert!(text.contains(module["content"].as_str().expect("content")));
+        }
+        assert!(!text.contains("不少于"));
+        let dir = workspace.path().join(".storydex/presets");
+        fs::create_dir_all(&dir).expect("presets");
+        for pointer in [json!({}), json!({"activeMainPreset": ""})] {
+            fs::write(dir.join("active.json"), pointer.to_string()).expect("pointer");
+            assert_eq!(
+                compile_active_for_agent(workspace.path())
+                    .expect("compile")
+                    .expect("guidance"),
+                text
+            );
+        }
+    }
+
+    #[test]
+    fn existing_presets_inherit_defaults_and_explicit_switches_win() {
+        for document in [json!({}), json!({"guidanceModules": []})] {
+            let compiled = compile_document(&document, &json!({}));
+            for module in writing_guidance_templates() {
+                assert!(
+                    compiled["compiledText"]
+                        .as_str()
+                        .expect("text")
+                        .contains(module["content"].as_str().expect("content"))
+                );
+            }
+        }
+        let overrides: Vec<_> = writing_guidance_templates()
+            .iter()
+            .map(|module| json!({"id": module["id"], "enabledByDefault": false}))
+            .collect();
+        let compiled = compile_document(&json!({"guidanceModules": overrides}), &json!({}));
+        assert!(
+            !compiled["sections"]
+                .as_array()
+                .expect("sections")
+                .iter()
+                .any(|s| s["sourceModuleId"]
+                    .as_str()
+                    .expect("id")
+                    .starts_with("writing_"))
+        );
+    }
 
     #[test]
     fn stable_sidecar_keys_round_trip_through_the_frontend_shape() {
@@ -3748,9 +3846,11 @@ mod tests {
     fn generic_and_silly_tavern_imports_keep_real_modules_and_order() {
         let generic = convert_import(br#"["first rule", "second rule"]"#, "array.json");
         assert_eq!(generic.modules.len(), 2);
-        assert_eq!(
-            compile_document(&generic.document, &json!({}))["compiledText"],
-            "first rule\n\nsecond rule"
+        assert!(
+            compile_document(&generic.document, &json!({}))["compiledText"]
+                .as_str()
+                .expect("text")
+                .starts_with("first rule\n\nsecond rule\n\n")
         );
 
         let source = json!({
@@ -3767,9 +3867,11 @@ mod tests {
         assert_eq!(imported.modules[0].source_identifier, "two");
         assert!(imported.modules[0].enabled);
         assert!(!imported.modules[1].enabled);
-        assert_eq!(
-            compile_document(&imported.document, &json!({}))["compiledText"],
-            "second"
+        assert!(
+            compile_document(&imported.document, &json!({}))["compiledText"]
+                .as_str()
+                .expect("text")
+                .starts_with("second\n\n")
         );
     }
 
