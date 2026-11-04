@@ -75,6 +75,7 @@ pub(crate) struct StorySettingsInput {
     chapter_word_count_target: Option<i64>,
     precise_word_count_enabled: Option<bool>,
     continuity_tracking_enabled: Option<bool>,
+    story_craft_enabled: Option<bool>,
     story_fragment_word_count: Option<i64>,
     story_fragment_word_count_min: Option<i64>,
     story_fragment_word_count_max: Option<i64>,
@@ -163,6 +164,7 @@ fn default_settings() -> Value {
         "chapterWordCountTarget": 3000,
         "preciseWordCountEnabled": false,
         "continuityTrackingEnabled": true,
+        "storyCraftEnabled": true,
         "storyFragmentWordCount": 3000,
         "storyFragmentWordCountMin": 3000,
         "storyFragmentWordCountMax": 3000,
@@ -442,6 +444,15 @@ pub(crate) async fn update_story_settings(
                     .and_then(Value::as_bool)
                     .unwrap_or(true)
             })),
+        );
+        object.insert(
+            "storyCraftEnabled".to_owned(),
+            json!(bool_value(
+                input.story_craft_enabled,
+                &baseline,
+                "storyCraftEnabled",
+                true
+            )),
         );
         if let Some(value) = input.story_chapter_template_id {
             object.insert(
@@ -1010,10 +1021,27 @@ mod tests {
         let settings = default_settings();
         assert_eq!(settings["storySegmentFormat"], "md");
         assert_eq!(settings["preciseWordCountEnabled"], false);
+        assert_eq!(settings["storyCraftEnabled"], true);
         assert_eq!(
             settings["storyChapterTemplateId"],
             DEFAULT_CHAPTER_TEMPLATE_ID
         );
+    }
+
+    #[test]
+    fn craft_setting_defaults_for_legacy_projects_and_preserves_opt_out() {
+        let root = tempdir().expect("root");
+        let workspace = root.path().canonicalize().expect("workspace");
+        assert_eq!(
+            read_settings(&workspace).expect("defaults")["storyCraftEnabled"],
+            true
+        );
+        let path = workspace.join(SETTINGS_RELATIVE_PATH);
+        fs::create_dir_all(path.parent().expect("settings parent")).expect("mkdir");
+        write_json(&path, &json!({"storyCraftEnabled": false})).expect("write opt out");
+        let settings = read_settings(&workspace).expect("settings");
+        assert_eq!(settings["storyCraftEnabled"], false);
+        assert!(!bool_value(None, &settings, "storyCraftEnabled", true));
     }
 
     #[test]

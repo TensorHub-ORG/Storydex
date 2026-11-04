@@ -58,6 +58,7 @@ mod replacement;
 mod story;
 mod story_context;
 mod story_continuity;
+mod story_craft;
 mod story_generation;
 mod system;
 mod workspace;
@@ -2327,6 +2328,7 @@ mod tests {
                     "storyFragmentWordCountMax": 4800,
                     "preciseWordCountEnabled": true,
                     "continuityTrackingEnabled": false,
+                    "storyCraftEnabled": false,
                     "autoUpdateVariables": true,
                     "autoUpdateWiki": true,
                     "agentCommitPromptEnabled": false,
@@ -2349,6 +2351,7 @@ mod tests {
         assert_eq!(body["data"]["storyFragmentWordCountMax"], 6000);
         assert_eq!(body["data"]["preciseWordCountEnabled"], true);
         assert_eq!(body["data"]["continuityTrackingEnabled"], false);
+        assert_eq!(body["data"]["storyCraftEnabled"], false);
 
         let response = router(state.clone())
             .oneshot(protected_json_request_with_method(
@@ -2361,6 +2364,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["data"]["chapterCompletion"]["chapters/第1章"], true);
+        assert_eq!(body["data"]["storyCraftEnabled"], false);
         assert_eq!(body["data"]["segmentExtension"], ".txt");
         assert_eq!(body["data"]["chapterWordCountTarget"], 6000);
         assert_eq!(body["data"]["preciseWordCountEnabled"], true);
@@ -2384,6 +2388,7 @@ mod tests {
         assert_eq!(body["data"]["chapterWordCountTarget"], 6000);
         assert_eq!(body["data"]["preciseWordCountEnabled"], false);
         assert_eq!(body["data"]["continuityTrackingEnabled"], false);
+        assert_eq!(body["data"]["storyCraftEnabled"], false);
 
         let response = router(state.clone())
             .oneshot(protected_get_request("/api/v1/story/chapters"))

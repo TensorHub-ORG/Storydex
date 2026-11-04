@@ -6,10 +6,13 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 const MAX_CONTEXT_CHARS: usize = 40_000;
 const MAX_SOURCE_BYTES: u64 = 512 * 1024;
+const MAX_RELATION_DOCUMENT_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct StoryContext {
@@ -56,6 +59,7 @@ impl StoryContext {
             "story_outline",
             "confirmed_relations",
             "recent_segments",
+            "recent_structure",
             "active_document",
             "active_characters",
             "worldbook",
@@ -88,7 +92,17 @@ impl StoryContext {
         if count == 0 {
             return;
         }
-        let limit = limit.min(MAX_CONTEXT_CHARS.saturating_sub(self.total_chars));
+        let prefix = if kind == "runtime_presets" {
+            String::new()
+        } else {
+            format!("\n来源：{path}\n")
+        };
+        let overhead = prefix.chars().count() + usize::from(kind != "runtime_presets");
+        let limit = limit.min(
+            MAX_CONTEXT_CHARS
+                .saturating_sub(self.total_chars)
+                .saturating_sub(overhead),
+        );
         if limit == 0 {
             self.notes.push(format!("context_budget_exhausted:{path}"));
             self.blocks
@@ -115,17 +129,17 @@ impl StoryContext {
         } else {
             text.chars().take(limit).collect::<String>()
         };
-        self.total_chars += included.chars().count();
+        self.total_chars += included.chars().count() + overhead;
         self.blocks.push(json!({
             "id": kind, "kind": kind, "sourcePaths": [path], "included": true,
             "truncated": truncated, "omitted": false, "chars": included.chars().count(),
+            "overheadChars": overhead,
             "sha256": format!("{:x}", Sha256::digest(included.as_bytes())),
         }));
         if kind == "runtime_presets" {
             self.preset = included;
         } else {
-            self.references
-                .push_str(&format!("\n来源：{path}\n{included}\n"));
+            self.references.push_str(&format!("{prefix}{included}\n"));
         }
     }
 }
@@ -175,7 +189,451 @@ fn is_prose(path: &Path) -> bool {
             .is_some_and(|s| matches!(s.to_ascii_lowercase().as_str(), "md" | "txt"))
 }
 
+struct RetrievalQuery {
+    author: String,
+    plan: String,
+    recent: String,
+    terms: Vec<(String, usize)>,
+    chapter: Option<u32>,
+}
+
+impl RetrievalQuery {
+    fn new(author: &str, plan: &str, recent: &[(PathBuf, String)], chapter: Option<u32>) -> Self {
+        let plan = plan.chars().take(2_400).collect::<String>();
+        let recent = recent
+            .iter()
+            .rev()
+            .take(6)
+            .map(|(_, text)| {
+                let chars = text.chars().collect::<Vec<_>>();
+                chars[chars.len().saturating_sub(1_000)..]
+                    .iter()
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut terms = Vec::new();
+        let mut seen = HashSet::new();
+        for (text, weight) in [(author, 12), (plan.as_str(), 5), (recent.as_str(), 1)] {
+            for term in retrieval_terms(text) {
+                if seen.insert(term.clone()) {
+                    terms.push((term, weight));
+                }
+            }
+        }
+        Self {
+            author: author.into(),
+            plan,
+            recent,
+            terms,
+            chapter,
+        }
+    }
+
+    fn text(&self) -> String {
+        format!("{}\n{}\n{}", self.author, self.plan, self.recent)
+    }
+
+    fn score(&self, text: &str) -> usize {
+        let text = text.to_lowercase();
+        self.terms
+            .iter()
+            .filter(|(term, _)| text.contains(term))
+            .take(80)
+            .map(|(_, weight)| *weight)
+            .sum()
+    }
+
+    fn named_score(&self, path: &Path) -> usize {
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        if name.chars().count() < 2 || name.eq_ignore_ascii_case("readme") {
+            return 0;
+        }
+        if self.author.contains(name) {
+            1_000
+        } else if self.plan.contains(name) {
+            500
+        } else if self.recent.contains(name) {
+            100
+        } else {
+            0
+        }
+    }
+}
+
+fn retrieval_terms(text: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut seen = HashSet::new();
+    for word in text.split(|c: char| !c.is_alphanumeric()) {
+        let chars = word.chars().collect::<Vec<_>>();
+        if word.is_ascii() {
+            if chars.len() >= 3 {
+                let term = word.to_ascii_lowercase();
+                if seen.insert(term.clone()) {
+                    terms.push(term);
+                }
+            }
+        } else {
+            for length in [3, 2] {
+                for window in chars.windows(length) {
+                    let term = window.iter().collect::<String>();
+                    if !matches!(
+                        term.as_str(),
+                        "继续"
+                            | "下一"
+                            | "一章"
+                            | "本章"
+                            | "人物"
+                            | "故事"
+                            | "正文"
+                            | "然后"
+                            | "这个"
+                            | "自己"
+                            | "一个"
+                            | "没有"
+                            | "什么"
+                            | "可以"
+                            | "就是"
+                            | "需要"
+                            | "作者"
+                    ) && seen.insert(term.clone())
+                    {
+                        terms.push(term);
+                    }
+                }
+            }
+        }
+        if terms.len() >= 768 {
+            break;
+        }
+    }
+    terms.truncate(768);
+    terms
+}
+
+fn requested_chapter(prompt: &str) -> Option<u32> {
+    let chapter = r"(?:第[0-9零〇一二两三四五六七八九十百千万]+章|(?i:chapter)\s+[0-9]+)";
+    let directed = regex::Regex::new(&format!(
+        r"(?:续写|继续|生成|创作|写|(?i:write|continue))\s*({chapter})"
+    ))
+    .ok()?;
+    if let Some(capture) = directed.captures_iter(prompt).last() {
+        return coomi_services::chapter_number(capture.get(1)?.as_str());
+    }
+    // A chapter cited as a style/reference example is not a new target when
+    // the author explicitly asks to move forward from the current manuscript.
+    let forward = regex::Regex::new(
+        r"(?:下一章|接着写|往下写|继续写|续写下一|继续下一|(?i:next\s+chapter|continue\s+writing))",
+    )
+    .ok()?;
+    if forward.is_match(prompt) {
+        return None;
+    }
+    let any = regex::Regex::new(chapter).ok()?;
+    any.find(prompt)
+        .and_then(|m| coomi_services::chapter_number(m.as_str()))
+}
+
+fn heading_chapter(line: &str) -> Option<u32> {
+    let line = line.trim_start_matches(|c: char| c.is_whitespace() || c == '#');
+    static HEADING: OnceLock<regex::Regex> = OnceLock::new();
+    let heading = HEADING.get_or_init(|| {
+        regex::Regex::new(
+        r"^(?:第[0-9零〇一二两三四五六七八九十百千万]+章|(?i:chapter)\s+[0-9]+)(?:[\s:：、.．-]|$)"
+    ).expect("chapter heading pattern")
+    });
+    if heading.is_match(line) {
+        coomi_services::chapter_number(line)
+    } else {
+        None
+    }
+}
+
+fn recent_chapter_files(root: &Path) -> Result<Vec<Vec<PathBuf>>> {
+    let chapters = root.join("chapters");
+    if !chapters.is_dir() {
+        return Ok(Vec::new());
+    }
+    let chapters = resolve_bounded_path(root, chapters)?;
+    let mut numbered = Vec::new();
+    for entry in fs::read_dir(chapters)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if coomi_services::is_chapter_entry(&name, entry.path().is_dir()) {
+            numbered.push((name, resolve_bounded_path(root, entry.path())?));
+        }
+    }
+    numbered.sort_by(|a, b| coomi_services::compare_chapter_paths(&b.0, &a.0));
+    let mut groups = Vec::new();
+    for (_, path) in numbered {
+        let files = if path.is_dir() {
+            text_files(root, &path, 0)?
+        } else {
+            vec![path]
+        };
+        let files = files
+            .into_iter()
+            .filter(|p| {
+                is_prose(p) && coomi_services::is_chapter_entry(&p.to_string_lossy(), false)
+            })
+            .collect::<Vec<_>>();
+        if !files.is_empty() {
+            groups.push(files);
+        }
+        if groups.len() == 3 {
+            break;
+        }
+    }
+    groups.reverse();
+    Ok(groups)
+}
+
+fn canon_priority(
+    root: &Path,
+    path: &Path,
+    kind: &str,
+    text: &str,
+    query: &RetrievalQuery,
+) -> (u8, usize) {
+    let core = path == root.join(".storydex/story-bible.md")
+        || (path.parent() == Some(root) && kind == "story_bible");
+    let current_outline = kind == "story_outline"
+        && query.chapter.is_some()
+        && text
+            .lines()
+            .any(|line| heading_chapter(line) == query.chapter);
+    let class = if core {
+        5
+    } else if current_outline {
+        4
+    } else if kind == "story_outline" {
+        3
+    } else if kind == "story_style" {
+        2
+    } else {
+        1
+    };
+    (class, query.named_score(path) + query.score(text))
+}
+
+struct SourcePassage {
+    text: String,
+    first_line: usize,
+    last_line: usize,
+    chapter: Option<u32>,
+}
+
+fn source_passages(text: &str) -> Vec<SourcePassage> {
+    let mut result = Vec::new();
+    let mut chapter = None;
+    for (index, line) in text.lines().enumerate() {
+        if let Some(number) = heading_chapter(line) {
+            chapter = Some(number);
+        }
+        let chars = line.chars().collect::<Vec<_>>();
+        for chunk in chars.chunks(900) {
+            let text = chunk.iter().collect::<String>();
+            if let Some(last) = result.last_mut().filter(|last: &&mut SourcePassage| {
+                last.chapter == chapter
+                    && last.last_line + 1 == index + 1
+                    && last.text.chars().count() + chunk.len() < 1_000
+                    && !line.starts_with('#')
+            }) {
+                last.text.push('\n');
+                last.text.push_str(&text);
+                last.last_line = index + 1;
+            } else {
+                result.push(SourcePassage {
+                    text,
+                    first_line: index + 1,
+                    last_line: index + 1,
+                    chapter,
+                });
+            }
+        }
+    }
+    result
+}
+
+fn add_selected_file(
+    root: &Path,
+    path: &Path,
+    source: &str,
+    kind: &str,
+    limit: usize,
+    query: &RetrievalQuery,
+    context: &mut StoryContext,
+) {
+    let source_chars = source.chars().count();
+    if source_chars == 0 {
+        return;
+    }
+    let guidance = if kind == "story_style" {
+        "本书表达参考：仅采用适用的叙述、对白和节奏特征；样例中的人物、物件、事件不属于本书事实，不复制样例原句。\n"
+    } else {
+        ""
+    };
+    let available = limit.saturating_sub(guidance.chars().count());
+    if available < 40 && source_chars > available {
+        add_file(root, path, source, kind, 0, false, context);
+        return;
+    }
+    let mut ranges = Vec::new();
+    let selected = if source_chars <= available {
+        ranges.push([1, source.lines().count().max(1)]);
+        source.to_owned()
+    } else {
+        let passages = source_passages(source);
+        let mut ranked = passages
+            .iter()
+            .enumerate()
+            .map(|(index, passage)| {
+                let chapter_score = usize::from(
+                    kind == "story_outline"
+                        && query.chapter.is_some()
+                        && passage.chapter == query.chapter,
+                ) * 100_000;
+                let opening_score = usize::from(index == 0) * 1_000;
+                (
+                    index,
+                    chapter_score + opening_score + query.score(&passage.text),
+                )
+            })
+            .collect::<Vec<_>>();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let marker = "[按当前章节及相关内容选取；其余原文省略]\n";
+        let mut remaining = available.saturating_sub(marker.chars().count());
+        let mut chosen = Vec::new();
+        for (index, _) in ranked {
+            if remaining < 40 {
+                break;
+            }
+            let passage = &passages[index];
+            let label = format!("[原文第 {}—{} 行]\n", passage.first_line, passage.last_line);
+            let room = remaining.saturating_sub(label.chars().count() + 1);
+            let excerpt = passage.text.chars().take(room).collect::<String>();
+            if excerpt.is_empty() {
+                continue;
+            }
+            remaining =
+                remaining.saturating_sub(label.chars().count() + excerpt.chars().count() + 1);
+            chosen.push((index, format!("{label}{excerpt}\n")));
+        }
+        chosen.sort_by_key(|(index, _)| *index);
+        let mut selected = String::from(marker);
+        for (index, text) in chosen {
+            let passage = &passages[index];
+            ranges.push([passage.first_line, passage.last_line]);
+            selected.push_str(&text);
+        }
+        selected
+    };
+    let before = context.blocks.len();
+    add_file(
+        root,
+        path,
+        &format!("{guidance}{selected}"),
+        kind,
+        limit,
+        false,
+        context,
+    );
+    if context.blocks.len() > before {
+        let block = context.blocks.last_mut().expect("selected context block");
+        block["selection"] = json!({"method": "chapter_and_lexical", "targetChapter": query.chapter,
+            "sourceChars": source_chars, "sourceSha256": format!("{:x}", Sha256::digest(source.as_bytes())), "sourceLineRanges": ranges});
+        if source_chars > available {
+            block["truncated"] = json!(true);
+        }
+    }
+}
+
+fn add_recent_structure(
+    root: &Path,
+    groups: &[Vec<PathBuf>],
+    sources: &[(PathBuf, String)],
+    context: &mut StoryContext,
+) {
+    let mut text = String::from(
+        "近期章节边界原文，仅用于观察开场、收尾和信息推进是否无意重复；有意呼应、缓冲章和延迟回收可以保留，不要求每章反转或悬念。\n",
+    );
+    let mut paths = Vec::new();
+    for group in groups {
+        let find = |path: &PathBuf| {
+            sources
+                .iter()
+                .find(|(source, _)| source == path)
+                .map(|(_, text)| text.as_str())
+                .unwrap_or_default()
+        };
+        let Some(first) = group.first() else {
+            continue;
+        };
+        let last = group.last().expect("nonempty chapter");
+        if group
+            .iter()
+            .map(|path| find(path).chars().count())
+            .sum::<usize>()
+            <= 1_200
+        {
+            continue;
+        }
+        let start = find(first).chars().take(180).collect::<String>();
+        let ending_chars = find(last).chars().collect::<Vec<_>>();
+        let end = ending_chars[ending_chars.len().saturating_sub(180)..]
+            .iter()
+            .collect::<String>();
+        for (path, label, excerpt) in [(first, "开头", start), (last, "结尾", end)] {
+            let relative = path
+                .strip_prefix(root)
+                .expect("bounded chapter")
+                .to_string_lossy()
+                .replace('\\', "/");
+            text.push_str(&format!("{relative} {label}：{excerpt}\n"));
+            if !paths.contains(&relative) {
+                paths.push(relative);
+            }
+        }
+    }
+    if paths.is_empty() {
+        return;
+    }
+    context.add("recent_structure", &paths.join(", "), &text, 2_000, false);
+    context.blocks.last_mut().expect("structure context")["sourcePaths"] = json!(paths);
+}
+
 pub(crate) fn prepare(workspace: &Path, payload: &ChatStreamRequest) -> Result<StoryContext> {
+    prepare_with_plan(workspace, payload, "")
+}
+
+/// A proposal can improve retrieval, but never replaces the author's request or
+/// becomes a source of established facts. Rebuild instead of appending beyond
+/// the shared context budget.
+pub(crate) fn refine_for_plan(
+    workspace: &Path,
+    payload: &ChatStreamRequest,
+    initial: &StoryContext,
+    plan_text: &str,
+) -> Result<StoryContext> {
+    if plan_text.trim().is_empty() {
+        return Ok(initial.clone());
+    }
+    let mut context = prepare_with_plan(workspace, payload, plan_text)?;
+    context.notes.push(
+        "retrieval_refined_from_proposal:构思仅用于补充资料检索，未作为已发生事实加入正文参考"
+            .into(),
+    );
+    Ok(context)
+}
+
+fn prepare_with_plan(
+    workspace: &Path,
+    payload: &ChatStreamRequest,
+    plan_text: &str,
+) -> Result<StoryContext> {
     let root = workspace.canonicalize()?;
     let mut context = StoryContext::default();
     if let Some(preset) = payload.compiled_preset.as_deref() {
@@ -187,6 +645,31 @@ pub(crate) fn prepare(workspace: &Path, payload: &ChatStreamRequest) -> Result<S
             false,
         );
     }
+
+    // Read first so a short request such as “continue” still recalls characters
+    // and threads from the actual ending, including unsaved editor drafts.
+    let recent_groups = recent_chapter_files(&root)?;
+    let mut recent_sources = Vec::new();
+    for group in &recent_groups {
+        for path in group {
+            let text = source_text(&root, path, payload, &mut context)?;
+            recent_sources.push((path.clone(), text));
+        }
+    }
+    let latest_chapter = recent_groups
+        .last()
+        .and_then(|group| group.first())
+        .and_then(|path| {
+            let relative = path.strip_prefix(root.join("chapters")).ok()?;
+            coomi_services::chapter_number(relative.components().next()?.as_os_str().to_str()?)
+        });
+    let query = RetrievalQuery::new(
+        &payload.prompt,
+        plan_text,
+        &recent_sources,
+        requested_chapter(&payload.prompt)
+            .or_else(|| latest_chapter.and_then(|n| n.checked_add(1))),
+    );
 
     // Canon and plans are persistent references, independent of a filename
     // appearing in the author's prompt or the previous chapter.
@@ -216,6 +699,11 @@ pub(crate) fn prepare(workspace: &Path, payload: &ChatStreamRequest) -> Result<S
         ) {
             let kind = if matches!(stem.as_str(), "文风" | "文风样例" | "style") {
                 "story_style"
+            } else if matches!(
+                stem.as_str(),
+                "故事圣经" | "故事设定" | "写作规则" | "story-bible"
+            ) {
+                "story_bible"
             } else {
                 "story_outline"
             };
@@ -231,8 +719,10 @@ pub(crate) fn prepare(workspace: &Path, payload: &ChatStreamRequest) -> Result<S
             text_files(&root, &root.join(directory), 2)?
                 .into_iter()
                 .filter(|p| {
-                    kind != "story_bible"
-                        || (is_prose(p) && !p.starts_with(root.join(".storydex/memory/backups")))
+                    (kind != "worldbook" || !is_readme(p))
+                        && (kind != "story_bible"
+                            || (is_prose(p)
+                                && !p.starts_with(root.join(".storydex/memory/backups"))))
                 })
                 .map(|p| (p, kind)),
         );
@@ -247,20 +737,39 @@ pub(crate) fn prepare(workspace: &Path, payload: &ChatStreamRequest) -> Result<S
             canon.insert(0, (resolve_bounded_path(&root, path)?, "story_style"));
         }
     }
-    let mut remaining = 12_000usize;
-    let count = canon.len();
-    for (index, (path, kind)) in canon.into_iter().enumerate() {
+    let mut candidates = Vec::new();
+    for (path, kind) in canon {
+        if candidates
+            .iter()
+            .any(|(existing, _, _, _)| existing == &path)
+        {
+            continue;
+        }
         let text = source_text(&root, &path, payload, &mut context)?;
-        let limit = (remaining / (count - index)).min(4_000);
-        remaining = remaining.saturating_sub(text.chars().count().min(limit));
-        let text = if kind == "story_style" {
-            format!(
-                "本书表达参考：仅采用适用的叙述、对白和节奏特征；样例中的人物、物件、事件不属于本书事实，不复制样例原句。\n{text}"
-            )
-        } else {
-            text
+        let priority = canon_priority(&root, &path, kind, &text, &query);
+        candidates.push((path, kind, text, priority));
+    }
+    candidates.sort_by(|a, b| b.3.cmp(&a.3).then_with(|| a.0.cmp(&b.0)));
+    let mut remaining = 12_000usize;
+    for (path, kind, text, _) in candidates {
+        let preferred = match kind {
+            "story_bible" => 3_000,
+            "story_outline" => 4_000,
+            "story_style" => 2_000,
+            _ if query.score(&text) > 0 || query.named_score(&path) > 0 => 1_800,
+            _ => 700,
         };
-        add_file(&root, &path, &text, kind, limit, false, &mut context);
+        let before = context.total_chars;
+        add_selected_file(
+            &root,
+            &path,
+            &text,
+            kind,
+            remaining.min(preferred),
+            &query,
+            &mut context,
+        );
+        remaining = remaining.saturating_sub(context.total_chars - before);
         used.insert(path);
     }
 
@@ -271,8 +780,7 @@ pub(crate) fn prepare(workspace: &Path, payload: &ChatStreamRequest) -> Result<S
         .filter(|d| d["dirty"] == true)
         .filter_map(|d| d["relativePath"].as_str().map(|p| p.replace('\\', "/")))
         .collect::<Vec<_>>();
-    let view =
-        crate::story_continuity::read_with_exclusions(&root, &payload.prompt, &unsaved_paths)?;
+    let view = crate::story_continuity::read_with_exclusions(&root, &query.text(), &unsaved_paths)?;
     for path in &view.paths {
         context.record_read(path, "disk", None);
     }
@@ -309,64 +817,29 @@ pub(crate) fn prepare(workspace: &Path, payload: &ChatStreamRequest) -> Result<S
         }
     }
 
-    // Read the latest three chapters, with directory and flat chapters sharing
-    // the index's Chinese/Arabic chapter numbering and fragment ordering.
-    let chapters = root.join("chapters");
-    let mut recent = Vec::new();
-    if chapters.is_dir() {
-        let chapters = resolve_bounded_path(&root, &chapters)?;
-        let mut numbered = Vec::new();
-        for entry in fs::read_dir(&chapters)? {
-            let entry = entry?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if coomi_services::is_chapter_entry(&name, entry.path().is_dir()) {
-                numbered.push((name, resolve_bounded_path(&root, entry.path())?));
-            }
-        }
-        numbered.sort_by(|a, b| coomi_services::compare_chapter_paths(&b.0, &a.0));
-        let mut groups = Vec::new();
-        for (_, path) in numbered {
-            let files = if path.is_dir() {
-                text_files(&root, &path, 0)?
-            } else {
-                vec![path]
-            };
-            let files: Vec<_> = files
-                .into_iter()
-                .filter(|p| {
-                    is_prose(p) && coomi_services::is_chapter_entry(&p.to_string_lossy(), false)
-                })
-                .collect();
-            if !files.is_empty() {
-                groups.push(files);
-            }
-            if groups.len() == 3 {
-                break;
-            }
-        }
-        recent = groups.into_iter().rev().flatten().collect();
-    }
+    // Recent prose still runs in manuscript order; selection above only changes
+    // which reference passages receive space, not the story chronology.
     let mut recent_remaining = 16_000usize.min(
         MAX_CONTEXT_CHARS
             .saturating_sub(context.total_chars)
             .saturating_sub(8_000),
     );
-    let recent_count = recent.len();
-    for (index, path) in recent.into_iter().enumerate() {
-        let text = source_text(&root, &path, payload, &mut context)?;
+    let recent_count = recent_sources.len();
+    for (index, (path, text)) in recent_sources.iter().enumerate() {
         let limit = recent_remaining / (recent_count - index);
         recent_remaining = recent_remaining.saturating_sub(text.chars().count().min(limit));
         add_file(
             &root,
-            &path,
-            &text,
+            path,
+            text,
             "recent_segments",
             limit,
             true,
             &mut context,
         );
-        used.insert(path);
+        used.insert(path.clone());
     }
+    add_recent_structure(&root, &recent_groups, &recent_sources, &mut context);
     if !payload.active_file.is_empty() {
         let path = root.join(payload.active_file.replace('\\', "/"));
         if path.is_file() {
@@ -385,11 +858,14 @@ pub(crate) fn prepare(workspace: &Path, payload: &ChatStreamRequest) -> Result<S
             }
         }
     }
-    let relevant_text = format!("{}\n{}", payload.prompt, context.references);
+    let relevant_text = format!("{}\n{}", query.text(), context.references);
     for (directory, kind) in [(".storydex/characters", "active_characters")] {
         let mut candidates = Vec::new();
         let mut relevant_ids = HashSet::new();
         for path in text_files(&root, &root.join(directory), 1)? {
+            if is_readme(&path) {
+                continue;
+            }
             let text = source_text(&root, &path, payload, &mut context)?;
             let data = serde_json::from_str::<Value>(&text).unwrap_or(Value::Null);
             if data["name"]
@@ -405,6 +881,12 @@ pub(crate) fn prepare(workspace: &Path, payload: &ChatStreamRequest) -> Result<S
             }
             candidates.push((path, text, data));
         }
+        candidates.sort_by(|a, b| {
+            let score = |(path, text, _): &(PathBuf, String, Value)| {
+                query.named_score(path).saturating_add(query.score(text))
+            };
+            score(b).cmp(&score(a)).then_with(|| a.0.cmp(&b.0))
+        });
         for (path, text, data) in candidates {
             if context.total_chars >= MAX_CONTEXT_CHARS {
                 context
@@ -416,8 +898,7 @@ pub(crate) fn prepare(workspace: &Path, payload: &ChatStreamRequest) -> Result<S
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or_default();
-            if !is_readme(&path)
-                && !relevant_text.contains(name)
+            if !relevant_text.contains(name)
                 && !relevant_ids.contains(name)
                 && !data["id"]
                     .as_str()
@@ -447,14 +928,37 @@ fn add_confirmed_relations(
     if !graph_path.is_file() && !root.join(".storydex/knowledge/relations.json").is_file() {
         return Ok(());
     }
-    // Refresh the existing projection so edited/deleted candidates cannot keep
-    // borrowing an old confirmation. This performs no model calls.
-    let graph = match coomi_services::StorydexKnowledge::new(root)?.sync(false) {
-        Ok(graph) => graph,
-        Err(_) => {
+    // Context tools are read-only. Check the saved projection against the live
+    // candidate and independent review ledger instead of refreshing WIKI here.
+    let loaded = (|| -> Result<(Value, Value, Value, Value)> {
+        Ok((
+            read_relation_document(root, ".storydex/wiki/knowledge_graph.json", None, context)?,
+            read_relation_document(
+                root,
+                ".storydex/knowledge/relations.json",
+                Some(payload),
+                context,
+            )?,
+            read_relation_document(
+                root,
+                ".storydex/knowledge/relation-reviews.json",
+                None,
+                context,
+            )?,
+            read_relation_document(
+                root,
+                ".storydex/knowledge/source-identities.json",
+                None,
+                context,
+            )?,
+        ))
+    })();
+    let (graph, candidates, reviews, identities) = match loaded {
+        Ok(documents) => documents,
+        Err(error) => {
             context
                 .notes
-                .push("knowledge_unavailable:知识图谱未能刷新，本轮未引用关系".into());
+                .push(format!("knowledge_unavailable:关系投影或独立确认资料无法读取，本轮未引用关系；只读上下文不会自动重建 WIKI：{error}"));
             return Ok(());
         }
     };
@@ -466,6 +970,39 @@ fn add_confirmed_relations(
         {
             continue;
         }
+        let id = relation["id"].as_str().unwrap_or_default();
+        let matching = candidates["relations"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|candidate| candidate["id"] == id)
+            .collect::<Vec<_>>();
+        let review = &reviews[id];
+        if id.is_empty()
+            || matching.len() != 1
+            || matching[0] != &relation["candidate"]
+            || review["decision"] != "confirmed"
+            || !relation["baseFingerprint"].is_string()
+            || review["baseFingerprint"] != relation["baseFingerprint"]
+        {
+            context.notes.push(format!(
+                "knowledge_stale:{id}：候选或作者确认已改变，未沿用旧投影"
+            ));
+            continue;
+        }
+        let fingerprint = format!(
+            "{:x}",
+            Sha256::digest(coomi_services::canonical_json_bytes(&json!([
+                relation["baseFingerprint"],
+                review
+            ]))?)
+        );
+        if relation["fingerprint"].as_str() != Some(fingerprint.as_str()) {
+            context
+                .notes
+                .push(format!("knowledge_stale:{id}：作者确认与投影版本不一致"));
+            continue;
+        }
         let refs = relation["sourceRefs"]
             .as_array()
             .cloned()
@@ -474,27 +1011,75 @@ fn add_confirmed_relations(
             continue;
         }
         let mut quotes = Vec::new();
+        let mut reviewed_refs = Vec::new();
         for reference in &refs {
             let path = reference["path"].as_str().unwrap_or_default();
             let quote = reference["quote"].as_str().unwrap_or_default();
             let source = root.join(path);
-            if quote.is_empty() || !source.is_file() {
+            let source_id = reference["sourceId"].as_str().unwrap_or_default();
+            let identity = &identities["sources"][source_id];
+            if quote.is_empty()
+                || !source.is_file()
+                || source_id.is_empty()
+                || identity["missing"] == true
+                || identity["path"] != path
+                || path.starts_with(".storydex/knowledge/")
+            {
                 break;
             }
             let source = resolve_bounded_path(root, source)?;
-            if !source_text(root, &source, payload, context)?.contains(quote) {
+            let text =
+                normalized_knowledge_text(&source, &source_text(root, &source, payload, context)?);
+            if !text.contains(quote) {
                 break;
             }
             quotes.push(format!("{path}：{quote}"));
+            reviewed_refs.push(
+                json!({"sourceId":source_id,"quote":quote,"matched":true,"unresolvedPath":null}),
+            );
         }
         if quotes.len() != refs.len() {
+            context
+                .notes
+                .push(format!("knowledge_stale:{id}：来源身份或引文已改变"));
             continue;
         }
+        let mut candidate = matching[0].clone();
+        candidate["sourceRefs"] = json!(reviewed_refs);
+        let base = format!(
+            "{:x}",
+            Sha256::digest(coomi_services::canonical_json_bytes(
+                &json!({"candidate":candidate,"removed":false})
+            )?)
+        );
+        if relation["baseFingerprint"].as_str() != Some(base.as_str()) {
+            continue;
+        }
+        let expected = |key: &str| {
+            review["changes"]
+                .get(key)
+                .filter(|value| value.as_str().is_some_and(|s| !s.trim().is_empty()))
+                .unwrap_or(&matching[0][key])
+        };
+        if ["subjectId", "objectId", "predicate"]
+            .iter()
+            .any(|key| &relation[*key] != expected(key))
+        {
+            continue;
+        }
+        let subject = current_relation_label(root, expected("subjectId"), &graph, &identities)?;
+        let object = current_relation_label(root, expected("objectId"), &graph, &identities)?;
+        let (Some(subject), Some(object)) = (subject, object) else {
+            context
+                .notes
+                .push(format!("knowledge_stale:{id}：关系端点已改变"));
+            continue;
+        };
         facts.push_str(&format!(
             "{} — {} — {}\n{}\n",
-            relation["subject"].as_str().unwrap_or_default(),
+            subject,
             relation["predicate"].as_str().unwrap_or_default(),
-            relation["object"].as_str().unwrap_or_default(),
+            object,
             quotes.join("\n")
         ));
     }
@@ -510,6 +1095,112 @@ fn add_confirmed_relations(
         );
     }
     Ok(())
+}
+
+fn read_relation_document(
+    root: &Path,
+    relative: &str,
+    payload: Option<&ChatStreamRequest>,
+    context: &mut StoryContext,
+) -> Result<Value> {
+    let path = resolve_bounded_path(root, root.join(relative))?;
+    let draft = payload
+        .and_then(|payload| {
+            payload.editor_documents.iter().find(|document| {
+                document["dirty"] == true
+                    && document["relativePath"]
+                        .as_str()
+                        .is_some_and(|p| p.replace('\\', "/") == relative)
+            })
+        })
+        .and_then(|document| document["content"].as_str());
+    let text = if let Some(draft) = draft {
+        anyhow::ensure!(
+            draft.len() as u64 <= MAX_RELATION_DOCUMENT_BYTES,
+            "关系资料 {relative} 超过 8 MiB，本轮省略关系"
+        );
+        context.notes.push(format!("unsaved_draft:{relative}"));
+        context.record_read(relative, "editor_draft", Some(draft.chars().count()));
+        draft.to_owned()
+    } else {
+        let file = fs::File::open(&path)?;
+        anyhow::ensure!(
+            file.metadata()?.len() <= MAX_RELATION_DOCUMENT_BYTES,
+            "关系资料 {relative} 超过 8 MiB，本轮省略关系"
+        );
+        let mut text = String::new();
+        file.take(MAX_RELATION_DOCUMENT_BYTES + 1)
+            .read_to_string(&mut text)?;
+        anyhow::ensure!(
+            text.len() as u64 <= MAX_RELATION_DOCUMENT_BYTES,
+            "关系资料 {relative} 读取期间超过 8 MiB，本轮省略关系"
+        );
+        context.record_read(relative, "disk", Some(text.chars().count()));
+        text
+    };
+    serde_json::from_str(&text).context("关系资料不是有效 JSON")
+}
+
+fn normalized_knowledge_text(path: &Path, text: &str) -> String {
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+        && let Ok(value) = serde_json::from_str::<Value>(text)
+        && let Ok(pretty) = serde_json::to_string_pretty(&value)
+    {
+        return pretty;
+    }
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn current_relation_label(
+    root: &Path,
+    id: &Value,
+    graph: &Value,
+    identities: &Value,
+) -> Result<Option<String>> {
+    let Some(id) = id.as_str().filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    if !graph["graph"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|node| node["id"] == id)
+    {
+        return Ok(None);
+    }
+    if id == "project:root" {
+        return Ok(root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned()));
+    }
+    let identity = &identities["sources"][id];
+    let Some(relative) = identity["path"]
+        .as_str()
+        .filter(|path| !path.starts_with(".storydex/knowledge/"))
+    else {
+        return Ok(None);
+    };
+    if identity["missing"] == true || !root.join(relative).is_file() {
+        return Ok(None);
+    }
+    let path = resolve_bounded_path(root, root.join(relative))?;
+    let Some(stem) = path.file_stem().and_then(|name| name.to_str()) else {
+        return Ok(None);
+    };
+    let mut title = stem.to_owned();
+    if relative.starts_with("chapters/")
+        && coomi_services::is_chapter_entry(relative, false)
+        && let Some(parent) = path
+            .parent()
+            .filter(|parent| *parent != root.join("chapters"))
+        && let Some(name) = parent.file_name()
+    {
+        title = format!("{} / {title}", name.to_string_lossy());
+    }
+    Ok(Some(title))
 }
 
 fn add_file(
@@ -573,6 +1264,238 @@ mod tests {
         let path = root.join(path);
         fs::create_dir_all(path.parent().expect("parent")).expect("directories");
         fs::write(path, text).expect("fixture");
+    }
+
+    #[test]
+    fn selects_the_requested_late_outline_and_keeps_author_rules_under_pressure() {
+        let directory = tempdir().expect("temp");
+        let root = directory.path();
+        let outline = (1..=24)
+            .map(|chapter| {
+                format!(
+                    "## 第{chapter}章\n{}\n\n",
+                    if chapter == 17 {
+                        "潮汐证词改变了卫迟的选择，找出旧案见证人。".repeat(50)
+                    } else {
+                        format!("第{chapter}章旧计划，无关的过渡事件。").repeat(80)
+                    }
+                )
+            })
+            .collect::<String>();
+        write(root, "章纲.md", &outline);
+        write(root, "写作规则.md", "作者约定：此卷不得揭露姐姐身份。");
+        write(root, "chapters/第16章.md", "前章结束，主角仍在码头等待。");
+        for index in 0..24 {
+            write(
+                root,
+                &format!(".storydex/worldbook/地区{index}.md"),
+                &"其他地区的旧闻。".repeat(700),
+            );
+        }
+        let payload = serde_json::from_value(json!({"prompt":"参考第三章的叙述，继续第十七章"}))
+            .expect("payload");
+        let context = prepare(root, &payload).expect("context");
+        assert!(context.references.contains("潮汐证词改变了卫迟的选择"));
+        assert!(context.references.contains("此卷不得揭露姐姐身份"));
+        let outline_block = context
+            .blocks
+            .iter()
+            .find(|b| b["sourcePaths"][0] == "章纲.md")
+            .expect("outline block");
+        assert_eq!(outline_block["selection"]["targetChapter"], 17);
+        assert_eq!(outline_block["truncated"], true);
+        assert!(
+            outline_block["selection"]["sourceLineRanges"]
+                .as_array()
+                .expect("ranges")
+                .iter()
+                .any(|range| range[0].as_u64().unwrap_or(0) > 40)
+        );
+        assert_eq!(
+            context.total_chars,
+            context.references.chars().count() + context.preset.chars().count()
+        );
+        assert!(context.total_chars <= MAX_CONTEXT_CHARS);
+        assert!(context.blocks.iter().any(|b| b["omitted"] == true));
+    }
+
+    #[test]
+    fn continuation_infers_next_chapter_instead_of_reading_only_outline_opening() {
+        let directory = tempdir().expect("temp");
+        let root = directory.path();
+        write(root, "chapters/第十五章/001.md", "灯塔的火熄灭了。");
+        write(
+            root,
+            "章纲.md",
+            &format!(
+                "# 第一章\n{}\n# 第十六章\n下章应核对守塔人的口供。\n",
+                "遥远的起点。".repeat(1_000)
+            ),
+        );
+        let payload = serde_json::from_value(json!({"prompt":"接着写"})).expect("payload");
+        let context = prepare(root, &payload).expect("context");
+        assert!(context.references.contains("下章应核对守塔人的口供"));
+        assert_eq!(requested_chapter("Write chapter 21"), Some(21));
+        assert_eq!(requested_chapter("续写第一百零二章"), Some(102));
+    }
+
+    #[test]
+    fn forward_request_ignores_reference_chapter_and_scaffold_readmes() {
+        let directory = tempdir().expect("temp");
+        let root = directory.path();
+        write(root, "chapters/第十五章.md", "上章的河水已经退去。");
+        write(
+            root,
+            "章纲.md",
+            &format!(
+                "# 第三章\n{}\n# 第十六章\n卫迟应当核对新的潮汐证词。\n",
+                "只用于早期风格参考。".repeat(800)
+            ),
+        );
+        write(
+            root,
+            ".storydex/worldbook/README.md",
+            "世界书模板说明，不是小说设定。",
+        );
+        write(
+            root,
+            ".storydex/characters/README.md",
+            "角色模板说明，不是人物资料。",
+        );
+        write(
+            root,
+            ".storydex/scripts/README.md",
+            "作者在此保留的安排：暂不揭晓渡口真相。",
+        );
+        let payload = serde_json::from_value(json!({"prompt":"参考第三章的风格，继续下一章"}))
+            .expect("payload");
+        let context = prepare(root, &payload).expect("context");
+        let outline = context
+            .blocks
+            .iter()
+            .find(|block| block["sourcePaths"][0] == "章纲.md")
+            .expect("outline");
+        assert_eq!(outline["selection"]["targetChapter"], 16);
+        assert!(context.references.contains("卫迟应当核对新的潮汐证词"));
+        assert!(!context.references.contains("世界书模板说明"));
+        assert!(!context.references.contains("角色模板说明"));
+        assert!(context.references.contains("暂不揭晓渡口真相"));
+        assert_eq!(requested_chapter("参考第三章，接着写"), None);
+        assert_eq!(requested_chapter("参考第三章，继续写第十七章"), Some(17));
+    }
+
+    fn write_crowded_continuity(root: &Path) -> String {
+        // Use a substantial evidence span: the reader deliberately fills small
+        // gaps with short entries even after larger entries exceed its budget.
+        let old_quote = format!(
+            "卫迟保留着锈锁，等待当年见证人归来。{}",
+            "他仍然记得那天码头上的每一句证词。".repeat(40)
+        )
+        .chars()
+        .take(600)
+        .collect::<String>();
+        for chapter in 1..=16 {
+            let path = format!("chapters/第{chapter}章/001.md");
+            let (key, character, quote) = if chapter == 1 {
+                ("锈锁旧案".to_owned(), "卫迟".to_owned(), old_quote.clone())
+            } else {
+                (
+                    format!("支线{chapter}"),
+                    format!("访客{chapter}"),
+                    format!(
+                        "访客{chapter}取走一份报纸。{}",
+                        "这件事尚待后续核对。".repeat(40)
+                    ),
+                )
+            };
+            write(root, &path, &quote);
+            let (record_path, record, _) =
+                crate::story_continuity::draft(root, std::slice::from_ref(&path)).expect("draft");
+            let extracted = json!({"entries":[{"kind":"thread","key":key,"summary":"线索仍待核对。","status":"active","characters":[character],"sourcePath":path,"quote":quote}]}).to_string();
+            crate::story_continuity::save_completion(root, &record_path, record, &extracted)
+                .expect("save continuity");
+        }
+        write(
+            root,
+            ".storydex/characters/卫迟.md",
+            "卫迟曾因证词错误而自责，拒绝轻率指认。",
+        );
+        old_quote
+    }
+
+    #[test]
+    fn plan_refinement_recalls_distant_evidence_without_promoting_the_plan_to_fact() {
+        let directory = tempdir().expect("temp");
+        let root = directory.path();
+        let old_quote = write_crowded_continuity(root);
+        write(root, "写作规则.md", "作者要求：旧案真凶仍不揭晓。");
+        let payload =
+            serde_json::from_value(json!({"prompt":"接着写，保持旧案悬而未决"})).expect("payload");
+        let initial = prepare(root, &payload).expect("initial");
+        assert!(!initial.references.contains(&old_quote));
+        assert!(
+            initial
+                .notes
+                .iter()
+                .any(|note| note == "continuity_budget_omitted:锈锁旧案")
+        );
+        let refined = refine_for_plan(
+            root,
+            &payload,
+            &initial,
+            "本章考虑让卫迟核对锈锁旧案；构思新增事件XYZ尚未发生。",
+        )
+        .expect("refined");
+        assert!(refined.references.contains(&old_quote));
+        assert!(refined.references.contains("拒绝轻率指认"));
+        assert!(refined.references.contains("旧案真凶仍不揭晓"));
+        assert!(!refined.references.contains("构思新增事件XYZ"));
+        assert!(
+            refined
+                .notes
+                .iter()
+                .any(|note| note.starts_with("retrieval_refined_from_proposal:"))
+        );
+        assert!(refined.total_chars <= MAX_CONTEXT_CHARS);
+        assert_eq!(payload.prompt, "接着写，保持旧案悬而未决");
+        assert_eq!(
+            refine_for_plan(root, &payload, &initial, "")
+                .expect("unchanged")
+                .references,
+            initial.references
+        );
+    }
+
+    #[test]
+    fn recent_editor_draft_guides_distant_recall_and_boundary_observation() {
+        let directory = tempdir().expect("temp");
+        let root = directory.path();
+        let old_quote = write_crowded_continuity(root);
+        let draft = format!(
+            "卫迟带着锈锁回到渡口。{}卫迟仍未打开那把锁。",
+            "潮水缓慢升高。".repeat(250)
+        );
+        let payload = serde_json::from_value(json!({"prompt":"继续", "editorDocuments":[{"relativePath":"chapters/第16章/001.md","dirty":true,"content":draft}]})).expect("payload");
+        let context = prepare(root, &payload).expect("context");
+        assert!(context.references.contains(&old_quote));
+        assert!(context.has_source("recent_structure"));
+        assert!(
+            context
+                .references
+                .contains("有意呼应、缓冲章和延迟回收可以保留")
+        );
+        assert!(context.references.contains("卫迟仍未打开那把锁"));
+        let reads = context
+            .file_reads
+            .iter()
+            .filter(|read| read["arguments"]["path"] == "chapters/第16章/001.md")
+            .collect::<Vec<_>>();
+        assert_eq!(reads.len(), 1);
+        assert_eq!(reads[0]["arguments"]["source"], "editor_draft");
+        assert_eq!(
+            context.total_chars,
+            context.references.chars().count() + context.preset.chars().count()
+        );
     }
 
     #[test]
@@ -739,7 +1662,7 @@ mod tests {
         );
         write(
             root,
-            ".storydex/worldbook/README.md",
+            ".storydex/worldbook/巨型设定.md",
             &"设".repeat(MAX_SOURCE_BYTES as usize),
         );
         let payload =
@@ -754,7 +1677,7 @@ mod tests {
             !context
                 .file_reads
                 .iter()
-                .any(|read| { read["arguments"]["path"] == ".storydex/worldbook/README.md" }),
+                .any(|read| { read["arguments"]["path"] == ".storydex/worldbook/巨型设定.md" }),
             "skipped oversized files must not be reported as read"
         );
         assert!(
@@ -872,12 +1795,34 @@ mod tests {
         knowledge
             .review_relation("old-friends", fingerprint, "confirmed", &json!({}))
             .expect("confirm");
+        let graph_path = root.join(".storydex/wiki/knowledge_graph.json");
+        let projection_before = fs::read(&graph_path).expect("projection bytes");
+        let reviews_path = root.join(".storydex/knowledge/relation-reviews.json");
+        let reviews_before = fs::read_to_string(&reviews_path).expect("review ledger");
         let mut payload: ChatStreamRequest =
             serde_json::from_value(json!({"prompt": "继续"})).expect("request");
         let context = prepare(root, &payload).expect("context");
         assert!(context.has_source("confirmed_relations"));
         assert!(context.references.contains("甲 — 旧识 — 乙"));
         assert!(!context.references.contains("仇敌"));
+        let mut rejected: Value = serde_json::from_str(&reviews_before).expect("reviews");
+        rejected["old-friends"]["decision"] = json!("rejected");
+        fs::write(&reviews_path, rejected.to_string()).expect("change review");
+        assert!(
+            !prepare(root, &payload)
+                .expect("rejected review")
+                .has_source("confirmed_relations")
+        );
+        fs::write(&reviews_path, &reviews_before).expect("restore review");
+        rejected["old-friends"]["decision"] = json!("confirmed");
+        rejected["old-friends"]["changes"]["predicate"] = json!("同门");
+        fs::write(&reviews_path, rejected.to_string()).expect("change review details");
+        assert!(
+            !prepare(root, &payload)
+                .expect("changed review")
+                .has_source("confirmed_relations")
+        );
+        fs::write(&reviews_path, &reviews_before).expect("restore review");
         payload.editor_documents = vec![
             json!({"relativePath": "chapters/第1章.md", "dirty": true, "content": "甲和乙素未谋面。"}),
         ];
@@ -897,6 +1842,21 @@ mod tests {
             !prepare(root, &payload)
                 .expect("updated candidate")
                 .has_source("confirmed_relations")
+        );
+        write(
+            root,
+            ".storydex/knowledge/relations.json",
+            r#"{"relations":[]}"#,
+        );
+        assert!(
+            !prepare(root, &payload)
+                .expect("removed candidate")
+                .has_source("confirmed_relations")
+        );
+        assert_eq!(
+            fs::read(&graph_path).expect("unchanged projection"),
+            projection_before,
+            "context preparation must not refresh or rewrite the projection"
         );
     }
 }

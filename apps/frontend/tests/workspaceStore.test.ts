@@ -270,6 +270,28 @@ describe("workspace store full action lifecycle", () => {
     expect(store.storySettingsWritesPending).toBe(0);
   });
 
+  it("keeps craft disabled after refresh and unrelated writes without leaking into another project", async () => {
+    const store = useWorkspaceStore();
+    store.currentProject = project;
+    store.launchScreenVisible = false;
+    await store.updateStorySettings({ storyCraftEnabled: false });
+    expect(store.storySettings.storyCraftEnabled).toBe(false);
+    api.fetchStoryProjectSettings.mockResolvedValue(result({ ...settings, storyCraftEnabled: false }));
+    await store.refreshStorySettings();
+    await store.updateStorySettings({ chapterWordCountTarget: 4000 });
+    expect(api.updateStoryProjectSettings.mock.calls.at(-1)?.[0]).toMatchObject({
+      storyCraftEnabled: false, chapterWordCountTarget: 4000
+    });
+    expect(store.storySettings.storyCraftEnabled).toBe(false);
+    const nextProject = { ...project, workspaceRoot: "C:/other-story", storydexRoot: "C:/other-story/.storydex" };
+    api.openWorkspaceProject.mockResolvedValue(result(nextProject));
+    api.fetchCurrentProject.mockResolvedValue(result(nextProject));
+    api.fetchStoryProjectSettings.mockResolvedValue(result(settings));
+    await store.openProject(nextProject.workspaceRoot);
+    expect(store.currentProject?.workspaceRoot).toBe(nextProject.workspaceRoot);
+    expect(store.storySettings.storyCraftEnabled).toBe(true);
+  });
+
   it("restores a large draft after reload without using localStorage or changing disk", async () => {
     const store = useWorkspaceStore(); store.currentProject = project;
     const saved = "正文".repeat(1_390_000);

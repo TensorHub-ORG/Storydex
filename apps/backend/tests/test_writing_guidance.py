@@ -57,6 +57,18 @@ def test_continuity_setting_round_trips_without_reenabling_explicit_false(tmp_pa
     assert service.read_project_settings(tmp_path)["continuityTrackingEnabled"] is False
 
 
+def test_craft_setting_preserves_opt_out_on_unrelated_and_nullable_updates(tmp_path):
+    service = StoryProjectService()
+    service.ensure_project_structure(tmp_path)
+    assert service.read_project_settings(tmp_path)["storyCraftEnabled"] is True
+    service.write_project_settings(tmp_path, {"storyCraftEnabled": False})
+    assert service.read_project_settings(tmp_path)["storyCraftEnabled"] is False
+    service.write_project_settings(tmp_path, {"autoUpdateWiki": True, "storyCraftEnabled": None})
+    assert service.read_project_settings(tmp_path)["storyCraftEnabled"] is False
+    service.write_project_settings(tmp_path, {"autoUpdateWiki": False})
+    assert service.read_project_settings(tmp_path)["storyCraftEnabled"] is False
+
+
 def test_runtime_preserves_the_complete_guidance_after_preset_compilation(tmp_path):
     service = StoryProjectService()
     service.ensure_project_structure(tmp_path)

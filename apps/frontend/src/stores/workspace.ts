@@ -706,6 +706,7 @@ export const useWorkspaceStore = defineStore("workspace", {
           chapterWordCountTarget: patch.chapterWordCountTarget ?? patch.chapter_word_count_target ?? this.storySettings.chapterWordCountTarget,
           preciseWordCountEnabled: patch.preciseWordCountEnabled ?? patch.precise_word_count_enabled ?? this.storySettings.preciseWordCountEnabled,
           continuityTrackingEnabled: patch.continuityTrackingEnabled ?? this.storySettings.continuityTrackingEnabled,
+          storyCraftEnabled: patch.storyCraftEnabled ?? this.storySettings.storyCraftEnabled,
           storyChapterTemplateId:
             patch.storyChapterTemplateId ?? this.storySettings.storyChapterTemplateId,
           autoUpdateVariables: patch.autoUpdateVariables ?? this.storySettings.autoUpdateVariables,
@@ -2225,6 +2226,7 @@ function defaultStoryProjectSettings(settingsPath = ".storydex/config/project-se
       chapterWordCountTarget: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
       preciseWordCountEnabled: false,
       continuityTrackingEnabled: true,
+      storyCraftEnabled: true,
       storyFragmentWordCount: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
       storyFragmentWordCountMin: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
       storyFragmentWordCountMax: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
@@ -2292,6 +2294,7 @@ function normalizeStorySettingsPayload(
     chapterWordCountTarget,
     preciseWordCountEnabled,
     continuityTrackingEnabled: normalizeBooleanFlag(payload.continuityTrackingEnabled, true),
+    storyCraftEnabled: normalizeBooleanFlag(payload.storyCraftEnabled, true),
     storyChapterTemplateId,
     story_chapter_template_id: storyChapterTemplateId,
     autoUpdateVariables,
@@ -2383,6 +2386,7 @@ function normalizeStorySettingsResponse(
         false
       ),
       continuityTrackingEnabled: normalizeBooleanFlag(payload.continuityTrackingEnabled ?? fallbackSettings?.continuityTrackingEnabled ?? currentSettings?.continuityTrackingEnabled, true),
+      storyCraftEnabled: normalizeBooleanFlag(payload.storyCraftEnabled ?? fallbackSettings?.storyCraftEnabled ?? currentSettings?.storyCraftEnabled, true),
       storyFragmentWordCount: responseWordCountRange.max,
       storyFragmentWordCountMin: responseWordCountRange.min,
       storyFragmentWordCountMax: responseWordCountRange.max,
@@ -2509,6 +2513,7 @@ function normalizeStorySettingsFromProjectFile(
       ),
       chapterWordCountTarget,
       continuityTrackingEnabled: normalizeBooleanFlag(storySettings.continuityTrackingEnabled, true),
+      storyCraftEnabled: normalizeBooleanFlag(storySettings.storyCraftEnabled, true),
       preciseWordCountEnabled: normalizeBooleanFlag(
         storySettings.preciseWordCountEnabled ?? storySettings.precise_word_count_enabled,
         false
@@ -2795,6 +2800,7 @@ function hasExtendedStorySettingsPayload(payload: StoryProjectSettingsResponse):
         || payload.chapter_word_count_target !== undefined
         || payload.preciseWordCountEnabled !== undefined
         || payload.precise_word_count_enabled !== undefined
+        || payload.storyCraftEnabled !== undefined
         || payload.storyFragmentWordCount !== undefined
         || payload.story_fragment_word_count !== undefined
         || payload.storyFragmentWordCountMin !== undefined

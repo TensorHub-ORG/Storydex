@@ -80,6 +80,23 @@ function envelopeMailbox(messages: unknown[] = []) {
 }
 
 describe("agent store streaming", () => {
+  it.each(["chat", "generate_chapter"] as const)("sends the craft choice for %s tasks", async (taskMode) => {
+    api.streamAgentPrompt.mockImplementation(async (_request, onPacket) => {
+      onPacket({ _type: "AgentCompleted" });
+    });
+    const store = useAgentStore();
+    store.taskMode = taskMode;
+    expect(store.storyCraftEnabled).toBe(true);
+    for (const enabled of [true, false]) {
+      store.setStoryGenerationOptions({ storyCraftEnabled: enabled });
+      store.promptInput = "继续下一章";
+      await store.runPrompt();
+      expect(api.streamAgentPrompt.mock.calls.at(-1)?.[0]).toMatchObject({
+        taskMode, storyGeneration: { storyCraftEnabled: enabled }
+      });
+    }
+  });
+
   it("keeps runtime file operations in the same tool waterfall across streaming and history", async () => {
     const packets = [
       { _type: "WorkspaceOperation", operationId: "context-read-0", operation: "read_file", origin: "runtime",
@@ -226,6 +243,7 @@ describe("agent store streaming", () => {
       chapterWordCountTarget: 3000,
       preciseWordCountEnabled: false,
       continuityTrackingEnabled: true,
+      storyCraftEnabled: true,
       chapterTemplateId: "default_chapter_directory"
     });
     expect(request.storyGeneration).not.toHaveProperty("fragmentWordCount");
@@ -638,6 +656,7 @@ describe("agent store sessions and Git decision UX", () => {
       chapterWordCountTarget: 3000,
       preciseWordCountEnabled: false,
       continuityTrackingEnabled: true,
+      storyCraftEnabled: true,
       chapterTemplateId: "default_chapter_directory"
     });
     expect(store.executionHistory).toHaveLength(1);

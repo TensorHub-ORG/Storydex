@@ -188,6 +188,7 @@ class StoryProjectSettingsResponse(BaseModel):
     story_fragment_word_count_max: int = Field(default=DEFAULT_CHAPTER_WORD_COUNT_TARGET, alias="storyFragmentWordCountMax")
     precise_word_count_enabled: bool = Field(default=False, alias="preciseWordCountEnabled")
     continuity_tracking_enabled: bool = Field(default=True, alias="continuityTrackingEnabled")
+    story_craft_enabled: bool = Field(default=True, alias="storyCraftEnabled")
     story_chapter_template_id: str = Field(default="default_chapter_directory", alias="storyChapterTemplateId")
     auto_update_variables: bool = Field(default=False, alias="autoUpdateVariables")
     auto_update_wiki: bool = Field(default=False, alias="autoUpdateWiki")
@@ -218,6 +219,7 @@ class StoryProjectSettingsUpdateRequest(BaseModel):
     story_fragment_word_count_max: Optional[int] = Field(default=None, alias="storyFragmentWordCountMax")
     precise_word_count_enabled: Optional[bool] = Field(default=None, alias="preciseWordCountEnabled")
     continuity_tracking_enabled: Optional[bool] = Field(default=None, alias="continuityTrackingEnabled")
+    story_craft_enabled: Optional[bool] = Field(default=None, alias="storyCraftEnabled")
     story_chapter_template_id: Optional[str] = Field(default=None, alias="storyChapterTemplateId")
     auto_update_variables: Optional[bool] = Field(default=None, alias="autoUpdateVariables")
     auto_update_wiki: Optional[bool] = Field(default=None, alias="autoUpdateWiki")
@@ -387,6 +389,7 @@ def _build_story_settings_payload() -> Dict[str, Any]:
         ),
         "preciseWordCountEnabled": bool(project_settings.get("preciseWordCountEnabled", False)),
         "continuityTrackingEnabled": bool(project_settings.get("continuityTrackingEnabled", True)),
+        "storyCraftEnabled": bool(project_settings.get("storyCraftEnabled", True)),
         "storyChapterTemplateId": str(
             project_settings.get("storyChapterTemplateId") or "default_chapter_directory"
         ).strip()
@@ -898,6 +901,7 @@ def update_story_project_settings(payload: StoryProjectSettingsUpdateRequest) ->
         "storyFragmentWordCountMax": payload.story_fragment_word_count_max,
         "preciseWordCountEnabled": payload.precise_word_count_enabled,
         "continuityTrackingEnabled": payload.continuity_tracking_enabled,
+        "storyCraftEnabled": payload.story_craft_enabled,
         "storyChapterTemplateId": payload.story_chapter_template_id,
         "autoUpdateVariables": payload.auto_update_variables,
         "autoUpdateWiki": payload.auto_update_wiki,

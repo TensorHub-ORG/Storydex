@@ -7,6 +7,51 @@ const u = __agentStoreTestUtils!;
 const packet = (value: Record<string, unknown>) => value as never;
 
 describe("agent store deterministic helpers", () => {
+  it("shows craft summaries and usage without rendering structured planning data", () => {
+    const plan = { privateTraceMarker: "PLAN_DATA_ONLY" };
+    for (const [phase, title, status] of [
+      ["story_craft_plan", "梳理人物与情节", "success"],
+      ["story_craft_review", "诊断正文", "warning"],
+      ["story_craft_revision", "修订正文", "success"],
+      ["story_craft_verify", "核对修改", "running"]
+    ]) {
+      const item = u.streamPacketToWaterfallItem("craft-trace", packet({
+        _type: "TurnPhase", phase, status, detail: "已检查人物选择与前后因果", elapsedMs: 2400, plan
+      }), []);
+      expect(item).toMatchObject({ type: "phase", title, status });
+      expect(item?.content).toBe(`${title} · 已检查人物选择与前后因果 · 2.4s`);
+      expect(item?.content).not.toContain("PLAN_DATA_ONLY");
+      expect(item?.raw?.plan).toEqual(plan);
+    }
+    const accounting = u.streamPacketToWaterfallItem("craft-trace", packet({
+      _type: "StoryCallAccounting", logicalStoryCalls: 2, initialGenerationCalls: 1,
+      lengthRevisionCalls: 1, secondDraftCalls: 0, providerAttempts: 7,
+      nonProseCalls: { craftPlan: 1, craftReview: 1, craftRevision: 1, craftVerify: 1, continuity: 1 }
+    }), []);
+    expect(accounting?.content).toContain("正文逻辑调用：2 次");
+    expect(accounting?.content).toContain("构思：1 次");
+    expect(accounting?.content).toContain("审稿诊断：1 次");
+    expect(accounting?.content).toContain("修订正文：1 次");
+    expect(accounting?.content).toContain("核对修改：1 次");
+    expect(accounting?.content).toContain("人物与线索整理：1 次");
+    expect(accounting?.content).toContain("模型调用总计：7 次");
+    expect(accounting?.content).not.toContain("正文 Provider 尝试");
+    const verificationOnly = u.streamPacketToWaterfallItem("verify-trace", packet({
+      _type: "StoryCallAccounting", logicalStoryCalls: 0, providerAttempts: 1,
+      nonProseCalls: { craftVerify: 1 }
+    }), []);
+    expect(verificationOnly?.content).toContain("核对修改：1 次");
+    expect(verificationOnly?.content).toContain("模型调用总计：1 次");
+    expect(verificationOnly?.content).not.toContain("正文 Provider 尝试");
+    const revisionOnly = u.streamPacketToWaterfallItem("revision-trace", packet({
+      _type: "StoryCallAccounting", logicalStoryCalls: 0, providerAttempts: 1,
+      nonProseCalls: { craftRevision: 1 }
+    }), []);
+    expect(revisionOnly?.content).toContain("修订正文：1 次");
+    expect(revisionOnly?.content).toContain("模型调用总计：1 次");
+    expect(revisionOnly?.content).not.toContain("正文 Provider 尝试");
+  });
+
   it("reports an advisory length miss as saved without a strict-check warning", () => {
     const validation = packet({
       chapterLengthTier: "long", chapterWordCountTarget: 6000, preciseWordCountEnabled: false,
@@ -18,6 +63,8 @@ describe("agent store deterministic helpers", () => {
     expect(summary).toContain("章节已写入");
     expect(summary).toContain("3201 字");
     expect(summary).toContain("参考目标：约 6000 字");
+    expect(summary).toContain("正文基础检查通过");
+    expect(summary).not.toContain("质量门禁");
     expect(summary).not.toContain("未命中");
     const draft = u.streamPacketToWaterfallItem("guidance-trace", packet({
       _type: "StoryDraftMeasured", chapterLengthTier: "long", chapterWordCountTarget: 6000,

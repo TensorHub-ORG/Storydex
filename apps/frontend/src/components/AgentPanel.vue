@@ -231,6 +231,14 @@
               {{ workspaceStore.storySettingsError }}
               <button type="button" @click="workspaceStore.dismissStorySettingsError()">知道了</button>
             </small>
+            <label class="coomi-story-field coomi-story-craft-field">
+              <span>写前构思</span>
+              <input type="checkbox" :checked="agentStore.storyCraftEnabled"
+                @change="persistStoryGenerationOptions({ storyCraftEnabled: ($event.target as HTMLInputElement).checked })" />
+            </label>
+            <small class="coomi-story-template-hint">
+              PC 新章先用当前同一模型做一次短构思，再生成正文，会增加一次调用和耗时；不自动审稿或重写。普通任务参考同一构思指导，关闭后可直接写作。
+            </small>
             <label class="coomi-story-field">
               <span>片段数量</span>
               <input
@@ -1270,6 +1278,7 @@ watch(
     workspaceStore.storySettings.chapterLengthTier,
     workspaceStore.storySettings.preciseWordCountEnabled,
     workspaceStore.storySettings.continuityTrackingEnabled,
+    workspaceStore.storySettings.storyCraftEnabled,
     workspaceStore.storySettings.chapterWordCountTarget,
     workspaceStore.storySettings.storyChapterTemplateId
   ],
@@ -1479,6 +1488,7 @@ function syncStoryGenerationOptionsFromProjectSettings(): void {
     chapterWordCountTarget: workspaceStore.storySettings.chapterWordCountTarget,
     preciseWordCountEnabled: workspaceStore.storySettings.preciseWordCountEnabled,
     continuityTrackingEnabled: workspaceStore.storySettings.continuityTrackingEnabled,
+    storyCraftEnabled: workspaceStore.storySettings.storyCraftEnabled ?? true,
     chapterTemplateId: workspaceStore.storySettings.storyChapterTemplateId || "default_chapter_directory"
   });
 }
@@ -1489,6 +1499,7 @@ async function persistStoryGenerationOptions(options: {
   chapterWordCountTarget?: number;
   preciseWordCountEnabled?: boolean;
   continuityTrackingEnabled?: boolean;
+  storyCraftEnabled?: boolean;
   chapterTemplateId?: string;
 }): Promise<void> {
   storyOptionsEditing.value = true;
@@ -1506,6 +1517,7 @@ async function persistStoryGenerationOptions(options: {
       chapterWordCountTarget: agentStore.chapterWordCountTarget,
       preciseWordCountEnabled: agentStore.preciseWordCountEnabled,
       continuityTrackingEnabled: agentStore.continuityTrackingEnabled,
+      storyCraftEnabled: agentStore.storyCraftEnabled,
       storyChapterTemplateId: agentStore.storyChapterTemplateId
     });
   } catch (error: unknown) {
@@ -1517,6 +1529,7 @@ async function persistStoryGenerationOptions(options: {
         chapterWordCountTarget: workspaceStore.storySettings.chapterWordCountTarget,
         preciseWordCountEnabled: workspaceStore.storySettings.preciseWordCountEnabled,
         continuityTrackingEnabled: workspaceStore.storySettings.continuityTrackingEnabled,
+        storyCraftEnabled: workspaceStore.storySettings.storyCraftEnabled ?? true,
         chapterTemplateId: workspaceStore.storySettings.storyChapterTemplateId
       });
     }

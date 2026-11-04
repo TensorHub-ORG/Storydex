@@ -1186,6 +1186,34 @@ describe("AgentPanel", () => {
     wrapper.unmount();
   });
 
+  it("offers craft in ordinary chat and restores its saved choice when reopened", async () => {
+    const store = useAgentStore();
+    const wrapper = shallowMount(AgentPanel);
+    expect(store.taskMode).toBe("chat");
+    await wrapper.find('.coomi-story-toggle').trigger('click');
+    expect(wrapper.text()).toContain('写前构思');
+    expect(wrapper.text()).toContain('会增加一次调用和耗时');
+    expect((wrapper.find('.coomi-story-craft-field input').element as HTMLInputElement).checked).toBe(true);
+    await wrapper.find('.coomi-story-craft-field input').setValue(false);
+    await flushPromises();
+    expect(workspace.updateStorySettings.mock.calls.at(-1)?.[0]).toMatchObject({ storyCraftEnabled: false });
+    expect(store.storyCraftEnabled).toBe(false);
+    workspace.storySettings = { ...workspace.storySettings, storyCraftEnabled: false } as any;
+    wrapper.unmount();
+
+    const restored = shallowMount(AgentPanel);
+    await restored.find('.coomi-story-toggle').trigger('click');
+    expect((restored.find('.coomi-story-craft-field input').element as HTMLInputElement).checked).toBe(false);
+    restored.unmount();
+
+    workspace.currentProject = { workspaceRoot: "C:/other/story" };
+    workspace.storySettings = { ...workspace.storySettings, storyCraftEnabled: undefined } as any;
+    const legacyProject = shallowMount(AgentPanel);
+    await legacyProject.find('.coomi-story-toggle').trigger('click');
+    expect((legacyProject.find('.coomi-story-craft-field input').element as HTMLInputElement).checked).toBe(true);
+    legacyProject.unmount();
+  });
+
   it("keeps the latest tier through a delayed earlier write and immediate popover close", async () => {
     const store = useAgentStore();
     const wrapper = shallowMount(AgentPanel);

@@ -102,6 +102,7 @@ interface AgentState {
   chapterWordCountTarget: number;
   preciseWordCountEnabled: boolean;
   continuityTrackingEnabled: boolean;
+  storyCraftEnabled: boolean;
   storyFragmentWordCount: number;
   storyFragmentWordCountMin: number;
   storyFragmentWordCountMax: number;
@@ -172,6 +173,7 @@ export const useAgentStore = defineStore("agent", {
     chapterWordCountTarget: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
     preciseWordCountEnabled: false,
     continuityTrackingEnabled: true,
+    storyCraftEnabled: true,
     storyFragmentWordCount: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
     storyFragmentWordCountMin: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
     storyFragmentWordCountMax: DEFAULT_CHAPTER_WORD_COUNT_TARGET,
@@ -562,6 +564,7 @@ export const useAgentStore = defineStore("agent", {
       chapterWordCountTarget?: number;
       preciseWordCountEnabled?: boolean;
       continuityTrackingEnabled?: boolean;
+      storyCraftEnabled?: boolean;
       fragmentWordCount?: number;
       fragmentWordCountMin?: number;
       fragmentWordCountMax?: number;
@@ -592,6 +595,9 @@ export const useAgentStore = defineStore("agent", {
       }
       if (options.continuityTrackingEnabled !== undefined) {
         this.continuityTrackingEnabled = Boolean(options.continuityTrackingEnabled);
+      }
+      if (options.storyCraftEnabled !== undefined) {
+        this.storyCraftEnabled = Boolean(options.storyCraftEnabled);
       }
       if (options.preciseWordCountEnabled !== undefined) {
         this.preciseWordCountEnabled = Boolean(options.preciseWordCountEnabled);
@@ -918,6 +924,7 @@ export const useAgentStore = defineStore("agent", {
               chapterWordCountTarget: this.chapterWordCountTarget,
               preciseWordCountEnabled: this.preciseWordCountEnabled,
               continuityTrackingEnabled: this.continuityTrackingEnabled,
+              storyCraftEnabled: this.storyCraftEnabled,
               chapterTemplateId: this.storyChapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID
             },
             sourceFollowupMessageId: next.messageId,
@@ -1029,6 +1036,7 @@ export const useAgentStore = defineStore("agent", {
           chapterWordCountTarget: this.chapterWordCountTarget,
           preciseWordCountEnabled: this.preciseWordCountEnabled,
           continuityTrackingEnabled: this.continuityTrackingEnabled,
+          storyCraftEnabled: this.storyCraftEnabled,
           chapterTemplateId: this.storyChapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID
         },
         replaceLatestTraceId: expectedTraceId
@@ -1091,6 +1099,7 @@ export const useAgentStore = defineStore("agent", {
           chapterWordCountTarget: this.chapterWordCountTarget,
           preciseWordCountEnabled: this.preciseWordCountEnabled,
           continuityTrackingEnabled: this.continuityTrackingEnabled,
+          storyCraftEnabled: this.storyCraftEnabled,
           chapterTemplateId: this.storyChapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID
         }
       };
@@ -1246,6 +1255,7 @@ export const useAgentStore = defineStore("agent", {
           chapterWordCountTarget: this.chapterWordCountTarget,
           preciseWordCountEnabled: this.preciseWordCountEnabled,
           continuityTrackingEnabled: this.continuityTrackingEnabled,
+          storyCraftEnabled: this.storyCraftEnabled,
           chapterTemplateId: this.storyChapterTemplateId || DEFAULT_CHAPTER_TEMPLATE_ID
         }
       };
@@ -1900,7 +1910,11 @@ function streamPacketToWaterfallItem(
   }
   if (eventName === "RunAccepted" || eventName === "TurnPhase") {
     const elapsedMs = Math.max(0, Number(packet.elapsedMs || 0));
-    const label = String(packet.label || packet.detail || (eventName === "RunAccepted" ? "请求已接收" : "正在准备"));
+    const craftPhaseLabel = packet.phase === "story_craft_plan" ? "梳理人物与情节"
+      : packet.phase === "story_craft_review" ? "诊断正文"
+        : packet.phase === "story_craft_revision" ? "修订正文"
+          : packet.phase === "story_craft_verify" ? "核对修改" : "";
+    const label = String(packet.label || craftPhaseLabel || packet.detail || (eventName === "RunAccepted" ? "请求已接收" : "正在准备"));
     const detail = String(packet.detail || "").trim();
     const elapsedLabel = elapsedMs > 0 ? ` · ${(elapsedMs / 1000).toFixed(1)}s` : "";
     return createWaterfallItem({
@@ -2599,10 +2613,21 @@ function summarizeStoryCallAccountingPacket(packet: AgentStreamPacket): string {
   const secondDraftCalls = firstNumber(record, ["secondDraftCalls"]) ?? 0;
   const providerAttempts = firstNumber(record, ["providerAttempts"]) ?? logicalStoryCalls;
   const transportRetries = firstNumber(record, ["transportRetries"]) ?? 0;
-  const continuityCalls = firstNumber(toRecord(record.nonProseCalls) || {}, ["continuity"]) ?? 0;
+  const nonProseCalls = toRecord(record.nonProseCalls) || {};
+  const continuityCalls = firstNumber(nonProseCalls, ["continuity"]) ?? 0;
+  const craftPlanCalls = firstNumber(nonProseCalls, ["craftPlan"]) ?? 0;
+  const craftReviewCalls = firstNumber(nonProseCalls, ["craftReview"]) ?? 0;
+  const craftRevisionCalls = firstNumber(nonProseCalls, ["craftRevision"]) ?? 0;
+  const craftVerifyCalls = firstNumber(nonProseCalls, ["craftVerify"]) ?? 0;
   return [
     `正文逻辑调用：${logicalStoryCalls} 次（首稿 ${initialGenerationCalls}，长度修订 ${lengthRevisionCalls}，第二稿 ${secondDraftCalls}）`,
-    ...(continuityCalls ? [`人物与线索整理：${continuityCalls} 次`, `模型调用总计：${providerAttempts} 次`] : [`正文 Provider 尝试：${providerAttempts} 次`]),
+    ...(craftPlanCalls ? [`构思：${craftPlanCalls} 次`] : []),
+    ...(craftReviewCalls ? [`审稿诊断：${craftReviewCalls} 次`] : []),
+    ...(craftRevisionCalls ? [`修订正文：${craftRevisionCalls} 次`] : []),
+    ...(craftVerifyCalls ? [`核对修改：${craftVerifyCalls} 次`] : []),
+    ...(continuityCalls ? [`人物与线索整理：${continuityCalls} 次`] : []),
+    continuityCalls + craftPlanCalls + craftReviewCalls + craftRevisionCalls + craftVerifyCalls > 0
+      ? `模型调用总计：${providerAttempts} 次` : `正文 Provider 尝试：${providerAttempts} 次`,
     `传输重试：${transportRetries} 次`
   ].join(" · ");
 }
@@ -2627,7 +2652,7 @@ function summarizeStoryGenerationValidationPacket(packet: AgentStreamPacket): st
         ? `目标 ${packet.chapterWordCountTarget} 字 · ${packet.precisionAchieved ? "字数检查通过" : "字数未达标"}`
         : `${tierLabel} · ${hitStatus}`;
     const structureStatus = packet.structurePassed === false ? "章节结构未通过" : "章节结构通过";
-    const qualityStatus = packet.machineQualityPassed === false ? "质量门禁未通过" : "质量门禁通过";
+    const qualityStatus = packet.machineQualityPassed === false ? "正文基础检查未通过" : "正文基础检查通过";
     const completionStatus = packet.outputTruncated === true ? " · 输出不完整" : "";
     return `${writeStatus} · 本次续写：${actualWordCount} 字 · ${lengthStatus} · ${structureStatus} · ${qualityStatus}${completionStatus}`;
   }

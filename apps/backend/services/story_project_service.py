@@ -795,6 +795,7 @@ class StoryProjectService:
             # value an older project inherits by upgrading.
             "preciseWordCountEnabled": False,
             "continuityTrackingEnabled": True,
+            "storyCraftEnabled": True,
             "storyChapterTemplateId": DEFAULT_CHAPTER_TEMPLATE_ID,
             "autoUpdateVariables": False,
             "autoUpdateWiki": False,
@@ -2098,6 +2099,7 @@ class StoryProjectService:
                     payload.get("storyChapterTemplateId", payload.get("story_chapter_template_id"))
                 ),
                 "continuityTrackingEnabled": self._normalize_bool(payload.get("continuityTrackingEnabled"), default=True),
+                "storyCraftEnabled": self._normalize_bool(payload.get("storyCraftEnabled"), default=True),
                 "autoUpdateVariables": self._normalize_bool(payload.get("autoUpdateVariables"), default=False),
                 "autoUpdateWiki": self._normalize_bool(payload.get("autoUpdateWiki"), default=False),
                 "autoUpdateVariablesNote": str(
@@ -2171,6 +2173,10 @@ class StoryProjectService:
         # The retired key stays serialized for one compatibility release, but it
         # can no longer turn the precision path back on.
         current["continuityTrackingEnabled"] = self._normalize_bool(payload.get("continuityTrackingEnabled", current.get("continuityTrackingEnabled")), default=True)
+        current["storyCraftEnabled"] = self._normalize_bool(
+            current.get("storyCraftEnabled") if payload.get("storyCraftEnabled") is None else payload["storyCraftEnabled"],
+            default=True,
+        )
         current["preciseWordCountEnabled"] = False
         current["autoUpdateVariables"] = self._normalize_bool(
             payload.get("autoUpdateVariables", current.get("autoUpdateVariables")),

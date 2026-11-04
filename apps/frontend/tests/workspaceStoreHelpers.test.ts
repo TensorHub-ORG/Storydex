@@ -5,6 +5,18 @@ import { __workspaceStoreTestUtils } from "@/stores/workspace";
 const u = __workspaceStoreTestUtils!;
 
 describe("workspace store deterministic helpers", () => {
+  it("defaults craft on and preserves explicit false across all settings sources", () => {
+    expect(u.defaultStoryProjectSettings().storyCraftEnabled).toBe(true);
+    expect(u.normalizeStorySettingsPayload({}).storyCraftEnabled).toBe(true);
+    expect(u.normalizeStorySettingsPayload({ storyCraftEnabled: false }).storyCraftEnabled).toBe(false);
+    expect(u.normalizeStorySettingsResponse({} as never).storyCraftEnabled).toBe(true);
+    expect(u.normalizeStorySettingsResponse({ storyCraftEnabled: false } as never).storyCraftEnabled).toBe(false);
+    const current = { ...u.defaultStoryProjectSettings(), storyCraftEnabled: false };
+    expect(u.normalizeStorySettingsResponse({} as never, { currentSettings: current }).storyCraftEnabled).toBe(false);
+    expect(u.normalizeStorySettingsFromProjectFile({ story_settings: { storyCraftEnabled: false } }, "settings.json").storyCraftEnabled).toBe(false);
+    expect(u.hasExtendedStorySettingsPayload({ storyCraftEnabled: false } as never)).toBe(true);
+  });
+
   it("migrates legacy word counts while explicit tiers take priority", () => {
     expect(u.defaultStoryProjectSettings().chapterLengthTier).toBe("medium");
     expect(u.defaultStoryProjectSettings().storyLengthTierEnabled).toBe(false);

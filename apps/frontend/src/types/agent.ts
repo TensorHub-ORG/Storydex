@@ -72,6 +72,7 @@ export interface AgentPendingSnapshotConfirmation {
 
 export interface AgentStoryGenerationOptions {
   continuityTrackingEnabled?: boolean;
+  storyCraftEnabled?: boolean;
   fragmentCount: number;
   chapterLengthTier: ChapterLengthTier;
   chapterWordCountTarget?: number;
