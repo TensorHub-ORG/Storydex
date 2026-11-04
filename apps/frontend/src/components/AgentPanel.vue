@@ -399,7 +399,7 @@
         <textarea
           v-if="activeApproval.allowText"
           class="coomi-approval-input"
-          placeholder="输入补充回复"
+          placeholder="输入你的回答，或补充选项未涵盖的信息"
           rows="2"
           :value="activeApprovalDraft?.text || ''"
           @input="updateApprovalDraftText(($event.target as HTMLTextAreaElement).value)"
@@ -1917,9 +1917,9 @@ async function handleApprovalConfirm(): Promise<void> {
 
 async function handleApprovalCancel(): Promise<void> {
   const queue = [...approvalQueue.value];
-  for (const approval of queue) {
-    await agentStore.resolvePendingApproval("cancel", { "__cancelled__": true }, approval.approvalId);
-  }
+  await Promise.all(queue.map((approval) =>
+    agentStore.resolvePendingApproval("cancel", { "__cancelled__": true }, approval.approvalId)
+  ));
 }
 
 function collapseExecutionFloat(): void {

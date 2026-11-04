@@ -1610,7 +1610,7 @@ impl ToolRuntime for CoreTools {
             },
             ToolSpec {
                 name: "request_user_input".into(),
-                description: "Ask the user one to three short questions with two to four options each and wait for answers.".into(),
+                description: "Ask only about a consequential ambiguity that cannot be resolved from the conversation, previous answers, project conventions, or reading relevant sources and requires the user's judgment. Use reasonable defaults for low-risk, reversible details and continue authorized work. Do not use this tool for progress updates, routine permission checks, or reconfirming an answer. Group the currently necessary questions into one request (one to three short questions, two to four options each), wait for the user's answers, then continue. Tool permissions use their own approval mechanism.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {

@@ -406,4 +406,27 @@ describe("agent store action fallbacks with an empty workspace", () => {
     await store.resolvePendingApproval("cancel");
     expect(resume).not.toHaveBeenCalled();
   });
+
+  it.each(["no_active_execution", "request_not_pending"])("clears an already finished question cancellation (%s) without approving anything", async (reason) => {
+    const store = useAgentStore();
+    store.pendingApprovals = [{ approvalId: "cancelled-question", kind: "question" }] as never;
+    store.followupPaused = true;
+    store.followupPauseReason = "permission_request";
+    api.resolveAgentCoomiApproval.mockResolvedValueOnce(envelope({ accepted: false, reason }));
+    const resume = vi.spyOn(store, "resumeFollowups").mockResolvedValue(undefined);
+
+    await store.resolvePendingApproval("cancel", { __cancelled__: true }, "cancelled-question");
+
+    expect(store.pendingApprovals).toEqual([]);
+    expect(store.lastError).toBe("");
+    expect(resume).not.toHaveBeenCalled();
+    expect(api.streamAgentPrompt).not.toHaveBeenCalled();
+
+    store.pendingApprovals = [{ approvalId: "permission", kind: "permission" }] as never;
+    api.resolveAgentCoomiApproval.mockResolvedValueOnce(envelope({ accepted: false, reason }));
+    await store.resolvePendingApproval("allow", { approved: true }, "permission");
+    expect(store.pendingApprovals).toHaveLength(1);
+    expect(store.lastError).toContain(reason);
+    expect(resume).not.toHaveBeenCalled();
+  });
 });

@@ -41,16 +41,25 @@ fn build_info() -> Value {
 #[derive(Clone)]
 struct Emitter {
     output: Arc<Mutex<BufWriter<std::io::Stdout>>>,
+    #[cfg(test)]
+    captured: Option<tokio::sync::mpsc::UnboundedSender<Value>>,
 }
 
 impl Emitter {
     fn new() -> Self {
         Self {
             output: Arc::new(Mutex::new(BufWriter::new(std::io::stdout()))),
+            #[cfg(test)]
+            captured: None,
         }
     }
 
     fn emit(&self, value: Value) {
+        #[cfg(test)]
+        if let Some(captured) = &self.captured {
+            let _ = captured.send(value);
+            return;
+        }
         let Ok(line) = serde_json::to_string(&value) else {
             return;
         };
@@ -333,6 +342,21 @@ struct StorydexApproval {
     controls: Arc<ControlHub>,
 }
 
+struct PendingQuestionBatch {
+    controls: Arc<ControlHub>,
+    request_ids: Vec<String>,
+}
+
+impl Drop for PendingQuestionBatch {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.controls.pending.lock() {
+            for request_id in &self.request_ids {
+                pending.remove(request_id);
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl ApprovalHandler for StorydexApproval {
     async fn approve(&self, call: &ToolCall, reason: &str) -> bool {
@@ -362,14 +386,19 @@ impl ApprovalHandler for StorydexApproval {
     }
 
     async fn request_user_input(&self, request: &UserInputRequest) -> Option<UserInputResponse> {
-        // The desktop UI models approvals as a queue.  Emit one question per
-        // request id so every answer can be resolved independently, then
-        // combine the scalar/legacy answer shapes back into the engine's map.
+        // Publish the entire batch before waiting so the desktop can collect
+        // all answers in one submission. Each control reply keeps its own ID.
         let mut answers = BTreeMap::new();
         let total = request.questions.len();
+        let mut batch = PendingQuestionBatch {
+            controls: self.controls.clone(),
+            request_ids: Vec::with_capacity(total),
+        };
+        let mut replies = tokio::task::JoinSet::new();
         for (index, question) in request.questions.iter().enumerate() {
             let request_id = Uuid::new_v4().to_string();
             let receiver = self.controls.register(request_id.clone());
+            batch.request_ids.push(request_id.clone());
             self.emitter.event(
                 "user_input_request",
                 json!({
@@ -383,30 +412,40 @@ impl ApprovalHandler for StorydexApproval {
                     "header": question.header,
                     "question": question.question,
                     "options": question.options,
-                    "allowText": false,
+                    "allowText": true,
                     "multiSelect": false,
                 }),
             );
-            let value = receiver.await.ok()?;
-            if let Some(map) = value.get("answers").and_then(Value::as_object) {
-                for (key, answer) in map {
-                    if let Some(answer) = answer
-                        .as_str()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                    {
-                        answers.insert(key.clone(), answer.to_owned());
-                    }
-                }
+            let question_id = question.id.clone();
+            replies.spawn(async move { (question_id, receiver.await) });
+        }
+        while let Some(reply) = replies.join_next().await {
+            let (question_id, value) = reply.ok()?;
+            let value = value.ok()?;
+            if value.get("approved").and_then(Value::as_bool) == Some(false)
+                || value.get("__cancelled__").and_then(Value::as_bool) == Some(true)
+                || value.get("cancelled").and_then(Value::as_bool) == Some(true)
+            {
+                return None;
             }
             let scalar = ["other_text", "answer", "value", "option", "label"]
                 .iter()
-                .find_map(|key| value.get(*key).and_then(Value::as_str))
-                .map(str::trim)
-                .filter(|value| !value.is_empty());
-            if let Some(answer) = scalar {
-                answers.insert(question.id.clone(), answer.to_owned());
-            }
+                .find_map(|key| {
+                    value
+                        .get(*key)
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                });
+            let answer = scalar.or_else(|| {
+                value
+                    .get("answers")
+                    .and_then(|map| map.get(&question_id))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            })?;
+            answers.insert(question_id, answer.to_owned());
         }
         Some(answers)
     }
@@ -1964,6 +2003,128 @@ mod tests {
             };
             let (result, ()) = tokio::join!(request, answer);
             assert_eq!(result, approved);
+        }
+    }
+
+    fn question_test_handler() -> (
+        StorydexApproval,
+        tokio::sync::mpsc::UnboundedReceiver<Value>,
+    ) {
+        let (captured, events) = tokio::sync::mpsc::unbounded_channel();
+        let mut emitter = Emitter::new();
+        emitter.captured = Some(captured);
+        (
+            StorydexApproval {
+                base_mode: "full_access".into(),
+                plan_mode_active: Arc::new(AtomicBool::new(false)),
+                emitter,
+                controls: Arc::new(ControlHub::default()),
+            },
+            events,
+        )
+    }
+
+    fn two_question_request() -> UserInputRequest {
+        serde_json::from_value(json!({
+            "questions": [
+                {"id": "route", "header": "路线", "question": "选择路线？", "options": [
+                    {"label": "沿河（推荐）", "description": "沿用已有安排"},
+                    {"label": "穿城", "description": "改走城区"}
+                ]},
+                {"id": "ending", "header": "结尾", "question": "选择结尾？", "options": [
+                    {"label": "重逢（推荐）", "description": "人物再次相遇"},
+                    {"label": "分别", "description": "人物各自离开"}
+                ]}
+            ],
+            "auto_resolution_ms": 1
+        }))
+        .expect("question request")
+    }
+
+    #[tokio::test]
+    async fn user_input_publishes_batch_before_answers_and_accepts_out_of_order_replies() {
+        let (approval, mut events) = question_test_handler();
+        let request = two_question_request();
+        let answer = async {
+            let first = tokio::time::timeout(Duration::from_secs(1), events.recv())
+                .await
+                .expect("first question emitted")
+                .expect("first event");
+            let second = tokio::time::timeout(Duration::from_secs(1), events.recv())
+                .await
+                .expect("entire batch emitted before any reply")
+                .expect("second event");
+            for (index, event) in [&first, &second].iter().enumerate() {
+                assert_eq!(event["type"], "user_input_request");
+                assert_eq!(event["data"]["questionIndex"], index);
+                assert_eq!(event["data"]["questionTotal"], 2);
+                assert_eq!(event["data"]["allowText"], true);
+            }
+            assert_eq!(approval.controls.pending.lock().expect("pending").len(), 2);
+            approval.controls.resolve(
+                second["data"]["requestId"].as_str().expect("second ID"),
+                json!({"answers": {"ending": " 分别 ", "route": "错误覆盖", "unknown": "忽略"}}),
+            );
+            approval.controls.resolve(
+                first["data"]["requestId"].as_str().expect("first ID"),
+                json!({"other_text": "", "answer": " 自定义路线 ", "value": "沿河（推荐）"}),
+            );
+        };
+        let (response, ()) = tokio::join!(approval.request_user_input(&request), answer);
+        assert_eq!(
+            response,
+            Some(BTreeMap::from([
+                ("route".to_owned(), "自定义路线".to_owned()),
+                ("ending".to_owned(), "分别".to_owned()),
+            ]))
+        );
+        assert!(
+            approval
+                .controls
+                .pending
+                .lock()
+                .expect("pending")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn user_input_cancellation_or_missing_answer_clears_the_entire_batch() {
+        for value in [
+            json!({"approved": false, "answer": "重逢（推荐）"}),
+            json!({"__cancelled__": true, "value": "重逢（推荐）"}),
+            json!({"cancelled": true}),
+            json!({}),
+            json!({"answers": {"route": "只有另一题的答案"}}),
+        ] {
+            let (approval, mut events) = question_test_handler();
+            let request = two_question_request();
+            let answer = async {
+                events.recv().await.expect("first question");
+                let second = events.recv().await.expect("second question");
+                // The unanswered first question and an expired legacy timeout
+                // must not supply the recommended answer automatically.
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                assert_eq!(approval.controls.pending.lock().expect("pending").len(), 2);
+                approval.controls.resolve(
+                    second["data"]["requestId"].as_str().expect("second ID"),
+                    value,
+                );
+            };
+            let (response, ()) = tokio::time::timeout(Duration::from_secs(1), async {
+                tokio::join!(approval.request_user_input(&request), answer)
+            })
+            .await
+            .expect("a later question can cancel without answering the first");
+            assert_eq!(response, None);
+            assert!(
+                approval
+                    .controls
+                    .pending
+                    .lock()
+                    .expect("pending")
+                    .is_empty()
+            );
         }
     }
 

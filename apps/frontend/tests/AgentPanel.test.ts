@@ -751,6 +751,78 @@ describe("AgentPanel", () => {
     wrapper.unmount();
   });
 
+  it("submits a free-text answer and an option together without starting another model stream", async () => {
+    const store = useAgentStore();
+    const wrapper = shallowMount(AgentPanel);
+    await flushPromises();
+    store.currentSessionId = "question-session";
+    store.currentTraceId = "question-trace";
+    store.isRunning = true;
+    store.pendingApprovals = [
+      {
+        approvalId: "direction-question",
+        kind: "question",
+        header: "剧情方向",
+        question: "这个场景如何发展？",
+        allowText: true,
+        options: [
+          { label: "正面冲突", value: "confrontation" },
+          { label: "暂时和解", value: "reconciliation" }
+        ]
+      },
+      {
+        approvalId: "viewpoint-question",
+        kind: "question",
+        header: "叙述视角",
+        question: "使用谁的视角？",
+        allowText: true,
+        options: [
+          { label: "林乔", value: "lin-qiao" },
+          { label: "许岑", value: "xu-cen" }
+        ]
+      }
+    ];
+    await nextTick();
+
+    expect(wrapper.find(".coomi-approval-nav-count").text()).toBe("1/2");
+    await wrapper.find("textarea.coomi-approval-input").setValue("先共同修好旧钟，保留两人的分歧。");
+    await wrapper.find('button[aria-label="下一个问题"]').trigger("mousedown");
+    expect(wrapper.find(".coomi-approval-nav-count").text()).toBe("2/2");
+    await wrapper.findAll(".coomi-approval-option")[1].trigger("mousedown");
+
+    const submit = wrapper.find(".coomi-approval-action.primary");
+    expect(submit.text()).toBe("提交全部答案");
+    expect(submit.attributes("disabled")).toBeUndefined();
+    expect(api.resolveAgentCoomiApproval).not.toHaveBeenCalled();
+    await submit.trigger("mousedown");
+    await flushPromises();
+
+    const controlContext = {
+      sessionId: "question-session",
+      expectedTraceId: "question-trace",
+      workspaceRoot: "C:/isolated/story"
+    };
+    expect(api.resolveAgentCoomiApproval).toHaveBeenCalledTimes(2);
+    expect(api.resolveAgentCoomiApproval).toHaveBeenNthCalledWith(
+      1,
+      "direction-question",
+      "answer",
+      expect.objectContaining({ answer: "先共同修好旧钟，保留两人的分歧。", other_text: "先共同修好旧钟，保留两人的分歧。" }),
+      controlContext
+    );
+    expect(api.resolveAgentCoomiApproval).toHaveBeenNthCalledWith(
+      2,
+      "viewpoint-question",
+      "answer",
+      expect.objectContaining({ answer: "许岑", value: "xu-cen", other_text: null }),
+      controlContext
+    );
+    expect(store.pendingApprovals).toEqual([]);
+    expect(wrapper.find(".coomi-approval-menu").exists()).toBe(false);
+    expect(api.streamAgentPrompt).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
   it("submits every selected question option as an explicit answer", async () => {
     const store = useAgentStore();
     store.pendingApprovals = [

@@ -481,7 +481,11 @@ export const useAgentStore = defineStore("agent", {
           expectedTraceId: this.currentTraceId,
           workspaceRoot: workspaceStore.currentProject?.workspaceRoot || workspaceStore.health?.workspaceRoot || ""
         });
-        if (result.data.accepted !== true && result.data.resolved !== true) {
+        // Cancelling one question ends its whole batch. The remaining cancel
+        // replies may arrive after that execution has already finished.
+        const cancellationAlreadyFinished = decision === "cancel"
+          && ["no_active_execution", "request_not_pending"].includes(result.data.reason || "");
+        if (result.data.accepted !== true && result.data.resolved !== true && !cancellationAlreadyFinished) {
           throw new Error(
             result.data.reason
               ? `Coomi approval was not accepted: ${result.data.reason}`
