@@ -342,6 +342,8 @@ const hoveredId = ref<string | null>(null);
 const pinnedId = ref<string | null>(null);
 const laneMenu = ref<LaneTrack | null>(null);
 const containerHeight = ref(DEFAULT_HEIGHT);
+/** 用户拖过高度后就以用户为准；否则紧凑模式按世界线条数自动贴合内容，不留大片空白。 */
+let userSizedHeight = false;
 
 let panStart = { x: 0, y: 0, panX: 0, panY: 0 };
 let resizeStart = { y: 0, height: 0 };
@@ -351,6 +353,7 @@ try {
   const value = saved ? parseInt(saved, 10) : NaN;
   if (Number.isFinite(value) && value >= MIN_HEIGHT && value <= MAX_HEIGHT) {
     containerHeight.value = value;
+    userSizedHeight = true;
   }
 } catch {
   // localStorage 不可用时用默认高度即可
@@ -659,6 +662,33 @@ function centerOnCurrent(closeMenus = false): void {
   if (!node || !canvas) return;
   panX.value = canvas.clientWidth / 2 - node.x * zoom.value;
   panY.value = canvas.clientHeight / 2 - node.y * zoom.value;
+  keepClearOfLaneChips();
+}
+
+/**
+ * 世界线名芯片固定在画布左侧。整棵树放得下时把它右移到芯片右侧，
+ * 避免最早的节点被名字盖住；放不下时保持原样，用户可以拖动查看。
+ */
+const laneChipGutter = computed(() => {
+  const longest = laneTracks.value.reduce((max, lane) => {
+    const text = lane.name.length * 6.6 + (lane.isCurrent ? 34 : 0);
+    return Math.max(max, text);
+  }, 0);
+  return longest ? Math.min(160, Math.ceil(longest + 34)) : 0;
+});
+
+function keepClearOfLaneChips(): void {
+  const canvas = canvasRef.value;
+  if (!canvas || !laidOutNodes.value.length) return;
+  const gutter = laneChipGutter.value;
+  const left = Math.min(...laidOutNodes.value.map((item) => item.x)) - metrics.value.radius - 6;
+  const right = Math.max(...laidOutNodes.value.map((item) => item.x), ghost.value?.x ?? 0) + metrics.value.radius + 10;
+  const screenLeft = panX.value + left * zoom.value;
+  if (screenLeft >= gutter) return;
+  const shifted = panX.value + (gutter - screenLeft);
+  if (shifted + right * zoom.value <= canvas.clientWidth) {
+    panX.value = shifted;
+  }
 }
 
 /** 缩放到整棵树刚好放得下，用于快速看清全局结构。 */
@@ -667,13 +697,15 @@ function fitToView(): void {
   const canvas = canvasRef.value;
   const { width, height } = contentSize.value;
   if (!canvas || width <= 0 || height <= 0) return;
+  const gutter = laneChipGutter.value;
+  const availableWidth = Math.max(1, canvas.clientWidth - gutter);
   const next = clamp(
-    Math.min(canvas.clientWidth / width, canvas.clientHeight / height),
+    Math.min(availableWidth / width, canvas.clientHeight / height),
     MIN_ZOOM,
     1
   );
   zoom.value = next;
-  panX.value = (canvas.clientWidth - width * next) / 2;
+  panX.value = gutter + (availableWidth - width * next) / 2;
   panY.value = (canvas.clientHeight - height * next) / 2;
 }
 
@@ -714,6 +746,7 @@ function onResizeKeydown(event: KeyboardEvent): void {
 }
 
 function persistHeight(): void {
+  userSizedHeight = true;
   try {
     localStorage.setItem(STORAGE_KEY_HEIGHT, String(containerHeight.value));
   } catch {
@@ -741,6 +774,24 @@ watch(
   () => currentNode.value?.id,
   (id) => {
     if (!id) return;
+    void nextTick(() => centerOnCurrent());
+  },
+  { immediate: true }
+);
+
+// 紧凑模式的默认高度：刚好放下所有世界线（工具条 + 上下留白 + 拖拽手柄），夹在 MIN~DEFAULT 之间。
+const autoHeight = computed(() => {
+  const lanes = rawNodes.value.reduce((max, node) => Math.max(max, node.row + 1), branches.value.length);
+  const graph = metrics.value.padY * 2 + Math.max(0, lanes - 1) * metrics.value.row;
+  const observing = detached.value ? 56 : 0;
+  return clamp(Math.ceil(graph + 33 + 9 + 16 + observing), MIN_HEIGHT, DEFAULT_HEIGHT);
+});
+
+watch(
+  autoHeight,
+  (height) => {
+    if (props.density !== "compact" || userSizedHeight || height === containerHeight.value) return;
+    containerHeight.value = height;
     void nextTick(() => centerOnCurrent());
   },
   { immediate: true }
@@ -803,7 +854,7 @@ defineExpose({
   display: flex;
   align-items: center;
   gap: 2px;
-  padding: 4px 6px;
+  padding: 4px 6px 4px 8px;
   border-bottom: 1px solid var(--border-ghost);
 }
 
@@ -977,8 +1028,9 @@ defineExpose({
   opacity: 0.28;
 }
 
+/* 节点描边与内芯取所在表面的底色；容器可设置 --wl-surface（如侧栏里的卡片）。 */
 .wl-node-dot {
-  stroke: var(--bg-sidebar);
+  stroke: var(--wl-surface, var(--bg-sidebar));
   stroke-width: 1.5;
 }
 
@@ -1014,17 +1066,16 @@ defineExpose({
 }
 
 .wl-node-core {
-  fill: var(--bg-sidebar);
+  fill: var(--wl-surface, var(--bg-sidebar));
 }
 
 /* ---------- 世界线名 ---------- */
 
+/* 容器铺满画布但不拦截指针：给芯片留出真实宽度，否则绝对定位的芯片会被压成最小宽度而截断名字。 */
 .wl-lane-labels {
   position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 0;
+  inset: 0;
+  overflow: hidden;
   pointer-events: none;
 }
 
@@ -1035,29 +1086,29 @@ defineExpose({
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  max-width: 150px;
-  height: 19px;
-  padding: 0 6px;
+  width: max-content;
+  max-width: min(160px, calc(100% - 12px));
+  height: 20px;
+  padding: 0 7px 0 6px;
   border: 1px solid;
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-full);
   background: var(--bg-elevated);
+  box-shadow: var(--shadow-resting);
   color: var(--text-soft);
   font: inherit;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1;
   cursor: pointer;
   pointer-events: auto;
-  opacity: 0.9;
 }
 
 .wl-lane-chip:hover {
-  opacity: 1;
   color: var(--text-main);
 }
 
 .wl-lane-chip.is-current {
   color: var(--text-main);
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .wl-lane-dot {
@@ -1076,11 +1127,13 @@ defineExpose({
 
 .wl-lane-badge {
   flex: 0 0 auto;
-  padding: 0 4px;
-  border-radius: var(--radius-md);
-  background: var(--accent);
-  color: var(--accent-contrast);
-  font-size: 9px;
+  padding: 0 5px;
+  border-radius: var(--radius-full);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 14px;
 }
 
 /* ---------- 悬浮层 ---------- */
@@ -1224,11 +1277,10 @@ defineExpose({
 
 .wl-resize {
   flex: 0 0 auto;
-  height: 8px;
+  height: 9px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-top: 1px solid var(--border-ghost);
   cursor: ns-resize;
   touch-action: none;
 }
@@ -1240,9 +1292,14 @@ defineExpose({
 }
 
 .wl-resize-grip {
-  width: 34px;
+  width: 28px;
   height: 3px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-full);
+  background: var(--border-strong);
+}
+
+.wl-resize:hover .wl-resize-grip,
+.wl-resize:focus-visible .wl-resize-grip {
   background: var(--text-faint);
 }
 </style>

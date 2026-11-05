@@ -75,6 +75,7 @@ defineExpose({
   height: 100%;
   min-height: 0;
   background: var(--bg-editor);
+  --wl-surface: var(--bg-editor);
   color: var(--text-main);
 }
 

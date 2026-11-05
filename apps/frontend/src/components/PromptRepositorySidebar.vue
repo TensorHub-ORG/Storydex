@@ -1,7 +1,10 @@
 <template>
   <aside class="prompt-repository-panel">
     <header class="prompt-repository-header">
-      <h2 class="prompt-repository-title">指令仓库</h2>
+      <div class="prompt-repository-header-copy">
+        <h2 class="prompt-repository-title">指令仓库</h2>
+        <p class="prompt-repository-subtitle">{{ loading ? "正在读取…" : `${items.length} 个指令模板` }}</p>
+      </div>
       <button class="prompt-icon-button" type="button" title="刷新指令仓库" @click="loadRepository">
         <span class="material-symbols-rounded">refresh</span>
       </button>
@@ -168,7 +171,7 @@
           type="button"
           @click="selectedId = item.id"
         >
-          <span class="prompt-list-icon material-symbols-rounded">prompt_suggestion</span>
+          <span class="prompt-list-icon material-symbols-rounded">{{ categoryIcon(item.category) }}</span>
           <span class="prompt-list-copy">
             <strong>{{ item.title }}</strong>
             <span>{{ item.summary || "通用小说创作指令模板" }}</span>
@@ -212,6 +215,20 @@ let feedbackTimer: number | null = null;
 const CUSTOM_CATEGORY = "自定义";
 
 const selectedItem = computed(() => items.value.find((item) => item.id === selectedId.value) || null);
+
+// 按分类给列表项不同的图标，扫一眼就能分出用途；未知分类用通用图标。
+const CATEGORY_ICONS: Record<string, string> = {
+  世界观: "public",
+  剧情设计: "timeline",
+  编辑审校: "spellcheck",
+  角色创作: "person",
+  项目包装: "inventory_2",
+  自定义: "edit",
+};
+
+function categoryIcon(category: string): string {
+  return CATEGORY_ICONS[String(category || "").trim()] || "prompt_suggestion";
+}
 const customBodyDirty = computed(() => Boolean(
   selectedItem.value?.isCustom && editingPromptText.value !== selectedItem.value.promptText
 ));
@@ -382,29 +399,42 @@ function showFeedback(message: string): void {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  color: var(--text-primary);
+  color: var(--text-main);
   background: var(--canvas);
 }
 
 .prompt-repository-header {
   flex: 0 0 auto;
-  min-height: 34px;
-  padding: 6px 12px;
+  min-height: 52px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 8px 10px 8px 12px;
+  padding: 10px 10px 8px 14px;
   border-bottom: 0;
   background: transparent;
 }
 
+.prompt-repository-header-copy {
+  min-width: 0;
+}
+
+/* 侧栏统一页头：页面名为主标题，副标题说明内容规模 */
 .prompt-repository-title {
   margin: 0;
+  color: var(--text-main);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: 0;
+}
+
+.prompt-repository-subtitle {
+  margin: 2px 0 0;
   color: var(--text-muted);
   font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  line-height: 1.4;
+  white-space: nowrap;
 }
 
 .prompt-icon-button {
@@ -432,25 +462,31 @@ function showFeedback(message: string): void {
 }
 
 .prompt-search-wrap {
-  margin: 10px 10px 8px;
-  height: 28px;
+  flex: 0 0 auto;
+  margin: 0 10px 8px;
+  height: 32px;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 8px;
+  gap: 8px;
+  padding: 0 9px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  background: var(--bg-input);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.prompt-search-wrap:hover {
+  border-color: var(--border-strong);
 }
 
 .prompt-search-wrap:focus-within {
   border-color: var(--accent);
-  box-shadow: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .prompt-search-wrap .material-symbols-rounded {
-  color: var(--text-muted);
-  font-size: 16px;
+  color: var(--text-faint);
+  font-size: 17px;
 }
 
 .prompt-search-wrap input {
@@ -461,78 +497,94 @@ function showFeedback(message: string): void {
   color: var(--text-main);
   background: transparent;
   font: inherit;
-  font-size: 12px;
+  font-size: 13px;
+}
+
+.prompt-search-wrap input::placeholder {
+  color: var(--text-faint);
 }
 
 .prompt-category-tabs {
   flex: 0 0 auto;
-  padding: 4px 10px 9px;
+  padding: 0 10px 8px;
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  border-bottom: 1px solid var(--border-ghost);
 }
 
 .prompt-category-tabs button {
   flex: 0 0 auto;
-  height: 20px;
-  padding: 0 7px;
+  height: 24px;
+  padding: 0 9px;
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: 4px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-full);
   color: var(--text-muted);
-  background: var(--bg-card);
+  background: transparent;
   font: inherit;
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 500;
   cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
 }
 
 .prompt-category-tabs button:hover {
-  border-color: var(--accent);
-  color: var(--accent);
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.prompt-category-tabs button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px var(--accent-soft);
 }
 
 .prompt-category-tabs button.active {
   border-color: color-mix(in srgb, var(--accent) 40%, var(--border-subtle));
   color: var(--accent-strong);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  background: var(--accent-soft);
+  font-weight: 600;
 }
 
 .prompt-category-tabs button span {
-  margin-left: 2px;
+  color: var(--text-faint);
   font-size: 10px;
-  opacity: 0.8;
+  font-variant-numeric: tabular-nums;
+}
+
+.prompt-category-tabs button.active span {
+  color: inherit;
+  opacity: 0.75;
 }
 
 .prompt-custom-toolbar {
   flex: 0 0 auto;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border-ghost);
+  padding: 0 10px 8px;
 }
 
 .prompt-custom-toolbar button {
   width: 100%;
-  height: 28px;
+  height: 32px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  background: var(--bg-card);
-  color: var(--text-main);
+  gap: 6px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-soft);
   font: inherit;
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 500;
   cursor: pointer;
 }
 
 .prompt-custom-toolbar button:hover {
   border-color: var(--accent);
-  color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
 }
 
 .prompt-custom-toolbar .material-symbols-rounded {
@@ -590,10 +642,10 @@ function showFeedback(message: string): void {
 .prompt-custom-create input,
 .prompt-custom-create textarea {
   width: 100%;
-  padding: 7px 8px;
+  padding: 7px 10px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  background: var(--bg-input);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
   color: var(--text-main);
   font: inherit;
   font-size: 12px;
@@ -603,6 +655,7 @@ function showFeedback(message: string): void {
 .prompt-custom-create input:focus,
 .prompt-custom-create textarea:focus {
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
   outline: none;
 }
 
@@ -626,14 +679,14 @@ function showFeedback(message: string): void {
 }
 
 .prompt-custom-create-actions button {
-  height: 28px;
-  padding: 0 12px;
+  height: 30px;
+  padding: 0 14px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  background: var(--bg-card);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
   color: var(--text-main);
   font: inherit;
-  font-size: 11px;
+  font-size: 12px;
   cursor: pointer;
 }
 
@@ -652,50 +705,66 @@ function showFeedback(message: string): void {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
-  padding: 7px;
+  padding: 2px 6px 12px;
 }
 
 .prompt-list-item {
   width: 100%;
   display: grid;
-  grid-template-columns: 30px minmax(0, 1fr) 18px;
+  grid-template-columns: 30px minmax(0, 1fr) 16px;
   align-items: start;
-  gap: 7px;
-  padding: 10px 7px;
+  gap: 10px;
+  margin-bottom: 1px;
+  padding: 9px 6px 9px 8px;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   color: inherit;
   text-align: left;
   background: transparent;
   cursor: pointer;
   font: inherit;
+  transition: background 120ms ease;
 }
 
 .prompt-list-item:hover {
   background: var(--bg-hover);
 }
 
+.prompt-list-item:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px var(--accent-soft);
+}
+
+/* 图标块用中性底色，靠图形区分分类；悬停时才用强调色 */
 .prompt-list-icon {
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   display: grid;
   place-items: center;
-  border-radius: var(--radius-sm);
-  color: var(--accent);
+  border: 1px solid var(--border-ghost);
+  border-radius: var(--radius-md);
+  color: var(--text-soft);
+  background: var(--surface-1);
+  font-size: 16px;
+  transition: color 120ms ease, background 120ms ease;
+}
+
+.prompt-list-item:hover .prompt-list-icon {
+  color: var(--accent-strong);
   background: var(--accent-soft);
-  font-size: 17px;
 }
 
 .prompt-list-copy {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
 }
 
 .prompt-list-copy strong {
-  font-size: 12px;
-  line-height: 1.35;
+  color: var(--text-main);
+  font-size: 13px;
+  line-height: 1.4;
   font-weight: 600;
 }
 
@@ -703,28 +772,29 @@ function showFeedback(message: string): void {
   display: -webkit-box;
   overflow: hidden;
   color: var(--text-muted);
-  font-size: 11px;
-  line-height: 1.45;
+  font-size: 12px;
+  line-height: 1.5;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
 }
 
 .prompt-list-copy .prompt-list-meta {
+  margin-top: 2px;
   color: var(--text-faint);
-  font-size: 10px;
+  font-size: 11px;
   -webkit-line-clamp: 1;
 }
 
 .prompt-list-arrow {
   align-self: center;
-  color: var(--text-muted);
-  font-size: 17px;
+  color: var(--text-faint);
+  font-size: 16px;
 }
 
 .prompt-detail-toolbar {
   flex: 0 0 auto;
-  min-height: 44px;
-  padding: 8px 10px;
+  min-height: 40px;
+  padding: 0 10px 8px 6px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -733,16 +803,17 @@ function showFeedback(message: string): void {
 }
 
 .prompt-back-button {
+  height: 28px;
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 5px 7px;
+  padding: 0 8px 0 4px;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   color: var(--text-muted);
   background: transparent;
   font: inherit;
-  font-size: 11px;
+  font-size: 12px;
   cursor: pointer;
 }
 
@@ -752,73 +823,73 @@ function showFeedback(message: string): void {
 }
 
 .prompt-back-button .material-symbols-rounded {
-  font-size: 16px;
+  font-size: 17px;
 }
 
 .prompt-category-badge {
-  padding: 0 7px;
-  height: 20px;
+  padding: 0 9px;
+  height: 22px;
   display: inline-flex;
   align-items: center;
-  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border-subtle));
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-radius: var(--radius-full);
+  background: var(--accent-soft);
   color: var(--accent-strong);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .prompt-detail-scroll {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
-  padding: 14px 12px 18px;
+  padding: 16px 14px 20px;
 }
 
 .prompt-detail-scroll h3 {
   margin: 0;
+  color: var(--text-main);
   font-size: 15px;
   line-height: 1.45;
   font-weight: 600;
 }
 
 .prompt-summary {
-  margin: 8px 0 14px;
+  margin: 6px 0 4px;
   color: var(--text-muted);
   font-size: 12px;
   line-height: 1.65;
 }
 
 .prompt-section-label {
-  margin: 13px 0 7px;
+  margin: 16px 0 8px;
   color: var(--text-muted);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
 }
 
 .prompt-placeholder-list {
   display: flex;
   flex-wrap: wrap;
-  gap: 5px;
+  gap: 6px;
 }
 
 .prompt-placeholder {
-  padding: 3px 6px;
+  padding: 2px 8px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  color: var(--text-muted);
-  background: var(--bg-card);
+  border-radius: var(--radius-full);
+  color: var(--text-soft);
+  background: var(--surface-1);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 11px;
+  line-height: 1.6;
 }
 
 .prompt-actions {
-  margin-top: 14px;
+  margin-top: 16px;
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 7px;
+  gap: 8px;
 }
 
 .prompt-primary-action,
@@ -827,13 +898,14 @@ function showFeedback(message: string): void {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
+  gap: 6px;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   font: inherit;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
 }
 
 .prompt-primary-action {
@@ -841,19 +913,19 @@ function showFeedback(message: string): void {
   background: var(--accent);
 }
 
-.prompt-primary-action:hover {
+.prompt-primary-action:hover:not(:disabled) {
   background: var(--accent-strong);
 }
 
 .prompt-secondary-action {
   color: var(--text-main);
   border: 1px solid var(--border-subtle);
-  background: var(--bg-card);
+  background: var(--surface-1);
 }
 
 .prompt-secondary-action:hover:not(:disabled) {
-  border-color: var(--accent);
-  color: var(--accent);
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
 }
 
 .prompt-secondary-action:disabled {
@@ -862,37 +934,39 @@ function showFeedback(message: string): void {
 }
 
 .prompt-actions .material-symbols-rounded {
-  font-size: 15px;
+  font-size: 16px;
 }
 
 .prompt-feedback {
-  margin-top: 8px;
-  padding: 7px 8px;
-  border-radius: var(--radius-sm);
-  color: var(--accent-strong);
-  background: var(--accent-soft);
-  font-size: 11px;
-  line-height: 1.45;
+  margin-top: 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--success-border);
+  border-radius: var(--radius-md);
+  color: var(--success-fg);
+  background: var(--success-bg);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .prompt-content {
   margin: 0;
-  padding: 10px;
+  padding: 10px 12px;
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-ghost);
+  border-radius: var(--radius-md);
   color: var(--text-main);
-  background: var(--bg-card);
+  background: var(--surface-1);
   font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1.65;
+  font-size: 12px;
+  line-height: 1.7;
 }
 
 .prompt-feedback.is-error {
-  color: var(--danger);
-  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  border-color: var(--danger-border);
+  color: var(--danger-fg);
+  background: var(--danger-bg);
 }
 
 .prompt-content-editor {
@@ -903,6 +977,7 @@ function showFeedback(message: string): void {
 
 .prompt-content-editor:focus {
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
   outline: none;
 }
 
@@ -940,11 +1015,11 @@ function showFeedback(message: string): void {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 9px;
+  gap: 8px;
   padding: 24px;
   color: var(--text-muted);
   text-align: center;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .prompt-empty-state p {
@@ -953,27 +1028,41 @@ function showFeedback(message: string): void {
 }
 
 .prompt-empty-state button {
-  padding: 5px 9px;
+  height: 28px;
+  padding: 0 12px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   color: var(--text-main);
-  background: var(--bg-card);
+  background: var(--surface-1);
   font: inherit;
-  font-size: 11px;
+  font-size: 12px;
   cursor: pointer;
 }
 
 .prompt-empty-state button:hover {
-  border-color: var(--accent);
-  color: var(--accent);
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
 }
 
 .prompt-empty-state.is-error {
-  color: var(--danger);
+  color: var(--danger-fg);
 }
 
 .prompt-state-icon {
-  font-size: 24px;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-full);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-resting);
+  color: var(--text-faint);
+  font-size: 22px;
+}
+
+.prompt-empty-state.is-error .prompt-state-icon {
+  background: var(--danger-bg);
+  color: var(--danger-fg);
 }
 
 .prompt-state-icon.is-loading {
@@ -983,6 +1072,12 @@ function showFeedback(message: string): void {
 @keyframes prompt-spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .prompt-state-icon.is-loading {
+    animation: none;
   }
 }
 </style>

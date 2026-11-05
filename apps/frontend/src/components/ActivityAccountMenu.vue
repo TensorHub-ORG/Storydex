@@ -14,6 +14,25 @@
     </div>
 
     <div v-if="authStore.isAuthenticated" class="activity-account-body">
+      <section class="activity-account-section activity-account-summary">
+        <div class="activity-account-userline">
+          <div class="activity-account-name">{{ authStore.displayName }}</div>
+          <div class="activity-account-handle">@{{ authStore.user?.username }}</div>
+        </div>
+        <div class="activity-account-email">{{ authStore.user?.email || "未设置邮箱" }}</div>
+
+        <div class="activity-account-stats">
+          <div class="activity-account-stat">
+            <span class="activity-account-stat-label">角色</span>
+            <span class="activity-account-stat-value">{{ authStore.user?.role || "USER" }}</span>
+          </div>
+          <div class="activity-account-stat">
+            <span class="activity-account-stat-label">额度</span>
+            <span class="activity-account-stat-value">{{ quotaLabel }}</span>
+          </div>
+        </div>
+      </section>
+
       <div class="activity-account-tabs activity-account-tabs-auth" role="tablist" aria-label="账号功能">
         <button
           class="activity-account-tab"
@@ -35,28 +54,7 @@
         </button>
       </div>
 
-      <section class="activity-account-section activity-account-summary">
-        <div class="activity-account-userline">
-          <div class="activity-account-name">{{ authStore.displayName }}</div>
-          <div class="activity-account-handle">@{{ authStore.user?.username }}</div>
-        </div>
-        <div class="activity-account-email">{{ authStore.user?.email || "未设置邮箱" }}</div>
-
-        <div class="activity-account-stats">
-          <div class="activity-account-stat">
-            <span class="activity-account-stat-label">角色</span>
-            <span class="activity-account-stat-value">{{ authStore.user?.role || "USER" }}</span>
-          </div>
-          <div class="activity-account-stat">
-            <span class="activity-account-stat-label">额度</span>
-            <span class="activity-account-stat-value">{{ quotaLabel }}</span>
-          </div>
-        </div>
-      </section>
-
       <section v-if="activeAccountView === 'profile'" class="activity-account-section">
-        <div class="activity-account-section-title">个人资料</div>
-
         <label class="activity-account-field">
           <span>昵称</span>
           <input
@@ -108,8 +106,6 @@
       </section>
 
       <section v-else class="activity-account-section">
-        <div class="activity-account-section-title">修改密码</div>
-
         <label class="activity-account-field">
           <span>当前密码</span>
           <input
@@ -555,18 +551,17 @@ async function handleUsernameBlur(): Promise<void> {
 
 <style scoped>
 .activity-account-menu {
-  width: 336px;
+  width: 320px;
   max-height: calc(100vh - 40px);
   overflow-y: auto;
+  padding: 14px;
 }
 
 .activity-account-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding-bottom: 10px;
-  border-bottom: 1px solid var(--border-ghost);
 }
 
 .activity-account-copy {
@@ -574,27 +569,28 @@ async function handleUsernameBlur(): Promise<void> {
 }
 
 .activity-account-title {
-  font-size: 13px;
-  font-weight: 600;
   color: var(--text-main);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
 }
 
 .activity-account-subtitle {
-  margin-top: 4px;
+  margin-top: 2px;
   color: var(--text-muted);
   font-size: 12px;
   line-height: 1.5;
 }
 
 .activity-account-avatar {
-  width: 28px;
-  height: 28px;
+  width: 32px;
+  height: 32px;
   border-radius: var(--radius-full);
   display: grid;
   place-items: center;
   background: var(--accent-soft);
-  color: var(--accent);
-  font-size: 12px;
+  color: var(--accent-strong);
+  font-size: 13px;
   font-weight: 700;
   flex-shrink: 0;
 }
@@ -602,38 +598,39 @@ async function handleUsernameBlur(): Promise<void> {
 .activity-account-body {
   display: flex;
   flex-direction: column;
+  gap: 12px;
+  margin-top: 12px;
 }
 
 .activity-account-section {
-  padding: 12px 0;
-  border-bottom: 1px solid var(--border-ghost);
+  display: flex;
+  flex-direction: column;
 }
 
-.activity-account-section:last-of-type {
-  border-bottom: 0;
-}
-
+/* 已登录：账号概览是一张小卡片，放在操作之前 */
 .activity-account-summary {
-  padding-top: 12px;
-}
-
-.activity-account-section-title {
-  margin-bottom: 10px;
-  color: var(--text-main);
-  font-size: 12px;
-  font-weight: 600;
+  padding: 12px;
+  border: 1px solid var(--border-ghost);
+  border-radius: var(--radius-lg);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-resting);
 }
 
 .activity-account-userline {
+  min-width: 0;
   display: flex;
   align-items: baseline;
   gap: 8px;
 }
 
 .activity-account-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-main);
   font-size: 14px;
   font-weight: 600;
-  color: var(--text-main);
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .activity-account-handle,
@@ -645,28 +642,36 @@ async function handleUsernameBlur(): Promise<void> {
   line-height: 1.5;
 }
 
-.activity-account-email {
+.activity-account-note {
+  margin: 0 0 12px;
+}
+
+.activity-account-hint {
   margin-top: 4px;
+}
+
+.activity-account-email {
+  margin-top: 2px;
 }
 
 .activity-account-stats {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
-  margin-top: 12px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-ghost);
 }
 
 .activity-account-stat {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
 }
 
 .activity-account-stat-label {
   color: var(--text-faint);
   font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
 }
 
 .activity-account-stat-value {
@@ -682,19 +687,25 @@ async function handleUsernameBlur(): Promise<void> {
 }
 
 .activity-account-field + .activity-account-field {
-  margin-top: 10px;
+  margin-top: 12px;
 }
 
 .activity-account-field span {
   color: var(--text-soft);
   font-size: 12px;
+  font-weight: 500;
+}
+
+.activity-account-field .modal-input {
+  min-height: 34px;
+  font-size: 13px;
 }
 
 .activity-account-actions {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-  margin-top: 12px;
+  margin-top: 14px;
 }
 
 .activity-account-btn,
@@ -702,24 +713,42 @@ async function handleUsernameBlur(): Promise<void> {
 .activity-account-tab {
   min-height: 32px;
   border: 1px solid transparent;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-main);
+  font: inherit;
   cursor: pointer;
-  transition: background 160ms ease, border-color 160ms ease, color 160ms ease;
+  transition: background 160ms ease, border-color 160ms ease, color 160ms ease, box-shadow 160ms ease;
 }
 
 .activity-account-btn {
-  padding: 0 12px;
+  padding: 0 14px;
   font-size: 12px;
+  font-weight: 600;
+}
+
+/* 只有一个主操作时（登录、注册、更新密码）占满整行 */
+.activity-account-actions > .activity-account-btn:only-child {
+  flex: 1 1 auto;
+  min-height: 34px;
+  font-size: 13px;
+}
+
+.activity-account-btn:focus-visible,
+.activity-account-inline-btn:focus-visible,
+.activity-account-tab:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px var(--accent-soft);
 }
 
 .activity-account-btn.is-muted {
   border-color: var(--border-subtle);
+  background: var(--surface-1);
   color: var(--text-soft);
 }
 
 .activity-account-btn.is-muted:hover:not(:disabled) {
+  border-color: var(--border-strong);
   background: var(--bg-hover);
   color: var(--text-main);
 }
@@ -734,112 +763,103 @@ async function handleUsernameBlur(): Promise<void> {
 }
 
 .activity-account-section-actions {
-  display: flex;
+  flex-direction: row;
   justify-content: space-between;
   gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-ghost);
 }
 
 .activity-account-inline-btn {
   flex: 1;
   border-color: var(--border-subtle);
+  background: var(--surface-1);
   font-size: 12px;
 }
 
 .activity-account-inline-btn:hover:not(:disabled) {
+  border-color: var(--border-strong);
   background: var(--bg-hover);
 }
 
 .activity-account-inline-btn.is-danger {
-  color: var(--danger);
+  color: var(--danger-fg);
 }
 
+.activity-account-inline-btn.is-danger:hover:not(:disabled) {
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+}
+
+/* 登录 / 注册、个人资料 / 修改密码：与知识图谱一致的分段控件 */
 .activity-account-tabs {
-  display: flex;
-  align-items: flex-end;
-  gap: 18px;
-  margin-top: 12px;
-  padding: 0 2px;
-  border-bottom: 1px solid var(--border-ghost);
-}
-
-.activity-account-tabs-auth {
-  padding-top: 8px;
+  display: grid;
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border-ghost);
+  border-radius: var(--radius-lg);
+  background: var(--canvas);
 }
 
 .activity-account-tab {
-  position: relative;
-  min-height: 38px;
-  padding: 0 2px 11px;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  color: var(--text-muted);
+  min-height: 28px;
+  padding: 0 10px;
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.activity-account-tab::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: -1px;
-  height: 2px;
-  border-radius: var(--radius-full);
+  justify-content: center;
+  gap: 6px;
+  border: 0;
+  border-radius: var(--radius-md);
   background: transparent;
-  transition: background 160ms ease, opacity 160ms ease, transform 160ms ease;
-  opacity: 0;
-  transform: scaleX(0.55);
+  box-shadow: none;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
 }
 
-.activity-account-tab:hover:not(:disabled) {
+.activity-account-tab:hover:not(:disabled):not(.active) {
+  background: var(--bg-hover);
   color: var(--text-main);
 }
 
 .activity-account-tab.active {
+  background: var(--nav-selected-bg);
   color: var(--text-main);
-}
-
-.activity-account-tab.active::after {
-  background: var(--accent);
-  opacity: 1;
-  transform: scaleX(1);
+  font-weight: 600;
+  box-shadow: var(--nav-selected-shadow);
 }
 
 .activity-account-tab-icon {
   color: var(--text-faint);
-  font-size: 15px;
-  transition: color 160ms ease, transform 160ms ease;
-}
-
-.activity-account-tab:hover:not(:disabled) .activity-account-tab-icon {
-  color: var(--text-soft);
+  font-size: 16px;
+  transition: color 160ms ease;
 }
 
 .activity-account-tab.active .activity-account-tab-icon {
   color: var(--accent);
-  transform: translateY(-0.5px);
 }
 
 .activity-account-tab-label {
   white-space: nowrap;
-  letter-spacing: 0.01em;
 }
 
 .activity-account-feedback {
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border-ghost);
-  color: var(--success);
+  margin-top: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--success-border);
+  border-radius: var(--radius-md);
+  background: var(--success-bg);
+  color: var(--success-fg);
   font-size: 12px;
   line-height: 1.5;
 }
 
 .activity-account-feedback.is-error {
-  color: var(--danger);
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
 }
 
 .activity-account-btn:disabled,
@@ -847,5 +867,14 @@ async function handleUsernameBlur(): Promise<void> {
 .activity-account-tab:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .activity-account-btn,
+  .activity-account-inline-btn,
+  .activity-account-tab,
+  .activity-account-tab-icon {
+    transition: none;
+  }
 }
 </style>

@@ -3,7 +3,7 @@
     <header class="preset-header">
       <div class="preset-header-copy">
         <h2 class="preset-title">预设管理</h2>
-        <p class="preset-subtitle">{{ projectLabel }}</p>
+        <p class="preset-subtitle" :title="projectLabel">{{ projectLabel }}</p>
       </div>
 
       <div class="preset-header-actions">
@@ -18,16 +18,18 @@
         <button
           class="preset-icon-btn"
           type="button"
-          title="导入"
+          :title="importing ? '正在处理导入…' : '导入预设（.md / .json / .txt）'"
+          aria-label="导入预设"
           :disabled="workspaceStore.launchScreenVisible || importing"
           @click="openImportPicker"
         >
-          <span class="material-symbols-rounded">upload_file</span>
+          <span class="material-symbols-rounded" :class="{ 'is-spinning': importing }">{{ importing ? "progress_activity" : "upload_file" }}</span>
         </button>
         <button
           class="preset-icon-btn"
           type="button"
           title="刷新"
+          aria-label="刷新预设列表"
           :disabled="workspaceStore.isTreeLoading || workspaceStore.launchScreenVisible"
           @click="refreshTree"
         >
@@ -38,138 +40,134 @@
 
     <div class="preset-body">
       <template v-if="workspaceStore.launchScreenVisible">
-        <div class="preset-empty">先打开一个 Storydex 项目，再管理项目级预设。</div>
+        <div class="preset-empty">
+          <span class="material-symbols-rounded preset-empty-icon">folder_open</span>
+          <p class="preset-empty-title">尚未打开项目</p>
+          <p>先打开一个 Storydex 项目，再管理项目级预设。</p>
+        </div>
       </template>
 
       <template v-else>
         <section class="preset-summary">
-          <div class="preset-summary-line">
-            <span class="preset-summary-label">目录</span>
-            <span class="preset-summary-value">.storydex/presets</span>
-          </div>
-          <div class="preset-workbench-entry-row">
-            <button class="preset-workbench-entry" type="button" :disabled="presetStore.saving"
-              @click="openWritingGuidance">
-              <span class="material-symbols-rounded">edit_note</span>
-              <span>小说写作指导</span>
-            </button>
-            <button
-              class="preset-workbench-entry"
-              type="button"
-              title="导入"
-              :disabled="importing"
-              @click="openImportPicker"
-            >
-              <span class="material-symbols-rounded">upload_file</span>
-              <span>导入</span>
-              <b v-if="importing">处理中</b>
-            </button>
-          </div>
+          <button
+            class="preset-guidance-card"
+            type="button"
+            :disabled="presetStore.saving"
+            title="打开小说写作指导的参数"
+            @click="openWritingGuidance"
+          >
+            <span class="preset-guidance-icon material-symbols-rounded">edit_note</span>
+            <span class="preset-guidance-copy">
+              <strong>小说写作指导</strong>
+              <span>分别调整语言、情节节奏与连续性建议</span>
+            </span>
+            <span class="material-symbols-rounded preset-guidance-arrow">chevron_right</span>
+          </button>
           <p v-if="importSummary" class="preset-import-summary">{{ importSummary }}</p>
-          <p v-if="presetStore.errorMessage" class="preset-import-summary" role="alert">{{ presetStore.errorMessage }}</p>
+          <p v-if="presetStore.errorMessage" class="preset-import-summary is-error" role="alert">{{ presetStore.errorMessage }}</p>
         </section>
 
-        <section class="preset-section">
-          <header class="preset-section-header">
-            <div class="preset-section-title">
-              <span class="material-symbols-rounded">check_circle</span>
-              <span>已启用</span>
-            </div>
-            <span class="preset-section-count">{{ enabledItems.length }}</span>
-          </header>
+        <div class="preset-scroll">
+          <section class="preset-section">
+            <header class="preset-section-header">
+              <div class="preset-section-title">
+                <span class="material-symbols-rounded">check_circle</span>
+                <span>已启用</span>
+              </div>
+              <span class="preset-section-count" :class="{ 'is-active': enabledItems.length > 0 }">{{ enabledItems.length }}</span>
+            </header>
 
-          <div class="preset-list">
-            <div v-if="enabledItems.length === 0" class="preset-empty-inline">
-              active 目录暂无启用预设。
-            </div>
-            <button
-              v-for="item in enabledItems"
-              :key="item.relativePath"
-              class="preset-row"
-              type="button"
-              :class="{ active: workspaceStore.activeFileBindingOrPath === item.relativePath }"
-              :title="item.relativePath"
-              @contextmenu.prevent.stop="openPresetContextMenu($event, item)"
-              @click="openPreset(item.relativePath)"
-            >
-              <span class="preset-row-icon material-symbols-rounded">{{ iconFor(item) }}</span>
-              <span class="preset-row-main">
-                <span class="preset-row-name">{{ item.name }}</span>
-                <span class="preset-row-path">
-                  <span>{{ item.displayPath }}</span>
-                  <span v-if="item.isActiveMain" class="preset-status-badge">主预设</span>
+            <div class="preset-list">
+              <div v-if="enabledItems.length === 0" class="preset-empty-inline">
+                active 目录暂无启用预设。
+              </div>
+              <button
+                v-for="item in enabledItems"
+                :key="item.relativePath"
+                class="preset-row"
+                type="button"
+                :class="{ active: workspaceStore.activeFileBindingOrPath === item.relativePath }"
+                :title="item.relativePath"
+                @contextmenu.prevent.stop="openPresetContextMenu($event, item)"
+                @click="openPreset(item.relativePath)"
+              >
+                <span class="preset-row-icon material-symbols-rounded">{{ iconFor(item) }}</span>
+                <span class="preset-row-main">
+                  <span class="preset-row-name">{{ item.name }}</span>
+                  <span v-if="presetFolder(item)" class="preset-row-folder">{{ presetFolder(item) }}</span>
+                  <span v-if="item.isActiveMain" class="preset-status-badge is-main">主预设</span>
                   <span v-if="item.hasSidecar" class="preset-status-badge">参数</span>
                   <span v-else-if="item.extension === '.md'" class="preset-status-badge is-warning" title="使用 Markdown 临时预设；编辑并保存参数可生成参数文件">缺参数</span>
                 </span>
-              </span>
-              <span class="preset-row-actions">
-                <span
-                  v-if="item.extension === '.md'"
-                  class="preset-row-action material-symbols-rounded"
-                  title="编辑参数"
-                  @click.stop="openEditor(item.relativePath)"
-                >tune</span>
-                <span
-                  class="preset-row-action material-symbols-rounded"
-                  title="停用（移回 library）"
-                  @click.stop="handleDeactivate(item.relativePath)"
-                >toggle_on</span>
-                <span class="preset-row-meta">{{ extensionLabel(item.extension) }}</span>
-              </span>
-            </button>
-          </div>
-        </section>
-
-        <section class="preset-section">
-          <header class="preset-section-header">
-            <div class="preset-section-title">
-              <span class="material-symbols-rounded">inventory_2</span>
-              <span>未启用</span>
+                <span class="preset-row-actions">
+                  <span
+                    v-if="item.extension === '.md'"
+                    class="preset-row-action material-symbols-rounded"
+                    title="编辑参数"
+                    @click.stop="openEditor(item.relativePath)"
+                  >tune</span>
+                  <span
+                    class="preset-switch is-on"
+                    title="停用（移回 library）"
+                    @click.stop="handleDeactivate(item.relativePath)"
+                  ><span class="preset-switch-knob"></span></span>
+                </span>
+              </button>
             </div>
-            <span class="preset-section-count">{{ disabledItems.length }}</span>
-          </header>
+          </section>
 
-          <div class="preset-list">
-            <div v-if="disabledItems.length === 0" class="preset-empty-inline">
-              library 目录暂无未启用预设。
-            </div>
-            <button
-              v-for="item in disabledItems"
-              :key="item.relativePath"
-              class="preset-row"
-              type="button"
-              :class="{ active: workspaceStore.activeFileBindingOrPath === item.relativePath }"
-              :title="item.relativePath"
-              @contextmenu.prevent.stop="openPresetContextMenu($event, item)"
-              @click="openPreset(item.relativePath)"
-            >
-              <span class="preset-row-icon material-symbols-rounded">{{ iconFor(item) }}</span>
-              <span class="preset-row-main">
-                <span class="preset-row-name">{{ item.name }}</span>
-                <span class="preset-row-path">
-                  <span>{{ item.displayPath }}</span>
+          <section class="preset-section">
+            <header class="preset-section-header">
+              <div class="preset-section-title">
+                <span class="material-symbols-rounded">inventory_2</span>
+                <span>未启用</span>
+              </div>
+              <span class="preset-section-count">{{ disabledItems.length }}</span>
+            </header>
+
+            <div class="preset-list">
+              <div v-if="disabledItems.length === 0" class="preset-empty-inline">
+                library 目录暂无未启用预设。
+              </div>
+              <button
+                v-for="item in disabledItems"
+                :key="item.relativePath"
+                class="preset-row"
+                type="button"
+                :class="{ active: workspaceStore.activeFileBindingOrPath === item.relativePath }"
+                :title="item.relativePath"
+                @contextmenu.prevent.stop="openPresetContextMenu($event, item)"
+                @click="openPreset(item.relativePath)"
+              >
+                <span class="preset-row-icon material-symbols-rounded">{{ iconFor(item) }}</span>
+                <span class="preset-row-main">
+                  <span class="preset-row-name">{{ item.name }}</span>
+                  <span v-if="presetFolder(item)" class="preset-row-folder">{{ presetFolder(item) }}</span>
                   <span v-if="item.hasSidecar" class="preset-status-badge">参数</span>
                   <span v-else-if="item.extension === '.md'" class="preset-status-badge is-warning" title="编辑并保存参数可生成参数文件">缺参数</span>
                 </span>
-              </span>
-              <span class="preset-row-actions">
-                <span
-                  v-if="item.extension === '.md'"
-                  class="preset-row-action material-symbols-rounded"
-                  title="编辑参数"
-                  @click.stop="openEditor(item.relativePath)"
-                >tune</span>
-                <span
-                  v-if="item.extension === '.md'"
-                  class="preset-row-action material-symbols-rounded"
-                  title="激活（移到 active）"
-                  @click.stop="handleActivate(item.relativePath)"
-                >toggle_off</span>
-                <span class="preset-row-meta">{{ extensionLabel(item.extension) }}</span>
-              </span>
-            </button>
-          </div>
-        </section>
+                <span class="preset-row-actions">
+                  <span
+                    v-if="item.extension === '.md'"
+                    class="preset-row-action material-symbols-rounded"
+                    title="编辑参数"
+                    @click.stop="openEditor(item.relativePath)"
+                  >tune</span>
+                  <span
+                    v-if="item.extension === '.md'"
+                    class="preset-switch"
+                    title="激活（移到 active）"
+                    @click.stop="handleActivate(item.relativePath)"
+                  ><span class="preset-switch-knob"></span></span>
+                </span>
+              </button>
+            </div>
+          </section>
+
+          <p class="preset-location-note">
+            预设保存在 <code>.storydex/presets</code>：启用的在 <code>active</code>，未启用的在 <code>library</code>。
+          </p>
+        </div>
       </template>
     </div>
 
@@ -611,6 +609,12 @@ function extensionLabel(extension: string): string {
   return extension ? extension.replace(/^\./u, "").toUpperCase() : "FILE";
 }
 
+/** 预设放在 active / library 的子目录里时，在名字后标出目录，避免同名文件分不清。 */
+function presetFolder(item: PresetItem): string {
+  const index = item.displayPath.lastIndexOf("/");
+  return index > 0 ? item.displayPath.slice(0, index) : "";
+}
+
 function extensionFromName(name: string): string {
   const match = String(name || "").match(/\.[^.]+$/u);
   return match ? match[0] : "";
@@ -662,11 +666,12 @@ defineExpose({
 
 .preset-header {
   flex: 0 0 auto;
+  min-height: 52px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 8px 10px 8px 12px;
+  padding: 10px 10px 8px 14px;
   border-bottom: 0;
   background: transparent;
 }
@@ -679,25 +684,28 @@ defineExpose({
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
 }
 
 .preset-import-input {
   display: none;
 }
 
+/* 侧栏统一页头：页面名为主标题，项目名为副标题 */
 .preset-title {
   margin: 0;
-  color: var(--text-muted);
-  font-size: 11px;
+  color: var(--text-main);
+  font-size: 13px;
   font-weight: 600;
-  letter-spacing: 0.04em;
+  line-height: 1.35;
+  letter-spacing: 0;
 }
 
 .preset-subtitle {
-  margin: 4px 0 0;
+  margin: 2px 0 0;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 11px;
+  line-height: 1.4;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -711,22 +719,42 @@ defineExpose({
   align-items: center;
   justify-content: center;
   border: 0;
-  border-radius: 0;
+  border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--text-main);
+  color: var(--text-muted);
   cursor: pointer;
 }
 
-.preset-icon-btn:hover:not(:disabled),
-.preset-icon-btn:focus-visible {
+.preset-icon-btn:hover:not(:disabled) {
   background: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.preset-icon-btn:focus-visible {
   outline: none;
+  box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px var(--accent-soft);
 }
 
 .preset-icon-btn:disabled,
 .preset-row:disabled {
   cursor: not-allowed;
   opacity: 0.6;
+}
+
+.is-spinning {
+  animation: preset-spin 1s linear infinite;
+}
+
+@keyframes preset-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .is-spinning {
+    animation: none;
+  }
 }
 
 .preset-body {
@@ -737,166 +765,191 @@ defineExpose({
   overflow: hidden;
 }
 
+/* ---------- 写作指导入口：一张小卡片 ---------- */
+
 .preset-summary {
   flex: 0 0 auto;
-  padding: 12px 18px;
-  border-bottom: 1px solid var(--border-ghost);
+  padding: 0 10px 2px;
 }
 
-.preset-summary-line {
-  min-height: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
-.preset-summary-label {
-  flex: 0 0 auto;
-  color: var(--text-soft);
-  font-weight: 700;
-}
-
-.preset-summary-value {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-align: right;
-}
-
-.preset-workbench-entry-row {
+.preset-guidance-card {
+  width: 100%;
   display: grid;
-  grid-template-columns: 1fr;
-  gap: 6px;
-  margin-top: 8px;
-}
-
-.preset-workbench-entry {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: 16px minmax(0, 1fr) auto;
+  grid-template-columns: 32px minmax(0, 1fr) 18px;
   align-items: center;
-  gap: 5px;
-  padding: 6px 7px;
+  gap: 10px;
+  padding: 9px 8px 9px 10px;
   border: 1px solid var(--border-ghost);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elevated);
-  color: var(--text-muted);
+  border-radius: var(--radius-lg);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-resting);
+  color: inherit;
   font: inherit;
-  font-size: 11px;
+  text-align: left;
   cursor: pointer;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
 }
 
-.preset-workbench-entry:disabled {
-  cursor: not-allowed;
-  opacity: 0.6;
+.preset-guidance-card:hover:not(:disabled) {
+  border-color: var(--border-subtle);
+  box-shadow: var(--shadow-raised);
 }
 
-.preset-workbench-entry .material-symbols-rounded {
-  font-size: 16px;
+.preset-guidance-card:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px var(--accent-soft);
 }
 
-.preset-workbench-entry span:nth-child(2) {
+.preset-guidance-card:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+.preset-guidance-icon {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 18px;
+}
+
+.preset-guidance-copy {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.preset-guidance-copy strong {
+  color: var(--text-main);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.preset-guidance-copy span {
   overflow: hidden;
-  text-overflow: ellipsis;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.45;
   white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
-.preset-workbench-entry b {
-  padding: 1px 4px;
-  border-radius: var(--radius-full);
-  background: var(--bg-hover);
+.preset-guidance-arrow {
   color: var(--text-faint);
-  font-size: 9px;
-  font-weight: 800;
+  font-size: 18px;
 }
 
 .preset-import-summary {
-  margin: 8px 0 0;
+  margin: 8px 2px 0;
   color: var(--text-muted);
   font-size: 11px;
   line-height: 1.5;
 }
 
-.preset-section {
-  flex: 1 1 0;
+.preset-import-summary.is-error {
+  color: var(--danger-fg);
+}
+
+/* ---------- 列表：两段按内容高度依次排列，整体一起滚动 ---------- */
+
+.preset-scroll {
+  flex: 1 1 auto;
   min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-bottom: 14px;
+}
+
+.preset-section {
   display: flex;
   flex-direction: column;
-  overflow: hidden;
-  border-bottom: 1px solid var(--border-ghost);
 }
 
 .preset-section-header {
-  flex: 0 0 auto;
-  min-height: 42px;
-  padding: 0 18px;
+  min-height: 28px;
+  margin: 12px 14px 4px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  border-bottom: 1px solid var(--border-ghost);
 }
 
 .preset-section-title {
   min-width: 0;
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  color: var(--text-soft);
-  font-size: 12px;
-  font-weight: 700;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
 }
 
 .preset-section-title .material-symbols-rounded {
-  color: var(--text-muted);
-  font-size: 17px;
+  color: var(--text-faint);
+  font-size: 15px;
 }
 
 .preset-section-count {
   flex: 0 0 auto;
+  min-width: 20px;
+  height: 18px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-full);
+  background: var(--bg-hover);
   color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 700;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.preset-section-count.is-active {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
 }
 
 .preset-list {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-x: hidden;
-  overflow-y: auto;
-  padding: 4px 10px 8px;
+  padding: 0 6px;
 }
 
 .preset-row {
   width: 100%;
-  min-height: 38px;
+  min-height: 32px;
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
-  padding: 7px 8px;
+  margin-bottom: 1px;
+  padding: 4px 6px 4px 8px;
   border: 0;
-  border-radius: 0;
+  border-radius: var(--radius-md);
   background: transparent;
   color: inherit;
   cursor: pointer;
   text-align: left;
   font: inherit;
+  transition: background 120ms ease, box-shadow 120ms ease;
 }
 
-.preset-row:hover,
-.preset-row:focus-visible {
+.preset-row:hover {
   background: var(--bg-hover);
-  outline: none;
 }
 
+.preset-row:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px var(--accent-soft);
+}
+
+/* 选中项抬到卡片层，与资源浏览器一致 */
 .preset-row.active {
-  background: var(--bg-selected);
-  color: var(--accent-strong);
+  background: var(--nav-selected-bg);
+  box-shadow: var(--nav-selected-shadow);
 }
 
 .preset-row-icon {
@@ -904,49 +957,53 @@ defineExpose({
   font-size: 16px;
 }
 
+.preset-row.active .preset-row-icon {
+  color: var(--accent);
+}
+
 .preset-row-main {
   min-width: 0;
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
 }
 
 .preset-row-name {
   min-width: 0;
-  color: var(--text-main);
-  font-size: 12px;
-  white-space: nowrap;
+  flex: 0 1 auto;
   overflow: hidden;
+  color: var(--text-main);
+  font-size: 13px;
+  white-space: nowrap;
   text-overflow: ellipsis;
 }
 
-.preset-row-path {
+.preset-row-folder {
   min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--text-muted);
+  flex: 0 2 auto;
+  overflow: hidden;
+  color: var(--text-faint);
   font-size: 11px;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.preset-row-path > span:first-child {
-  min-width: 0;
-  overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .preset-status-badge {
   flex: 0 0 auto;
-  padding: 1px 4px;
-  border-radius: var(--radius-sm);
+  padding: 0 6px;
+  border-radius: var(--radius-full);
   background: var(--bg-hover);
-  color: var(--text-faint);
-  font-size: 9px;
-  font-weight: 800;
-  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 17px;
+  white-space: nowrap;
+}
+
+.preset-status-badge.is-main {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
 }
 
 .preset-status-badge.is-warning {
@@ -954,33 +1011,92 @@ defineExpose({
   color: var(--warning-fg);
 }
 
-.preset-row-meta {
-  flex: 0 0 auto;
-  color: var(--text-faint);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-}
-
 .preset-row-actions {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
 }
 
 .preset-row-action {
-  font-size: 18px;
-  color: var(--text-muted);
-  cursor: pointer;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
   border-radius: var(--radius-sm);
-  padding: 2px;
+  color: var(--text-faint);
+  font-size: 16px;
+  cursor: pointer;
   transition: background-color 0.15s ease, color 0.15s ease;
 }
 
-.preset-row-action:hover {
-  background: var(--bg-hover);
+.preset-row:hover .preset-row-action {
+  color: var(--text-muted);
+}
+
+.preset-row .preset-row-action:hover {
+  background: var(--bg-active);
   color: var(--accent-strong);
+}
+
+/* 启用开关：开 = 强调色，点击即启用 / 停用 */
+.preset-switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 16px;
+  margin: 0 2px 0 4px;
+  border-radius: var(--radius-full);
+  background: var(--border-strong);
+  cursor: pointer;
+  transition: background 160ms ease, box-shadow 160ms ease;
+}
+
+.preset-switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: var(--radius-full);
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  transition: transform 160ms ease;
+}
+
+.preset-switch.is-on {
+  background: var(--accent);
+}
+
+.preset-switch.is-on .preset-switch-knob {
+  transform: translateX(12px);
+}
+
+.preset-switch:hover {
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .preset-switch,
+  .preset-switch-knob {
+    transition: none;
+  }
+}
+
+.preset-location-note {
+  margin: 16px 14px 0;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.preset-location-note code {
+  padding: 0 4px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
 }
 
 .preset-context-menu {
@@ -1053,7 +1169,6 @@ defineExpose({
 .preset-import-preview-modal {
   width: min(960px, 96vw);
   height: min(86vh, 720px);
-  border-radius: var(--radius-sm);
 }
 
 .preset-editor-close {
@@ -1081,10 +1196,39 @@ defineExpose({
 }
 
 .preset-empty {
-  padding: 18px 16px;
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  padding: 36px 20px;
+  text-align: center;
+}
+
+.preset-empty p {
+  margin: 0;
+}
+
+.preset-empty .preset-empty-title {
+  color: var(--text-main);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.preset-empty-icon {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  margin-bottom: 4px;
+  border-radius: var(--radius-full);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-resting);
+  color: var(--text-faint);
+  font-size: 22px;
 }
 
 .preset-empty-inline {
-  padding: 12px 8px;
+  margin: 0 2px;
+  padding: 8px 8px 10px;
+  color: var(--text-faint);
 }
 </style>

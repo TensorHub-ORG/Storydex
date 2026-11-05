@@ -69,8 +69,8 @@
             role="menu"
             aria-label="设置菜单"
           >
-            <div class="activity-settings-section">
-              <div class="activity-settings-heading">界面主题</div>
+            <div class="activity-settings-section" role="group" aria-labelledby="activity-theme-heading">
+              <div id="activity-theme-heading" class="activity-settings-heading">界面主题</div>
               <button
                 v-for="item in themeOptions"
                 :key="item.code"
@@ -78,27 +78,25 @@
                 :class="{ active: uiStore.theme === item.code }"
                 type="button"
                 role="menuitemradio"
+                :title="item.description"
                 :aria-checked="uiStore.theme === item.code"
                 @click="handleThemeSelect(item.code)"
               >
                 <span class="activity-theme-preview" :style="{ background: item.preview }"></span>
-                <span class="activity-theme-copy">
-                  <span class="activity-theme-label">{{ item.label }}</span>
-                  <span class="activity-theme-description">{{ item.description }}</span>
-                </span>
+                <span class="activity-theme-label">{{ item.label }}</span>
                 <span v-if="uiStore.theme === item.code" class="material-symbols-rounded activity-theme-check">
                   check
                 </span>
               </button>
             </div>
 
-            <div class="activity-settings-section">
-              <div class="activity-settings-heading">系统设置</div>
-              <button class="activity-settings-link" type="button" @click="openSystemSettings">
-                <span class="material-symbols-rounded">tune</span>
-                <span>打开系统设置</span>
-              </button>
-            </div>
+            <div class="activity-settings-divider" role="separator"></div>
+
+            <button class="activity-settings-link" type="button" role="menuitem" @click="openSystemSettings">
+              <span class="material-symbols-rounded">tune</span>
+              <span>打开系统设置</span>
+              <span class="material-symbols-rounded activity-settings-link-arrow">chevron_right</span>
+            </button>
           </div>
         </transition>
       </div>
@@ -263,21 +261,48 @@ function handleDocumentKeydown(event: KeyboardEvent): void {
   line-height: 1;
 }
 
+.activity-settings-divider {
+  height: 1px;
+  margin: 6px 4px;
+  background: var(--border-ghost);
+}
+
 .activity-settings-link {
   width: 100%;
   min-height: 34px;
-  border: 0;
-  background: transparent;
-  color: var(--text-main);
-  display: inline-flex;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) 16px;
   align-items: center;
   gap: 10px;
-  padding: 0 2px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-main);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
   cursor: pointer;
-  font-size: 12px;
+}
+
+.activity-settings-link .material-symbols-rounded {
+  justify-self: center;
+  color: var(--text-muted);
+  font-size: 18px;
+}
+
+.activity-settings-link .activity-settings-link-arrow {
+  color: var(--text-faint);
+  font-size: 16px;
 }
 
 .activity-settings-link:hover:not(:disabled) {
+  background: var(--bg-hover);
   color: var(--text-main);
+}
+
+.activity-settings-link:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px var(--accent-soft);
 }
 </style>

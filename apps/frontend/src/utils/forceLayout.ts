@@ -12,12 +12,17 @@ export interface ForceNode {
   /** 初始坐标（如上一轮 radial 结果），用于减少重算抖动。 */
   x?: number;
   y?: number;
+  /**
+   * 固定锚点：必须同时给出 x/y。参与斥力与边引力（会拉动/推开其他节点），
+   * 自身不移动、不受 safeRect 约束，原样出现在结果里。用于章节主线等预排节点。
+   */
+  fixed?: boolean;
 }
 
 export interface ForceEdge {
   source: string;
   target: string;
-  /** 关系强度，越大理想边长越短（节点被拉得更近）。 */
+  /** 关系强度（默认 1）：越大理想边长越短；小于 1（最低 0.2）时边被放长。 */
   weight?: number;
 }
 
@@ -28,6 +33,8 @@ export interface ForceLayoutOptions {
   padding?: number;
   /** 可放置节点的绝对画布区域；用于避开 HUD、图例等覆盖层。 */
   safeRect?: ForceSafeRect;
+  /** 理想边长；缺省按画布面积/节点数推算。给定后图的疏密不再随画布尺寸漂移。 */
+  idealEdgeLength?: number;
 }
 
 export interface ForceSafeRect {
@@ -62,8 +69,11 @@ export function computeForceLayout(
   if (count === 0) {
     return {};
   }
+  const isFixed = (node: ForceNode) => Boolean(node.fixed) && typeof node.x === "number" && typeof node.y === "number";
+  const hasFixed = nodes.some(isFixed);
   if (count === 1) {
-    return { [nodes[0].id]: { x: centerX, y: centerY } };
+    const only = nodes[0];
+    return { [only.id]: isFixed(only) ? { x: only.x!, y: only.y! } : { x: centerX, y: centerY } };
   }
 
   const positions = new Map<string, MutablePoint>();
@@ -89,7 +99,7 @@ export function computeForceLayout(
 
   // 无边图：斥力没有引力制衡，会把节点推到边界角落。
   // 直接按圆环均匀铺开并居中，比跑完整迭代更稳定也更美观。
-  if (validEdges.length === 0) {
+  if (validEdges.length === 0 && !hasFixed) {
     const maxRadius = Math.max(...nodes.map((node) => radii.get(node.id)!));
     const ringSpread = Math.max(
       maxRadius * 1.6,
@@ -115,7 +125,9 @@ export function computeForceLayout(
   }
 
   const area = safeWidth * safeHeight;
-  const k = Math.sqrt(area / count) * 0.72; // 理想节点间距
+  const k = options.idealEdgeLength && options.idealEdgeLength > 0
+    ? options.idealEdgeLength
+    : Math.sqrt(area / count) * 0.72; // 理想节点间距
   let temperature = Math.min(width, height) * 0.12;
   const cooling = 0.96;
   const minTemperature = 0.6;
@@ -163,14 +175,14 @@ export function computeForceLayout(
       }
     }
 
-    // 引力：边把两端拉近，weight 越大越近。
+    // 引力：边把两端拉近，weight 越大越近；weight < 1 时边会被放长（如多分支枢纽的辐条）。
     for (const edge of validEdges) {
       const posU = positions.get(edge.source)!;
       const posV = positions.get(edge.target)!;
       let dx = posU.x - posV.x;
       let dy = posU.y - posV.y;
       const distance = Math.max(0.01, Math.hypot(dx, dy));
-      const weight = Math.max(1, edge.weight ?? 1);
+      const weight = Math.max(0.2, edge.weight ?? 1);
       const force = ((distance * distance) / k) * Math.min(2.4, Math.sqrt(weight));
       const ux = dx / distance;
       const uy = dy / distance;
@@ -184,6 +196,9 @@ export function computeForceLayout(
 
     // 向心力：轻微拉向画布中心，防止孤立子图飘散出界；连接度越高拉力越强。
     for (const node of nodes) {
+      if (isFixed(node)) {
+        continue;
+      }
       const pos = positions.get(node.id)!;
       const disp0 = disp.get(node.id)!;
       const degree = degrees.get(node.id) ?? 0;
@@ -192,8 +207,11 @@ export function computeForceLayout(
       disp0.y += (centerY - pos.y) * pull;
     }
 
-    // 按当前温度限制位移，并夹到画布边界内。
+    // 按当前温度限制位移，并夹到画布边界内。固定锚点保持原位。
     for (const node of nodes) {
+      if (isFixed(node)) {
+        continue;
+      }
       const pos = positions.get(node.id)!;
       const disp0 = disp.get(node.id)!;
       const magnitude = Math.hypot(disp0.x, disp0.y);

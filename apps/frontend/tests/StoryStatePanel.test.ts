@@ -16,6 +16,7 @@ vi.mock("axios", () => ({ default: { create: () => transport, isAxiosError: (err
 import StoryStatePanel from "@/components/StoryStatePanel.vue";
 import { useAgentStore } from "@/stores/agent";
 import { useUiStore } from "@/stores/ui";
+import { useWorkspaceStore } from "@/stores/workspace";
 
 function mountPanel(props: Record<string, unknown> = {}) {
   const pinia = createPinia(); setActivePinia(pinia);
@@ -577,9 +578,9 @@ describe("StoryStatePanel deterministic graph and inspector behavior", () => {
     await nextTick();
 
     expect(wrapper.find(".ssp-wiki-edge.edge-review-required").exists()).toBe(true);
-    expect(wrapper.text()).toContain("当前范围节点 62");
-    expect(wrapper.text()).toContain("当前返回 60");
-    expect(wrapper.text()).toContain("待确认边 1");
+    expect(wrapper.text()).toContain("已显示 60 / 62 个节点");
+    expect(wrapper.find(".ssp-wiki-legend-edge.edge-review").text()).toBe("待确认 1");
+    expect(wrapper.find(".ssp-wiki-legend-edge.edge-relation").text()).toBe("关系 52");
     expect(wrapper.text()).toContain("水手传闻雾鲸来自远潮星。");
     expect(wrapper.text()).not.toContain("provider/model");
     expect(wrapper.text()).toContain("引文匹配只说明原文存在");
@@ -587,6 +588,79 @@ describe("StoryStatePanel deterministic graph and inspector behavior", () => {
     expect(wrapper.text()).not.toContain("entity:whale");
     expect(wrapper.text()).toContain("该关系将写入 JSON 角色卡 sidecar。");
     expect(wrapper.find(".ssp-wiki-source-link").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("labels the local Rust projection, cleans summaries and lists the focused node's relations", async () => {
+    const wrapper = mountPanel({ relationshipOnly: true }); const u = (wrapper.vm as any).__testUtils;
+    await flushPromises();
+    u.wikiData.value = {
+      projectName: "雾港纪事", generatedAt: "2026-11-04T17:17:39Z", generator: "storydex-rust-knowledge",
+      generationMode: "local evidence-grounded", summary: "覆盖 6 个正文章节。",
+      entries: [{ id: "lin", category: "characters", title: "林晚", summary: "# 林晚 主持人 - 妹妹：林雪", details: ["来源: .storydex/characters/林晚.md", "- 年龄：27"], sourcePaths: [".storydex/characters/林晚.md"] }],
+      graph: { nodes: [], edges: [] },
+    };
+    expect(u.selectedWikiSourceLabel.value).toBe("本地证据");
+    expect(u.wikiHeaderMeta.value).toContain("雾港纪事 · 本地证据 · 更新于");
+    expect(u.cleanWikiSummary("# 林晚 主持人 - 妹妹：林雪", "林晚")).toBe("主持人 · 妹妹：林雪");
+
+    u.wikiGraphQueryData.value = {
+      graph: {
+        nodes: [
+          { id: "lin", label: "林晚", type: "character", entryId: "lin" },
+          { id: "xue", label: "林雪", type: "character", entryId: "xue" },
+          { id: "qin", label: "秦正", type: "character", entryId: "qin" },
+          { id: "ch1", label: "第一章", type: "chapter", narrativeOrder: 1 },
+          { id: "ch2", label: "第二章", type: "chapter", narrativeOrder: 2 },
+        ],
+        edges: [
+          { id: "sisters", source: "lin", target: "xue", type: "relationship", label: "姐妹", reviewStatus: "confirmed" },
+          { id: "letters", source: "qin", target: "lin", type: "relationship", label: "寄信人", reviewStatus: "review_required" },
+          { id: "seq", source: "ch1", target: "ch2", type: "timeline", label: "承接" },
+        ],
+      },
+      entries: u.wikiData.value.entries,
+    };
+    await nextTick();
+    // 未选中时：详情栏显示项目概览，图上不高亮任何节点。
+    expect(wrapper.findAll(".ssp-wiki-node.active")).toHaveLength(0);
+    expect(wrapper.find(".ssp-wiki-inspector-detail.is-overview").text()).toContain("覆盖 6 个正文章节。");
+    u.selectWikiNode(unref(u.wikiGraphNodes).find((node: any) => node.id === "lin"));
+    await nextTick();
+
+    expect(wrapper.find(".ssp-wiki-node.active").text()).toContain("林晚");
+    expect(u.wikiActiveEntryId.value).toBe("lin");
+    expect(unref(u.wikiLayoutBands)).toMatchObject({ lin: "network", ch1: "spine", ch2: "spine" });
+    expect(unref(u.wikiFocusRelations).map((relation: any) => [relation.otherLabel, relation.outgoing, relation.needsReview]))
+      .toEqual([["秦正", false, true], ["林雪", true, false]]);
+    expect(unref(u.selectedWikiDetailLines)).toEqual(["年龄：27"]);
+    expect(unref(u.wikiGraphEdges).find((edge: any) => edge.id === "seq").structural).toBe(true);
+    expect(unref(u.visibleWikiGraphLabelEdges).map((edge: any) => edge.id)).not.toContain("seq");
+    expect(u.wikiInspectorOpen.value).toBe(true);
+    expect(wrapper.text()).toContain("关系 · 2");
+
+    u.handleWikiGraphBackgroundClick();
+    await nextTick();
+    expect(u.wikiDetailPinned.value).toBe(false);
+    expect(u.wikiInspectorOpen.value).toBe(false);
+    expect(wrapper.find(".ssp-wiki-inspector-detail.is-overview").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("leaves the graph view after opening an evidence source so the file is visible", async () => {
+    const wrapper = mountPanel({ relationshipOnly: true }); const u = (wrapper.vm as any).__testUtils;
+    await flushPromises();
+    // 显式绑定组件自己的 pinia：前面用例遗留的异步 action 会切换 activePinia。
+    const pinia = (wrapper.vm as any).$pinia;
+    const workspaceStore = useWorkspaceStore(pinia);
+    const uiStore = useUiStore(pinia);
+    uiStore.setActivity("relationships");
+    vi.spyOn(workspaceStore, "openFile").mockImplementation(async (path: string) => { workspaceStore.activeFile = path; });
+
+    await u.openWikiSource("chapters\\001.md");
+
+    expect(workspaceStore.openFile).toHaveBeenCalledWith("chapters/001.md");
+    expect(uiStore.activeActivity).toBe("resources");
     wrapper.unmount();
   });
 });

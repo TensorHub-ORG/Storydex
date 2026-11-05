@@ -3641,8 +3641,8 @@ body.is-resizing-panels .workspace-splitter::before {
   position: absolute;
   left: calc(100% + 10px);
   bottom: 0;
-  width: 300px;
-  padding: 10px;
+  width: 232px;
+  padding: 6px;
   background: var(--bg-sidebar);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
@@ -3653,29 +3653,30 @@ body.is-resizing-panels .workspace-splitter::before {
 .activity-settings-section {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 1px;
 }
 
 .activity-settings-heading {
-  padding: 4px 8px 8px;
+  padding: 6px 8px 4px;
   color: var(--text-muted);
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
 }
 
+/* 快速切换只留色块与名称；完整说明在悬停提示和系统设置里 */
 .activity-theme-option {
   width: 100%;
+  min-height: 34px;
   display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) 18px;
+  grid-template-columns: 22px minmax(0, 1fr) 16px;
   align-items: center;
   gap: 10px;
-  padding: 8px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-main);
+  font: inherit;
   text-align: left;
   cursor: pointer;
 }
@@ -3684,39 +3685,38 @@ body.is-resizing-panels .workspace-splitter::before {
   background: var(--bg-hover);
 }
 
+.activity-theme-option:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px var(--accent-soft);
+}
+
 .activity-theme-option.active {
   background: var(--accent-soft);
-  border-color: var(--border-subtle);
 }
 
 .activity-theme-preview {
-  width: 18px;
-  height: 18px;
-  border-radius: var(--radius-full);
-  border: 1px solid var(--border-subtle);
-}
-
-.activity-theme-copy {
-  min-width: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
 }
 
 .activity-theme-label {
-  display: block;
+  overflow: hidden;
   color: var(--text-main);
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 500;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
-.activity-theme-description {
-  display: block;
-  margin-top: 2px;
-  color: var(--text-muted);
-  font-size: 12px;
-  line-height: 1.35;
+.activity-theme-option.active .activity-theme-label {
+  font-weight: 600;
 }
 
 .activity-theme-check {
   color: var(--accent);
+  font-size: 16px;
 }
 
 .settings-menu-enter-active,
@@ -3728,6 +3728,18 @@ body.is-resizing-panels .workspace-splitter::before {
 .settings-menu-leave-to {
   opacity: 0;
   transform: translate3d(-6px, 8px, 0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-menu-enter-active,
+  .settings-menu-leave-active {
+    transition: opacity 120ms ease;
+  }
+
+  .settings-menu-enter-from,
+  .settings-menu-leave-to {
+    transform: none;
+  }
 }
 
 .explorer-panel {
@@ -4328,7 +4340,7 @@ body.is-resizing-panels .workspace-splitter::before {
   }
 
   .activity-settings-menu {
-    width: min(280px, calc(100vw - 72px));
+    width: min(232px, calc(100vw - 72px));
   }
 }
 

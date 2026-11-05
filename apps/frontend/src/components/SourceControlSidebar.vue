@@ -700,11 +700,12 @@ defineExpose({
 
 .scm-header {
   flex: 0 0 auto;
+  min-height: 52px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 8px 10px 8px 12px;
+  padding: 10px 10px 8px 14px;
   border-bottom: 0;
   background: transparent;
 }
@@ -714,18 +715,21 @@ defineExpose({
   flex: 1 1 auto;
 }
 
+/* 侧栏统一页头：页面名为主标题，项目名为副标题 */
 .scm-title {
   margin: 0;
-  color: var(--text-muted);
-  font-size: 11px;
+  color: var(--text-main);
+  font-size: 13px;
   font-weight: 600;
-  letter-spacing: 0.04em;
+  line-height: 1.35;
+  letter-spacing: 0;
 }
 
 .scm-project {
-  margin: 3px 0 0;
+  margin: 2px 0 0;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 11px;
+  line-height: 1.4;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -780,19 +784,28 @@ defineExpose({
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
-  padding: 28px 16px;
+  gap: 6px;
+  padding: 36px 20px;
   color: var(--text-muted);
   font-size: 12px;
   text-align: center;
 }
 
 .scm-empty-icon {
-  font-size: 26px;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  margin-bottom: 4px;
+  border-radius: var(--radius-full);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-resting);
+  font-size: 22px;
   color: var(--text-faint);
 }
 
 .scm-empty-state.is-warning .scm-empty-icon {
+  background: var(--warning-bg);
   color: var(--warning-fg);
 }
 
@@ -820,8 +833,7 @@ defineExpose({
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 9px 14px;
-  border-bottom: 1px solid var(--border-ghost);
+  padding: 0 10px 8px;
   font-size: 11px;
 }
 
@@ -829,39 +841,52 @@ defineExpose({
   min-width: 0;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  max-width: 58%;
-  height: 24px;
-  padding: 0 4px 0 6px;
+  gap: 6px;
+  max-width: 62%;
+  height: 30px;
+  padding: 0 4px 0 8px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  background: var(--bg-hover);
-  color: var(--accent-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  color: var(--text-main);
   font: inherit;
-  font-weight: 700;
+  font-size: 12px;
+  font-weight: 600;
   cursor: pointer;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
 }
 
-.scm-branch-trigger:hover,
-.scm-branch-trigger:focus-visible {
+.scm-branch-trigger:hover {
+  border-color: var(--border-strong);
+}
+
+.scm-branch-trigger:focus-visible,
+.scm-branch-trigger[aria-expanded="true"] {
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
   outline: none;
 }
 
 .scm-branch-trigger.is-observing {
-  border-color: color-mix(in srgb, var(--warning) 45%, transparent);
-  background: color-mix(in srgb, var(--warning) 12%, transparent);
-  color: var(--warning);
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
+  color: var(--warning-fg);
 }
 
 .scm-branch-trigger .material-symbols-rounded {
   flex: 0 0 auto;
-  font-size: 14px;
+  color: var(--accent);
+  font-size: 15px;
+}
+
+.scm-branch-trigger.is-observing .material-symbols-rounded {
+  color: inherit;
 }
 
 .scm-branch-trigger .scm-branch-caret {
-  margin-left: 1px;
-  font-size: 17px;
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 18px;
 }
 
 .scm-here-name {
@@ -886,7 +911,7 @@ defineExpose({
 .scm-branch-menu {
   position: absolute;
   z-index: 30;
-  top: calc(100% - 3px);
+  top: calc(100% - 4px);
   left: 10px;
   width: min(270px, calc(100% - 20px));
   max-height: min(360px, calc(100vh - 150px));
@@ -894,7 +919,7 @@ defineExpose({
   overflow-x: hidden;
   overflow-y: auto;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: var(--bg-card, var(--bg-sidebar));
   box-shadow: var(--shadow-overlay);
 }
@@ -1041,14 +1066,20 @@ defineExpose({
   background: var(--warning);
 }
 
-/* ---------- 树状图（面板主角） ---------- */
+/* ---------- 树状图（面板主角）：放在一张卡片里，和下方的更改列表分开 ---------- */
 
 .scm-graph {
+  --wl-surface: var(--surface-1);
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  border-bottom: 1px solid var(--border-ghost);
+  margin: 0 10px;
+  overflow: hidden;
+  border: 1px solid var(--border-ghost);
+  border-radius: var(--radius-lg);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-resting);
 }
 
 /* ---------- compose ---------- */
@@ -1057,41 +1088,48 @@ defineExpose({
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 10px 14px 12px;
-  border-top: 1px solid var(--border-ghost);
+  gap: 8px;
+  padding: 10px 10px 8px;
 }
 
 .scm-bottom {
   flex: 0 0 auto;
+  border-top: 1px solid var(--border-ghost);
 }
 
 .scm-compose-input {
   width: 100%;
-  min-height: 44px;
-  max-height: 90px;
-  padding: 7px 8px;
+  min-height: 52px;
+  max-height: 120px;
+  padding: 8px 10px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  background: var(--bg-input);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
   color: var(--text-main);
   font: inherit;
   font-size: 12px;
   line-height: 1.5;
   resize: vertical;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
 }
 
 .scm-compose-input::placeholder {
   color: var(--text-faint);
 }
 
+.scm-compose-input:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
 .scm-compose-input:focus {
   outline: none;
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .scm-compose-input:disabled {
-  background: var(--bg-card-muted, var(--bg-card));
+  background: transparent;
+  border-style: dashed;
   cursor: not-allowed;
 }
 
@@ -1107,20 +1145,21 @@ defineExpose({
 }
 
 .scm-primary-btn {
-  height: 28px;
+  height: 30px;
   padding: 0 12px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
+  gap: 6px;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: var(--accent);
   color: var(--accent-contrast);
   font: inherit;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
+  transition: background 140ms ease;
 }
 
 .scm-primary-btn.is-block {
@@ -1148,26 +1187,30 @@ defineExpose({
   display: flex;
   align-items: flex-start;
   gap: 6px;
-  margin: 8px 14px 0;
-  padding: 7px 9px;
-  border-radius: var(--radius-sm);
+  margin: 8px 10px 0;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
   font-size: 12px;
   line-height: 1.6;
 }
 
 .scm-feedback .material-symbols-rounded {
   flex: 0 0 auto;
+  margin-top: 2px;
   font-size: 15px;
 }
 
 .scm-feedback.is-success {
-  background: color-mix(in srgb, var(--success) 10%, transparent);
-  color: var(--success);
+  border-color: var(--success-border);
+  background: var(--success-bg);
+  color: var(--success-fg);
 }
 
 .scm-feedback.is-error {
-  background: color-mix(in srgb, var(--danger) 10%, transparent);
-  color: var(--danger);
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
 }
 
 /* ---------- panes ---------- */
@@ -1189,10 +1232,14 @@ defineExpose({
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 9px 14px;
-  color: var(--text-soft);
-  font-size: 12px;
-  font-weight: 700;
+  min-height: 32px;
+  margin: 10px 6px 2px;
+  padding: 0 8px 0 6px;
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
   cursor: pointer;
   outline: none;
   user-select: none;
@@ -1201,6 +1248,7 @@ defineExpose({
 .scm-pane-header:hover,
 .scm-pane-header:focus-visible {
   background: var(--bg-hover);
+  color: var(--text-main);
 }
 
 .scm-pane-title {
@@ -1211,27 +1259,27 @@ defineExpose({
 .scm-pane-caret {
   flex: 0 0 auto;
   font-size: 16px;
-  color: var(--text-muted);
+  color: var(--text-faint);
 }
 
 .scm-pane-count {
   flex: 0 0 auto;
-  min-width: 18px;
+  min-width: 20px;
   height: 18px;
-  padding: 0 5px;
+  padding: 0 6px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-full);
   background: var(--bg-hover);
   color: var(--text-muted);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 
 .scm-pane-count.is-active {
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  background: var(--accent-soft);
   color: var(--accent-strong);
 }
 
@@ -1240,12 +1288,12 @@ defineExpose({
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
-  padding: 2px 8px 8px;
+  padding: 0 6px 8px;
 }
 
 .scm-inline-empty {
   margin: 0;
-  padding: 10px 6px;
+  padding: 8px 8px 12px;
   color: var(--text-faint);
   font-size: 12px;
   line-height: 1.6;
@@ -1256,23 +1304,30 @@ defineExpose({
 .scm-change-row {
   width: 100%;
   max-width: 100%;
+  min-height: 30px;
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
-  padding: 7px 6px;
+  padding: 4px 8px;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: transparent;
   color: inherit;
   cursor: pointer;
   text-align: left;
   font: inherit;
   overflow: hidden;
+  transition: background 120ms ease;
 }
 
 .scm-change-row:hover:not(:disabled) {
   background: var(--bg-hover);
+}
+
+.scm-change-row:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px var(--accent-soft);
 }
 
 .scm-row-icon {
@@ -1291,8 +1346,9 @@ defineExpose({
 .scm-row-name {
   min-width: 0;
   max-width: 100%;
+  flex: 0 1 auto;
   color: var(--text-main);
-  font-size: 12px;
+  font-size: 13px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1301,45 +1357,48 @@ defineExpose({
 .scm-row-dir {
   min-width: 0;
   max-width: 100%;
-  flex: 1 1 auto;
-  color: var(--text-muted);
+  flex: 1 1 0;
+  color: var(--text-faint);
   font-size: 11px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-/* 状态改为中文短标签，写作者不需要记 Git 字母 */
+/* 状态用中文短标签（写作者不需要记 Git 字母），做成「圆点 + 彩色文字」，整列不再是一面色块 */
 .scm-status-chip {
   flex: 0 0 auto;
-  height: 18px;
-  padding: 0 6px;
   display: inline-flex;
   align-items: center;
-  border-radius: var(--radius-sm);
+  gap: 5px;
+  color: var(--text-muted);
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 500;
   white-space: nowrap;
 }
 
+.scm-status-chip::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: currentColor;
+}
+
 .scm-status-chip.is-added {
-  background: color-mix(in srgb, var(--success) 14%, transparent);
-  color: var(--success);
+  color: var(--success-fg);
 }
 
 .scm-status-chip.is-modified {
-  background: color-mix(in srgb, var(--warning) 16%, transparent);
-  color: var(--warning);
+  color: var(--warning-fg);
 }
 
 .scm-status-chip.is-deleted {
-  background: color-mix(in srgb, var(--danger) 12%, transparent);
-  color: var(--danger);
+  color: var(--danger-fg);
 }
 
 .scm-status-chip.is-renamed {
-  background: color-mix(in srgb, var(--info) 12%, transparent);
-  color: var(--info);
+  color: var(--info-fg);
 }
 
 /* ---------- footer ---------- */
@@ -1349,8 +1408,7 @@ defineExpose({
   display: flex;
   align-items: center;
   gap: 5px;
-  padding: 7px 14px;
-  border-top: 1px solid var(--border-ghost);
+  padding: 0 14px 10px;
   color: var(--text-faint);
   font-size: 11px;
 }

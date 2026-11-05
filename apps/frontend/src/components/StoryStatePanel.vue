@@ -6,7 +6,10 @@
     <header class="ssp-header">
       <div class="ssp-title">
         <span class="material-symbols-rounded ssp-title-icon">{{ relationshipOnly ? "hub" : "timeline" }}</span>
-        <span>{{ relationshipOnly ? "知识图谱" : "项目状态" }}</span>
+        <span class="ssp-title-text">
+          <span class="ssp-title-main">{{ relationshipOnly ? "知识图谱" : "项目状态" }}</span>
+          <small v-if="relationshipOnly && wikiHeaderMeta" class="ssp-title-meta" :title="wikiHeaderTooltip">{{ wikiHeaderMeta }}</small>
+        </span>
       </div>
       <div class="ssp-header-actions">
         <button
@@ -18,6 +21,7 @@
           @click="runWikiAgentWorkflow('generate')"
         >
           <span class="material-symbols-rounded">auto_awesome</span>
+          <span class="ssp-action-label">Agent 生成</span>
         </button>
         <button
           v-if="relationshipOnly"
@@ -28,6 +32,7 @@
           @click="runWikiAgentWorkflow('update')"
         >
           <span class="material-symbols-rounded">published_with_changes</span>
+          <span class="ssp-action-label">增量更新</span>
         </button>
         <button
           v-if="relationshipOnly"
@@ -38,7 +43,9 @@
           @click="runWikiAgentWorkflow('review')"
         >
           <span class="material-symbols-rounded">fact_check</span>
+          <span class="ssp-action-label">审阅</span>
         </button>
+        <span v-if="relationshipOnly" class="ssp-header-divider" aria-hidden="true"></span>
         <button
           class="ssp-refresh"
           type="button"
@@ -66,9 +73,13 @@
     </nav>
 
     <div class="ssp-body">
-      <div v-if="errorMessage || wikiErrorMessage" class="ssp-empty">⚠ {{ errorMessage || wikiErrorMessage }}</div>
+      <div v-if="errorMessage || (!relationshipOnly && wikiErrorMessage)" class="ssp-empty">⚠ {{ errorMessage || wikiErrorMessage }}</div>
 
-      <div v-else-if="relationshipOnly" class="ssp-wiki-workspace">
+      <div
+        v-else-if="relationshipOnly"
+        class="ssp-wiki-workspace"
+        :class="{ 'is-inspector-open': wikiInspectorOpen }"
+      >
         <section class="ssp-wiki-toolbar">
           <nav class="ssp-wiki-category-tabs" role="tablist" aria-label="知识图谱分类">
             <button
@@ -104,41 +115,47 @@
               <span class="material-symbols-rounded">close</span>
             </button>
           </form>
-          <div class="ssp-wiki-toolbar-stats">
-            <span>当前范围节点 {{ wikiGraphStats.nodeCount }}</span>
-            <span>当前返回 {{ wikiGraphStats.returnedNodeCount }}</span>
-            <span>已确认关系 {{ wikiGraphStats.confirmedEdgeCount }}</span>
-            <span>待确认边 {{ wikiGraphStats.reviewRequiredEdgeCount }}</span>
-            <span>无已确认关系节点 {{ wikiGraphStats.isolatedNodeCount }}</span>
-            <span v-if="wikiGraphStats.notLoadedNodeCount > 0">尚未加载 {{ wikiGraphStats.notLoadedNodeCount }}</span>
-            <button
-              v-if="wikiGraphHasMore"
-              class="ssp-wiki-load-more"
-              type="button"
-              :disabled="wikiGraphLoading"
-              @click="loadMoreWikiGraph"
-            >
-              加载更多
-            </button>
+          <div class="ssp-wiki-toolbar-actions">
             <button
               class="ssp-wiki-review-alert"
+              :class="{ 'has-pending': wikiNeedsReviewCount > 0, active: wikiReviewOpen }"
               type="button"
+              title="查看并处理待确认的关系"
               @click="toggleWikiReviewQueue"
             >
-              关系待确认 {{ wikiNeedsReviewCount }}
+              <span class="material-symbols-rounded">pending_actions</span>
+              <span class="ssp-wiki-review-alert-label">关系待确认</span>
+              <strong class="ssp-wiki-review-alert-count">{{ wikiNeedsReviewCount }}</strong>
+            </button>
+            <button
+              class="ssp-wiki-inspector-toggle"
+              :class="{ active: wikiInspectorOpen }"
+              type="button"
+              :title="wikiInspectorOpen ? '收起详情' : '展开详情'"
+              @click="wikiInspectorOpen = !wikiInspectorOpen"
+            >
+              <span class="material-symbols-rounded">right_panel_open</span>
             </button>
           </div>
         </section>
 
         <div v-if="wikiAgentStatus" class="ssp-wiki-agent-status" :class="wikiAgentTone">
-          {{ wikiAgentStatus }}
+          <span class="material-symbols-rounded">{{ wikiAgentTone === 'warning' || wikiAgentTone === 'error' ? 'error' : 'info' }}</span>
+          <span class="ssp-wiki-agent-status-text">{{ wikiAgentStatus }}</span>
+          <button class="ssp-wiki-agent-status-close" type="button" title="关闭提示" @click="wikiAgentStatus = ''">
+            <span class="material-symbols-rounded">close</span>
+          </button>
         </div>
 
         <main class="ssp-wiki-main">
-          <section ref="wikiGraphPanelRef" class="ssp-wiki-graph-panel">
-            <div v-if="wikiLoading || wikiGraphLoading" class="ssp-wiki-graph-empty">
+          <section
+            ref="wikiGraphPanelRef"
+            class="ssp-wiki-graph-panel"
+            :class="{ 'is-busy': wikiGraphLoading && wikiGraphNodes.length > 0 }"
+          >
+            <div v-if="(wikiLoading || wikiGraphLoading) && !wikiGraphNodes.length" class="ssp-wiki-graph-empty">
               <span class="material-symbols-rounded is-spinning">progress_activity</span>
-              <p>正在生成/读取知识图谱...</p>
+              <p>正在读取知识图谱…</p>
             </div>
             <template v-else-if="wikiGraphNodes.length">
               <svg
@@ -152,25 +169,43 @@
                 @pointermove="moveWikiGraphPointer"
                 @pointerup="endWikiGraphPointer"
                 @pointercancel="endWikiGraphPointer"
-                @click.self="clearWikiGraphSelection"
+                @click.self="handleWikiGraphBackgroundClick"
               >
                 <g :transform="`translate(${wikiGraphPan.x} ${wikiGraphPan.y}) scale(${wikiGraphZoom})`">
-                  <path
+                  <g
+                    v-for="caption in wikiLayoutCaptions"
+                    :key="`caption-${caption.band}`"
+                    class="ssp-wiki-band-caption"
+                    :transform="`translate(${caption.x} ${caption.y})`"
+                  >
+                    <text x="0" y="0" dominant-baseline="central">{{ caption.band === 'spine' ? '章节顺序' : '独立条目' }} · {{ caption.count }}</text>
+                    <line :x1="78 + String(caption.count).length * 7" y1="0" :x2="caption.width" y2="0" />
+                    <title>{{ caption.band === 'spine' ? '章节按叙事顺序排列' : '在当前视图中没有连线的条目' }}</title>
+                  </g>
+                  <g
                     v-for="edge in wikiGraphEdges"
                     :key="edge.id"
-                    class="ssp-wiki-edge"
-                    :class="[`edge-${edge.type}`, {
-                      active: edge.active,
-                      dimmed: isWikiEdgeDimmed(edge),
-                      'edge-co-occurrence': edge.coOccurrence,
-                      'edge-real-relation': edge.realRelation,
-                      'edge-review-required': edge.reviewStatus === 'review_required',
-                    }]"
-                    :d="edge.pathD"
+                    class="ssp-wiki-edge-group"
+                    :class="{ dimmed: isWikiEdgeDimmed(edge), hovered: hoveredWikiEdgeId === edge.id }"
+                    :style="{ '--wiki-edge-width': edge.strokeWidth }"
                     @click.stop="selectWikiEdge(edge.id)"
                     @pointerenter="hoveredWikiEdgeId = edge.id"
                     @pointerleave="hoveredWikiEdgeId = ''"
-                  />
+                  >
+                    <path
+                      class="ssp-wiki-edge"
+                      :class="[`edge-${edge.type}`, {
+                        active: edge.active,
+                        dimmed: isWikiEdgeDimmed(edge),
+                        'edge-co-occurrence': edge.coOccurrence,
+                        'edge-real-relation': edge.realRelation,
+                        'edge-review-required': edge.reviewStatus === 'review_required',
+                      }]"
+                      :d="edge.pathD"
+                    />
+                    <path v-if="edge.arrowD" class="ssp-wiki-edge-arrow" :d="edge.arrowD" />
+                    <path class="ssp-wiki-edge-hit" :d="edge.pathD" />
+                  </g>
                   <g
                     v-for="node in wikiGraphNodes"
                     :key="node.id"
@@ -178,8 +213,9 @@
                     :class="[
                       `node-${node.type}`,
                       `tone-${node.tone}`,
+                      `band-${node.band}`,
                       {
-                        active: isWikiNodeSelectable(node) && (selectedWikiNodeId === node.id || (!!node.entryId && selectedWikiEntry?.id === node.entryId)),
+                        active: isWikiNodeSelectable(node) && selectedWikiNodeId === node.id,
                         dimmed: isWikiNodeDimmed(node),
                         'is-neighbor': node.neighbor,
                         'is-synthetic': node.synthetic,
@@ -193,31 +229,76 @@
                     @pointerleave="hoveredWikiNodeId = ''"
                     @click.stop="selectWikiNode(node)"
                   >
-                    <circle class="ssp-wiki-node-halo" :r="node.radius + 6" />
+                    <circle class="ssp-wiki-node-halo" :r="node.radius + 5" />
                     <circle class="ssp-wiki-node-dot" :r="node.radius" />
-                    <text :y="node.radius + 14" text-anchor="middle">{{ node.shortLabel }}</text>
+                    <text
+                      class="ssp-wiki-node-glyph"
+                      text-anchor="middle"
+                      dominant-baseline="central"
+                      :style="{ fontSize: `${Math.round(node.radius * 1.02)}px` }"
+                    >{{ node.glyph }}</text>
+                    <circle
+                      v-if="node.needsReview"
+                      class="ssp-wiki-node-badge"
+                      :cx="node.radius * 0.72"
+                      :cy="-node.radius * 0.72"
+                      r="4"
+                    />
+                    <text
+                      class="ssp-wiki-node-label"
+                      :x="wikiNodeLabelLayout[node.id]?.dx ?? 0"
+                      :y="wikiNodeLabelLayout[node.id]?.dy ?? node.radius + 12"
+                      :text-anchor="wikiNodeLabelLayout[node.id]?.anchor ?? 'middle'"
+                      dominant-baseline="central"
+                    >{{ node.shortLabel }}</text>
                     <title>{{ node.label }}</title>
                   </g>
                   <g
                     v-for="edge in visibleWikiGraphLabelEdges"
                     :key="`${edge.id}-label`"
                     class="ssp-wiki-edge-label"
-                    :class="{ active: edge.active }"
+                    :class="{
+                      active: edge.active,
+                      hovered: hoveredWikiEdgeId === edge.id,
+                      'is-review': edge.reviewStatus === 'review_required',
+                    }"
                     :transform="`translate(${edge.labelX} ${edge.labelY})`"
                     @click.stop="selectWikiEdge(edge.id)"
+                    @pointerenter="hoveredWikiEdgeId = edge.id"
+                    @pointerleave="hoveredWikiEdgeId = ''"
                   >
-                    <rect :x="-edge.labelWidth / 2" y="-9" :width="edge.labelWidth" height="18" rx="9" />
-                    <text text-anchor="middle" dominant-baseline="middle">{{ edge.displayLabel }}</text>
+                    <rect
+                      :x="-edge.labelWidth / 2"
+                      :y="-9 * wikiLabelScale"
+                      :width="edge.labelWidth"
+                      :height="18 * wikiLabelScale"
+                      :rx="9 * wikiLabelScale"
+                    />
+                    <text text-anchor="middle" dominant-baseline="central">{{ edge.displayLabel }}</text>
                   </g>
                 </g>
               </svg>
               <div v-if="wikiGraphHasMore" class="ssp-wiki-graph-note">
-                已加载 {{ wikiGraphStats.returnedNodeCount }} / {{ wikiGraphStats.nodeCount }} 个节点。
-                <button type="button" @click="loadMoreWikiGraph">继续加载</button>
+                <span>已显示 {{ wikiGraphStats.returnedNodeCount }} / {{ wikiGraphStats.nodeCount }} 个节点</span>
+                <button type="button" :disabled="wikiGraphLoading" @click="loadMoreWikiGraph">继续加载</button>
               </div>
-              <div v-if="wikiGraphLegend.length" class="ssp-wiki-graph-legend">
+              <div v-if="wikiErrorMessage" class="ssp-wiki-graph-error">
+                <span class="material-symbols-rounded">error</span>
+                <span>{{ wikiErrorMessage }}</span>
+              </div>
+              <div v-if="wikiGraphLegend.length || wikiEdgeLegend.length" class="ssp-wiki-graph-legend">
                 <span v-for="item in wikiGraphLegend" :key="item.key" class="ssp-wiki-legend-item">
                   <i :class="`tone-${item.key}`"></i>{{ item.label }}
+                </span>
+                <span v-if="wikiGraphLegend.length && wikiEdgeLegend.length" class="ssp-wiki-legend-divider" aria-hidden="true"></span>
+                <span
+                  v-for="item in wikiEdgeLegend"
+                  :key="item.key"
+                  class="ssp-wiki-legend-item ssp-wiki-legend-edge"
+                  :class="`edge-${item.key}`"
+                >
+                  <svg viewBox="0 0 18 6" aria-hidden="true"><line x1="1" y1="3" x2="17" y2="3" /></svg>
+                  <span>{{ item.count === null ? item.label : `${item.label} ${item.count}` }}</span>
                 </span>
               </div>
               <div class="ssp-wiki-graph-hud">
@@ -228,39 +309,57 @@
                 <button class="ssp-hud-btn" type="button" title="放大" @click="zoomWikiGraphStep(1)">
                   <span class="material-symbols-rounded">add</span>
                 </button>
-                <button class="ssp-hud-btn" type="button" title="适配视图" @click="resetWikiGraphView">
+                <span class="ssp-hud-divider" aria-hidden="true"></span>
+                <button class="ssp-hud-btn" type="button" title="重新布局并适配视图" @click="resetWikiGraphView">
                   <span class="material-symbols-rounded">fit_screen</span>
                 </button>
               </div>
             </template>
-            <div v-else class="ssp-wiki-graph-empty">
-              <span class="material-symbols-rounded">hub</span>
+            <div v-else class="ssp-wiki-graph-empty" :class="{ 'is-error': !!wikiErrorMessage }">
+              <span class="material-symbols-rounded">{{ wikiErrorMessage ? 'cloud_off' : 'hub' }}</span>
               <p>{{ wikiErrorMessage || '暂无知识图谱数据' }}</p>
-              <small v-if="!wikiErrorMessage">点击右上角 ✦ 让 Agent 深度生成，或保存正文后自动同步。</small>
+              <small v-if="!wikiErrorMessage">点击右上角「Agent 生成」让 Agent 深度整理，或保存正文后自动同步。</small>
+              <button v-else class="ssp-wiki-empty-action" type="button" @click="refreshPanel">
+                <span class="material-symbols-rounded">refresh</span>重试
+              </button>
             </div>
           </section>
 
-          <aside class="ssp-wiki-inspector">
-            <header class="ssp-wiki-inspector-head">
-              <div class="ssp-wiki-project">
-                <span class="material-symbols-rounded">travel_explore</span>
-                <strong>{{ wikiData?.projectName || "Storydex" }}</strong>
-              </div>
-              <div class="ssp-wiki-run-meta">
-                <span>{{ wikiGenerationModeLabel }}</span>
-                <span>{{ wikiUpdatedAtLabel }}</span>
-              </div>
-              <p v-if="wikiProjectSummary" class="ssp-wiki-project-summary">{{ wikiProjectSummary }}</p>
-            </header>
-
+          <aside ref="wikiInspectorRef" class="ssp-wiki-inspector" :class="{ 'is-open': wikiInspectorOpen }">
+            <button class="ssp-wiki-inspector-close" type="button" title="收起详情" @click="wikiInspectorOpen = false">
+              <span class="material-symbols-rounded">close</span>
+            </button>
             <div class="ssp-wiki-inspector-body">
               <article v-if="selectedWikiRelationEdge" class="ssp-wiki-inspector-detail">
-                <div class="ssp-wiki-entry-kicker">{{ selectedWikiRelationEdge.coOccurrence ? "章节共现" : "知识关系" }}</div>
+                <div class="ssp-wiki-detail-kicker-row">
+                  <span class="ssp-wiki-entry-kicker">
+                    {{ selectedWikiRelationEdge.coOccurrence ? "章节共现" : selectedWikiRelationEdge.structural ? "章节顺序" : "知识关系" }}
+                  </span>
+                  <span
+                    v-if="!selectedWikiRelationEdge.structural"
+                    class="ssp-wiki-status-chip"
+                    :class="`status-${selectedWikiRelationEdge.reviewStatus}`"
+                  >{{ wikiReviewStatusLabel(selectedWikiRelationEdge.reviewStatus) }}</span>
+                </div>
                 <h3>{{ selectedWikiRelationEdge.label }}</h3>
+                <p
+                  v-if="selectedWikiRelationEdge.semanticsLabel && selectedWikiRelationEdge.semanticsLabel !== selectedWikiRelationEdge.label"
+                  class="ssp-wiki-detail-subtitle"
+                >{{ selectedWikiRelationEdge.semanticsLabel }}</p>
                 <div class="ssp-wiki-relation-endpoints">
-                  <span>{{ selectedWikiRelationEdge.source.label }}</span>
-                  <span class="material-symbols-rounded">sync_alt</span>
-                  <span>{{ selectedWikiRelationEdge.target.label }}</span>
+                  <button
+                    type="button"
+                    class="ssp-wiki-endpoint"
+                    :class="`tone-${selectedWikiRelationEdge.source.tone}`"
+                    @click="selectWikiNode(selectedWikiRelationEdge.source)"
+                  ><i></i>{{ selectedWikiRelationEdge.source.label }}</button>
+                  <span class="material-symbols-rounded">{{ selectedWikiRelationEdge.realRelation || selectedWikiRelationEdge.structural ? 'arrow_forward' : 'sync_alt' }}</span>
+                  <button
+                    type="button"
+                    class="ssp-wiki-endpoint"
+                    :class="`tone-${selectedWikiRelationEdge.target.tone}`"
+                    @click="selectWikiNode(selectedWikiRelationEdge.target)"
+                  ><i></i>{{ selectedWikiRelationEdge.target.label }}</button>
                 </div>
                 <div v-if="selectedWikiRelationEdge.level !== null" class="ssp-wiki-relation-level">
                   <span>强度 {{ selectedWikiRelationEdge.level }}</span>
@@ -275,19 +374,19 @@
                   此连线仅表示两角色在同一章节被共同提及，不代表既定关系。
                   <span v-if="selectedWikiRelationEdge.evidence" class="ssp-wiki-evidence-note">共现章节：{{ selectedWikiRelationEdge.evidence }}</span>
                 </p>
-                <p v-else>{{ selectedWikiRelationEdge.evidence || "该关系来自知识图谱，可在下方相关条目查看更多上下文。" }}</p>
-                <div class="ssp-wiki-audit-grid">
-                  <span>审核</span><strong>{{ wikiReviewStatusLabel(selectedWikiRelationEdge.reviewStatus) }}</strong>
-                </div>
-                <small>引文匹配只说明原文存在；关系含义、称谓与推断仍需结合上下文核对。</small>
+                <p v-else-if="selectedWikiRelationEdge.structural">章节按叙事顺序自动连接。</p>
+                <p v-else-if="!selectedWikiRelationEdge.sourceRefs.length">{{ selectedWikiRelationEdge.evidence || "该关系来自知识图谱，暂未附带原文引文。" }}</p>
                 <div v-if="selectedWikiRelationEdge.sourceRefs.length" class="ssp-wiki-source-ref-list">
+                  <div class="ssp-wiki-section-label">原文证据</div>
                   <div v-for="(sourceRef, sourceIndex) in selectedWikiRelationEdge.sourceRefs" :key="`${sourceRef.path}-${sourceIndex}`" class="ssp-wiki-source-ref">
-                    <button type="button" class="ssp-wiki-source-link" @click="openWikiSource(sourceRef.path)">
-                      {{ sourceRef.path }}
-                    </button>
                     <blockquote>{{ sourceRef.quote }}</blockquote>
+                    <button type="button" class="ssp-wiki-source-link" @click="openWikiSource(sourceRef.path)">
+                      <span class="material-symbols-rounded">description</span>
+                      <span>{{ sourceRef.path }}</span>
+                    </button>
                   </div>
                 </div>
+                <small v-if="!selectedWikiRelationEdge.structural">引文匹配只说明原文存在；关系含义、称谓与推断仍需结合上下文核对。</small>
                 <div v-if="selectedWikiReviewCandidate" class="ssp-wiki-review-inline-actions">
                   <button
                     class="ssp-btn accept"
@@ -305,33 +404,68 @@
               </article>
 
               <article v-else-if="selectedWikiNode || selectedWikiDetailEntry" class="ssp-wiki-inspector-detail">
-                <div class="ssp-wiki-entry-kicker">{{ selectedWikiDetailKicker }}</div>
-                <h3>{{ selectedWikiNode?.label || selectedWikiDetailEntry?.title }}</h3>
-                <div
-                  v-if="selectedWikiDetailEntry?.needsReview || selectedWikiSourceLabel"
-                  class="ssp-wiki-entry-meta"
-                >
+                <div class="ssp-wiki-detail-kicker-row">
+                  <span
+                    class="ssp-wiki-entry-kicker"
+                    :class="`tone-${selectedWikiNode?.tone || (selectedWikiDetailEntry ? wikiEntryTone(selectedWikiDetailEntry) : 'misc')}`"
+                  ><i></i>{{ selectedWikiDetailKicker }}</span>
                   <span v-if="selectedWikiDetailEntry?.needsReview" class="ssp-wiki-review-chip">需要人工确认</span>
-                  <span v-if="selectedWikiSourceLabel" class="ssp-wiki-source-chip">{{ selectedWikiSourceLabel }}</span>
                 </div>
-                <p>{{ selectedWikiNode?.summary || selectedWikiDetailEntry?.summary || "暂无摘要。" }}</p>
-                <ul v-if="selectedWikiDetailEntry?.details?.length">
-                  <li v-for="(detail, index) in selectedWikiDetailEntry.details.slice(0, 18)" :key="index">{{ detail }}</li>
+                <h3>{{ selectedWikiNode?.label || selectedWikiDetailEntry?.title }}</h3>
+                <p>{{ selectedWikiDetailSummary || "暂无摘要。" }}</p>
+                <ul v-if="selectedWikiDetailLines.length" class="ssp-wiki-detail-lines">
+                  <li v-for="(detail, index) in selectedWikiDetailLines" :key="index">{{ detail }}</li>
                 </ul>
-                <div v-if="selectedWikiDetailEntry?.sourcePaths?.length" class="ssp-wiki-sources">
-                  <span v-for="source in selectedWikiDetailEntry.sourcePaths.slice(0, 8)" :key="source">{{ source }}</span>
-                </div>
+                <section v-if="wikiFocusRelations.length" class="ssp-wiki-detail-section">
+                  <div class="ssp-wiki-section-label">关系 · {{ wikiFocusRelations.length }}</div>
+                  <button
+                    v-for="relation in wikiFocusRelations"
+                    :key="relation.id"
+                    type="button"
+                    class="ssp-wiki-relation-row"
+                    :class="{ 'is-review': relation.needsReview }"
+                    @click="selectWikiEdge(relation.id)"
+                  >
+                    <span class="material-symbols-rounded">{{ relation.outgoing ? 'arrow_forward' : 'arrow_back' }}</span>
+                    <span class="ssp-wiki-relation-other" :class="`tone-${relation.otherTone}`"><i></i>{{ relation.otherLabel }}</span>
+                    <span class="ssp-wiki-relation-predicate">
+                      {{ relation.category }}<small v-if="relation.predicate && relation.predicate !== relation.category"> · {{ relation.predicate }}</small>
+                    </span>
+                    <span v-if="relation.needsReview" class="ssp-wiki-status-chip status-review_required">待确认</span>
+                  </button>
+                </section>
+                <section v-if="selectedWikiDetailEntry?.sourcePaths?.length" class="ssp-wiki-detail-section">
+                  <div class="ssp-wiki-section-label">来源</div>
+                  <div class="ssp-wiki-sources">
+                    <button
+                      v-for="source in selectedWikiDetailEntry.sourcePaths.slice(0, 8)"
+                      :key="source"
+                      type="button"
+                      class="ssp-wiki-source-chip"
+                      :title="`打开 ${source}`"
+                      @click="openWikiSource(source)"
+                    >
+                      <span class="material-symbols-rounded">description</span>
+                      <span>{{ source }}</span>
+                    </button>
+                  </div>
+                </section>
               </article>
 
-              <article v-else class="ssp-wiki-inspector-detail is-empty">
-                <div class="ssp-wiki-entry-kicker">{{ selectedWikiCategoryLabel }}</div>
-                <h3>{{ wikiInspectorEmptyTitle }}</h3>
-                <p>{{ wikiInspectorEmptyHint }}</p>
+              <article v-else class="ssp-wiki-inspector-detail is-overview">
+                <div class="ssp-wiki-detail-kicker-row">
+                  <span class="ssp-wiki-entry-kicker">
+                    <span class="material-symbols-rounded">travel_explore</span>{{ wikiData?.projectName ? "项目概览" : wikiInspectorEmptyTitle }}
+                  </span>
+                </div>
+                <h3>{{ wikiData?.projectName || wikiInspectorEmptyTitle }}</h3>
+                <p v-if="wikiProjectSummary">{{ wikiProjectSummary }}</p>
+                <p class="ssp-wiki-overview-hint">{{ wikiInspectorEmptyHint }}</p>
               </article>
 
               <section v-if="wikiReviewOpen" class="ssp-wiki-review-queue">
                 <div class="ssp-wiki-inspector-heading">
-                  关系待确认 · {{ wikiReviewTotal }}
+                  <span>关系待确认 · {{ wikiReviewTotal }}</span>
                   <button type="button" class="ssp-wiki-review-refresh" @click="loadWikiReviewQueue">刷新</button>
                 </div>
                 <div v-if="wikiReviewLoading" class="ssp-wiki-review-empty">正在读取审核队列…</div>
@@ -340,50 +474,53 @@
                 <article v-for="candidate in wikiReviewQueue" :key="candidate.id" class="ssp-wiki-review-card">
                   <div class="ssp-wiki-review-card-title">
                     <strong>{{ wikiEndpointLabel(candidate.subjectId, candidate.subject) }}</strong>
-                    <span>→</span>
+                    <span class="material-symbols-rounded">arrow_forward</span>
                     <strong>{{ wikiEndpointLabel(candidate.objectId, candidate.object) }}</strong>
+                    <span class="ssp-wiki-status-chip status-review_required">{{ wikiReviewStatusLabel(candidate.reviewStatus) }}</span>
+                  </div>
+                  <p v-if="candidate.reviewReason">{{ candidate.reviewReason }}</p>
+                  <div v-for="(sourceRef, sourceIndex) in (candidate.sourceRefs || [])" :key="`${candidate.id}-source-${sourceIndex}`" class="ssp-wiki-source-ref">
+                    <blockquote>{{ sourceRef.quote }}</blockquote>
+                    <button type="button" class="ssp-wiki-source-link" @click="openWikiSource(sourceRef.path)">
+                      <span class="material-symbols-rounded">description</span>
+                      <span>打开来源：{{ sourceRef.path }}</span>
+                    </button>
                   </div>
                   <label class="ssp-wiki-review-field">
                     谓词
                     <input v-model="wikiReviewDraft(candidate).predicate" type="text" />
                   </label>
-                  <label class="ssp-wiki-review-field">
-                    主体
-                    <select v-model="wikiReviewDraft(candidate).subjectId">
-                      <option v-for="node in wikiEndpointOptions(candidate)" :key="node.id" :value="node.id">{{ node.label }}</option>
-                    </select>
-                  </label>
-                  <label class="ssp-wiki-review-field">
-                    客体
-                    <select v-model="wikiReviewDraft(candidate).objectId">
-                      <option v-for="node in wikiEndpointOptions(candidate)" :key="node.id" :value="node.id">{{ node.label }}</option>
-                    </select>
-                  </label>
-                  <p v-if="candidate.reviewReason">{{ candidate.reviewReason }}</p>
+                  <div class="ssp-wiki-review-field-row">
+                    <label class="ssp-wiki-review-field">
+                      主体
+                      <select v-model="wikiReviewDraft(candidate).subjectId">
+                        <option v-for="node in wikiEndpointOptions(candidate)" :key="node.id" :value="node.id">{{ node.label }}</option>
+                      </select>
+                    </label>
+                    <label class="ssp-wiki-review-field">
+                      客体
+                      <select v-model="wikiReviewDraft(candidate).objectId">
+                        <option v-for="node in wikiEndpointOptions(candidate)" :key="node.id" :value="node.id">{{ node.label }}</option>
+                      </select>
+                    </label>
+                  </div>
                   <small>引文匹配只说明原文存在。请核对关系双方、称谓和推断是否成立；确认结果在图谱重建后保留。</small>
-                  <div class="ssp-wiki-audit-grid compact">
-                    <span>审核</span><strong>{{ wikiReviewStatusLabel(candidate.reviewStatus) }}</strong>
+                  <div class="ssp-wiki-review-reject">
+                    <label class="ssp-wiki-review-field">
+                      驳回原因
+                      <select v-model="wikiReviewDraft(candidate).rejectReason">
+                        <option value="incorrect">关系错误</option>
+                        <option value="ambiguous">证据有歧义</option>
+                        <option value="duplicate">重复关系</option>
+                        <option value="not_canon">未采纳的设定</option>
+                        <option value="other">其他原因</option>
+                      </select>
+                    </label>
+                    <label class="ssp-wiki-review-field">
+                      驳回备注
+                      <textarea v-model="wikiReviewDraft(candidate).rejectNote" rows="2" />
+                    </label>
                   </div>
-                  <div v-for="(sourceRef, sourceIndex) in (candidate.sourceRefs || [])" :key="`${candidate.id}-source-${sourceIndex}`" class="ssp-wiki-source-ref">
-                    <button type="button" class="ssp-wiki-source-link" @click="openWikiSource(sourceRef.path)">
-                      打开来源：{{ sourceRef.path }}
-                    </button>
-                    <blockquote>{{ sourceRef.quote }}</blockquote>
-                  </div>
-                  <label class="ssp-wiki-review-field">
-                    驳回原因
-                    <select v-model="wikiReviewDraft(candidate).rejectReason">
-                      <option value="incorrect">关系错误</option>
-                      <option value="ambiguous">证据有歧义</option>
-                      <option value="duplicate">重复关系</option>
-                      <option value="not_canon">未采纳的设定</option>
-                      <option value="other">其他原因</option>
-                    </select>
-                  </label>
-                  <label class="ssp-wiki-review-field">
-                    驳回备注
-                    <textarea v-model="wikiReviewDraft(candidate).rejectNote" rows="2" />
-                  </label>
                   <div class="ssp-action-row">
                     <button class="ssp-btn accept" type="button" :disabled="wikiReviewActionId === candidate.id" @click="confirmWikiCandidate(candidate)">确认</button>
                     <button class="ssp-btn dismiss" type="button" :disabled="wikiReviewActionId === candidate.id" @click="rejectWikiCandidate(candidate)">驳回</button>
@@ -393,17 +530,22 @@
               </section>
 
               <section class="ssp-wiki-entry-list">
-                <div class="ssp-wiki-inspector-heading">相关条目 · {{ visibleWikiEntries.length }}</div>
+                <div class="ssp-wiki-inspector-heading">
+                  <span>{{ wikiGraphSearchQuery ? "搜索结果" : `${selectedWikiCategoryLabel}条目` }} · {{ visibleWikiEntries.length }}</span>
+                </div>
                 <button
                   v-for="entry in visibleWikiEntries"
                   :key="entry.id"
                   class="ssp-wiki-entry-button"
-                  :class="{ active: selectedWikiEntry?.id === entry.id }"
+                  :class="[`tone-${wikiEntryTone(entry)}`, { active: wikiActiveEntryId === entry.id }]"
                   type="button"
                   @click="selectWikiEntry(entry.id)"
                 >
-                  <strong>{{ entry.title }}</strong>
-                  <span>{{ entry.summary }}</span>
+                  <i class="ssp-wiki-entry-dot" aria-hidden="true"></i>
+                  <span class="ssp-wiki-entry-text">
+                    <strong>{{ entry.title }}</strong>
+                    <span>{{ cleanWikiSummary(entry.summary, entry.title) }}</span>
+                  </span>
                   <small v-if="entry.needsReview" class="ssp-wiki-review-chip">需要人工确认</small>
                 </button>
               </section>
@@ -677,14 +819,26 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { apiClient, describeTransportError, unwrapEnvelope } from "@/api/client";
 import { useStoryStore } from "@/stores/story";
 import { useAgentStore } from "@/stores/agent";
 import { useUiStore } from "@/stores/ui";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type { ApiEnvelope } from "@/types/api";
-import { computeForceLayout, type ForceEdge, type ForceNode } from "@/utils/forceLayout";
+import {
+  buildWikiEdgeGeometry,
+  computeWikiGraphLayout,
+  estimateWikiTextWidth,
+  placeWikiEdgeLabels,
+  placeWikiNodeLabels,
+  pointOnWikiEdge,
+  wikiEdgeBendOffsets,
+  type WikiEdgeGeometry,
+  type WikiLabelRect,
+  type WikiLayoutBand,
+  type WikiLayoutCaption,
+} from "@/utils/wikiGraphLayout";
 
 type StoryStateTab = "changes" | "outline" | "conflicts" | "relations" | "foreshadow" | "timeline";
 
@@ -853,6 +1007,7 @@ interface StoryWikiNodePayload {
   needsReview?: boolean;
   reviewStatus?: string;
   knowledgeStatus?: string;
+  narrativeOrder?: number;
 }
 
 interface StoryWikiEdgePayload {
@@ -1008,6 +1163,10 @@ interface WikiGraphNode {
   y: number;
   radius: number;
   shortLabel: string;
+  glyph: string;
+  band: WikiLayoutBand;
+  narrativeOrder: number;
+  labelWidth: number;
 }
 
 interface WikiGraphEdge {
@@ -1036,6 +1195,10 @@ interface WikiGraphEdge {
   provenance: Record<string, unknown>;
   traceId: string;
   fingerprint: string;
+  arrowD: string;
+  geometry: WikiEdgeGeometry;
+  structural: boolean;
+  strokeWidth: number;
 }
 
 const loading = ref(false);
@@ -1072,8 +1235,16 @@ const wikiGraphZoom = ref(1);
 const wikiGraphPan = ref({ x: 0, y: 0 });
 const wikiGraphSvgRef = ref<SVGSVGElement | null>(null);
 const wikiGraphPanelRef = ref<HTMLElement | null>(null);
+const wikiInspectorRef = ref<HTMLElement | null>(null);
 const wikiCanvasSize = ref({ width: 960, height: 600 });
 const wikiLayoutPositions = ref<Record<string, { x: number; y: number }>>({});
+const wikiLayoutBands = ref<Record<string, WikiLayoutBand>>({});
+const wikiLayoutCaptions = ref<WikiLayoutCaption[]>([]);
+// 窄宽度下详情栏浮在图谱右侧，由选中/开关控制；宽度足够时详情栏常驻，忽略此状态。
+const wikiInspectorOpen = ref(false);
+// 详情栏只展示用户明确选中的条目或节点；未选中时显示项目概览，图上也不高亮任何节点。
+const wikiDetailPinned = ref(false);
+let wikiGraphPanMoved = false;
 const wikiNodeOverrides = ref<Record<string, { x: number; y: number }>>({});
 const wikiGraphDragState = ref<{ nodeId: string; pointerId: number; offsetX: number; offsetY: number } | null>(null);
 const wikiGraphPanState = ref<{
@@ -1141,6 +1312,28 @@ const WIKI_TONE_LABELS: Record<string, string> = {
   hub: "导航",
   misc: "其他",
 };
+// 节点内的类型图标（Material Symbols 连字），与分类色一起区分条目类型。
+const WIKI_NODE_GLYPHS: Record<string, string> = {
+  character: "person",
+  chapter: "menu_book",
+  event: "flag",
+  timeline: "schedule",
+  world: "public",
+  setting: "public",
+  item: "diamond",
+  location: "location_on",
+  faction: "shield",
+  foreshadow: "visibility",
+  document: "description",
+  project: "hub",
+  categoryHub: "hub",
+};
+const WIKI_CATEGORY_TONES: Record<string, string> = {
+  characters: "character",
+  plot: "plot",
+  setting: "setting",
+};
+const LOCAL_WIKI_GENERATORS = new Set(["local-fallback-wiki", "local-evidence-grounded-wiki", "storydex-rust-knowledge"]);
 
 const panelLoading = computed(() => (
   props.relationshipOnly ? wikiLoading.value || wikiRebuilding.value : loading.value
@@ -1399,19 +1592,42 @@ const wikiVisibleRawGraphNodes = computed<StoryWikiNodePayload[]>(() => {
     .filter((node) => matchesWikiKnowledgeStatus(node.knowledgeStatus));
 });
 
+// 节点大小按连接度的平方根增长：主干角色明显更大，又不会把周围挤散。
 function wikiNodeRadius(node: StoryWikiNodePayload, degree: number): number {
   if (node.synthetic) {
-    return node.role === "projectHub" ? 20 : 15;
+    return node.role === "projectHub" ? 22 : 18;
   }
-  const base = node.neighbor ? 5.5 : 8;
-  return base + Math.min(10, degree * 1.3);
+  if (node.neighbor) {
+    return 11 + Math.min(4, Math.sqrt(Math.max(0, degree)) * 1.4);
+  }
+  return 13 + Math.min(9, Math.sqrt(Math.max(0, degree)) * 3);
 }
 
-function wikiNodeLabel(value: string): string {
+function wikiNodeLabel(value: string, maxLength = 15): string {
   const trimmed = String(value || "").trim();
-  // 优化：从 12 字符提升到 15 字符，减少截断
-  return trimmed.length <= 15 ? trimmed : `${trimmed.slice(0, 14)}…`;
+  return trimmed.length <= maxLength ? trimmed : `${trimmed.slice(0, maxLength - 1)}…`;
 }
+
+// 条目摘要来自 Markdown 正文的压平文本：去掉开头的标题符号与重复的条目名，列表符号改为间隔号。
+function cleanWikiSummary(value: unknown, title = ""): string {
+  let text = String(value ?? "").replace(/\s+/g, " ").trim();
+  text = text.replace(/^#{1,6}\s+/, "");
+  const name = String(title || "").trim();
+  if (name && text.startsWith(name) && text.length > name.length) {
+    text = text.slice(name.length).replace(/^[\s:：·、,，.-]+/, "");
+  }
+  return text
+    .replace(/\s#{1,6}\s+/g, " ")
+    .replace(/\s+[-*•]\s+/g, " · ")
+    .replace(/^[-*•]\s+/, "")
+    .trim();
+}
+
+function wikiEntryTone(entry: Pick<StoryWikiEntry, "category">): string {
+  return WIKI_CATEGORY_TONES[String(entry.category || "")] ?? "misc";
+}
+
+const wikiLabelScale = computed(() => clampNumber(Number(uiStore.centerPaneFontScale || 100) / 100, 0.75, 1.5));
 
 function resolveWikiDisplayLabel(value: unknown): string {
   const label = normalizeRelationshipGraphText(value);
@@ -1476,43 +1692,58 @@ function wikiRelationshipSemanticsLabel(edge: Partial<StoryWikiEdgePayload>): st
   return parts.join(" · ");
 }
 
+function wikiNodeTone(node: Pick<StoryWikiNodePayload, "type" | "synthetic">): string {
+  const type = normalizeRelationshipGraphText(node.type || "project").replace(/\s+/g, "-");
+  return WIKI_NODE_TONES[type] ?? (node.synthetic ? "hub" : "misc");
+}
+
+function wikiNodeNarrativeOrder(node: StoryWikiNodePayload): number {
+  // 只有章节进入叙事主线；事件等条目即使带序号也留在关系网里。
+  return node.type === "chapter" && typeof node.narrativeOrder === "number" && node.narrativeOrder > 0
+    ? node.narrativeOrder
+    : 0;
+}
+
 let wikiLayoutSignature = "";
 function recomputeWikiLayout(force = false): void {
   const rawNodes = wikiVisibleRawGraphNodes.value;
   if (!rawNodes.length) {
     wikiLayoutPositions.value = {};
+    wikiLayoutBands.value = {};
+    wikiLayoutCaptions.value = [];
     wikiLayoutSignature = "";
     return;
   }
   const degrees = wikiGraphDegrees.value;
   const previous = wikiLayoutPositions.value;
-  const forceNodes: ForceNode[] = rawNodes.map((node) => {
-    const seed = previous[node.id];
-    return {
-      id: node.id,
-      // 半径额外加 16px 当作下方标签的保留空间，避免标签互相压盖。
-      radius: wikiNodeRadius(node, degrees.get(node.id) ?? 0) + 16,
-      x: seed?.x,
-      y: seed?.y,
-    };
-  });
-  const forceEdges: ForceEdge[] = (wikiGraphQueryData.value?.graph?.edges ?? []).map((edge) => ({
+  const layoutNodes = rawNodes.map((node) => ({
+    id: node.id,
+    radius: wikiNodeRadius(node, degrees.get(node.id) ?? 0),
+    tone: wikiNodeTone(node),
+    narrativeOrder: wikiNodeNarrativeOrder(node),
+    seedX: previous[node.id]?.x,
+    seedY: previous[node.id]?.y,
+  }));
+  const layoutEdges = (wikiGraphQueryData.value?.graph?.edges ?? []).map((edge) => ({
     source: edge.source,
     target: edge.target,
     weight: typeof edge.weight === "number" ? edge.weight : 1,
   }));
+  // 签名只含影响布局的字段：标签文字与证据变化不重排节点。
   const signature = JSON.stringify([
     wikiCanvasSize.value,
-    forceNodes.map(({ id, radius }) => [id, radius]).sort(),
-    forceEdges.map(({ source, target, weight }) => [source, target, weight]).sort(),
+    layoutNodes.map(({ id, radius, tone, narrativeOrder }) => [id, radius, tone, narrativeOrder]).sort(),
+    layoutEdges.map(({ source, target, weight }) => [source, target, weight]).sort(),
   ]);
   if (!force && signature === wikiLayoutSignature) return;
   wikiLayoutSignature = signature;
-  wikiLayoutPositions.value = computeForceLayout(forceNodes, forceEdges, {
+  const layout = computeWikiGraphLayout(layoutNodes, layoutEdges, {
     width: wikiCanvasSize.value.width,
     height: wikiCanvasSize.value.height,
-    padding: 36,
   });
+  wikiLayoutPositions.value = layout.positions;
+  wikiLayoutBands.value = layout.bands;
+  wikiLayoutCaptions.value = layout.captions;
 }
 
 const wikiGraphNodes = computed<WikiGraphNode[]>(() => {
@@ -1523,6 +1754,8 @@ const wikiGraphNodes = computed<WikiGraphNode[]>(() => {
   const centerX = wikiCanvasSize.value.width / 2;
   const centerY = wikiCanvasSize.value.height / 2;
   const spread = Math.max(80, Math.min(centerX, centerY) * 0.62);
+  const bands = wikiLayoutBands.value;
+  const labelScale = wikiLabelScale.value;
   return rawNodes.map((node, index) => {
     const label = resolveWikiDisplayLabel(node.label || node.id);
     const degree = degrees.get(node.id) ?? 0;
@@ -1533,6 +1766,9 @@ const wikiGraphNodes = computed<WikiGraphNode[]>(() => {
     };
     const position = overrides[node.id] ?? layout[node.id] ?? fallback;
     const type = normalizeRelationshipGraphText(node.type || "project").replace(/\s+/g, "-");
+    const band = bands[node.id] ?? "network";
+    const shortLabel = wikiNodeLabel(label, band === "shelf" ? 8 : band === "spine" ? 11 : 14);
+    const labelFontSize = (band === "shelf" || node.neighbor ? 11 : 12) * labelScale;
     return {
       id: node.id,
       label,
@@ -1552,25 +1788,36 @@ const wikiGraphNodes = computed<WikiGraphNode[]>(() => {
       x: position.x,
       y: position.y,
       radius: wikiNodeRadius(node, degree),
-      shortLabel: wikiNodeLabel(label),
+      shortLabel,
+      glyph: WIKI_NODE_GLYPHS[type] ?? "label",
+      band,
+      narrativeOrder: wikiNodeNarrativeOrder(node),
+      labelWidth: estimateWikiTextWidth(shortLabel, labelFontSize) + 4,
     };
   });
 });
 
+// 节点名位置：默认在圆点下方，与其他节点或标签重叠时自动换到上/右/左。
+const wikiNodeLabelLayout = computed(() => placeWikiNodeLabels(wikiGraphNodes.value.map((node) => ({
+  id: node.id,
+  x: node.x,
+  y: node.y,
+  radius: node.radius,
+  width: node.labelWidth,
+  height: 15 * wikiLabelScale.value,
+  priority: (node.band === "network" ? 100 : node.band === "spine" ? 50 : 0) + node.degree * 4 + node.radius,
+}))));
+
 const wikiGraphEdges = computed<WikiGraphEdge[]>(() => {
   const nodeById = new Map(wikiGraphNodes.value.map((node) => [node.id, node]));
-  const rawEdges = wikiGraphQueryData.value?.graph?.edges ?? [];
-  // 同一对节点的多条边（多维度关系）依次向两侧弯出，首条保持直线。
-  const pairSeen = new Map<string, number>();
-  return rawEdges.flatMap((edge, index) => {
-    const source = nodeById.get(edge.source);
-    const target = nodeById.get(edge.target);
-    if (!source || !target) {
-      return [];
-    }
-    const pairKey = [edge.source, edge.target].sort().join("→");
-    const parallelIndex = pairSeen.get(pairKey) ?? 0;
-    pairSeen.set(pairKey, parallelIndex + 1);
+  const rawEdges = (wikiGraphQueryData.value?.graph?.edges ?? [])
+    .filter((edge) => nodeById.has(edge.source) && nodeById.has(edge.target));
+  // 同一对节点的多条边（多维度关系）对称弯开，单条边保持直线。
+  const bends = wikiEdgeBendOffsets(rawEdges);
+  const labelScale = wikiLabelScale.value;
+  return rawEdges.map((edge, index) => {
+    const source = nodeById.get(edge.source)!;
+    const target = nodeById.get(edge.target)!;
     const label = normalizeRelationshipGraphText(edge.label || edge.type || "关联");
     const semanticsLabel = edge.type === "relationship"
       ? wikiRelationshipSemanticsLabel(edge)
@@ -1579,33 +1826,23 @@ const wikiGraphEdges = computed<WikiGraphEdge[]>(() => {
     const displayLabel = edge.type === "relationship"
       ? semanticsLabel.split(" · ")[0]
       : label;
-    const dx = target.x - source.x;
-    const dy = target.y - source.y;
-    const distance = Math.hypot(dx, dy) || 1;
-    let pathD: string;
-    let labelX: number;
-    let labelY: number;
-    if (parallelIndex === 0) {
-      pathD = `M ${source.x} ${source.y} L ${target.x} ${target.y}`;
-      labelX = (source.x + target.x) / 2;
-      labelY = (source.y + target.y) / 2;
-    } else {
-      const side = parallelIndex % 2 === 1 ? 1 : -1;
-      const magnitude = Math.ceil(parallelIndex / 2) * clampNumber(distance * 0.16, 14, 42);
-      const controlX = (source.x + target.x) / 2 + (-dy / distance) * side * magnitude;
-      const controlY = (source.y + target.y) / 2 + (dx / distance) * side * magnitude;
-      pathD = `M ${source.x} ${source.y} Q ${controlX} ${controlY} ${target.x} ${target.y}`;
-      labelX = (source.x + 2 * controlX + target.x) / 4;
-      labelY = (source.y + 2 * controlY + target.y) / 4;
-    }
+    const type = normalizeRelationshipGraphText(edge.type || "related").replace(/\s+/g, "-");
+    const structural = type === "timeline";
+    const directed = structural || type === "relationship";
+    const geometry = buildWikiEdgeGeometry(source, target, bends[index] ?? 0, {
+      gap: 3,
+      arrow: directed ? 7 : 0,
+    });
+    const midpoint = pointOnWikiEdge(geometry, 0.5);
     const id = String(edge.id || edge.fingerprint || `${edge.source}-${edge.target}-${index}`);
     const coOccurrence = Boolean(edge.coOccurrence);
-    return [{
+    const strength = typeof edge.strength === "number" && Number.isFinite(edge.strength) ? Math.abs(edge.strength) : null;
+    return {
       id,
       label,
       displayLabel,
       semanticsLabel,
-      type: normalizeRelationshipGraphText(edge.type || "related").replace(/\s+/g, "-"),
+      type,
       evidence: normalizeRelationshipGraphText(edge.evidence || ""),
       synthetic: Boolean(edge.synthetic),
       active: isWikiEdgeActive({ id, source, target }),
@@ -1622,11 +1859,15 @@ const wikiGraphEdges = computed<WikiGraphEdge[]>(() => {
       fingerprint: String(edge.fingerprint || ""),
       source,
       target,
-      pathD,
-      labelX,
-      labelY: labelY - 4,
-      labelWidth: Math.max(40, Math.min(128, displayLabel.length * 11 + 18)),
-    }];
+      pathD: geometry.pathD,
+      arrowD: geometry.arrowD,
+      geometry,
+      structural,
+      strokeWidth: structural ? 1.4 : strength === null ? 1.5 : 1.2 + strength * 1.4,
+      labelX: midpoint.x,
+      labelY: midpoint.y,
+      labelWidth: Math.ceil(estimateWikiTextWidth(displayLabel, 11 * labelScale) + 18),
+    };
   });
 });
 
@@ -1673,32 +1914,94 @@ function isWikiEdgeDimmed(edge: WikiGraphEdge): boolean {
   return !(focus.has(edge.source.id) && focus.has(edge.target.id));
 }
 
-// 边标签默认克制：真实关系边常显（关系名即核心信息），其余仅在 hover/选中时出现。
-const visibleWikiGraphLabelEdges = computed(() => (
-  wikiGraphEdges.value.filter((edge) => (
-    edge.active
-    || hoveredWikiEdgeId.value === edge.id
-    || (edge.realRelation && !isWikiEdgeDimmed(edge))
-  ))
-));
+// 边标签默认克制：真实关系边常显（关系名即核心信息）；章节承接等结构边只在 hover/选中时出现。
+// 标签沿连线滑动避让节点、节点名与其他标签；常显标签先放，hover 临时出现的标签后放，避免已有标签跳动。
+const visibleWikiGraphLabelEdges = computed(() => {
+  const hoveredId = hoveredWikiEdgeId.value;
+  const selectedEdgeId = selectedWikiEdgeId.value;
+  const stable: WikiGraphEdge[] = [];
+  const transient: WikiGraphEdge[] = [];
+  wikiGraphEdges.value.forEach((edge) => {
+    if (!edge.pathD) {
+      return;
+    }
+    if (!edge.structural && (edge.active || (edge.realRelation && !isWikiEdgeDimmed(edge)))) {
+      stable.push(edge);
+    } else if (hoveredId === edge.id || selectedEdgeId === edge.id) {
+      transient.push(edge);
+    }
+  });
+  const ordered = [...stable, ...transient];
+  if (!ordered.length) {
+    return [];
+  }
+  const labelLayout = wikiNodeLabelLayout.value;
+  const labelHeight = 18 * wikiLabelScale.value;
+  const obstacles: WikiLabelRect[] = [];
+  wikiGraphNodes.value.forEach((node) => {
+    obstacles.push({ x: node.x - node.radius - 2, y: node.y - node.radius - 2, width: node.radius * 2 + 4, height: node.radius * 2 + 4 });
+    const rect = labelLayout[node.id]?.rect;
+    if (rect) obstacles.push(rect);
+  });
+  const placements = placeWikiEdgeLabels(ordered.map((edge) => ({
+    id: edge.id,
+    width: edge.labelWidth,
+    height: labelHeight,
+    candidates: [0.5, 0.36, 0.64, 0.26, 0.74].map((t) => pointOnWikiEdge(edge.geometry, t)),
+  })), obstacles);
+  return ordered.map((edge) => ({
+    ...edge,
+    labelX: placements[edge.id]?.x ?? edge.labelX,
+    labelY: placements[edge.id]?.y ?? edge.labelY,
+  }));
+});
 
 const wikiGraphLegend = computed(() => {
-  const present = new Set(wikiGraphNodes.value.map((node) => node.tone));
+  const counts = new Map<string, number>();
+  wikiGraphNodes.value.forEach((node) => {
+    if (!node.synthetic) counts.set(node.tone, (counts.get(node.tone) ?? 0) + 1);
+  });
   // 三视图对应三色，misc 兜底未归类节点；hub 节点已经不再产出。
   return ["character", "plot", "setting", "misc"]
-    .filter((key) => present.has(key))
-    .map((key) => ({ key, label: WIKI_TONE_LABELS[key] ?? key }));
+    .filter((key) => counts.has(key))
+    .map((key) => ({ key, label: WIKI_TONE_LABELS[key] ?? key, count: counts.get(key) ?? 0 }));
+});
+
+// 连线图例：说明线型并给出数量；关系数优先取后端统计（覆盖未加载的分页）。
+const wikiEdgeLegend = computed(() => {
+  const edges = wikiGraphEdges.value;
+  const stats = wikiGraphStats.value;
+  const loadedRelations = edges.filter((edge) => edge.realRelation && edge.reviewStatus !== "review_required").length;
+  const loadedReview = edges.filter((edge) => edge.reviewStatus === "review_required").length;
+  const items: Array<{ key: string; label: string; count: number | null }> = [];
+  const relationCount = stats.confirmedEdgeCount || loadedRelations;
+  if (relationCount > 0) items.push({ key: "relation", label: "关系", count: relationCount });
+  const reviewCount = stats.reviewRequiredEdgeCount || loadedReview;
+  if (reviewCount > 0) items.push({ key: "review", label: "待确认", count: reviewCount });
+  if (edges.some((edge) => edge.structural)) items.push({ key: "structural", label: "章节承接", count: null });
+  return items;
 });
 
 const selectedWikiDetailEntry = computed<StoryWikiEntry | null>(() => {
   const node = selectedWikiNode.value;
   if (!node) {
-    return selectedWikiEntry.value;
+    return wikiDetailPinned.value ? selectedWikiEntry.value : null;
   }
   if (!node.entryId) {
     return null;
   }
   return wikiEntries.value.find((entry) => entry.id === node.entryId) ?? null;
+});
+
+// 条目列表的高亮与详情栏一致：选中节点时跟随节点，否则只认用户明确选中的条目。
+const wikiActiveEntryId = computed(() => {
+  if (selectedWikiEdgeId.value) {
+    return "";
+  }
+  if (selectedWikiNode.value) {
+    return selectedWikiNode.value.entryId || "";
+  }
+  return wikiDetailPinned.value ? selectedWikiEntry.value?.id || "" : "";
 });
 
 const selectedWikiDetailKicker = computed(() => {
@@ -1812,9 +2115,91 @@ const selectedWikiSourceLabel = computed(() => {
   if (!generator) {
     return "";
   }
-  return ["local-fallback-wiki", "local-evidence-grounded-wiki"].includes(generator)
+  // storydex-rust-knowledge 是本地确定性投影；Agent 整理的内容也会经过它重建，来源仍是本地证据。
+  const mode = String(wikiData.value?.generationMode || "").toLowerCase();
+  return LOCAL_WIKI_GENERATORS.has(generator) || mode.includes("local")
     ? "本地证据"
     : "Agent 整理";
+});
+
+function formatWikiShortTime(value?: string): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const pad = (part: number) => String(part).padStart(2, "0");
+  const time = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  const sameYear = date.getFullYear() === new Date().getFullYear();
+  const day = `${date.getMonth() + 1}/${date.getDate()}`;
+  return sameYear ? `${day} ${time}` : `${date.getFullYear()}/${day} ${time}`;
+}
+
+// 页头副标题：项目 · 来源 · 更新时间；项目摘要与生成方式放在悬停提示里。
+const wikiHeaderMeta = computed(() => {
+  if (!wikiData.value) {
+    return "";
+  }
+  const updated = formatWikiShortTime(wikiData.value.lastUpdatedAt || wikiData.value.generatedAt);
+  return [
+    wikiData.value.projectName,
+    selectedWikiSourceLabel.value,
+    updated ? `更新于 ${updated}` : "尚未生成",
+  ].filter(Boolean).join(" · ");
+});
+
+const wikiHeaderTooltip = computed(() => (
+  [wikiProjectSummary.value, wikiGenerationModeLabel.value, wikiUpdatedAtLabel.value].filter(Boolean).join("\n")
+));
+
+// 详情栏聚焦的节点：显式选中的节点，或当前条目对应的节点。
+const wikiFocusNode = computed<WikiGraphNode | null>(() => {
+  if (selectedWikiNode.value) {
+    return selectedWikiNode.value;
+  }
+  const entryId = selectedWikiDetailEntry.value?.id;
+  return entryId ? wikiGraphNodes.value.find((node) => node.entryId === entryId) ?? null : null;
+});
+
+// 当前节点的关系清单（不含章节承接等结构边），待确认的排在前面。
+const wikiFocusRelations = computed(() => {
+  const node = wikiFocusNode.value;
+  if (!node) {
+    return [];
+  }
+  return wikiGraphEdges.value
+    .filter((edge) => !edge.structural && (edge.source.id === node.id || edge.target.id === node.id))
+    .map((edge) => {
+      const outgoing = edge.source.id === node.id;
+      const other = outgoing ? edge.target : edge.source;
+      return {
+        id: edge.id,
+        // 与图上关系名一致：先写关系类别，原始谓词不同时作补充。
+        category: edge.displayLabel,
+        predicate: edge.label,
+        outgoing,
+        otherLabel: other.label,
+        otherTone: other.tone,
+        needsReview: edge.reviewStatus === "review_required",
+      };
+    })
+    .sort((a, b) => Number(b.needsReview) - Number(a.needsReview));
+});
+
+const selectedWikiDetailSummary = computed(() => cleanWikiSummary(
+  selectedWikiNode.value?.summary || selectedWikiDetailEntry.value?.summary || "",
+  selectedWikiNode.value?.label || selectedWikiDetailEntry.value?.title || "",
+));
+
+// 「来源: path」行与下方来源列表重复，详情里不再重复展示。
+const selectedWikiDetailLines = computed(() => {
+  const entry = selectedWikiDetailEntry.value;
+  const sources = new Set((entry?.sourcePaths ?? []).map((path) => path.trim()));
+  return (entry?.details ?? [])
+    .map((detail) => String(detail || "").replace(/^[-*•]\s+/, "").trim())
+    .filter((detail) => {
+      const match = detail.match(/^来源\s*[:：]\s*(.+)$/);
+      return detail && !(match && sources.has(match[1].trim()));
+    })
+    .slice(0, 18);
 });
 
 const wikiWorkflowLabel = computed(() => {
@@ -2163,7 +2548,7 @@ function mergeWikiGraphPage(
 
 async function loadWikiGraph(
   params: WikiGraphQueryParams = currentWikiGraphQueryParams(),
-  options: { append?: boolean } = {},
+  options: { append?: boolean; fit?: boolean } = {},
 ): Promise<void> {
   const append = Boolean(options.append);
   const requestSeq = ++wikiGraphLoadSeq;
@@ -2205,6 +2590,13 @@ async function loadWikiGraph(
       ?? page?.pagination?.nextOffset
       ?? null;
     ensureWikiGraphSelection();
+    if (options.fit && !append) {
+      // 切换分类或搜索后布局整体重排，沿用上一个视图的缩放与平移会偏出画面。
+      await nextTick();
+      if (requestSeq === wikiGraphLoadSeq) {
+        fitWikiGraphView();
+      }
+    }
   } catch (error: unknown) {
     if (requestSeq === wikiGraphLoadSeq) {
       wikiErrorMessage.value = describeTransportError(error, "知识图谱查询失败。");
@@ -2259,6 +2651,9 @@ async function loadWikiReviewQueue(): Promise<void> {
 
 function toggleWikiReviewQueue(): void {
   wikiReviewOpen.value = !wikiReviewOpen.value;
+  if (wikiReviewOpen.value) {
+    wikiInspectorOpen.value = true;
+  }
   if (wikiReviewOpen.value || wikiNeedsReviewCount.value > 0) {
     void loadWikiReviewQueue();
   }
@@ -2271,6 +2666,10 @@ async function openWikiSource(path: string): Promise<void> {
   }
   try {
     await workspaceStore.openFile(normalized);
+    // 图谱页没有编辑区：打开成功后切回资源视图，否则用户看不到打开的文件。
+    if (props.relationshipOnly && workspaceStore.activeFile === normalized) {
+      uiStore.setActivity("resources");
+    }
   } catch (error: unknown) {
     wikiReviewError.value = describeTransportError(error, "无法打开来源文件。");
   }
@@ -2476,6 +2875,7 @@ function ensureWikiGraphSelection(): void {
   const visibleEntries = visibleWikiEntries.value;
   if (visibleEntries.length && !visibleEntries.some((entry) => entry.id === selectedWikiEntryId.value)) {
     selectedWikiEntryId.value = visibleEntries[0].id;
+    wikiDetailPinned.value = false;
   }
   if (selectedWikiNodeId.value && !wikiGraphNodes.value.some((node) => node.id === selectedWikiNodeId.value)) {
     selectedWikiNodeId.value = "";
@@ -2528,9 +2928,10 @@ function selectWikiCategory(categoryId: StoryWikiCategory): void {
   selectedWikiEntryId.value = wikiEntries.value.find((entry) => entry.category === selectedWikiCategory.value)?.id || "";
   selectedWikiNodeId.value = "";
   selectedWikiEdgeId.value = "";
+  wikiDetailPinned.value = false;
   wikiGraphSearchInput.value = "";
   wikiGraphSearchQuery.value = "";
-  void loadWikiGraph({ category: categoryId });
+  void loadWikiGraph({ category: categoryId }, { fit: true });
 }
 
 function selectWikiEntry(entryId: string): void {
@@ -2538,6 +2939,9 @@ function selectWikiEntry(entryId: string): void {
   const node = wikiGraphNodes.value.find((item) => item.entryId === entryId);
   selectedWikiNodeId.value = node?.id || "";
   selectedWikiEdgeId.value = "";
+  wikiDetailPinned.value = true;
+  wikiInspectorOpen.value = true;
+  scheduleWikiSelectionReveal();
 }
 
 function isWikiNodeSelectable(node: WikiGraphNode): boolean {
@@ -2553,11 +2957,16 @@ function selectWikiNode(node: WikiGraphNode): void {
   if (node.entryId) {
     selectedWikiEntryId.value = node.entryId;
   }
+  wikiDetailPinned.value = true;
+  wikiInspectorOpen.value = true;
+  scheduleWikiSelectionReveal();
 }
 
 function selectWikiEdge(edgeId: string): void {
   selectedWikiEdgeId.value = edgeId;
   selectedWikiNodeId.value = "";
+  wikiInspectorOpen.value = true;
+  scheduleWikiSelectionReveal();
 }
 
 function isWikiEdgeActive(edge: Pick<WikiGraphEdge, "id" | "source" | "target">): boolean {
@@ -2575,11 +2984,12 @@ function submitWikiGraphSearch(): void {
   wikiGraphSearchQuery.value = query;
   selectedWikiNodeId.value = "";
   selectedWikiEdgeId.value = "";
+  wikiDetailPinned.value = false;
   if (!query) {
-    void loadWikiGraph({ category: selectedWikiCategory.value });
+    void loadWikiGraph({ category: selectedWikiCategory.value }, { fit: true });
     return;
   }
-  void loadWikiGraph({ q: query });
+  void loadWikiGraph({ q: query }, { fit: true });
 }
 
 function clearWikiGraphSearch(): void {
@@ -2587,10 +2997,12 @@ function clearWikiGraphSearch(): void {
   wikiGraphSearchQuery.value = "";
   selectedWikiNodeId.value = "";
   selectedWikiEdgeId.value = "";
-  void loadWikiGraph({ category: selectedWikiCategory.value });
+  wikiDetailPinned.value = false;
+  void loadWikiGraph({ category: selectedWikiCategory.value }, { fit: true });
 }
 
 function zoomWikiGraphAt(point: { x: number; y: number }, factor: number): void {
+  stopWikiPanAnimation();
   const next = clampNumber(wikiGraphZoom.value * factor, 0.35, 2.6);
   const ratio = next / wikiGraphZoom.value;
   wikiGraphPan.value = {
@@ -2607,8 +3019,9 @@ function zoomWikiGraphStep(direction: number): void {
   );
 }
 
-// 依据节点包围盒自动适配缩放与平移，使整张图居中呈现。
+// 依据节点与标签的包围盒自动适配缩放与平移；顶/底留出悬浮控件的位置，小图不过度放大。
 function fitWikiGraphView(): void {
+  stopWikiPanAnimation();
   const nodes = wikiGraphNodes.value;
   const { width, height } = wikiCanvasSize.value;
   if (!nodes.length || width <= 0 || height <= 0) {
@@ -2616,24 +3029,39 @@ function fitWikiGraphView(): void {
     wikiGraphPan.value = { x: 0, y: 0 };
     return;
   }
+  const labels = wikiNodeLabelLayout.value;
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
   let maxY = -Infinity;
   nodes.forEach((node) => {
-    minX = Math.min(minX, node.x - node.radius - 22);
-    maxX = Math.max(maxX, node.x + node.radius + 22);
-    minY = Math.min(minY, node.y - node.radius - 14);
-    // 下方标签需要额外空间。
-    maxY = Math.max(maxY, node.y + node.radius + 30);
+    minX = Math.min(minX, node.x - node.radius - 6);
+    maxX = Math.max(maxX, node.x + node.radius + 6);
+    minY = Math.min(minY, node.y - node.radius - 6);
+    maxY = Math.max(maxY, node.y + node.radius + 6);
+    const rect = labels[node.id]?.rect;
+    if (rect) {
+      minX = Math.min(minX, rect.x - 4);
+      maxX = Math.max(maxX, rect.x + rect.width + 4);
+      minY = Math.min(minY, rect.y - 4);
+      maxY = Math.max(maxY, rect.y + rect.height + 4);
+    }
   });
+  wikiLayoutCaptions.value.forEach((caption) => {
+    minX = Math.min(minX, caption.x);
+    maxX = Math.max(maxX, caption.x + caption.width);
+    minY = Math.min(minY, caption.y - 12);
+  });
+  const inset = { top: wikiGraphHasMore.value ? 52 : 20, right: 20, bottom: 60, left: 20 };
+  const availableWidth = Math.max(1, width - inset.left - inset.right);
+  const availableHeight = Math.max(1, height - inset.top - inset.bottom);
   const boxWidth = Math.max(1, maxX - minX);
   const boxHeight = Math.max(1, maxY - minY);
-  const zoom = clampNumber(Math.min(width / boxWidth, height / boxHeight), 0.35, 1.45);
+  const zoom = clampNumber(Math.min(availableWidth / boxWidth, availableHeight / boxHeight), 0.35, 1.3);
   wikiGraphZoom.value = zoom;
   wikiGraphPan.value = {
-    x: (width - boxWidth * zoom) / 2 - minX * zoom,
-    y: (height - boxHeight * zoom) / 2 - minY * zoom,
+    x: inset.left + (availableWidth - boxWidth * zoom) / 2 - minX * zoom,
+    y: inset.top + (availableHeight - boxHeight * zoom) / 2 - minY * zoom,
   };
 }
 
@@ -2646,6 +3074,96 @@ function resetWikiGraphView(): void {
 function clearWikiGraphSelection(): void {
   selectedWikiNodeId.value = "";
   selectedWikiEdgeId.value = "";
+  wikiDetailPinned.value = false;
+}
+
+// 窄宽度下详情栏浮在舞台右侧；选中的节点或连线若被它盖住，就把视图平移到剩余的可见区域里。
+let wikiPanAnimationFrame = 0;
+
+function stopWikiPanAnimation(): void {
+  if (wikiPanAnimationFrame && typeof cancelAnimationFrame === "function") {
+    cancelAnimationFrame(wikiPanAnimationFrame);
+  }
+  wikiPanAnimationFrame = 0;
+}
+
+function animateWikiGraphPan(target: { x: number; y: number }): void {
+  stopWikiPanAnimation();
+  const reduceMotion = typeof window !== "undefined"
+    && typeof window.matchMedia === "function"
+    && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (reduceMotion || typeof requestAnimationFrame !== "function") {
+    wikiGraphPan.value = target;
+    return;
+  }
+  const from = { ...wikiGraphPan.value };
+  const startedAt = performance.now();
+  const duration = 220;
+  const step = (now: number) => {
+    const progress = Math.min(1, (now - startedAt) / duration);
+    const eased = 1 - Math.pow(1 - progress, 3);
+    wikiGraphPan.value = {
+      x: from.x + (target.x - from.x) * eased,
+      y: from.y + (target.y - from.y) * eased,
+    };
+    wikiPanAnimationFrame = progress < 1 ? requestAnimationFrame(step) : 0;
+  };
+  wikiPanAnimationFrame = requestAnimationFrame(step);
+}
+
+function revealWikiPoint(point: { x: number; y: number }): void {
+  const panel = wikiGraphPanelRef.value;
+  const inspector = wikiInspectorRef.value;
+  if (!panel || !inspector || typeof window === "undefined" || window.getComputedStyle(inspector).position !== "absolute") {
+    return;
+  }
+  const stageRect = panel.getBoundingClientRect();
+  const inspectorRect = inspector.getBoundingClientRect();
+  const { width, height } = wikiCanvasSize.value;
+  if (stageRect.width <= 0 || stageRect.height <= 0 || width <= 0 || height <= 0) {
+    return;
+  }
+  // viewBox 按 meet 缩放并居中：把详情栏左缘换算成画布坐标。
+  const scale = Math.min(stageRect.width / width, stageRect.height / height);
+  const offsetX = (stageRect.width - width * scale) / 2;
+  const visibleRight = (inspectorRect.left - stageRect.left - offsetX) / scale - 24;
+  const zoom = wikiGraphZoom.value;
+  const screenX = wikiGraphPan.value.x + point.x * zoom;
+  const screenY = wikiGraphPan.value.y + point.y * zoom;
+  const target = { ...wikiGraphPan.value };
+  if (screenX > visibleRight || screenX < 24) {
+    target.x += Math.max(24, visibleRight / 2) - screenX;
+  }
+  if (screenY < 32 || screenY > height - 64) {
+    target.y += height / 2 - screenY;
+  }
+  if (Math.abs(target.x - wikiGraphPan.value.x) > 1 || Math.abs(target.y - wikiGraphPan.value.y) > 1) {
+    animateWikiGraphPan(target);
+  }
+}
+
+function scheduleWikiSelectionReveal(): void {
+  void nextTick(() => {
+    const node = selectedWikiNode.value;
+    if (node) {
+      revealWikiPoint({ x: node.x, y: node.y });
+      return;
+    }
+    const edge = selectedWikiRelationEdge.value;
+    if (edge) {
+      revealWikiPoint(pointOnWikiEdge(edge.geometry, 0.5));
+    }
+  });
+}
+
+// 点击空白画布取消选择并收起浮动详情栏；拖动平移后的那次 click 不算。
+function handleWikiGraphBackgroundClick(): void {
+  if (wikiGraphPanMoved) {
+    wikiGraphPanMoved = false;
+    return;
+  }
+  clearWikiGraphSelection();
+  wikiInspectorOpen.value = false;
 }
 
 function wikiGraphRawPointFromEvent(event: PointerEvent | WheelEvent): { x: number; y: number } | null {
@@ -2692,6 +3210,8 @@ function beginWikiGraphPan(event: PointerEvent): void {
     return;
   }
   event.preventDefault();
+  stopWikiPanAnimation();
+  wikiGraphPanMoved = false;
   wikiGraphPanState.value = {
     pointerId: event.pointerId,
     startX: point.x,
@@ -2726,8 +3246,8 @@ function moveWikiGraphPointer(event: PointerEvent): void {
     wikiNodeOverrides.value = {
       ...wikiNodeOverrides.value,
       [drag.nodeId]: {
-        x: clampNumber(point.x - drag.offsetX, 24, wikiCanvasSize.value.width - 24),
-        y: clampNumber(point.y - drag.offsetY, 24, wikiCanvasSize.value.height - 40),
+        x: point.x - drag.offsetX,
+        y: point.y - drag.offsetY,
       },
     };
     return;
@@ -2739,6 +3259,9 @@ function moveWikiGraphPointer(event: PointerEvent): void {
   const point = wikiGraphRawPointFromEvent(event);
   if (!point) {
     return;
+  }
+  if (Math.hypot(point.x - pan.startX, point.y - pan.startY) > 3) {
+    wikiGraphPanMoved = true;
   }
   wikiGraphPan.value = {
     x: pan.originX + point.x - pan.startX,
@@ -2944,6 +3467,7 @@ onBeforeUnmount(() => {
   }
   wikiResizeObserver?.disconnect();
   wikiResizeObserver = null;
+  stopWikiPanAnimation();
 });
 
 onMounted(() => {
@@ -2993,6 +3517,18 @@ defineExpose({
     wikiGraphFocusIds,
     visibleWikiGraphLabelEdges,
     wikiGraphLegend,
+    wikiEdgeLegend,
+    wikiNodeLabelLayout,
+    wikiLayoutBands,
+    wikiLayoutCaptions,
+    wikiFocusNode,
+    wikiFocusRelations,
+    wikiHeaderMeta,
+    wikiInspectorOpen,
+    selectedWikiDetailSummary,
+    selectedWikiDetailLines,
+    cleanWikiSummary,
+    handleWikiGraphBackgroundClick,
     selectedWikiDetailEntry,
     selectedWikiDetailKicker,
     wikiInspectorEmptyTitle,
@@ -3094,6 +3630,8 @@ defineExpose({
     fitWikiGraphView,
     resetWikiGraphView,
     clearWikiGraphSelection,
+    wikiDetailPinned,
+    wikiActiveEntryId,
     entryHasSegmentPath,
     isCharacterAssetPath
   } : null
@@ -3117,20 +3655,20 @@ defineExpose({
   border-top: 0;
   background: var(--bg-editor);
 }
+/* 知识图谱页：面板本身作为容器，工具条与详情栏按面板宽度（而非窗口宽度）自适应。 */
+.story-state-panel.is-relationship-only {
+  container: ssp-wiki-panel / inline-size;
+}
 .story-state-panel.is-relationship-only .ssp-header {
-  min-height: 52px;
-  padding: 10px 16px 6px 18px;
+  min-height: 56px;
+  padding: 12px 16px 8px 18px;
 }
 .story-state-panel.is-relationship-only .ssp-title {
   gap: 10px;
-  color: var(--text-main);
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
 }
 .story-state-panel.is-relationship-only .ssp-title-icon {
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   display: grid;
   place-items: center;
   border-radius: var(--radius-md);
@@ -3138,37 +3676,79 @@ defineExpose({
   color: var(--accent-strong);
   font-size: 17px;
 }
+.ssp-title-text {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+.story-state-panel.is-relationship-only .ssp-title-main {
+  color: var(--text-main);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+.ssp-title-meta {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.4;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: default;
+}
 .story-state-panel.is-relationship-only .ssp-header-actions {
-  gap: 2px;
-  padding: 2px;
-  border: 1px solid var(--border-ghost);
-  border-radius: var(--radius-lg);
-  background: var(--surface-2);
+  gap: 4px;
 }
 .story-state-panel.is-relationship-only .ssp-refresh {
-  width: 30px;
+  width: auto;
+  min-width: 30px;
   height: 30px;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid transparent;
   border-radius: var(--radius-md);
-  color: var(--text-muted);
+  color: var(--text-soft);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+.story-state-panel.is-relationship-only .ssp-refresh .material-symbols-rounded {
+  font-size: 16px;
 }
 .story-state-panel.is-relationship-only .ssp-refresh:hover:not(:disabled) {
-  background: var(--surface-1);
+  background: var(--bg-hover);
   color: var(--text-main);
-  box-shadow: var(--shadow-resting);
 }
 .story-state-panel.is-relationship-only .ssp-rebuild {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--border-subtle));
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+.story-state-panel.is-relationship-only .ssp-rebuild:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent) 16%, var(--surface-1));
   color: var(--accent-strong);
 }
 .story-state-panel.is-relationship-only .ssp-refresh:disabled {
   opacity: 0.45;
   cursor: default;
 }
+.ssp-header-divider {
+  width: 1px;
+  height: 16px;
+  margin: 0 4px;
+  background: var(--border-subtle);
+}
 .story-state-panel.is-expanded .ssp-body {
   max-height: none;
   padding: 10px 20px 14px;
 }
 .story-state-panel.is-relationship-only.is-expanded .ssp-body {
-  padding: 8px 16px 16px;
+  padding: 4px 16px 16px;
   overflow: hidden;
 }
 .story-state-panel.is-expanded .ssp-relation-graph {
@@ -3279,98 +3859,114 @@ defineExpose({
   line-height: 1.6;
 }
 /* ================= 知识图谱工作区 =================
-   结构：工具条（分类 + 搜索）→ 统计行 → 主区（图谱画布 | 详情栏）
-   图谱画布是卡片内的嵌入层（略深底色 + 点阵），节点是带白描边的圆点，
-   图例、缩放控件是悬浮在画布上的小胶囊；详情栏是同色卡片，内容分段。 */
+   结构：工具条（分类 · 搜索 · 待确认）→ 主区（图谱舞台 | 详情栏）。
+   舞台是卡片里的一块浅色内嵌层（点阵底），节点为「分类色淡底 + 同色描边 + 类型图标」，
+   连线默认中性灰，聚焦时才用强调色；待确认关系统一用琥珀色虚线。
+   详情栏在宽屏常驻；面板变窄时改为浮在舞台右侧的卡片，选中节点或连线时出现。 */
 .ssp-wiki-workspace {
-  --wiki-graph-bg: color-mix(in srgb, var(--surface-2) 70%, var(--surface-1));
-  container: ssp-wiki-workspace / inline-size;
+  --wiki-graph-bg: color-mix(in srgb, var(--surface-2) 64%, var(--surface-1));
+  --wiki-tone-character: var(--wiki-cat-1);
+  --wiki-tone-plot: var(--wiki-cat-2);
+  --wiki-tone-setting: var(--wiki-cat-3);
+  --wiki-tone-misc: var(--wiki-cat-4);
+  --wiki-tone-hub: var(--text-muted);
   height: 100%;
   min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 10px;
 }
+.ssp-wiki-workspace .tone-character { --wiki-node-color: var(--wiki-tone-character); }
+.ssp-wiki-workspace .tone-plot { --wiki-node-color: var(--wiki-tone-plot); }
+.ssp-wiki-workspace .tone-setting { --wiki-node-color: var(--wiki-tone-setting); }
+.ssp-wiki-workspace .tone-misc { --wiki-node-color: var(--wiki-tone-misc); }
+.ssp-wiki-workspace .tone-hub { --wiki-node-color: var(--wiki-tone-hub); }
+
+/* ---------- 工具条 ---------- */
 .ssp-wiki-toolbar {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 10px 12px;
+  gap: 8px 10px;
 }
 .ssp-wiki-category-tabs {
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  height: 36px;
+  height: 34px;
   padding: 3px;
   box-sizing: border-box;
   border: 1px solid var(--border-ghost);
   border-radius: var(--radius-lg);
-  background: var(--surface-2);
+  background: var(--canvas);
 }
-.ssp-wiki-category-tab {
+.ssp-wiki-category-tabs .ssp-wiki-category-tab {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 28px;
-  padding: 0 12px;
+  height: 26px;
+  padding: 0 10px;
   border: 0;
   border-radius: var(--radius-md);
   background: transparent;
+  box-shadow: none;
   color: var(--text-muted);
   font: inherit;
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 500;
   cursor: pointer;
   transition: background 140ms ease, color 140ms ease, box-shadow 140ms ease;
 }
-.ssp-wiki-category-tab .material-symbols-rounded {
+.ssp-wiki-category-tabs .ssp-wiki-category-tab .material-symbols-rounded {
   font-size: 16px;
 }
-.ssp-wiki-category-tab small {
+.ssp-wiki-category-tabs .ssp-wiki-category-tab small {
   min-width: 18px;
-  padding: 1px 5px;
+  padding: 0 5px;
   box-sizing: border-box;
   border-radius: var(--radius-full);
   background: var(--bg-hover);
   color: var(--text-faint);
-  font-size: 10.5px;
+  font-size: 10px;
   font-weight: 600;
-  line-height: 1.4;
+  line-height: 16px;
   text-align: center;
+  font-variant-numeric: tabular-nums;
 }
-.ssp-wiki-category-tab:hover {
+.ssp-wiki-category-tabs .ssp-wiki-category-tab:hover:not(.active) {
   background: var(--bg-hover);
   color: var(--text-main);
 }
-.ssp-wiki-category-tab.active {
-  background: var(--surface-1);
+.ssp-wiki-category-tabs .ssp-wiki-category-tab.active {
+  background: var(--nav-selected-bg);
   color: var(--text-main);
   font-weight: 600;
-  box-shadow: var(--shadow-resting), 0 0 0 1px var(--border-ghost);
+  box-shadow: var(--nav-selected-shadow);
 }
-.ssp-wiki-category-tab.active .material-symbols-rounded {
+.ssp-wiki-category-tabs .ssp-wiki-category-tab.active .material-symbols-rounded {
   color: var(--accent);
 }
-.ssp-wiki-category-tab.active small {
+.ssp-wiki-category-tabs .ssp-wiki-category-tab.active small {
   background: var(--accent-soft);
   color: var(--accent-strong);
 }
 .ssp-wiki-search-form {
-  flex: 1 1 240px;
-  max-width: 420px;
-  height: 36px;
+  flex: 1 1 200px;
+  max-width: 340px;
+  height: 34px;
   box-sizing: border-box;
   display: flex;
   align-items: center;
   gap: 8px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
-  padding: 0 6px 0 11px;
+  padding: 0 6px 0 10px;
   background: var(--surface-1);
-  box-shadow: var(--shadow-resting);
   transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+.ssp-wiki-search-form:hover {
+  border-color: var(--border-strong);
 }
 .ssp-wiki-search-form:focus-within {
   border-color: var(--accent);
@@ -3394,6 +3990,9 @@ defineExpose({
 .ssp-wiki-search-input::placeholder {
   color: var(--text-faint);
 }
+.ssp-wiki-search-input::-webkit-search-cancel-button {
+  display: none;
+}
 .ssp-wiki-search-clear {
   flex: 0 0 auto;
   width: 24px;
@@ -3413,72 +4012,72 @@ defineExpose({
 .ssp-wiki-search-clear .material-symbols-rounded {
   font-size: 15px;
 }
-/* 统计行：独占一行，数字做成浅色小标签；操作按钮靠右 */
-.ssp-wiki-toolbar-stats {
-  flex: 1 0 100%;
-  display: flex;
+.ssp-wiki-toolbar-actions {
+  margin-left: auto;
+  display: inline-flex;
   align-items: center;
-  flex-wrap: wrap;
   gap: 6px;
-  color: var(--text-muted);
-  font-size: 11.5px;
-  white-space: nowrap;
 }
-.ssp-wiki-toolbar-stats > span {
-  display: inline-flex;
-  align-items: center;
-  height: 22px;
-  padding: 0 8px;
-  border-radius: var(--radius-full);
-  background: var(--surface-2);
-  font-variant-numeric: tabular-nums;
-}
-.ssp-wiki-load-more,
 .ssp-wiki-review-alert,
-.ssp-wiki-review-refresh {
+.ssp-wiki-inspector-toggle {
+  height: 30px;
   display: inline-flex;
   align-items: center;
-  height: 26px;
-  padding: 0 10px;
+  gap: 6px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-full);
+  border-radius: var(--radius-md);
   background: var(--surface-1);
-  box-shadow: var(--shadow-resting);
   color: var(--text-soft);
   font: inherit;
-  font-size: 11.5px;
+  font-size: 12px;
   font-weight: 500;
   cursor: pointer;
   transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
 }
-.ssp-wiki-load-more:hover,
+.ssp-wiki-review-alert {
+  padding: 0 10px 0 8px;
+  font-variant-numeric: tabular-nums;
+}
+.ssp-wiki-review-alert-count {
+  font-weight: 600;
+}
+.ssp-wiki-review-alert .material-symbols-rounded,
+.ssp-wiki-inspector-toggle .material-symbols-rounded {
+  font-size: 16px;
+}
 .ssp-wiki-review-alert:hover,
-.ssp-wiki-review-refresh:hover {
+.ssp-wiki-inspector-toggle:hover {
   border-color: var(--border-strong);
-  background: var(--surface-2);
+  background: var(--bg-hover);
   color: var(--text-main);
 }
-.ssp-wiki-load-more {
-  margin-left: auto;
-}
-.ssp-wiki-load-more:disabled {
-  opacity: 0.5;
-  cursor: wait;
-}
-.ssp-wiki-review-alert {
+.ssp-wiki-review-alert.has-pending {
   border-color: var(--warning-border);
   background: var(--warning-bg);
   color: var(--warning-fg);
   font-weight: 600;
 }
-.ssp-wiki-toolbar-stats > span + .ssp-wiki-review-alert {
-  margin-left: auto;
-}
-.ssp-wiki-review-alert:hover {
+.ssp-wiki-review-alert.has-pending:hover {
   border-color: var(--warning-fg);
   background: var(--warning-bg);
   color: var(--warning-fg);
 }
+.ssp-wiki-review-alert.active {
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.ssp-wiki-inspector-toggle {
+  display: none;
+  width: 30px;
+  justify-content: center;
+  padding: 0;
+}
+.ssp-wiki-inspector-toggle.active {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border-subtle));
+  background: var(--bg-selected);
+  color: var(--accent-strong);
+}
+
+/* ---------- 提示条 ---------- */
 .ssp-wiki-evidence-note {
   display: block;
   margin-top: 4px;
@@ -3486,22 +4085,46 @@ defineExpose({
   font-size: 11px;
   font-style: italic;
 }
-.ssp-wiki-source-chip {
-  padding: 1px 8px;
-  border-radius: var(--radius-full);
-  background: var(--surface-2);
-  color: var(--text-muted);
-  font-size: 10.5px;
-}
 .ssp-wiki-agent-status {
   flex: 0 0 auto;
-  border: 1px solid var(--border-ghost);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--info-border);
   border-radius: var(--radius-md);
-  padding: 7px 12px;
-  color: var(--text-soft);
-  background: var(--surface-2);
+  padding: 5px 6px 5px 10px;
+  color: var(--info-fg);
+  background: var(--info-bg);
   font-size: 12px;
   line-height: 1.5;
+}
+.ssp-wiki-agent-status > .material-symbols-rounded {
+  flex: 0 0 auto;
+  font-size: 16px;
+}
+.ssp-wiki-agent-status-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.ssp-wiki-agent-status-close {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  opacity: 0.7;
+  cursor: pointer;
+}
+.ssp-wiki-agent-status-close:hover {
+  opacity: 1;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+.ssp-wiki-agent-status-close .material-symbols-rounded {
+  font-size: 15px;
 }
 .ssp-wiki-agent-status.success {
   border-color: var(--success-border);
@@ -3518,23 +4141,19 @@ defineExpose({
   background: var(--danger-bg);
   color: var(--danger-fg);
 }
+
+/* ---------- 主区：舞台 | 详情栏 ---------- */
 .ssp-wiki-main {
+  position: relative;
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(300px, 360px);
+  grid-template-columns: minmax(0, 1fr) 340px;
   gap: 12px;
 }
-/* 窄宽度：详情栏移到图谱下方 */
-@container ssp-wiki-workspace (max-width: 760px) {
-  .ssp-wiki-main {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(280px, 1fr) minmax(0, 40%);
-  }
-}
 
-/* ---------- 图谱画布 ---------- */
+/* ---------- 图谱舞台 ---------- */
 .ssp-wiki-graph-panel {
   position: relative;
   min-width: 0;
@@ -3543,8 +4162,24 @@ defineExpose({
   border-radius: var(--radius-lg);
   overflow: hidden;
   background-color: var(--wiki-graph-bg);
-  background-image: radial-gradient(color-mix(in srgb, var(--text-faint) 26%, transparent) 1px, transparent 1.3px);
-  background-size: 22px 22px;
+  background-image: radial-gradient(color-mix(in srgb, var(--text-faint) 22%, transparent) 1px, transparent 1.4px);
+  background-size: 24px 24px;
+  background-position: 12px 12px;
+}
+.ssp-wiki-graph-panel.is-busy::before {
+  content: "";
+  position: absolute;
+  z-index: 3;
+  top: 0;
+  left: 0;
+  width: 32%;
+  height: 2px;
+  background: var(--accent);
+  animation: ssp-wiki-busy 1.1s ease-in-out infinite;
+}
+@keyframes ssp-wiki-busy {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(320%); }
 }
 .ssp-wiki-graph {
   position: absolute;
@@ -3554,128 +4189,194 @@ defineExpose({
   display: block;
   touch-action: none;
   cursor: grab;
+  user-select: none;
 }
 .ssp-wiki-graph:active {
   cursor: grabbing;
 }
-/* 边：普通关联是细灰线；真实关系用强调色；待确认用黄色虚线 */
+
+/* 分区标题：「章节顺序 · 6」「独立条目 · 4」，细线延伸到图的右缘 */
+.ssp-wiki-band-caption {
+  pointer-events: none;
+}
+.ssp-wiki-band-caption text {
+  fill: var(--text-faint);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.ssp-wiki-band-caption line {
+  stroke: color-mix(in srgb, var(--text-faint) 30%, transparent);
+  stroke-width: 1;
+  stroke-dasharray: 2 4;
+}
+
+/* ---------- 连线 ---------- */
+.ssp-wiki-edge-group {
+  cursor: pointer;
+  transition: opacity 160ms ease;
+}
+.ssp-wiki-edge-group.dimmed {
+  opacity: 0.07;
+  pointer-events: none;
+}
 .ssp-wiki-edge {
   fill: none;
-  stroke: color-mix(in srgb, var(--text-muted) 34%, transparent);
+  stroke: color-mix(in srgb, var(--text-muted) 36%, transparent);
   stroke-width: 1.2;
   stroke-linecap: round;
-  cursor: pointer;
-  transition: opacity 160ms ease, stroke 140ms ease, stroke-width 140ms ease;
+  transition: stroke 140ms ease, stroke-width 140ms ease;
 }
 .ssp-wiki-edge.edge-real-relation {
-  stroke: color-mix(in srgb, var(--accent) 55%, var(--wiki-graph-bg));
-  stroke-width: 1.8;
+  stroke: color-mix(in srgb, var(--text-soft) 50%, transparent);
+  stroke-width: var(--wiki-edge-width, 1.5);
 }
-.ssp-wiki-edge.edge-review-required {
-  stroke: var(--warning-fg);
-  stroke-dasharray: 6 5;
+.ssp-wiki-edge.edge-timeline {
+  stroke: color-mix(in srgb, var(--wiki-tone-plot) 52%, transparent);
   stroke-width: 1.6;
-  opacity: 0.85;
 }
 .ssp-wiki-edge.edge-co-occurrence {
   stroke-dasharray: 2 5;
 }
-.ssp-wiki-edge:hover {
+.ssp-wiki-edge.edge-review-required {
+  stroke: color-mix(in srgb, var(--warning-fg) 78%, transparent);
+  stroke-dasharray: 5 4;
+  stroke-width: 1.5;
+}
+.ssp-wiki-edge-group:hover .ssp-wiki-edge,
+.ssp-wiki-edge-group.hovered .ssp-wiki-edge {
   stroke: var(--accent);
   stroke-width: 2.2;
 }
 .ssp-wiki-edge.active {
   stroke: var(--accent-strong);
-  stroke-width: 2.6;
-  opacity: 1;
+  stroke-width: 2.4;
 }
-.ssp-wiki-edge.dimmed {
-  opacity: 0.08;
-  pointer-events: none;
+.ssp-wiki-edge-group:hover .ssp-wiki-edge.edge-review-required,
+.ssp-wiki-edge-group.hovered .ssp-wiki-edge.edge-review-required,
+.ssp-wiki-edge.edge-review-required.active {
+  stroke: var(--warning-fg);
+  stroke-width: 2.2;
 }
-/* 边标签：带细边框的小胶囊 */
+.ssp-wiki-edge-arrow {
+  fill: color-mix(in srgb, var(--text-soft) 58%, transparent);
+  transition: fill 140ms ease;
+}
+.ssp-wiki-edge.edge-timeline ~ .ssp-wiki-edge-arrow {
+  fill: color-mix(in srgb, var(--wiki-tone-plot) 62%, transparent);
+}
+.ssp-wiki-edge.edge-review-required ~ .ssp-wiki-edge-arrow {
+  fill: color-mix(in srgb, var(--warning-fg) 82%, transparent);
+}
+.ssp-wiki-edge-group:hover .ssp-wiki-edge-arrow,
+.ssp-wiki-edge-group.hovered .ssp-wiki-edge-arrow {
+  fill: var(--accent);
+}
+.ssp-wiki-edge.active ~ .ssp-wiki-edge-arrow {
+  fill: var(--accent-strong);
+}
+.ssp-wiki-edge-group:hover .ssp-wiki-edge.edge-review-required ~ .ssp-wiki-edge-arrow,
+.ssp-wiki-edge-group.hovered .ssp-wiki-edge.edge-review-required ~ .ssp-wiki-edge-arrow,
+.ssp-wiki-edge.edge-review-required.active ~ .ssp-wiki-edge-arrow {
+  fill: var(--warning-fg);
+}
+/* 透明的粗命中区：细线也容易点中 */
+.ssp-wiki-edge-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 12;
+  stroke-linecap: round;
+}
+
+/* 关系名：小胶囊，平时克制，hover/选中时与连线一起高亮 */
 .ssp-wiki-edge-label {
   cursor: pointer;
-  transition: opacity 160ms ease;
 }
 .ssp-wiki-edge-label rect {
   fill: var(--surface-1);
   stroke: var(--border-subtle);
   stroke-width: 1;
+  transition: fill 140ms ease, stroke 140ms ease;
 }
 .ssp-wiki-edge-label text {
   fill: var(--text-soft);
-  font-size: 10.5px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 500;
   pointer-events: none;
 }
-.ssp-wiki-edge-label:hover rect {
-  stroke: color-mix(in srgb, var(--accent) 50%, var(--border-subtle));
+.ssp-wiki-edge-label.is-review rect {
+  fill: color-mix(in srgb, var(--warning-fg) 9%, var(--surface-1));
+  stroke: var(--warning-border);
 }
+.ssp-wiki-edge-label.is-review text {
+  fill: var(--warning-fg);
+}
+.ssp-wiki-edge-label:hover rect,
+.ssp-wiki-edge-label.hovered rect,
 .ssp-wiki-edge-label.active rect {
-  fill: var(--accent);
-  stroke: var(--accent);
+  fill: color-mix(in srgb, var(--accent) 10%, var(--surface-1));
+  stroke: color-mix(in srgb, var(--accent) 55%, var(--border-subtle));
 }
+.ssp-wiki-edge-label:hover text,
+.ssp-wiki-edge-label.hovered text,
 .ssp-wiki-edge-label.active text {
-  fill: var(--accent-contrast);
+  fill: var(--accent-strong);
+  font-weight: 600;
 }
-/* 节点：分类色圆点 + 卡片色描边，外圈是同色淡光晕 */
+.ssp-wiki-edge-label.is-review:hover rect,
+.ssp-wiki-edge-label.is-review.hovered rect,
+.ssp-wiki-edge-label.is-review.active rect {
+  fill: color-mix(in srgb, var(--warning-fg) 16%, var(--surface-1));
+  stroke: var(--warning-fg);
+}
+.ssp-wiki-edge-label.is-review:hover text,
+.ssp-wiki-edge-label.is-review.hovered text,
+.ssp-wiki-edge-label.is-review.active text {
+  fill: var(--warning-fg);
+}
+
+/* ---------- 节点：分类色淡底 + 同色描边 + 类型图标 ---------- */
 .ssp-wiki-node {
+  --wiki-node-color: var(--text-muted);
   cursor: default;
   transition: opacity 160ms ease;
 }
 .ssp-wiki-node.is-selectable {
   cursor: pointer;
 }
-.ssp-wiki-node.tone-character {
-  --wiki-node-color: var(--wiki-cat-1);
-}
-.ssp-wiki-node.tone-plot {
-  --wiki-node-color: var(--wiki-cat-2);
-}
-.ssp-wiki-node.tone-setting {
-  --wiki-node-color: var(--wiki-cat-3);
-}
-.ssp-wiki-node.tone-misc {
-  --wiki-node-color: var(--wiki-cat-4);
-}
-.ssp-wiki-node.tone-hub {
-  --wiki-node-color: color-mix(in srgb, var(--text-muted) 72%, transparent);
+.ssp-wiki-node-halo {
+  fill: transparent;
+  stroke: transparent;
+  stroke-width: 2;
+  transition: fill 140ms ease, stroke 140ms ease;
 }
 .ssp-wiki-node-dot {
-  fill: var(--wiki-node-color, var(--text-muted));
-  stroke: var(--surface-1);
-  stroke-width: 2.5;
-  transition: fill 140ms ease, stroke 140ms ease, stroke-width 140ms ease;
-}
-.ssp-wiki-node.active .ssp-wiki-node-dot {
-  stroke: var(--surface-1);
-  stroke-width: 3;
-}
-.ssp-wiki-node.needs-review .ssp-wiki-node-dot {
-  stroke: var(--warning-fg);
-  stroke-width: 2;
-  stroke-dasharray: 4 3;
-}
-.ssp-wiki-node-halo {
-  fill: color-mix(in srgb, var(--wiki-node-color, var(--text-muted)) 12%, transparent);
-  stroke: transparent;
+  fill: color-mix(in srgb, var(--wiki-node-color) 15%, var(--surface-1));
+  stroke: color-mix(in srgb, var(--wiki-node-color) 72%, var(--surface-1));
   stroke-width: 1.5;
-  transition: stroke 140ms ease, fill 140ms ease;
+  transition: fill 140ms ease, stroke 140ms ease;
 }
-.ssp-wiki-node:hover .ssp-wiki-node-halo {
-  fill: color-mix(in srgb, var(--wiki-node-color, var(--accent)) 22%, transparent);
-  stroke: color-mix(in srgb, var(--wiki-node-color, var(--accent)) 45%, transparent);
+.ssp-wiki-node-glyph {
+  fill: var(--wiki-node-color);
+  font-family: "Material Symbols Rounded", sans-serif;
+  font-weight: 400;
+  font-feature-settings: "liga";
+  pointer-events: none;
+  transition: fill 140ms ease;
 }
-.ssp-wiki-node.active .ssp-wiki-node-halo {
-  fill: color-mix(in srgb, var(--wiki-node-color, var(--accent)) 24%, transparent);
-  stroke: var(--wiki-node-color, var(--accent));
+:root:not(.icon-font-ready) .ssp-wiki-node-glyph,
+:root.icon-font-failed .ssp-wiki-node-glyph {
+  visibility: hidden;
+}
+.ssp-wiki-node-badge {
+  fill: var(--warning-fg);
+  stroke: var(--wiki-graph-bg);
   stroke-width: 2;
 }
-/* 节点名：用画布底色描边，压在连线上也清楚 */
-.ssp-wiki-node text {
+/* 节点名：用舞台底色描边，压在连线上也清楚 */
+.ssp-wiki-node-label {
   fill: var(--text-soft);
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 500;
   paint-order: stroke;
   stroke: var(--wiki-graph-bg);
@@ -3684,43 +4385,64 @@ defineExpose({
   pointer-events: none;
   transition: fill 140ms ease;
 }
-.ssp-wiki-node:hover text,
-.ssp-wiki-node.active text {
+.ssp-wiki-node:hover .ssp-wiki-node-dot {
+  fill: color-mix(in srgb, var(--wiki-node-color) 24%, var(--surface-1));
+  stroke: var(--wiki-node-color);
+}
+.ssp-wiki-node:hover .ssp-wiki-node-halo {
+  fill: color-mix(in srgb, var(--wiki-node-color) 10%, transparent);
+}
+.ssp-wiki-node:hover .ssp-wiki-node-label,
+.ssp-wiki-node.active .ssp-wiki-node-label {
   fill: var(--text-main);
   font-weight: 600;
 }
+.ssp-wiki-node.active .ssp-wiki-node-dot {
+  fill: var(--wiki-node-color);
+  stroke: var(--wiki-node-color);
+}
+.ssp-wiki-node.active .ssp-wiki-node-glyph {
+  fill: var(--surface-1);
+}
+.ssp-wiki-node.active .ssp-wiki-node-halo {
+  fill: color-mix(in srgb, var(--wiki-node-color) 14%, transparent);
+  stroke: color-mix(in srgb, var(--wiki-node-color) 42%, transparent);
+}
 .ssp-wiki-node.dimmed {
-  opacity: 0.14;
+  opacity: 0.16;
 }
 .ssp-wiki-node.is-neighbor {
-  opacity: 0.7;
+  opacity: 0.72;
 }
 .ssp-wiki-node.is-neighbor.dimmed {
   opacity: 0.1;
 }
-.ssp-wiki-node.is-neighbor text {
-  font-size: 10.5px;
-  font-weight: 500;
+.ssp-wiki-node.is-neighbor .ssp-wiki-node-label,
+.ssp-wiki-node.band-shelf .ssp-wiki-node-label {
+  font-size: 11px;
   fill: var(--text-muted);
 }
+.ssp-wiki-node.band-shelf:hover .ssp-wiki-node-label,
+.ssp-wiki-node.band-shelf.active .ssp-wiki-node-label {
+  fill: var(--text-main);
+}
 .ssp-wiki-node.is-synthetic .ssp-wiki-node-dot {
-  fill: color-mix(in srgb, var(--wiki-node-color, var(--text-muted)) 28%, var(--surface-1));
-  stroke: var(--wiki-node-color, var(--text-muted));
-  stroke-width: 1.5;
+  fill: var(--surface-1);
   stroke-dasharray: 3 3;
 }
 
-/* ---------- 画布上的悬浮控件 ---------- */
+/* ---------- 舞台上的悬浮控件 ---------- */
 .ssp-wiki-graph-note {
   position: absolute;
+  z-index: 2;
   left: 50%;
   top: 12px;
   transform: translateX(-50%);
-  max-width: min(520px, calc(100% - 32px));
+  max-width: calc(100% - 32px);
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 6px 5px 12px;
+  padding: 4px 4px 4px 12px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-full);
   background: var(--surface-1);
@@ -3729,76 +4451,116 @@ defineExpose({
   font-size: 12px;
   line-height: 1.4;
   white-space: nowrap;
-  pointer-events: none;
+  font-variant-numeric: tabular-nums;
 }
 .ssp-wiki-graph-note button {
-  pointer-events: auto;
   height: 22px;
-  padding: 0 9px;
+  padding: 0 10px;
   border: 0;
   border-radius: var(--radius-full);
   background: var(--accent-soft);
   color: var(--accent-strong);
   font: inherit;
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 600;
   cursor: pointer;
 }
-.ssp-wiki-graph-note button:hover {
+.ssp-wiki-graph-note button:hover:not(:disabled) {
   background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.ssp-wiki-graph-note button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+.ssp-wiki-graph-error {
+  position: absolute;
+  z-index: 2;
+  left: 12px;
+  right: 12px;
+  top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-md);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.ssp-wiki-graph-error .material-symbols-rounded {
+  flex: 0 0 auto;
+  font-size: 16px;
 }
 .ssp-wiki-graph-legend {
   position: absolute;
+  z-index: 2;
   left: 12px;
   bottom: 12px;
+  max-width: calc(100% - 196px);
   display: inline-flex;
   align-items: center;
-  gap: 14px;
-  height: 32px;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  min-height: 30px;
   box-sizing: border-box;
-  padding: 0 14px;
+  padding: 5px 12px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-full);
   background: var(--surface-1);
   box-shadow: var(--shadow-raised);
   color: var(--text-soft);
-  font-size: 11.5px;
+  font-size: 11px;
+  line-height: 1.5;
   pointer-events: none;
+  font-variant-numeric: tabular-nums;
 }
 .ssp-wiki-legend-item {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  white-space: nowrap;
 }
 .ssp-wiki-legend-item i {
   width: 9px;
   height: 9px;
+  box-sizing: border-box;
+  border: 1.5px solid var(--wiki-node-color, var(--text-muted));
   border-radius: var(--radius-full);
-  background: var(--text-muted);
+  background: color-mix(in srgb, var(--wiki-node-color, var(--text-muted)) 22%, var(--surface-1));
 }
-.ssp-wiki-legend-item i.tone-character {
-  background: var(--wiki-cat-1);
+.ssp-wiki-legend-divider {
+  width: 1px;
+  height: 12px;
+  background: var(--border-subtle);
 }
-.ssp-wiki-legend-item i.tone-plot {
-  background: var(--wiki-cat-2);
+.ssp-wiki-legend-edge svg {
+  width: 18px;
+  height: 6px;
+  overflow: visible;
 }
-.ssp-wiki-legend-item i.tone-setting {
-  background: var(--wiki-cat-3);
+.ssp-wiki-legend-edge line {
+  stroke: color-mix(in srgb, var(--text-soft) 55%, transparent);
+  stroke-width: 1.6;
+  stroke-linecap: round;
 }
-.ssp-wiki-legend-item i.tone-misc {
-  background: var(--wiki-cat-4);
+.ssp-wiki-legend-edge.edge-review line {
+  stroke: var(--warning-fg);
+  stroke-dasharray: 4 3;
 }
-.ssp-wiki-legend-item i.tone-hub {
-  background: color-mix(in srgb, var(--text-muted) 72%, transparent);
+.ssp-wiki-legend-edge.edge-structural line {
+  stroke: color-mix(in srgb, var(--wiki-tone-plot) 60%, transparent);
 }
 .ssp-wiki-graph-hud {
   position: absolute;
+  z-index: 2;
   right: 12px;
   bottom: 12px;
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  height: 32px;
+  height: 30px;
   box-sizing: border-box;
   padding: 0 3px;
   border: 1px solid var(--border-subtle);
@@ -3807,8 +4569,8 @@ defineExpose({
   box-shadow: var(--shadow-raised);
 }
 .ssp-hud-btn {
-  width: 26px;
-  height: 26px;
+  width: 24px;
+  height: 24px;
   display: grid;
   place-items: center;
   border: 0;
@@ -3822,14 +4584,20 @@ defineExpose({
   color: var(--text-main);
 }
 .ssp-hud-btn .material-symbols-rounded {
-  font-size: 17px;
+  font-size: 16px;
 }
 .ssp-hud-zoom {
-  min-width: 42px;
+  min-width: 40px;
   text-align: center;
   color: var(--text-soft);
-  font-size: 11.5px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
+}
+.ssp-hud-divider {
+  width: 1px;
+  height: 14px;
+  margin: 0 2px;
+  background: var(--border-subtle);
 }
 .ssp-wiki-graph-empty {
   position: absolute;
@@ -3842,9 +4610,9 @@ defineExpose({
   color: var(--text-muted);
   text-align: center;
 }
-.ssp-wiki-graph-empty .material-symbols-rounded {
-  width: 56px;
-  height: 56px;
+.ssp-wiki-graph-empty > .material-symbols-rounded {
+  width: 52px;
+  height: 52px;
   display: grid;
   place-items: center;
   margin-bottom: 4px;
@@ -3852,17 +4620,24 @@ defineExpose({
   border-radius: var(--radius-full);
   background: var(--surface-1);
   box-shadow: var(--shadow-resting);
-  font-size: 28px;
+  font-size: 26px;
   color: var(--text-faint);
+}
+.ssp-wiki-graph-empty.is-error > .material-symbols-rounded {
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
 }
 .ssp-wiki-graph-empty .is-spinning {
   animation: spin-ring 1s linear infinite;
 }
 .ssp-wiki-graph-empty p {
   margin: 0;
-  color: var(--text-soft);
+  max-width: 420px;
+  color: var(--text-main);
   font-size: 14px;
   font-weight: 600;
+  line-height: 1.5;
 }
 .ssp-wiki-graph-empty small {
   max-width: 340px;
@@ -3870,9 +4645,33 @@ defineExpose({
   font-size: 12px;
   line-height: 1.6;
 }
+.ssp-wiki-empty-action {
+  margin-top: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  color: var(--text-main);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.ssp-wiki-empty-action:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+.ssp-wiki-empty-action .material-symbols-rounded {
+  font-size: 15px;
+}
 
-/* ---------- 右侧详情栏 ---------- */
+/* ---------- 详情栏 ---------- */
 .ssp-wiki-inspector {
+  position: relative;
   min-width: 0;
   min-height: 0;
   display: flex;
@@ -3882,114 +4681,227 @@ defineExpose({
   overflow: hidden;
   background: var(--surface-1);
 }
-.ssp-wiki-inspector-head {
-  flex: 0 0 auto;
-  padding: 14px 16px 12px;
-  border-bottom: 1px solid var(--border-ghost);
-}
-.ssp-wiki-project {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  color: var(--text-main);
-  font-size: 14px;
-  font-weight: 600;
-}
-.ssp-wiki-project strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.ssp-wiki-project .material-symbols-rounded {
-  flex: 0 0 auto;
-  width: 28px;
-  height: 28px;
-  display: grid;
+.ssp-wiki-inspector-close {
+  display: none;
+  position: absolute;
+  z-index: 2;
+  top: 10px;
+  right: 10px;
+  width: 26px;
+  height: 26px;
   place-items: center;
+  border: 0;
   border-radius: var(--radius-md);
-  background: var(--accent-soft);
-  color: var(--accent-strong);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.ssp-wiki-inspector-close:hover {
+  background: var(--bg-hover);
+  color: var(--text-main);
+}
+.ssp-wiki-inspector-close .material-symbols-rounded {
   font-size: 17px;
-}
-.ssp-wiki-run-meta {
-  margin: 6px 0 0 38px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px 12px;
-  color: var(--text-faint);
-  font-size: 11px;
-  line-height: 1.4;
-}
-.ssp-wiki-project-summary {
-  margin: 10px 0 0;
-  color: var(--text-soft);
-  font-size: 12px;
-  line-height: 1.6;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
 }
 .ssp-wiki-inspector-body {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .ssp-wiki-inspector-detail {
-  padding: 16px 16px 18px;
+  padding: 16px 18px 18px;
   border-bottom: 1px solid var(--border-ghost);
 }
+.ssp-wiki-detail-kicker-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 22px;
+  padding-right: 28px;
+}
+.ssp-wiki-entry-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 9px;
+  box-sizing: border-box;
+  border: 1px solid var(--border-ghost);
+  border-radius: var(--radius-full);
+  background: var(--surface-2);
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 600;
+}
+.ssp-wiki-entry-kicker i,
+.ssp-wiki-endpoint i,
+.ssp-wiki-relation-other i,
+.ssp-wiki-entry-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  box-sizing: border-box;
+  border: 1.5px solid var(--wiki-node-color, var(--text-muted));
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--wiki-node-color, var(--text-muted)) 24%, var(--surface-1));
+}
 .ssp-wiki-inspector-detail h3 {
-  margin: 8px 0 10px;
+  margin: 10px 0 6px;
   color: var(--text-main);
-  font-size: 16px;
+  font-size: 17px;
   font-weight: 600;
   line-height: 1.4;
   letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
 }
 .ssp-wiki-inspector-detail p {
   margin: 0;
   color: var(--text-soft);
-  font-size: 12.5px;
+  font-size: 13px;
   line-height: 1.7;
 }
-.ssp-wiki-inspector-detail ul {
-  margin: 12px 0 0;
-  padding-left: 18px;
+.ssp-wiki-inspector-detail p + p {
+  margin-top: 8px;
 }
-.ssp-wiki-inspector-detail li {
+.ssp-wiki-inspector-detail .ssp-wiki-detail-subtitle {
+  margin: -2px 0 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.ssp-wiki-detail-lines {
+  margin: 10px 0 0;
+  padding-left: 16px;
+}
+.ssp-wiki-detail-lines li {
   color: var(--text-soft);
-  font-size: 12.5px;
+  font-size: 12px;
   line-height: 1.7;
 }
-.ssp-wiki-inspector-detail li::marker {
+.ssp-wiki-detail-lines li::marker {
   color: var(--text-faint);
 }
-.ssp-wiki-inspector-detail.is-empty {
-  padding: 22px 16px;
-  text-align: center;
+.ssp-wiki-inspector-detail > small,
+.ssp-wiki-review-card > small {
+  display: block;
+  margin-top: 10px;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.6;
 }
-.ssp-wiki-inspector-detail.is-empty p {
+.ssp-wiki-detail-section {
+  margin-top: 16px;
+}
+.ssp-wiki-section-label {
+  margin: 0 0 6px;
   color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.ssp-wiki-relation-row {
+  width: calc(100% + 12px);
+  margin: 0 -6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 4px 6px;
+  box-sizing: border-box;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-main);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.ssp-wiki-relation-row:hover {
+  background: var(--bg-hover);
+}
+.ssp-wiki-relation-row > .material-symbols-rounded {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-size: 14px;
+}
+.ssp-wiki-relation-other {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ssp-wiki-relation-predicate {
+  min-width: 0;
+  margin-left: auto;
+  color: var(--text-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ssp-wiki-relation-predicate small {
+  color: var(--text-faint);
+  font-size: 11px;
+}
+.ssp-wiki-status-chip {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  box-sizing: border-box;
+  border: 1px solid var(--success-border);
+  border-radius: var(--radius-full);
+  background: var(--success-bg);
+  color: var(--success-fg);
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.ssp-wiki-status-chip.status-review_required {
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+}
+.ssp-wiki-status-chip.status-rejected {
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
 }
 .ssp-wiki-relation-endpoints {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
-  margin: 2px 0 12px;
-  color: var(--text-main);
-  font-size: 12.5px;
-  font-weight: 600;
+  margin: 4px 0 12px;
 }
-.ssp-wiki-relation-endpoints > span:not(.material-symbols-rounded) {
-  padding: 3px 10px;
+.ssp-wiki-endpoint {
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  box-sizing: border-box;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-full);
   background: var(--surface-2);
+  color: var(--text-main);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
 }
-.ssp-wiki-relation-endpoints .material-symbols-rounded {
+.ssp-wiki-endpoint:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+.ssp-wiki-relation-endpoints > .material-symbols-rounded {
   color: var(--text-faint);
   font-size: 16px;
 }
@@ -3998,58 +4910,15 @@ defineExpose({
   gap: 5px;
   margin: 0 0 12px;
   color: var(--text-muted);
-  font-size: 11.5px;
-}
-.ssp-wiki-audit-grid {
-  display: grid;
-  grid-template-columns: minmax(64px, auto) minmax(0, 1fr);
-  gap: 4px 10px;
-  margin-top: 12px;
-  padding: 8px 10px;
-  border-radius: var(--radius-md);
-  background: var(--surface-2);
-  color: var(--text-muted);
-  font-size: 11.5px;
-  line-height: 1.5;
-}
-.ssp-wiki-audit-grid strong {
-  min-width: 0;
-  overflow-wrap: anywhere;
-  color: var(--text-main);
-  font-weight: 600;
-}
-.ssp-wiki-audit-grid.compact {
-  margin-top: 4px;
-}
-.ssp-wiki-inspector-detail > small,
-.ssp-wiki-review-card > small {
-  display: block;
-  margin-top: 8px;
-  color: var(--text-faint);
   font-size: 11px;
-  line-height: 1.55;
 }
-.ssp-wiki-source-ref-list,
+.ssp-wiki-source-ref-list {
+  margin-top: 14px;
+}
 .ssp-wiki-source-ref {
   display: grid;
-  gap: 5px;
-  margin-top: 10px;
-}
-.ssp-wiki-source-link {
-  justify-self: start;
-  border: 0;
-  background: transparent;
-  padding: 0;
-  color: var(--accent-strong);
-  font: inherit;
-  font-size: 11.5px;
-  font-weight: 500;
-  text-align: left;
-  cursor: pointer;
-  overflow-wrap: anywhere;
-}
-.ssp-wiki-source-link:hover {
-  text-decoration: underline;
+  gap: 4px;
+  margin-top: 8px;
 }
 .ssp-wiki-source-ref blockquote {
   margin: 0;
@@ -4057,52 +4926,166 @@ defineExpose({
   border-left: 3px solid color-mix(in srgb, var(--accent) 45%, var(--border-subtle));
   border-radius: 0 var(--radius-md) var(--radius-md) 0;
   background: var(--surface-2);
-  color: var(--text-soft);
-  font-size: 12px;
-  line-height: 1.6;
+  color: var(--text-main);
+  font-family: var(--font-prose);
+  font-size: 13px;
+  line-height: 1.7;
   white-space: pre-wrap;
+}
+.ssp-wiki-source-link {
+  justify-self: start;
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  background: transparent;
+  padding: 2px 0;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+.ssp-wiki-source-link > span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ssp-wiki-source-link .material-symbols-rounded {
+  flex: 0 0 auto;
+  font-size: 13px;
+}
+.ssp-wiki-source-link:hover {
+  color: var(--accent-strong);
+}
+.ssp-wiki-source-link:hover > span:last-child {
+  text-decoration: underline;
+}
+.ssp-wiki-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.ssp-wiki-source-chip {
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 9px 0 7px;
+  box-sizing: border-box;
+  border: 1px solid var(--border-ghost);
+  border-radius: var(--radius-full);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.ssp-wiki-source-chip > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ssp-wiki-source-chip .material-symbols-rounded {
+  flex: 0 0 auto;
+  font-size: 13px;
+}
+.ssp-wiki-source-chip:hover {
+  border-color: var(--border-subtle);
+  background: var(--bg-hover);
+  color: var(--text-main);
 }
 .ssp-wiki-review-inline-actions {
   display: flex;
   gap: 8px;
   margin-top: 14px;
 }
-.ssp-wiki-review-queue {
-  padding: 14px 12px 14px;
-  border-bottom: 1px solid var(--border-ghost);
-  background: color-mix(in srgb, var(--warning-bg) 35%, var(--surface-1));
+.ssp-wiki-entry-kicker .material-symbols-rounded {
+  margin-left: -2px;
+  font-size: 14px;
 }
-.ssp-wiki-review-heading {
+.ssp-wiki-inspector-detail .ssp-wiki-overview-hint {
+  margin-top: 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.65;
+}
+.ssp-wiki-review-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  box-sizing: border-box;
+  border: 1px solid var(--warning-border);
+  border-radius: var(--radius-full);
+  color: var(--warning-fg);
+  background: var(--warning-bg);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+/* 分段标题：「角色条目 · 9」「关系待确认 · 3」 */
+.ssp-wiki-inspector-heading {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 8px;
+  padding: 0 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
 }
 .ssp-wiki-review-refresh {
   height: 22px;
   margin-left: auto;
   padding: 0 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text-soft);
+  font: inherit;
   font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.ssp-wiki-review-refresh:hover {
+  border-color: var(--border-strong);
+  color: var(--text-main);
+}
+
+/* ---------- 审核队列 ---------- */
+.ssp-wiki-review-queue {
+  padding: 14px 12px;
+  border-bottom: 1px solid var(--border-ghost);
+  background: color-mix(in srgb, var(--warning-bg) 40%, var(--surface-1));
 }
 .ssp-wiki-review-card {
   display: grid;
-  gap: 8px;
+  gap: 10px;
   margin-top: 10px;
   padding: 12px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
   background: var(--surface-1);
-  box-shadow: var(--shadow-resting);
 }
 .ssp-wiki-review-card-title {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   color: var(--text-main);
   font-size: 13px;
   overflow-wrap: anywhere;
 }
-.ssp-wiki-review-card-title > span {
+.ssp-wiki-review-card-title > .material-symbols-rounded {
   color: var(--text-faint);
+  font-size: 15px;
+}
+.ssp-wiki-review-card-title .ssp-wiki-status-chip {
+  margin-left: auto;
 }
 .ssp-wiki-review-card p {
   margin: 0;
@@ -4110,9 +5093,21 @@ defineExpose({
   font-size: 12px;
   line-height: 1.6;
 }
+.ssp-wiki-review-card > small {
+  margin-top: 0;
+}
+.ssp-wiki-review-card .ssp-wiki-source-ref {
+  margin-top: 0;
+}
+.ssp-wiki-review-field-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+}
 .ssp-wiki-review-field {
   display: grid;
   gap: 4px;
+  min-width: 0;
   color: var(--text-muted);
   font-size: 11px;
   font-weight: 500;
@@ -4141,6 +5136,47 @@ defineExpose({
 .ssp-wiki-review-field textarea {
   resize: vertical;
 }
+.ssp-wiki-review-reject {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+.ssp-wiki-review-card .ssp-action-row,
+.ssp-wiki-review-inline-actions {
+  margin-top: 0;
+}
+.ssp-wiki-review-card .ssp-btn,
+.ssp-wiki-review-inline-actions .ssp-btn {
+  min-height: 28px;
+  padding: 0 14px;
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  font-weight: 500;
+}
+.ssp-wiki-review-card .ssp-btn.accept,
+.ssp-wiki-review-inline-actions .ssp-btn.accept {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+.ssp-wiki-review-card .ssp-btn.accept:hover:not(:disabled),
+.ssp-wiki-review-inline-actions .ssp-btn.accept:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+.ssp-wiki-review-card .ssp-btn.dismiss,
+.ssp-wiki-review-inline-actions .ssp-btn.dismiss {
+  opacity: 1;
+  border-color: var(--border-subtle);
+  background: var(--surface-1);
+  color: var(--text-main);
+}
+.ssp-wiki-review-card .ssp-btn.dismiss:hover:not(:disabled),
+.ssp-wiki-review-inline-actions .ssp-btn.dismiss:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
 .ssp-wiki-review-empty,
 .ssp-wiki-review-error {
   padding: 10px 4px;
@@ -4155,72 +5191,42 @@ defineExpose({
   color: var(--text-faint);
   font-size: 11px;
 }
-/* 详情类型标签：小胶囊 */
-.ssp-wiki-entry-kicker {
-  display: inline-flex;
-  align-items: center;
-  height: 20px;
-  padding: 0 8px;
-  border-radius: var(--radius-full);
-  background: var(--accent-soft);
-  color: var(--accent-strong);
-  font-size: 11px;
-  font-weight: 600;
-}
-.ssp-wiki-entry-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin: 0 0 10px;
-  color: var(--text-muted);
-  font-size: 11px;
-  line-height: 1.4;
-}
-.ssp-wiki-review-chip {
-  border: 1px solid var(--warning-border);
-  border-radius: var(--radius-full);
-  padding: 1px 8px;
-  color: var(--warning-fg);
-  background: var(--warning-bg);
-  font-size: 10.5px;
-  font-weight: 600;
-  line-height: 1.5;
-}
-/* 分段标题：「相关条目 · 12」「关系待确认 · 3」 */
-.ssp-wiki-inspector-heading {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 0 8px;
-  padding: 0 6px;
-  color: var(--text-muted);
-  font-size: 11.5px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-}
+
+/* ---------- 条目列表 ---------- */
 .ssp-wiki-entry-list {
-  padding: 14px 10px 14px;
+  padding: 14px 10px 12px;
 }
 .ssp-wiki-entry-button {
   width: 100%;
-  display: grid;
-  gap: 3px;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
   margin-bottom: 2px;
   border: 1px solid transparent;
   border-radius: var(--radius-md);
   background: transparent;
-  padding: 9px 10px;
+  padding: 8px 10px;
+  box-sizing: border-box;
   color: var(--text-main);
   font: inherit;
   text-align: left;
   cursor: pointer;
   transition: background 140ms ease, border-color 140ms ease;
 }
-.ssp-wiki-entry-button strong {
+.ssp-wiki-entry-dot {
+  margin-top: 5px;
+}
+.ssp-wiki-entry-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+.ssp-wiki-entry-text strong {
   font-size: 13px;
   font-weight: 600;
 }
-.ssp-wiki-entry-button span {
+.ssp-wiki-entry-text span {
   overflow: hidden;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -4229,37 +5235,78 @@ defineExpose({
   font-size: 12px;
   line-height: 1.5;
 }
-.ssp-wiki-entry-button small {
-  justify-self: start;
-  margin-top: 2px;
+.ssp-wiki-entry-button > small {
+  flex: 0 0 auto;
+  margin-top: 1px;
 }
 .ssp-wiki-entry-button:hover {
   background: var(--bg-hover);
 }
 .ssp-wiki-entry-button.active {
-  border-color: color-mix(in srgb, var(--accent) 35%, var(--border-subtle));
+  border-color: var(--border-subtle);
   background: var(--bg-selected);
 }
-.ssp-wiki-entry-button.active strong {
-  color: var(--accent-strong);
+
+/* ---------- 宽度自适应：面板变窄时详情栏浮到舞台上 ---------- */
+@container ssp-wiki-panel (max-width: 1080px) {
+  .ssp-wiki-main {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .ssp-wiki-inspector-toggle {
+    display: inline-flex;
+  }
+  .ssp-wiki-inspector {
+    position: absolute;
+    z-index: 4;
+    top: 10px;
+    right: 10px;
+    bottom: 54px;
+    width: min(340px, calc(100% - 20px));
+    border-color: var(--border-subtle);
+    box-shadow: var(--shadow-overlay);
+    opacity: 0;
+    visibility: hidden;
+    transform: translateX(8px);
+    transition: opacity 160ms ease, transform 160ms ease, visibility 0s linear 160ms;
+  }
+  .ssp-wiki-inspector.is-open {
+    opacity: 1;
+    visibility: visible;
+    transform: none;
+    transition: opacity 160ms ease, transform 160ms ease;
+  }
+  .ssp-wiki-inspector-close {
+    display: grid;
+  }
 }
-.ssp-wiki-sources {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 14px;
+
+@container ssp-wiki-panel (max-width: 860px) {
+  .ssp-action-label {
+    display: none;
+  }
+  .story-state-panel.is-relationship-only .ssp-refresh {
+    width: 30px;
+    padding: 0;
+  }
 }
-.ssp-wiki-sources span {
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  border-radius: var(--radius-full);
-  padding: 2px 9px;
-  background: var(--surface-2);
-  color: var(--text-muted);
-  font-size: 11px;
+
+@container ssp-wiki-panel (max-width: 640px) {
+  .ssp-wiki-category-name,
+  .ssp-wiki-legend-edge,
+  .ssp-wiki-legend-divider {
+    display: none;
+  }
+  .ssp-wiki-search-form {
+    max-width: none;
+  }
+  .ssp-wiki-review-alert-label {
+    display: none;
+  }
+  .ssp-wiki-review-alert {
+    padding: 0 8px;
+  }
 }
+
 .ssp-list {
   list-style: none;
   padding: 0;
@@ -4625,52 +5672,9 @@ defineExpose({
   display: none;
 }
 
-@media (max-width: 1180px) {
-  .ssp-wiki-toolbar {
-    gap: 8px;
-  }
-
-  .ssp-wiki-search-form {
-    max-width: none;
-  }
-
-  .ssp-wiki-toolbar-stats {
-    margin-left: 0;
-    width: 100%;
-  }
-
-  .ssp-wiki-main {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(360px, 1.7fr) minmax(220px, 1fr);
-  }
-}
-
 @media (max-width: 720px) {
   .story-state-panel.is-expanded .ssp-body {
     padding: 12px 12px 14px;
-  }
-
-  .ssp-wiki-category-tabs {
-    width: 100%;
-    overflow-x: auto;
-  }
-
-  .ssp-wiki-category-tab {
-    flex: 1 0 auto;
-    justify-content: center;
-    padding: 0 9px;
-  }
-
-  .ssp-wiki-category-name {
-    display: none;
-  }
-
-  .ssp-wiki-main {
-    grid-template-rows: minmax(300px, 1.5fr) minmax(220px, 1fr);
-  }
-
-  .ssp-wiki-graph-legend {
-    display: none;
   }
 
   .story-state-panel.is-expanded .ssp-relation-graph {
@@ -4697,6 +5701,17 @@ defineExpose({
 
   .ssp-relation-node text {
     font-size: 13px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ssp-wiki-graph-panel.is-busy::before,
+  .ssp-wiki-graph-empty .is-spinning {
+    animation: none;
+  }
+  .ssp-wiki-inspector,
+  .ssp-wiki-inspector.is-open {
+    transform: none;
   }
 }
 </style>
